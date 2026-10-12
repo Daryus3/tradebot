@@ -2,7 +2,8 @@
 
 Kendi bilgisayarınızda çalışan, modüler yapıda, Python ile yazılmış bir al-sat botu.
 Düşmüş ama toparlanmaya başlamış coinleri bulur, kısa vadeli (15-60 dk) toparlanma
-işlemleri açar ve her şeyi emojili mesajlarla Telegram'ınıza bildirir.
+işlemleri açar ve her şeyi emojili mesajlarla Telegram'ınıza bildirir. Telegram'dan
+komutla yönetilebilir.
 
 > ⚠️ **Risk uyarısı:** Kripto para alım-satımı yüksek risk içerir. Bu bot kâr garantisi
 > vermez; kaybetmeyi göze alamayacağınız parayla kullanmayın. Önce mutlaka **test modunda**
@@ -12,7 +13,9 @@ işlemleri açar ve her şeyi emojili mesajlarla Telegram'ınıza bildirir.
 
 ## ✨ Özellikler
 
-| Kural | Ayrıntı (11 USDT örneği) |
+### Ana kurallar (11 USDT örneği)
+
+| Kural | Ayrıntı |
 |---|---|
 | 💰 Sermaye | 11 USDT. Binance'in min. emir tutarı (~5 USDT) nedeniyle 11 USDT'de **tek pozisyon** açılır, bakiyenin tamamı kullanılır |
 | 📦 Çoklu pozisyon | Bakiye yettikçe aynı anda **en fazla 3 coin** (ayarlanabilir): ~12 USDT → 2, ~17.5 USDT → 3. Sermaye eşit bölünür |
@@ -21,29 +24,72 @@ işlemleri açar ve her şeyi emojili mesajlarla Telegram'ınıza bildirir.
 | 📈 İzleyen Stop | Net kâr bir kez **+%10** (≈12.10) görülür, sonra **+%5**'e (≈11.55) düşerse anında satar |
 | 💸 Komisyon | Alış ve satışta **%0.1** (BNB'siz). Tüm kararlar komisyon **düşüldükten sonraki net** paraya göre verilir |
 | ☠️ Kill-switch | Toplam zarar **5 USDT**'ye ulaşırsa tüm açık pozisyonları satar, botu kapatır ve kilitler |
-| 🔍 Tarama | Piyasa **30 sn**'de bir taranır; açık pozisyon **5 sn**'de bir kontrol edilir |
+| 🔍 Tarama | Piyasa **30 sn**'de bir taranır; açık pozisyon **~1 sn**'de (anlık fiyat akışı) bir kontrol edilir |
 | 📨 Telegram | Alım, satım, kâr/zarar, bakiye, hatalar → emojili anlık mesajlar |
 | 🧪 Test modu | 11 USDT **sanal** bakiye ile canlı fiyatlardan simülasyon (gerçek emir yok) |
 
+### Koruma ve güvenilirlik
+
+| Özellik | Ne yapar? |
+|---|---|
+| 🧷 Binance'te yedek zarar-kes | Her alımdan sonra Binance'e −%12'de bekleyen bir stop emri bırakır. **Bilgisayar kapalı, uykuda veya internetsizken bile** pozisyon korunur |
+| 🔄 Hesap mutabakatı | Açılışta Binance ile karşılaştırma yapar: bot kapalıyken stop çalıştıysa veya coini elle sattıysanız **gerçek satış fiyatını** kaydeder; internet kesintisinde sonucu belirsiz kalan alımı bulup takibe alır; gerçek komisyon oranınızı kontrol eder |
+| ♻️ Otomatik yeniden başlatma | `watchdog.py` (veya `BASLAT.bat`) ile bot çökerse kendiliğinden yeniden açılır. İsterseniz Windows açılışında başlar |
+| ⏰ Kesinti uyarısı | Bilgisayar uykuya geçip uyanınca veya bot uzun süre kapalı kalınca "Bot 47 dk çalışmadı" uyarısı |
+| 📶 İnternet kesintisi | Telegram mesajları kaybolmaz, bağlantı gelince gönderilir; açılışta internet yoksa bot bekler |
+| 🔒 Başabaş koruması *(isteğe bağlı)* | +%5 görmüş işlem geri dönerse zarara geçmeden ~+%0.3'te satar |
+| 📉 BTC çöküş çıkışı *(isteğe bağlı)* | BTC 15 dk'da %2'den fazla düşerse açık pozisyonları erkenden satar |
+| ⚡ Anlık fiyat akışı | Fiyatlar Binance WebSocket'ten anında gelir; bağlantı koparsa otomatik olarak normal sorguya döner |
+| 🔐 Gizli bilgi koruması | Bot token'ı ve API anahtarları log dosyalarına ve mesajlara asla açık yazılmaz |
+
+### Daha iyi alım seçimi
+
+| Filtre | Ne yapar? |
+|---|---|
+| ↔️ Spread filtresi | Alış-satış farkı %0.3'ten büyük coinlere girmez (11 USDT'de bu fark doğrudan zarardır) |
+| ☣️ Tehlikeli coin filtresi | Binance delist takvimindeki, 14 günden yeni listelenmiş ve son 3 günde %50+ pompalanıp sönen coinleri eler |
+| 🌡️ Piyasa rejimi | Genel çöküşte alım yapmaz; zayıf piyasada kurallar sıkılaşır ve en fazla 1 pozisyon açılır |
+| 📏 Oynaklık (ATR) filtresi | Hedefe gidemeyecek kadar sakin veya zarar kesi gürültüyle tetikleyecek kadar oynak coinleri eler |
+| 🏅 Sinyal puanı / teyit *(isteğe bağlı)* | Alt puan sınırı ve sinyalin art arda 2 taramada görülmesi şartı |
+
+### Telegram'dan kontrol ve raporlar
+
+`/durum` `/pozisyon` `/bakiye` (TL karşılığıyla) `/islemler` `/csv` `/istatistik` `/rapor` `/tarama`
+`/durdur` `/devam` `/sat` `/hepsinisat` `/kapat` `/ayarlar` `/ping` — ayrıntılar aşağıda.
+Her gece günlük, pazar günleri haftalık özet gelir. Sessiz saatlerde rutin mesajlar sessiz gelir.
+
 ---
 
-## 🛠️ Kurulum (adım adım)
+## 🚀 En kolay kurulum (Windows, çift tıkla)
+
+1. [python.org/downloads](https://www.python.org/downloads/) adresinden **Python 3.10 veya üstünü** kurun.
+   Kurulumun ilk ekranında **"Add Python to PATH"** kutusunu mutlaka işaretleyin.
+2. Projeyi indirin: GitHub'da **Code → Download ZIP**, sonra ZIP'i bir klasöre çıkarın.
+3. Klasördeki dosyalara **çift tıklayın**:
+
+| Dosya | Ne yapar? |
+|---|---|
+| `KURULUM.bat` | Türkçe kurulum sihirbazı: Telegram'ı bağlar, (isterseniz) Binance anahtarlarını test eder, `.env` dosyasını sizin yerinize yazar, sonunda self-test çalıştırır |
+| `TEST_ET.bat` | Self-test: bağlantıları ve kuralları kontrol eder |
+| `BASLAT.bat` | Botu **test modunda** (sanal 11 USDT) başlatır; çökerse kendiliğinden yeniden açar |
+| `CANLI_BASLAT.bat` | Botu **gerçek parayla** başlatır (EVET onayı ister) |
+| `ISTATISTIK.bat` | İşlem geçmişinden performans istatistikleri |
+| `BACKTEST.bat` | Stratejiyi son 30 günün verisiyle dener |
+
+İlk çalıştırmada gerekli kütüphaneler otomatik kurulur. Pencereyi kapatmak botu durdurur.
+
+---
+
+## 🛠️ Elle kurulum (adım adım, tüm işletim sistemleri)
 
 ### 1) Python'u kurun
 - [python.org/downloads](https://www.python.org/downloads/) adresinden **Python 3.10 veya üstünü** indirin.
 - **Windows:** Kurulumun ilk ekranında **"Add Python to PATH"** kutusunu mutlaka işaretleyin.
-- Kontrol: Terminali açıp yazın:
-  ```bash
-  python --version
-  ```
-  (macOS/Linux'ta `python3 --version`)
+- Kontrol: Terminali açıp yazın: `python --version` (macOS/Linux'ta `python3 --version`)
 
 ### 2) Projeyi indirin
 - GitHub sayfasında **Code → Download ZIP** ile indirip bir klasöre çıkarın,
-  veya git yüklüyse:
-  ```bash
-  git clone https://github.com/Daryus3/tradebot.git
-  ```
+  veya git yüklüyse: `git clone https://github.com/Daryus3/tradebot.git`
 
 ### 3) Terminali proje klasöründe açın
 - **Windows:** Klasörü açın, adres çubuğuna `cmd` yazıp Enter'a basın.
@@ -68,78 +114,111 @@ Satırın başında `(venv)` görürseniz tamamdır. Terminali her yeni açış�
 pip install -r requirements.txt
 ```
 
-### 6) Ayar dosyasını oluşturun
-**Windows:**
-```bat
-copy .env.example .env
-```
-**macOS / Linux:**
+### 6) Ayarları yapın — sihirbazla (önerilir)
 ```bash
-cp .env.example .env
+python main.py --kurulum
 ```
-`.env` dosyasını Not Defteri / herhangi bir metin editörüyle açın. Varsayılan değerler
-isteğinizdeki kurallara göre ayarlıdır; şimdilik sadece Telegram bilgilerini girmeniz yeterli.
+Sihirbaz Telegram token'ınızı ister, chat ID'nizi kendisi bulur, isterseniz Binance anahtarlarınızı
+test eder ve `.env` dosyasını yazar. Kâr al / zarar kes / kill-switch kurallarınız değiştirilmez.
 
-### 7) Telegram botunu bağlayın
+**Elle yapmak isterseniz:** `.env.example` dosyasını `.env` adıyla kopyalayın
+(Windows: `copy .env.example .env`, macOS/Linux: `cp .env.example .env`) ve Telegram bilgilerini girin:
 1. Telegram'da **@BotFather**'ı açın → `/newbot` yazın → isim verin.
 2. Size verilen **token**'ı `.env` içinde `TELEGRAM_BOT_TOKEN=` satırına yapıştırın.
 3. Telegram'da yeni botunuzu açıp **`/start`** yazın (bu adım şart!).
-4. Chat ID'nizi bulmak için:
-   ```bash
-   python main.py --telegram-chat-id
-   ```
-   Çıkan `TELEGRAM_CHAT_ID=...` satırını `.env` dosyasına kopyalayın.
+4. Chat ID'nizi bulmak için `python main.py --telegram-chat-id` çalıştırıp çıkan
+   `TELEGRAM_CHAT_ID=...` satırını `.env` dosyasına kopyalayın.
 
-### 8) Self-test çalıştırın ✅
+### 7) Self-test çalıştırın ✅
 ```bash
 python main.py --selftest
 ```
-Kontrol edilenler: ayarlar, risk kuralları (kâr al / zarar kes / izleyen stop / kill-switch
-senaryoları), Binance bağlantısı, deneme taraması, 11 USDT sanal bakiye ile canlı fiyattan
-örnek al-sat, API anahtarı izinleri ve Telegram. Sonuçlar Telegram'a da gönderilir.
+Kontrol edilenler: ayarlar, risk kuralları (kâr al / zarar kes / izleyen stop / başabaş / kill-switch
+senaryoları, yedek stop tutarı), Binance bağlantısı, deneme taraması, 11 USDT sanal bakiye ile canlı
+fiyattan örnek al-sat, anlık fiyat akışı, API anahtarı izinleri ve komisyon oranı, Telegram.
+Sonuçlar Telegram'a da gönderilir.
 
-### 9) Test modunda (paper trading) çalıştırın 🧪
+### 8) Test modunda (paper trading) çalıştırın 🧪
 ```bash
-python main.py
+python watchdog.py --mode paper     # Önerilen: çökerse kendiliğinden yeniden başlar
+python main.py                      # veya doğrudan
 ```
 `.env` içinde `TRADING_MODE=paper` olduğu sürece bot **11 USDT sanal bakiye** ile canlı
 verileri kullanarak al-sat yapar; gerçek emir göndermez. Telegram mesajlarının başında
-`🧪 [TEST MODU]` yazar. Durdurmak için **Ctrl + C**.
+`🧪 [TEST MODU]` yazar. Durdurmak için **Ctrl + C** (veya Telegram'dan `/kapat`).
 
-Birkaç gün test modunda çalıştırıp sonuçları izlemenizi öneririz.
+Birkaç gün test modunda çalıştırıp sonuçları izlemenizi öneririz (`/istatistik`).
 İşlem geçmişi: `data/trades_paper.csv` (Excel ile açılabilir).
 
-### 10) Canlı moda geçiş 💵 (gerçek para)
+### 9) Canlı moda geçiş 💵 (gerçek para)
 1. **Binance API anahtarı oluşturun:** Binance → Profil → **API Yönetimi** → API Oluştur.
    - ✅ **Enable Reading** (Okuma)
    - ✅ **Enable Spot & Margin Trading** (Spot işlem)
    - ❌ **Enable Withdrawals** (Para çekme) — **ASLA açmayın!**
    - Mümkünse **IP kısıtlaması** ekleyin (evinizin IP adresi).
-2. Anahtarları `.env` içindeki `BINANCE_API_KEY` ve `BINANCE_API_SECRET` satırlarına yazın.
-3. Self-test'i tekrar çalıştırın (API izinlerini kontrol eder): `python main.py --selftest`
-4. Canlı modu başlatın:
+2. Anahtarları `.env` içindeki `BINANCE_API_KEY` ve `BINANCE_API_SECRET` satırlarına yazın
+   (veya `python main.py --kurulum`).
+3. USDT'nizin **Spot** cüzdanında olduğundan emin olun (Futures/Funding'deyse Binance'te
+   **Cüzdan → Transfer** ile Spot'a aktarın).
+4. Self-test'i tekrar çalıştırın (API izinlerini ve komisyonu kontrol eder): `python main.py --selftest`
+5. Canlı modu başlatın:
    ```bash
-   python main.py --mode live
+   python watchdog.py --mode live
    ```
-   Bot sizden onay için **EVET** yazmanızı ister. (Kalıcı olarak canlı mod için `.env`
-   içinde `TRADING_MODE=live` yapabilirsiniz.)
+   Bot sizden onay için **EVET** yazmanızı ister. Çökerse yeniden başlatmalarda onay tekrar sorulmaz.
 
 > ℹ️ Bot **binance.com** (Global) API'sini kullanır. Binance TR (trbinance) farklı bir
 > borsadır ve desteklenmez.
 
+> 💡 Test ve canlı modu **aynı anda** çalıştıracaksanız iki ayrı Telegram botu kullanın;
+> aynı token'la iki bot komut alamaz.
+
 ---
 
-## 🧭 Komutlar
+## 🧭 Bilgisayar komutları
 
 | Komut | Açıklama |
 |---|---|
-| `python main.py` | `.env`'deki moda göre çalışır (varsayılan: test) |
-| `python main.py --mode paper` | Test modu (sanal 11 USDT) |
-| `python main.py --mode live` | Canlı mod (gerçek para, onay ister) |
+| `python watchdog.py --mode paper` | Test modu; çökerse otomatik yeniden başlatır (önerilen) |
+| `python watchdog.py --mode live` | Canlı mod; çökerse otomatik yeniden başlatır |
+| `python main.py` | `.env`'deki moda göre doğrudan çalışır (yeniden başlatma yok) |
+| `python main.py --kurulum` | Türkçe kurulum sihirbazı |
 | `python main.py --selftest` | Tüm sistemi test eder |
+| `python main.py --istatistik` | Performans istatistikleri |
+| `python main.py --backtest --gun 30` | Stratejiyi geçmiş verilerle dener (`--coin-sayisi 40`) |
 | `python main.py --telegram-chat-id` | Telegram chat ID'nizi bulur |
 | `python main.py --reset-state` | Kayıtlı durumu sıfırlar (kill-switch kilidi dahil) |
+| `python watchdog.py --install-autostart --mode paper` | Windows açılışında otomatik başlatmayı kurar |
+| `python watchdog.py --remove-autostart` | Otomatik başlatmayı kaldırır |
 | `Ctrl + C` | Botu durdurur |
+
+**Windows açılışında canlı mod:** Güvenlik için ayrıca onay bayrağı ister:
+`python watchdog.py --install-autostart --mode live --allow-live-autostart`
+
+---
+
+## 📱 Telegram komutları
+
+Bot **yalnızca sizin sohbetinizden** (`TELEGRAM_CHAT_ID`) gelen komutları kabul eder.
+Telegram'da `/` yazınca komut listesi çıkar.
+
+| Komut | Ne yapar? |
+|---|---|
+| `/durum` | Genel durum, bakiye, açık pozisyonlar |
+| `/pozisyon` | Her pozisyonun güncel fiyatı, net K/Z, hedef ve stop fiyatları, yedek stop |
+| `/bakiye` | Bakiye ve **TL karşılığı** (bilgi amaçlı) |
+| `/islemler` | Son 10 işlem |
+| `/csv` | İşlem geçmişi dosyasını gönderir |
+| `/istatistik` | Kazanma oranı, ortalama kâr/zarar, en uzun kayıp serisi, kill-switch'e ulaşma olasılığı |
+| `/rapor gun` · `/rapor hafta` · `/rapor ay` | Dönem özeti |
+| `/tarama` | "Neden alım yapmıyor?" — son taramada kaç coine bakıldı, en sık eleme nedenleri |
+| `/durdur` · `/devam` | Yeni alımları durdurur / devam ettirir (açık pozisyon takibi sürer) |
+| `/sat ETH` · `/hepsinisat` | Pozisyonu hedefi beklemeden hemen satar (onay ister) |
+| `/kapat` | Botu güvenle kapatır (onay ister) |
+| `/ayarlar` · `/ping` · `/yardim` | Ayarlar, "çalışıyor musun?", komut listesi |
+
+Riskli komutlar `/evet` onayı ister (60 sn içinde). `.env`'de `COMMAND_PIN=1234` gibi bir PIN
+belirlerseniz onay `/evet 1234` şeklinde olur. Elle satıştaki zarar da kill-switch toplamına sayılır.
 
 ---
 
@@ -148,19 +227,34 @@ Birkaç gün test modunda çalıştırıp sonuçları izlemenizi öneririz.
 **Her 30 saniyede bir:**
 1. **Ön eleme:** Binance'teki tüm USDT pariteleri arasından son 24 saatte **düşmüş**
    (−%2 ile −%30 arası), yeterli **hacmi** (≥ 3M USDT) ve **oynaklığı** olan coinler seçilir.
-   Stabil coinler ve 11 USDT ile işlem yapmaya uygun olmayan pariteler elenir.
+   Stabil coinler, tehlikeli coinler (delist takvimi, yeni listelenen, pompa sonrası) ve
+   11 USDT ile işlem yapmaya uygun olmayan pariteler elenir.
 2. **Ayrıntılı analiz (5 dk mumlar):**
    - Son 3 saatte en az **%3'lük bir düşüş** (dip) olmuş,
    - Dip en az 10 dk önce oluşmuş ve fiyat **toparlanmaya başlamış** (düşüşün %15-60'ı geri alınmış),
    - **RSI** dipte aşırı satımdaydı (≤35) ve şimdi **yükseliyor** (40-65),
-   - Fiyat **EMA(9)** üzerinde, son mum yeşil, toparlanma mumlarında **hacim** artmış.
+   - Fiyat **EMA(9)** üzerinde, son mum yeşil, toparlanma mumlarında **hacim** artmış,
+   - Oynaklık (ATR) makul aralıkta.
 3. **Puanlama:** Düşüş derinliği, kalan toparlanma alanı, hacim, RSI ivmesi ve oynaklığa göre
-   en iyi aday seçilir ve alım yapılır.
-4. **Piyasa filtresi:** BTC son 1 saatte %1.5'ten fazla düşmüşse (genel çöküş) alım yapılmaz.
+   en iyi aday seçilir; spread kontrolünden geçerse alım yapılır.
+4. **Piyasa filtreleri:** BTC son 1 saatte %1.5'ten fazla düşmüşse veya piyasa genel çöküş
+   modundaysa alım yapılmaz. Zayıf piyasada kurallar sıkılaşır ve en fazla 1 pozisyon açılır.
 
-**Pozisyon açıkken (her 5 saniyede):** Her pozisyonun net kâr/zararı ayrı ayrı hesaplanır;
-kâr al, zarar kes ve izleyen stop her coin için bağımsız çalışır. Kill-switch tüm pozisyonların
-toplamına bakar.
+**Pozisyon açıkken:** Her pozisyonun net kâr/zararı ayrı ayrı hesaplanır; kâr al, zarar kes ve
+izleyen stop her coin için bağımsız çalışır. Kill-switch tüm pozisyonların toplamına bakar.
+
+### 🧷 Binance'teki yedek zarar-kes emri
+Bot normalde zarar kesi kendisi yapar (−%10). Ama bilgisayar kapanır, uykuya geçer veya internet
+kesilirse bot satış yapamaz. Bu yüzden her alımdan hemen sonra Binance'e, biraz daha aşağıda
+(**−%12**) bekleyen bir stop emri bırakılır. Bu emir **Binance'in sunucusunda** durur:
+
+- Bot çalışırken fiyat −%10'a inerse bot önce bu emri iptal eder, sonra kendisi satar.
+- Bot ulaşılamıyorsa ve fiyat −%12'ye inerse Binance satışı kendisi yapar.
+- Bot yeniden açılınca bunu fark eder ve gerçek satış fiyatıyla kaydeder.
+
+Not: Emir beklerken coinler Binance'te "kilitli" görünür; bu normaldir. Bazı paritelerde
+piyasa tipi stop yoktur, o zaman limitli stop kullanılır ve çok sert çöküşte dolmayabilir.
+Kapatmak için: `BACKUP_STOP_ENABLED=false`.
 
 ### 📦 Aynı anda kaç coin? (`MAX_OPEN_POSITIONS`)
 Bot sermayeyi pozisyonlara **eşit** böler. Ancak her pozisyon, fiyat stop-loss'a (−%10) düşse bile
@@ -192,7 +286,7 @@ Kâr ettikçe pozisyon sayısı artar, zarar ettikçe azalır. Her zaman tek poz
 ### ☠️ Kill-switch
 Toplam (gerçekleşen + tüm açık pozisyonlardaki) zarar 5 USDT'ye ulaştığında bot açık pozisyonların hepsini satar,
 Telegram'a bildirir ve kapanır. Bu durum `data/` klasörüne kaydedilir; botu yeniden başlatsanız
-bile **kilitli** kalır. Bilerek tekrar başlatmak için:
+bile **kilitli** kalır (bekçi de yeniden başlatmaz). Bilerek tekrar başlatmak için:
 ```bash
 python main.py --reset-state
 ```
@@ -202,6 +296,24 @@ Strateji, kısa sürede toparlanma potansiyeli olan oynak coinleri seçer. Ancak
 iddialı bir hedeftir; bazı işlemler 60 dakikadan uzun sürebilir. İsterseniz `.env` içinde
 `MAX_HOLD_MINUTES=60` yaparak pozisyonun en fazla 60 dk tutulmasını sağlayabilirsiniz
 (varsayılan: kapalı, yani sadece kâr al / zarar kes / izleyen stop ile çıkılır).
+
+---
+
+## 📊 İstatistik ve backtest
+
+- **`/istatistik`** veya `python main.py --istatistik`: kazanma oranı, ortalama kâr ve zarar, en uzun
+  kayıp serisi, toplam komisyon, ortalama süre, çıkış nedenlerine ve coinlere göre dağılım.
+  +%15 / −%10 kuralında başabaş için yaklaşık **%40 kazanma oranı** gerekir; bot bunu sizin
+  oranınızla karşılaştırır ve geçmiş işlemlerden "kill-switch'e ulaşma olasılığı" tahmini yapar.
+  20-30 işlemden az veriyle sonuçlar yanıltıcı olabilir.
+- **İşlem kaydı** (`data/trades_<mod>.csv`): her işlemin sinyal puanı, düşüş, RSI, hacim, spread,
+  BTC durumu, piyasa rejimi ve işlem boyunca görülen en yüksek / en düşük kâr bilgisi de yazılır.
+  Bakiye seyri `data/equity_<mod>.csv` dosyasında.
+- **Backtest** (`python main.py --backtest --gun 30`): strateji ve tüm kurallarınız (+%15, −%10,
+  izleyen stop, kill-switch, 11 USDT, %0.1 komisyon) son 30 günün verisiyle denenir. İlk çalıştırma
+  veri indirdiği için birkaç dakika sürebilir; veriler `data/backtest_cache` klasörüne kaydedilir.
+  **Geçmiş geleceği garanti etmez**: listeden çıkarılmış coinler eksik olduğu için sonuç iyimser
+  çıkabilir; 5 dakikalık mumlarla çalışır ve aynı mumda hem hedef hem stop varsa kötümser varsayar.
 
 ---
 
@@ -215,16 +327,24 @@ iddialı bir hedeftir; bazı işlemler 60 dakikadan uzun sürebilir. İsterseniz
 | `MAX_TOTAL_LOSS_USDT` | `5` | Kill-switch zarar limiti |
 | `TAKE_PROFIT_PCT` | `15` | Net kâr hedefi (%) |
 | `STOP_LOSS_PCT` | `10` | Net zarar limiti (%) |
-| `TRAILING_ACTIVATION_PCT` | `10` | İzleyen stop başlangıcı (%) |
-| `TRAILING_FLOOR_PCT` | `5` | İzleyen stop satış seviyesi (%) |
-| `TRAILING_DYNAMIC` | `false` | `true`: koruma seviyesi zirve kârın yarısına çıkar |
+| `TRAILING_ACTIVATION_PCT` / `TRAILING_FLOOR_PCT` | `10` / `5` | İzleyen stop |
 | `FEE_RATE` | `0.001` | Komisyon oranı (%0.1) |
-| `SCAN_INTERVAL_SEC` | `30` | Tarama aralığı (sn) |
-| `POSITION_CHECK_SEC` | `5` | Açık pozisyon kontrol aralığı (sn) |
-| `STATUS_REPORT_MINUTES` | `60` | Telegram durum raporu aralığı (0 = kapalı) |
+| `BACKUP_STOP_ENABLED` / `BACKUP_STOP_PCT` | `true` / `12` | Binance'teki yedek zarar-kes emri |
+| `BREAKEVEN_ENABLED` | `false` | Başabaş koruması |
+| `BTC_CRASH_EXIT` | `false` | BTC çöküşünde erken çıkış |
+| `USE_WEBSOCKET` | `true` | Anlık fiyat akışı |
+| `TELEGRAM_COMMANDS` / `COMMAND_PIN` | `true` / boş | Telegram komutları / onay PIN'i |
+| `DAILY_REPORT_TIME` / `WEEKLY_REPORT` | `23:55` / `true` | Günlük ve haftalık özet |
+| `QUIET_HOURS` | boş | Sessiz saatler, örn. `23:00-08:00` |
+| `MAX_SPREAD_PCT` | `0.3` | Spread filtresi |
+| `DELIST_FILTER` | `true` | Tehlikeli coin filtresi |
+| `REGIME_FILTER` | `true` | Piyasa rejimi filtresi |
+| `MIN_SIGNAL_SCORE` / `SIGNAL_CONFIRM_SCANS` | `0` / `1` | Sinyal puanı alt sınırı / tarama teyidi (kapalı) |
+| `MIN_ATR_PCT` / `MAX_ATR_PCT` | `0.25` / `4` | Oynaklık filtresi |
 | `MAX_HOLD_MINUTES` | `0` | Maks. pozisyon süresi (0 = sınırsız) |
 
-Tüm ayarlar ve açıklamaları `.env.example` dosyasındadır.
+Tüm ayarlar ve açıklamaları `.env.example` dosyasındadır. Eski bir `.env` dosyanız varsa yeni
+ayarları eklemeniz gerekmez; yazmadığınız ayarlar için yukarıdaki varsayılanlar kullanılır.
 
 > Sermaye/kural ayarlarını değiştirdikten sonra temiz bir başlangıç için
 > `python main.py --reset-state` çalıştırın (kayıtlı durum başlangıç sermayesini hatırlar).
@@ -236,17 +356,27 @@ Tüm ayarlar ve açıklamaları `.env.example` dosyasındadır.
 ```
 tradebot/
 ├── main.py            # Giriş noktası (komut satırı, modlar)
+├── watchdog.py        # Bekçi: bot çökerse yeniden başlatır
+├── autostart.py       # Windows açılışında otomatik başlatma
 ├── config.py          # .env ayarlarını okur ve doğrular
-├── trader.py          # Ana döngü: tarama, alım, pozisyon takibi, kill-switch
+├── trader.py          # Ana döngü: tarama, alım, pozisyon takibi, yedek stop, kill-switch, raporlar
 ├── strategy.py        # Düşüş sonrası toparlanma tarayıcısı
-├── indicators.py      # RSI, EMA hesaplamaları
-├── risk.py            # Kâr al / zarar kes / izleyen stop / boyutlandırma (komisyon dahil)
-├── exchange.py        # Binance kuralları, canlı borsa ve sanal (paper) borsa
+├── coin_filters.py    # Tehlikeli coin filtresi (delist, yeni listeleme, pompa)
+├── market_regime.py   # Piyasa rejimi tespiti
+├── indicators.py      # RSI, EMA, ATR hesaplamaları
+├── risk.py            # Kâr al / zarar kes / izleyen stop / başabaş / boyutlandırma (komisyon dahil)
+├── exchange.py        # Binance kuralları, canlı borsa ve sanal (paper) borsa, yedek stop emirleri
 ├── binance_client.py  # Binance REST API istemcisi
+├── price_stream.py    # Anlık fiyat akışı (WebSocket)
 ├── telegram_bot.py    # Telegram bildirimleri ve emojili mesaj şablonları
-├── state.py           # Kalıcı durum (data/state_*.json) ve işlem geçmişi (CSV)
+├── commands.py        # Telegram komutları
+├── stats.py           # İstatistikler ve dönem raporları
+├── backtest.py        # Geçmiş veriyle strateji testi
+├── state.py           # Kalıcı durum (data/state_*.json), işlem ve bakiye kayıtları (CSV)
 ├── selftest.py        # Self-test
-├── logger.py          # Log ayarları (logs/bot.log)
+├── setup_wizard.py    # Kurulum sihirbazı
+├── logger.py          # Log ayarları (logs/bot.log), gizli bilgileri maskeleme
+├── *.bat              # Windows için çift tıkla başlatma dosyaları
 ├── tests/             # Otomatik testler (pytest)
 ├── requirements.txt
 ├── .env.example
@@ -261,17 +391,19 @@ tradebot/
 |---|---|
 | `python` bulunamadı | Python'u "Add to PATH" işaretli tekrar kurun veya `py main.py` deneyin |
 | Telegram mesajı gelmiyor | Bota `/start` yazdığınızdan emin olun; `--telegram-chat-id` ile ID'yi kontrol edin |
+| Telegram komutlarına cevap yok | Aynı bot token'ını kullanan başka bir program (ör. ikinci bot) çalışıyor olabilir; logda "aynı bot token" uyarısına bakın |
 | `Timestamp ... recvWindow` (-1021) | Bilgisayar saatinizi senkronize edin (Windows: Ayarlar → Saat → "Şimdi eşitle") |
-| `Invalid API-key, IP, or permissions` (-2015) | Anahtarı, izinleri ve IP kısıtlamasını kontrol edin |
+| `Invalid API-key, IP, or permissions` (-2015) | Anahtarı, izinleri ve IP kısıtlamasını kontrol edin; ev IP'niz değişmiş olabilir |
 | `Service unavailable from a restricted location` | Binance bulunduğunuz konumdan API erişimine izin vermiyor |
 | "Serbest USDT bakiyesi yok" ama hesapta USDT var | Bot **Spot** cüzdanını kullanır. Futures/Funding cüzdanındaki USDT'yi Binance'te **Cüzdan → Transfer** ile **Spot**'a aktarın |
+| Coinler Binance'te "kilitli" görünüyor | Normal: yedek zarar-kes emri bekliyor. Bot satarken önce iptal eder |
 | Kill-switch kilidi | `python main.py --reset-state` |
-| Bot hiç alım yapmıyor | Normal olabilir: kriterlere uyan fırsat yoksa bekler. Loglarda "Tarama:" satırlarına bakın |
+| Bot hiç alım yapmıyor | Normal olabilir: kriterlere uyan fırsat yoksa bekler. Telegram'dan `/tarama` yazın |
 
-**Önemli:** Bot sadece bilgisayarınız açıkken ve internete bağlıyken çalışır. Pozisyon açıkken
-bilgisayar uyku moduna geçerse kâr al / zarar kes çalışmaz. Windows'ta **Ayarlar → Sistem →
-Güç** bölümünden uyku modunu kapatın. Bot tekrar başlatıldığında açık pozisyonu kaldığı yerden
-takip eder.
+**Önemli:** Bot sadece bilgisayarınız açıkken ve internete bağlıyken **kâr al / izleyen stop** yapabilir.
+Bilgisayar kapalıyken açık pozisyonu yalnızca Binance'teki yedek stop emri (−%12) korur.
+Windows'ta **Ayarlar → Sistem → Güç** bölümünden uyku modunu kapatmanızı öneririz. Bot tekrar
+başlatıldığında açık pozisyonu kaldığı yerden takip eder ve kapalıyken ne olduğunu size bildirir.
 
 ---
 

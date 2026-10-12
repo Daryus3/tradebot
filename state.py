@@ -36,6 +36,12 @@ class BotState:
     kill_reason: str = ""
     killed_at: float = 0.0
     created_at: float = field(default_factory=time.time)
+    # Sonucu belirsiz kalan emirler (internet kesintisi): clientOrderId → {symbol, side, created_at, ...}
+    pending_orders: Dict[str, dict] = field(default_factory=dict)
+    paused: bool = False             # Telegram /durdur: yeni alım yok, açık pozisyon takibi sürer
+    last_alive: float = 0.0          # Botun en son çalıştığı an (kesinti tespiti için)
+    last_daily_report: str = ""      # En son günlük raporun tarihi (YYYY-MM-DD)
+    last_weekly_report: str = ""     # En son haftalık raporun haftası (YYYY-Www)
 
     @property
     def capital(self) -> float:
@@ -102,17 +108,42 @@ class StateStore:
 
 
 class TradeLog:
-    HEADER = ["acilis", "kapanis", "parite", "miktar", "alis_fiyati", "satis_fiyati", "maliyet_usdt",
-              "net_gelir_usdt", "kar_zarar_usdt", "kar_zarar_yuzde", "komisyon_usdt", "neden", "sure_dk"]
+    BASE_HEADER = ["acilis", "kapanis", "parite", "miktar", "alis_fiyati", "satis_fiyati", "maliyet_usdt",
+                   "net_gelir_usdt", "kar_zarar_usdt", "kar_zarar_yuzde", "komisyon_usdt", "neden", "sure_dk"]
+    EXTRA_HEADER = ["sinyal_puani", "dusus_pct", "rsi", "hacim_orani", "spread_pct", "btc_1s_pct",
+                    "piyasa_rejimi", "max_kar_pct", "max_zarar_pct"]
+    HEADER = BASE_HEADER + EXTRA_HEADER
 
     def __init__(self, path: Path):
         self.path = Path(path)
+
+    def _migrate_header(self) -> None:
+        """Eski sürümün daha az sütunlu dosyasını yeni başlığa taşır (eski satırlar korunur)."""
+        with self.path.open("r", newline="", encoding="utf-8") as fh:
+            rows = list(csv.reader(fh))
+        if not rows or rows[0] == self.HEADER:
+            return
+        width = len(self.HEADER)
+        body = [r + [""] * (width - len(r)) if len(r) < width else r for r in rows[1:]]
+        tmp = self.path.with_suffix(".tmp")
+        with tmp.open("w", newline="", encoding="utf-8") as fh:
+            writer = csv.writer(fh)
+            writer.writerow(self.HEADER)
+            writer.writerows(body)
+        os.replace(tmp, self.path)
 
     def append(self, pos: Position, exit_price: float, proceeds: float, fee_total: float,
                reason: str, closed_at: float) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         new_file = not self.path.exists()
+        if not new_file:
+            self._migrate_header()
         pnl = proceeds - pos.cost_usdt
+        m = pos.metrics or {}
+
+        def num(value, digits=2):
+            return "" if value is None else f"{value:.{digits}f}"
+
         with self.path.open("a", newline="", encoding="utf-8") as fh:
             writer = csv.writer(fh)
             if new_file:
@@ -124,4 +155,25 @@ class TradeLog:
                 f"{pos.cost_usdt:.4f}", f"{proceeds:.4f}", f"{pnl:.4f}",
                 f"{(pnl / pos.cost_usdt * 100) if pos.cost_usdt else 0:.2f}", f"{fee_total:.4f}",
                 reason, f"{(closed_at - pos.opened_at) / 60:.1f}",
+                num(pos.score), num(m.get("dip_pct")), num(m.get("rsi"), 1), num(m.get("vol_ratio")),
+                num(pos.spread_pct, 3), num(pos.btc_1h_pct), pos.regime,
+                num(pos.peak_pnl_pct), num(pos.min_pnl_pct),
             ])
+
+
+class EquityLog:
+    """Bakiyenin zaman içindeki seyri (data/equity_<mod>.csv)."""
+    HEADER = ["zaman", "gerceklesen_bakiye", "acik_kz", "toplam_bakiye", "acik_pozisyon"]
+
+    def __init__(self, path: Path):
+        self.path = Path(path)
+
+    def append(self, at: float, capital: float, unrealized: float, open_positions: int) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        new_file = not self.path.exists()
+        with self.path.open("a", newline="", encoding="utf-8") as fh:
+            writer = csv.writer(fh)
+            if new_file:
+                writer.writerow(self.HEADER)
+            writer.writerow([datetime.fromtimestamp(at).strftime("%Y-%m-%d %H:%M:%S"), f"{capital:.4f}",
+                             f"{unrealized:.4f}", f"{capital + unrealized:.4f}", open_positions])

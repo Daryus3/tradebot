@@ -16,14 +16,15 @@ Sonuçlar terminale yazılır ve Telegram'a gönderilir.
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 from decimal import Decimal
 from typing import List, Tuple
 
 from binance_client import BinanceClient
 from exchange import PaperExchange, SymbolRules, parse_symbol_rules
 from logger import get_logger
-from risk import (ExitReason, Position, evaluate_exit, kill_switch_hit, net_exit_value, plan_entry,
-                  min_position_usdt, pnl_pct, position_slots, price_for_pnl, update_trailing)
+from risk import (ExitReason, Position, evaluate_exit, kill_switch_hit, min_position_usdt, net_exit_value,
+                  plan_entry, pnl_pct, position_slots, price_for_pnl, update_breakeven, update_trailing)
 from strategy import ReboundStrategy
 from telegram_bot import LINE, TelegramNotifier, esc, fmt_price, fmt_usdt
 
@@ -97,6 +98,25 @@ def run_risk_scenarios(cfg) -> List[Tuple[str, bool, str]]:
     checks.append(("Pozisyon sayısı bakiyeye göre", safe,
                    " | ".join(f"{c:g} USDT → {n} pozisyon" for c, n in slots.items())
                    + f" (pozisyon başı en az {min_pos:.2f} USDT)"))
+
+    # Başabaş koruması (ayar kapalı olsa da mantığı doğrulanır)
+    be_cfg = replace(cfg, breakeven_enabled=True)
+    pos = Position("TESTUSDT", "TEST", qty, 1.0, cost, time.time())
+    for target in (be_cfg.breakeven_trigger_pct + 0.5, be_cfg.breakeven_floor_pct - 0.1):
+        pct = pnl_pct(net_exit_value(qty, p(target), cfg.fee_rate), cost)
+        update_trailing(pos, pct, be_cfg)
+        update_breakeven(pos, be_cfg)
+    reason = evaluate_exit(pos, pct, time.time(), be_cfg)
+    checks.append(("Başabaş koruması", reason == ExitReason.BREAKEVEN,
+                   f"+%{be_cfg.breakeven_trigger_pct:g} görüldükten sonra +%{pct:.2f}'de satış "
+                   f"({'açık' if cfg.breakeven_enabled else 'ayarda kapalı'})"))
+
+    # Yedek stop emri: en küçük pozisyonda bile Binance minimumunun üstünde kalmalı
+    smallest = max(min_pos, cfg.start_capital / max(1, position_slots(cfg.start_capital, 5.0, cfg)))
+    backup_value = smallest * (1 - cfg.backup_stop_pct / 100) * (1 - cfg.backup_stop_limit_gap_pct / 100)
+    checks.append(("Binance yedek stop tutarı", not cfg.backup_stop_enabled or backup_value >= 5.0,
+                   f"-%{cfg.backup_stop_pct:g} seviyesinde emir ≈{backup_value:.2f} USDT (min. 5)"
+                   if cfg.backup_stop_enabled else "kapalı"))
     return checks
 
 
@@ -156,7 +176,11 @@ def run_selftest(cfg) -> int:
     if rules and tickers:
         results.append(_paper_round_trip(cfg, client, rules, tickers))
 
-    # 6) API anahtarı
+    # 6) Anlık fiyat akışı (WebSocket)
+    if cfg.use_websocket:
+        results.append(_check_websocket(cfg))
+
+    # 7) API anahtarı
     results.append(_check_api_keys(cfg, client))
 
     # 7) Telegram
@@ -179,7 +203,7 @@ def run_selftest(cfg) -> int:
     if failed:
         print(f"❌ {failed} kontrol başarısız. Lütfen yukarıdaki hataları düzeltin.")
     else:
-        print("✅ Tüm kritik kontroller başarılı. Sonraki adım: python main.py  (test modunda çalıştırır)")
+        print("✅ Tüm kritik kontroller başarılı. Sonraki adım: BASLAT.bat (Windows) veya python watchdog.py --mode paper")
 
     if notifier.enabled:
         lines = "\n".join(f"{s} <b>{esc(t)}</b>\n<i>{esc(d)}</i>" for s, t, d in results)
@@ -213,6 +237,29 @@ def _paper_round_trip(cfg, client: BinanceClient, rules: dict, tickers: list) ->
         return (FAIL, title, str(exc))
 
 
+def _check_websocket(cfg) -> Result:
+    title = "Anlık fiyat akışı (WebSocket)"
+    try:
+        from price_stream import PriceStream
+    except ImportError:
+        return (WARN, title, "price_stream modülü yok; fiyatlar 5 sn'de bir sorgulanacak")
+    stream = PriceStream(cfg.binance_ws_url, stale_after=10.0)
+    if not stream.available:
+        return (WARN, title, "websocket-client kurulu değil (pip install -r requirements.txt); REST kullanılacak")
+    try:
+        stream.start()
+        stream.set_symbols({"BTCUSDT"})
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            quote = stream.get_bid_ask("BTCUSDT")
+            if quote:
+                return (OK, title, f"BTCUSDT anlık fiyat alındı ({quote[0]:.2f})")
+            time.sleep(0.25)
+        return (WARN, title, "10 sn içinde fiyat gelmedi; bot gerekirse REST ile devam eder")
+    finally:
+        stream.stop()
+
+
 def _check_api_keys(cfg, client: BinanceClient) -> Result:
     title = "Binance API anahtarı"
     if not cfg.has_binance_keys:
@@ -234,6 +281,14 @@ def _check_api_keys(cfg, client: BinanceClient) -> Result:
         except Exception as exc:  # noqa: BLE001
             log.debug("API kısıtlamaları okunamadı: %s", exc)
         detail = f"Serbest bakiye: {free:.2f} {cfg.quote_asset}"
+        try:
+            taker = float(client.commission_rates("BTCUSDT")["standardCommission"]["taker"])
+            detail += f" | komisyon %{taker * 100:.3f}"
+            if abs(taker - cfg.fee_rate) > 1e-6:
+                problems.append(f"gerçek komisyon %{taker * 100:.3f}, FEE_RATE ayarı %{cfg.fee_rate * 100:.3f} "
+                                f"(.env'de FEE_RATE={taker:g} yapın)")
+        except Exception as exc:  # noqa: BLE001
+            log.debug("Komisyon oranı okunamadı: %s", exc)
         if free < cfg.start_capital:
             problems.append(f"Spot bakiyesi START_CAPITAL_USDT ({cfg.start_capital:g}) altında — para Futures/Funding "
                             f"cüzdanındaysa Binance'te Transfer ile Spot'a aktarın")

@@ -9,15 +9,16 @@ from __future__ import annotations
 
 import html
 import math
-import queue
 import re
 import threading
 import time
-from typing import Dict, List, Optional, Tuple
+from collections import deque
+from typing import Deque, Dict, List, Optional, Tuple
 
 import requests
 
-from logger import get_logger
+from config import in_time_range
+from logger import get_logger, redact, register_secrets
 
 log = get_logger()
 
@@ -67,94 +68,198 @@ def _strip_html(text: str) -> str:
 
 
 # ---------------------------------------------------------------- gönderici
+_OK, _DROP, _RETRY = "ok", "drop", "retry"
+_RETRY_DELAYS = (2, 5, 10, 30)
+
+
 class TelegramNotifier:
     """Mesajları arka planda (ayrı bir iş parçacığında) sırayla gönderir.
 
-    Böylece Telegram yavaşlasa veya erişilemez olsa bile ana döngü (kâr al / zarar kes
-    kontrolleri) hiç beklemez. `async_mode=False` ile senkron çalışır (self-test için).
+    - Telegram yavaşlasa bile ana döngü (kâr al / zarar kes kontrolleri) hiç beklemez.
+    - İnternet kesilirse mesajlar kaybolmaz: kuyrukta bekler, bağlantı gelince gönderilir.
+    - Sessiz saatlerde rutin mesajlar bildirim sesi olmadan gelir; kritik mesajlar her zaman sesli.
+    - Token / API anahtarları loglara ve mesajlara asla açık yazılmaz.
+    `async_mode=False` ile senkron çalışır (self-test ve kurulum için).
     """
 
     def __init__(self, token: str, chat_id: str, prefix: str = "", timeout: float = 10.0,
-                 async_mode: bool = True):
+                 async_mode: bool = True, quiet_window: Optional[Tuple[int, int]] = None,
+                 max_queue: int = 300, now_fn=None):
         self.token = token
         self.chat_id = chat_id
         self.prefix = prefix
         self.timeout = timeout
         self.async_mode = async_mode
+        self.quiet_window = quiet_window
+        self.max_queue = max_queue
+        self.now_fn = now_fn or time.time
         self.session = requests.Session()
         self._last_error_sent: Dict[str, float] = {}
-        self._queue: "queue.Queue[Tuple[str, bool]]" = queue.Queue()
+        self._items: Deque[Tuple[str, str, bool, bool]] = deque()  # (tür, içerik, sessiz, kritik)
+        self._cond = threading.Condition()
+        self._busy = False
         self._worker: Optional[threading.Thread] = None
+        self.down_since: Optional[float] = None
+        register_secrets(token)
 
     @property
     def enabled(self) -> bool:
         return bool(self.token and self.chat_id)
 
-    def send(self, text: str, silent: bool = False) -> bool:
+    def is_quiet_now(self) -> bool:
+        lt = time.localtime(self.now_fn())
+        return in_time_range(lt.tm_hour * 60 + lt.tm_min, self.quiet_window)
+
+    def send(self, text: str, silent: bool = False, critical: bool = False) -> bool:
         """Mesajı gönderir (veya kuyruğa ekler). Asla exception fırlatmaz."""
-        full = f"{self.prefix}{text}"
+        full = redact(f"{self.prefix}{text}")
         log.info("📨 %s", _strip_html(full).replace("\n", " | "))
         if not self.enabled:
             return False
+        if not critical and self.is_quiet_now():
+            silent = True
         if not self.async_mode:
-            return self._deliver(full, silent)
-        if self._worker is None or not self._worker.is_alive():
-            self._worker = threading.Thread(target=self._run, name="telegram", daemon=True)
-            self._worker.start()
-        self._queue.put((full, silent))
+            return self._deliver_text(full, silent) == _OK
+        self._enqueue(("text", full, silent, critical))
         return True
 
-    def flush(self, timeout: float = 20.0) -> None:
-        """Kuyruktaki mesajların gönderilmesini bekler (bot kapanırken)."""
-        deadline = time.time() + timeout
-        while self._queue.unfinished_tasks and time.time() < deadline:
-            time.sleep(0.1)
-
-    def _run(self) -> None:
-        while True:
-            full, silent = self._queue.get()
-            try:
-                self._deliver(full, silent)
-            except Exception as exc:  # noqa: BLE001 - gönderici iş parçacığı asla ölmesin
-                log.warning("Telegram gönderim hatası: %s", exc)
-            finally:
-                self._queue.task_done()
-
-    def _deliver(self, full: str, silent: bool) -> bool:
-        if len(full) > MAX_LEN:
-            full = full[: MAX_LEN - 20] + "\n…(kısaltıldı)"
-        payload = {"chat_id": self.chat_id, "text": full, "parse_mode": "HTML",
-                   "disable_web_page_preview": True, "disable_notification": silent}
-        url = API_URL.format(token=self.token, method="sendMessage")
-        for attempt in range(3):
-            try:
-                resp = self.session.post(url, json=payload, timeout=self.timeout)
-                if resp.status_code == 429:
-                    wait = resp.json().get("parameters", {}).get("retry_after", 2)
-                    time.sleep(min(float(wait), 30))
-                    continue
-                if resp.ok:
-                    return True
-                if resp.status_code == 400 and "parse" in resp.text.lower():
-                    # HTML biçimlendirme hatası: düz metin olarak tekrar dene
-                    payload.pop("parse_mode", None)
-                    payload["text"] = _strip_html(full)
-                    continue
-                log.warning("Telegram mesajı gönderilemedi (HTTP %s): %s", resp.status_code, resp.text[:200])
-                return False
-            except requests.RequestException as exc:
-                log.warning("Telegram bağlantı hatası (deneme %d/3): %s", attempt + 1, exc)
-                time.sleep(2)
-        return False
+    def send_document(self, path, caption: str = "") -> bool:
+        """Dosya gönderir (örn. işlem geçmişi CSV'si)."""
+        if not self.enabled:
+            return False
+        if not self.async_mode:
+            return self._deliver_document(str(path), redact(caption)) == _OK
+        self._enqueue(("doc", f"{path}\n{redact(caption)}", False, False))
+        return True
 
     def send_error(self, key: str, text: str, cooldown_sec: int = 600) -> bool:
         """Aynı hata için Telegram'ı spam'lememek adına `cooldown_sec` içinde tek mesaj."""
         now = time.time()
         if now - self._last_error_sent.get(key, 0) < cooldown_sec:
-            log.warning("(tekrarlanan hata, Telegram'a gönderilmedi) %s", _strip_html(text).replace("\n", " | "))
+            log.warning("(tekrarlanan hata, Telegram'a gönderilmedi) %s",
+                        redact(_strip_html(text)).replace("\n", " | "))
             return False
         self._last_error_sent[key] = now
-        return self.send(text)
+        return self.send(text, critical=True)
+
+    def flush(self, timeout: float = 20.0) -> None:
+        """Kuyruktaki mesajların gönderilmesini bekler (bot kapanırken)."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            with self._cond:
+                if not self._items and not self._busy:
+                    return
+            time.sleep(0.1)
+
+    @property
+    def pending(self) -> int:
+        with self._cond:
+            return len(self._items)
+
+    # ------------------------------------------------------------ iç işler
+    def _enqueue(self, item) -> None:
+        with self._cond:
+            if len(self._items) >= self.max_queue:
+                # Kuyruk dolu: en eski kritik olmayan mesajı at (kritikler korunur)
+                for i, old in enumerate(self._items):
+                    if not old[3]:
+                        del self._items[i]
+                        break
+                else:
+                    self._items.popleft()
+            self._items.append(item)
+            self._cond.notify()
+        if self._worker is None or not self._worker.is_alive():
+            self._worker = threading.Thread(target=self._run, name="telegram", daemon=True)
+            self._worker.start()
+
+    def _run(self) -> None:
+        attempt = 0
+        while True:
+            with self._cond:
+                while not self._items:
+                    self._cond.wait()
+                item = self._items[0]
+                self._busy = True
+            kind, payload, silent, _ = item
+            try:
+                if kind == "doc":
+                    path, caption = payload.split("\n", 1)
+                    result = self._deliver_document(path, caption)
+                else:
+                    result = self._deliver_text(payload, silent)
+            except Exception as exc:  # noqa: BLE001 - gönderici iş parçacığı asla ölmesin
+                log.warning("Telegram gönderim hatası: %s", redact(str(exc)))
+                result = _DROP
+            if result == _RETRY:
+                if self.down_since is None:
+                    self.down_since = time.time()
+                with self._cond:
+                    self._busy = False
+                time.sleep(_RETRY_DELAYS[min(attempt, len(_RETRY_DELAYS) - 1)])
+                attempt += 1
+                continue
+            attempt = 0
+            with self._cond:
+                if self._items and self._items[0] is item:
+                    self._items.popleft()
+                self._busy = False
+            if result == _OK and self.down_since is not None:
+                minutes = (time.time() - self.down_since) / 60
+                self.down_since = None
+                if minutes >= 1:
+                    note = (f"📶 Telegram bağlantısı yaklaşık {minutes:.0f} dk kesikti. "
+                            f"Bu sürede biriken {self.pending} mesaj sırayla gönderiliyor.")
+                    log.info(note)
+                    self._deliver_text(f"{self.prefix}{note}", True)
+
+    def _deliver_text(self, full: str, silent: bool) -> str:
+        if len(full) > MAX_LEN:
+            full = full[: MAX_LEN - 20] + "\n…(kısaltıldı)"
+        payload = {"chat_id": self.chat_id, "text": full, "parse_mode": "HTML",
+                   "disable_web_page_preview": True, "disable_notification": silent}
+        url = API_URL.format(token=self.token, method="sendMessage")
+        for _ in range(3):
+            try:
+                resp = self.session.post(url, json=payload, timeout=self.timeout)
+            except requests.RequestException as exc:
+                log.warning("Telegram'a ulaşılamadı, mesaj kuyrukta bekletiliyor: %s", redact(str(exc)))
+                return _RETRY
+            if resp.status_code == 429:
+                wait = resp.json().get("parameters", {}).get("retry_after", 2)
+                time.sleep(min(float(wait), 30))
+                continue
+            if resp.ok:
+                return _OK
+            if resp.status_code == 400 and "parse" in resp.text.lower():
+                # HTML biçimlendirme hatası: düz metin olarak tekrar dene
+                payload.pop("parse_mode", None)
+                payload["text"] = _strip_html(full)
+                continue
+            if resp.status_code >= 500:
+                return _RETRY
+            log.warning("Telegram mesajı gönderilemedi (HTTP %s): %s", resp.status_code, redact(resp.text[:200]))
+            return _DROP
+        return _RETRY
+
+    def _deliver_document(self, path: str, caption: str) -> str:
+        url = API_URL.format(token=self.token, method="sendDocument")
+        try:
+            with open(path, "rb") as fh:
+                resp = self.session.post(url, data={"chat_id": self.chat_id, "caption": caption[:1000]},
+                                         files={"document": fh}, timeout=max(self.timeout, 30))
+        except FileNotFoundError:
+            log.warning("Gönderilecek dosya bulunamadı: %s", path)
+            return _DROP
+        except requests.RequestException as exc:
+            log.warning("Telegram dosya gönderimi başarısız: %s", redact(str(exc)))
+            return _RETRY
+        if resp.ok:
+            return _OK
+        if resp.status_code >= 500 or resp.status_code == 429:
+            return _RETRY
+        log.warning("Telegram dosyası gönderilemedi (HTTP %s): %s", resp.status_code, redact(resp.text[:200]))
+        return _DROP
 
 
 def discover_chat_ids(token: str) -> List[Tuple[str, str]]:
@@ -182,7 +287,14 @@ _EXIT_HEADERS = {
     "MAX_HOLD": "⏱️ <b>MAKSİMUM SÜRE DOLDU</b>",
     "KILL_SWITCH": "☠️ <b>KILL-SWITCH SATIŞI</b>",
     "EXTERNAL": "❔ <b>POZİSYON BOT DIŞINDA KAPANMIŞ</b>",
+    "BREAKEVEN": "🔒 <b>BAŞABAŞ KORUMASI ÇALIŞTI</b>",
+    "MANUAL": "✋ <b>ELLE SATIŞ (Telegram komutu)</b>",
+    "BTC_CRASH": "📉 <b>BTC ÇÖKÜŞÜ — ERKEN ÇIKIŞ</b>",
+    "BACKUP_STOP": "🧷 <b>BINANCE YEDEK STOP EMRİ ÇALIŞTI</b>",
 }
+
+# Kritik mesajlar sessiz saatlerde de sesli gelir
+CRITICAL_EXITS = {"STOP_LOSS", "KILL_SWITCH", "EXTERNAL", "BTC_CRASH", "BACKUP_STOP"}
 
 
 class Messages:
@@ -208,8 +320,10 @@ class Messages:
         )
 
     @staticmethod
-    def buy(pos, levels: Dict[str, float], note: str, cfg, open_count: int = 1, slots: int = 1) -> str:
+    def buy(pos, levels: Dict[str, float], note: str, cfg, open_count: int = 1, slots: int = 1,
+            backup_line: str = "") -> str:
         q = cfg.quote_asset
+        extra = f"\n{backup_line}" if backup_line else ""
         return (
             f"🟢 <b>ALIM YAPILDI</b> — <b>{esc(pos.symbol)}</b> (📦 {open_count}/{slots})\n{LINE}\n"
             f"💵 Harcanan: {fmt_usdt(pos.cost_usdt)} {q}\n"
@@ -220,7 +334,8 @@ class Messages:
             f"📈 İzleyen stop başlar (+%{cfg.trailing_activation_pct:g}): {fmt_price(levels['trail_on'])}\n"
             f"🛡️ İzleyen stop satış (+%{cfg.trailing_floor_pct:g}): {fmt_price(levels['trail_floor'])}"
             f" → ≈{fmt_usdt(levels['trail_value'])} {q}\n"
-            f"🛑 Zarar Kes (-%{cfg.stop_loss_pct:g}): {fmt_price(levels['sl'])} → ≈{fmt_usdt(levels['sl_value'])} {q}\n"
+            f"🛑 Zarar Kes (-%{cfg.stop_loss_pct:g}): {fmt_price(levels['sl'])} → ≈{fmt_usdt(levels['sl_value'])} {q}"
+            f"{extra}\n"
             f"🔍 Sinyal: {esc(note)}"
         )
 
@@ -284,6 +399,27 @@ class Messages:
             f"{pos}\n"
             f"☠️ Kill-switch'e kalan: {fmt_usdt(remaining_loss)} {q}"
         )
+
+    @staticmethod
+    def breakeven_activated(pos, pnl_pct: float, floor_price: float, cfg) -> str:
+        return (f"🔒 <b>BAŞABAŞ KORUMASI AKTİF</b> — {esc(pos.symbol)}\n"
+                f"Net kâr %{pnl_pct:.2f} görüldü. Fiyat {fmt_price(floor_price)} seviyesine "
+                f"(net +%{cfg.breakeven_floor_pct:g}) dönerse zarara geçmeden satılacak.")
+
+    @staticmethod
+    def outage(minutes: float, open_symbols: List[str], startup: bool = False) -> str:
+        what = "Bot kapalıydı" if startup else "Bot çalışmadı (bilgisayar uykuda olabilir)"
+        if open_symbols:
+            tail = (f"\n⚠️ Bu sürede açık pozisyonların ({esc(', '.join(open_symbols))}) kâr al / zarar kes "
+                    f"kontrolü bot tarafından yapılamadı. Şimdi kontrol ediliyor.")
+        else:
+            tail = "\nAçık pozisyon yoktu."
+        return f"⏰ <b>{what}: yaklaşık {fmt_duration(minutes * 60)}</b>{tail}"
+
+    @staticmethod
+    def network_restored(minutes: float, lines: List[str]) -> str:
+        body = "\n".join(lines) if lines else "📦 Açık pozisyon yok."
+        return f"📶 <b>İnternet bağlantısı geri geldi</b> (yaklaşık {fmt_duration(minutes * 60)} kesikti)\n{body}"
 
     @staticmethod
     def position_resumed(pos) -> str:

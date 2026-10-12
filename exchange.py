@@ -14,7 +14,7 @@ import time
 from collections import Counter
 from dataclasses import dataclass
 from decimal import ROUND_DOWN, Decimal
-from typing import Dict, Optional, Tuple
+from typing import Dict, FrozenSet, List, Optional, Tuple
 
 import requests
 
@@ -57,6 +57,7 @@ class SymbolRules:
     market_min_qty: Decimal
     market_max_qty: Decimal
     min_notional: Decimal
+    order_types: FrozenSet[str] = frozenset()
 
     def floor_market_qty(self, qty) -> Decimal:
         q = floor_to_step(to_dec(qty), self.market_step_size)
@@ -67,6 +68,14 @@ class SymbolRules:
     def step_value(self, price: float) -> float:
         """Bir LOT adımının USDT değeri (satışta kalabilecek en büyük 'toz')."""
         return float(self.market_step_size) * price
+
+    def floor_order_qty(self, qty) -> Decimal:
+        """Bekleyen (stop) emirler için miktar: hem LOT_SIZE hem MARKET_LOT_SIZE adımına uyar."""
+        q = floor_to_step(to_dec(qty), self.step_size) if self.step_size > 0 else to_dec(qty)
+        return self.floor_market_qty(q)
+
+    def floor_price(self, price) -> Decimal:
+        return floor_to_step(to_dec(price), self.tick_size) if self.tick_size > 0 else to_dec(price)
 
 
 def parse_symbol_rules(exchange_info: dict, quote_asset: str = "USDT") -> Dict[str, SymbolRules]:
@@ -116,6 +125,7 @@ def parse_symbol_rules(exchange_info: dict, quote_asset: str = "USDT") -> Dict[s
             market_min_qty=m_min,
             market_max_qty=m_max,
             min_notional=min_notional,
+            order_types=frozenset(s.get("orderTypes", [])),
         )
     return rules
 
@@ -123,9 +133,10 @@ def parse_symbol_rules(exchange_info: dict, quote_asset: str = "USDT") -> Dict[s
 class OrderError(Exception):
     """Emir verilemedi/reddedildi. `code`: NO_BALANCE, MIN_NOTIONAL, LOT_SIZE, NOT_FILLED, Binance kodu..."""
 
-    def __init__(self, message: str, code: str = ""):
+    def __init__(self, message: str, code: str = "", client_order_id: str = ""):
         super().__init__(message)
         self.code = code
+        self.client_order_id = client_order_id
 
 
 @dataclass
@@ -138,6 +149,34 @@ class Fill:
     usdt: float        # BUY: toplam maliyet | SELL: komisyon düşülmüş net gelir
     fee_usdt: float    # Ödenen komisyonun USDT karşılığı
     order_id: str = ""
+
+
+def combine_fills(fills: List[Fill]) -> Optional[Fill]:
+    """Aynı pozisyonun parça parça satışlarını tek satış özetinde birleştirir."""
+    fills = [f for f in fills if f and f.qty > 0]
+    if not fills:
+        return None
+    qty = sum(f.qty for f in fills)
+    gross = sum(f.qty * f.avg_price for f in fills)
+    return Fill(fills[0].symbol, fills[0].side, qty, gross / qty if qty else 0.0,
+                sum(f.usdt for f in fills), sum(f.fee_usdt for f in fills),
+                ",".join(f.order_id for f in fills if f.order_id))
+
+
+@dataclass
+class BackupStop:
+    """Binance'te bekleyen yedek zarar-kes emri."""
+    order_id: int
+    stop_price: float
+    qty: float
+    kind: str  # STOP_LOSS (piyasa) veya STOP_LOSS_LIMIT
+
+
+@dataclass
+class BackupStatus:
+    status: str                  # OPEN, FILLED, CANCELED, GONE (zaten yok), ERROR (öğrenilemedi)
+    fill: Optional[Fill] = None  # Emrin gerçekleşen kısmı (varsa)
+    detail: str = ""
 
 
 class BaseExchange:
@@ -184,9 +223,55 @@ class BaseExchange:
         q = rules.floor_market_qty(qty)
         return float(q) if q >= rules.market_min_qty else 0.0
 
+    def backup_order_params(self, symbol: str, qty: float, stop_price: float,
+                            limit_gap_pct: float) -> Tuple[Decimal, Decimal, Optional[Decimal], str]:
+        """Yedek stop emrinin miktar/fiyatlarını Binance kurallarına göre hazırlar (miktar, stop, limit, tür)."""
+        rules = self.rules_for(symbol)
+        q = rules.floor_order_qty(qty)
+        stop = rules.floor_price(stop_price)
+        if q <= 0 or q < rules.market_min_qty or q < rules.min_qty or stop <= 0:
+            raise OrderError("Yedek stop için miktar/fiyat geçersiz", "LOT_SIZE")
+        limit = None
+        kind = "STOP_LOSS"
+        if "STOP_LOSS" not in rules.order_types:
+            if "STOP_LOSS_LIMIT" not in rules.order_types:
+                raise OrderError(f"{symbol} paritesi stop emirlerini desteklemiyor", "NO_STOP_TYPE")
+            kind = "STOP_LOSS_LIMIT"
+            limit = rules.floor_price(stop * (1 - to_dec(limit_gap_pct) / 100))
+        lowest = limit if limit is not None else stop
+        if q * lowest < rules.min_notional:
+            raise OrderError(f"Yedek stop tutarı ({float(q * lowest):.2f}) minimum emir tutarının altında",
+                             "MIN_NOTIONAL")
+        return q, stop, limit, kind
+
     # Alt sınıfların doldurduğu metotlar
     def free_balance(self, asset: str) -> float:
         raise NotImplementedError
+
+    def total_balance(self, asset: str) -> float:
+        """Serbest + emirde kilitli bakiye."""
+        return self.free_balance(asset)
+
+    def place_backup_stop(self, symbol: str, qty: float, stop_price: float, limit_gap_pct: float) -> BackupStop:
+        raise NotImplementedError
+
+    def cancel_backup_stop(self, symbol: str, order_id: int) -> BackupStatus:
+        raise NotImplementedError
+
+    def backup_stop_status(self, symbol: str, order_id: int) -> BackupStatus:
+        raise NotImplementedError
+
+    def find_sell_fills(self, symbol: str, since_sec: float) -> Optional[Fill]:
+        """Bot dışında yapılmış satışların gerçek sonucunu bulur (sadece canlı modda)."""
+        return None
+
+    def recover_order(self, symbol: str, client_order_id: str, side: str) -> Optional[Fill]:
+        """Durumu belirsiz kalmış bir emrin sonucunu öğrenir. Emir yoksa None."""
+        return None
+
+    def taker_fee_rate(self, symbol: str) -> Optional[float]:
+        """Hesaba uygulanan gerçek komisyon oranı (sadece canlı modda)."""
+        return None
 
     def market_buy(self, symbol: str, quote_amount: float) -> Fill:
         raise NotImplementedError
@@ -231,22 +316,62 @@ class PaperExchange(BaseExchange):
         return Fill(symbol, "BUY", net_qty, ask, notional, fee_base * ask, f"PAPER-{int(time.time() * 1000)}")
 
     def market_sell(self, symbol: str, qty: float) -> Fill:
-        rules = self.rules_for(symbol)
         bid, _ = self.get_bid_ask(symbol)
+        return self._paper_sell(symbol, qty, bid, check_notional=True)
+
+    def _paper_sell(self, symbol: str, qty: float, price: float, check_notional: bool) -> Fill:
+        rules = self.rules_for(symbol)
         held = self.free_balance(rules.base_asset)
         q = rules.floor_market_qty(min(qty, held))
         if q <= 0 or q < rules.market_min_qty:
             raise OrderError("Satılacak bakiye yok", "NO_BALANCE")
         q_f = float(q)
-        notional = q_f * bid
-        if notional < float(rules.min_notional):
+        notional = q_f * price
+        if check_notional and notional < float(rules.min_notional):
             raise OrderError(f"Satış tutarı ({notional:.2f}) minimumun ({rules.min_notional}) altında", "MIN_NOTIONAL")
 
         fee = notional * self.fee_rate  # Satış komisyonu USDT'den kesilir
         proceeds = notional - fee
         self.balances[rules.base_asset] = held - q_f
         self.balances[self.quote_asset] = self.free_balance(self.quote_asset) + proceeds
-        return Fill(symbol, "SELL", q_f, bid, proceeds, fee, f"PAPER-{int(time.time() * 1000)}")
+        return Fill(symbol, "SELL", q_f, price, proceeds, fee, f"PAPER-{int(time.time() * 1000)}")
+
+    # --- Yedek stop simülasyonu (gerçek emir yok; tetiklenme fiyat verisinden hesaplanır)
+    def place_backup_stop(self, symbol: str, qty: float, stop_price: float, limit_gap_pct: float) -> BackupStop:
+        q, stop, _, kind = self.backup_order_params(symbol, qty, stop_price, limit_gap_pct)
+        return BackupStop(int(time.time() * 1000), float(stop), float(q), kind)
+
+    def cancel_backup_stop(self, symbol: str, order_id: int) -> BackupStatus:
+        return BackupStatus("CANCELED")
+
+    def backup_stop_status(self, symbol: str, order_id: int, qty: float = 0.0,
+                           stop_price: float = 0.0) -> BackupStatus:
+        """Fiyat stop seviyesine indiyse emir borsada tetiklenmiş gibi satış yapılır."""
+        if qty <= 0 or stop_price <= 0:
+            return BackupStatus("OPEN")
+        bid, _ = self.get_bid_ask(symbol)
+        if bid > stop_price:
+            return BackupStatus("OPEN")
+        try:
+            return BackupStatus("FILLED", self._paper_sell(symbol, qty, bid, check_notional=False))
+        except OrderError as exc:
+            return BackupStatus("GONE", detail=str(exc))
+
+    def check_backup_offline(self, symbol: str, qty: float, stop_price: float, since_sec: float) -> BackupStatus:
+        """Bot kapalıyken fiyat yedek stop seviyesine inmiş mi? (5 dk mumlarla geriye dönük kontrol)"""
+        try:
+            rows = self.client.klines(symbol, "5m", 1000, start_time=int(since_sec * 1000))
+        except Exception as exc:  # noqa: BLE001
+            return BackupStatus("ERROR", detail=str(exc))
+        for row in rows:
+            open_, low = float(row[1]), float(row[3])
+            if low <= stop_price:
+                price = min(stop_price, open_)  # Açılışta zaten altındaysa açılıştan dolar
+                try:
+                    return BackupStatus("FILLED", self._paper_sell(symbol, qty, price, check_notional=False))
+                except OrderError as exc:
+                    return BackupStatus("GONE", detail=str(exc))
+        return BackupStatus("OPEN")
 
 
 class LiveExchange(BaseExchange):
@@ -260,6 +385,13 @@ class LiveExchange(BaseExchange):
 
     def free_balance(self, asset: str) -> float:
         return self.balances().get(asset, 0.0)
+
+    def total_balance(self, asset: str) -> float:
+        acc = self.client.account()
+        for b in acc.get("balances", []):
+            if b.get("asset") == asset:
+                return float(b.get("free") or 0) + float(b.get("locked") or 0)
+        return 0.0
 
     def check_trading_enabled(self) -> None:
         acc = self.client.account()
@@ -287,6 +419,114 @@ class LiveExchange(BaseExchange):
         resp = self._place(symbol, "SELL", quantity=dec_to_str(q))
         return self._parse_fill(resp, rules, "SELL")
 
+    # --- Yedek zarar-kes emri (Binance'te bekler; bot kapalıyken de korur)
+    def place_backup_stop(self, symbol: str, qty: float, stop_price: float, limit_gap_pct: float) -> BackupStop:
+        q, stop, limit, kind = self.backup_order_params(symbol, qty, stop_price, limit_gap_pct)
+        client_id = f"tbX{int(time.time() * 1000)}"
+        try:
+            resp = self.client.order_stop_loss(symbol, dec_to_str(q), dec_to_str(stop),
+                                               dec_to_str(limit) if limit is not None else None, client_id)
+        except BinanceAPIError as exc:
+            raise OrderError(f"Yedek stop emri reddedildi: {exc.message}", str(exc.code)) from exc
+        except requests.RequestException as exc:
+            time.sleep(2)
+            try:
+                resp = self.client.get_order(symbol, client_order_id=client_id)
+            except Exception as exc2:  # noqa: BLE001
+                raise OrderError(f"Yedek stop emrinin durumu belirlenemedi: {exc2}", "UNKNOWN", client_id) from exc
+        return BackupStop(int(resp["orderId"]), float(stop), float(q), kind)
+
+    def cancel_backup_stop(self, symbol: str, order_id: int) -> BackupStatus:
+        try:
+            resp = self.client.cancel_order(symbol, order_id)
+        except BinanceAPIError as exc:
+            # Emir zaten açık değil (tetiklenip dolmuş veya iptal edilmiş olabilir): durumuna bak
+            st = self.backup_stop_status(symbol, order_id)
+            return BackupStatus("ERROR", detail=exc.message) if st.status == "OPEN" else st
+        except requests.RequestException as exc:
+            return BackupStatus("ERROR", detail=str(exc))
+        executed = float(resp.get("executedQty") or 0)
+        return BackupStatus("CANCELED", self._fill_from_order(symbol, resp) if executed > 0 else None)
+
+    def backup_stop_status(self, symbol: str, order_id: int, qty: float = 0.0,
+                           stop_price: float = 0.0) -> BackupStatus:
+        try:
+            order = self.client.get_order(symbol, order_id=order_id)
+        except BinanceAPIError as exc:
+            if exc.code == -2013:  # Emir bulunamadı
+                return BackupStatus("GONE", detail=exc.message)
+            return BackupStatus("ERROR", detail=exc.message)
+        except requests.RequestException as exc:
+            return BackupStatus("ERROR", detail=str(exc))
+        status = order.get("status", "")
+        executed = float(order.get("executedQty") or 0)
+        fill = self._fill_from_order(symbol, order) if executed > 0 else None
+        if status == "FILLED":
+            return BackupStatus("FILLED", fill)
+        if status in ("NEW", "PARTIALLY_FILLED", "PENDING_NEW"):
+            return BackupStatus("OPEN", fill)
+        return BackupStatus("GONE", fill, detail=status)
+
+    def cancel_bot_stop_orders(self, symbol: str) -> int:
+        """Botun bu paritede açık bıraktığı (tbX ile başlayan) stop emirlerini iptal eder."""
+        cancelled = 0
+        for order in self.client.open_orders(symbol):
+            if str(order.get("clientOrderId", "")).startswith("tbX"):
+                try:
+                    self.client.cancel_order(symbol, int(order["orderId"]))
+                    cancelled += 1
+                except BinanceAPIError as exc:
+                    log.warning("%s stop emri iptal edilemedi: %s", symbol, exc.message)
+        return cancelled
+
+    def _fill_from_order(self, symbol: str, order: dict) -> Fill:
+        """Emir özetini (komisyonları işlem geçmişinden alarak) Fill'e çevirir."""
+        rules = self.rules_for(symbol)
+        order = dict(order)
+        if not order.get("fills") and order.get("orderId") is not None:
+            try:
+                trades = self.client.my_trades(symbol, order_id=int(order["orderId"]))
+                order["fills"] = [{"commission": t.get("commission"), "commissionAsset": t.get("commissionAsset")}
+                                  for t in trades]
+            except Exception as exc:  # noqa: BLE001 - komisyon tahmin edilir
+                log.debug("İşlem geçmişi okunamadı: %s", exc)
+        return self._parse_fill(order, rules, order.get("side", "SELL"))
+
+    def find_sell_fills(self, symbol: str, since_sec: float) -> Optional[Fill]:
+        trades = self.client.my_trades(symbol, start_time=int(since_sec * 1000))
+        sells = [t for t in trades if not t.get("isBuyer")]
+        if not sells:
+            return None
+        rules = self.rules_for(symbol)
+        qty = sum(float(t["qty"]) for t in sells)
+        quote = sum(float(t["quoteQty"]) for t in sells)
+        fee = 0.0
+        for t in sells:
+            c, asset = float(t.get("commission") or 0), t.get("commissionAsset", "")
+            if asset == rules.quote_asset:
+                fee += c
+            elif asset == rules.base_asset:
+                fee += c * float(t["price"])
+            else:
+                fee += c * self._asset_usdt_price(asset)
+        return Fill(symbol, "SELL", qty, quote / qty if qty else 0.0, quote - fee, fee, "EXTERNAL")
+
+    def recover_order(self, symbol: str, client_order_id: str, side: str) -> Optional[Fill]:
+        try:
+            order = self.client.get_order(symbol, client_order_id=client_order_id)
+        except BinanceAPIError as exc:
+            if exc.code == -2013:  # Emir Binance'e hiç ulaşmamış
+                return None
+            raise OrderError(f"Emir sorgulanamadı: {exc.message}", str(exc.code)) from exc
+        if float(order.get("executedQty") or 0) <= 0:
+            return None
+        order.setdefault("side", side)
+        return self._fill_from_order(symbol, order)
+
+    def taker_fee_rate(self, symbol: str) -> Optional[float]:
+        data = self.client.commission_rates(symbol)
+        return float(data["standardCommission"]["taker"])
+
     def _place(self, symbol: str, side: str, quantity: Optional[str] = None,
                quote_order_qty: Optional[str] = None) -> dict:
         client_id = f"tb{side[0]}{int(time.time() * 1000)}"
@@ -301,9 +541,10 @@ class LiveExchange(BaseExchange):
             log.warning("Emir sırasında ağ hatası (%s). Emir durumu kontrol ediliyor...", exc)
             time.sleep(2)
             try:
-                return self.client.get_order(symbol, client_id)
+                return self.client.get_order(symbol, client_order_id=client_id)
             except Exception as exc2:  # noqa: BLE001
-                raise OrderError(f"Emir durumu belirlenemedi, Binance'i kontrol edin: {exc2}", "UNKNOWN") from exc
+                raise OrderError(f"Emir durumu belirlenemedi, bot tekrar kontrol edecek: {exc2}",
+                                 "UNKNOWN", client_id) from exc
 
     def _asset_usdt_price(self, asset: str) -> float:
         if asset == self.quote_asset:

@@ -53,3 +53,21 @@ def _rsi_value(avg_gain: float, avg_loss: float) -> float:
 
 def mean(values: Sequence[float]) -> float:
     return sum(values) / len(values) if values else 0.0
+
+
+def atr(highs: Sequence[float], lows: Sequence[float], closes: Sequence[float],
+        period: int = 14) -> List[Optional[float]]:
+    """Ortalama Gerçek Aralık (Wilder). Fiyatın tipik mum başı hareketini ölçer."""
+    n = len(closes)
+    out: List[Optional[float]] = [None] * n
+    if period <= 0 or n <= period:
+        return out
+    trs = [highs[0] - lows[0]]
+    for i in range(1, n):
+        trs.append(max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1])))
+    prev = sum(trs[1:period + 1]) / period
+    out[period] = prev
+    for i in range(period + 1, n):
+        prev = (prev * (period - 1) + trs[i]) / period
+        out[i] = prev
+    return out

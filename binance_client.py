@@ -122,8 +122,10 @@ class BinanceClient:
     def tickers_24h(self) -> List[Dict[str, Any]]:
         return self._request("GET", "/api/v3/ticker/24hr")
 
-    def klines(self, symbol: str, interval: str = "5m", limit: int = 100) -> List[list]:
-        return self._request("GET", "/api/v3/klines", {"symbol": symbol, "interval": interval, "limit": limit})
+    def klines(self, symbol: str, interval: str = "5m", limit: int = 100,
+               start_time: Optional[int] = None, end_time: Optional[int] = None) -> List[list]:
+        return self._request("GET", "/api/v3/klines", {"symbol": symbol, "interval": interval, "limit": limit,
+                                                       "startTime": start_time, "endTime": end_time})
 
     def book_ticker(self, symbol: str) -> Dict[str, Any]:
         return self._request("GET", "/api/v3/ticker/bookTicker", {"symbol": symbol})
@@ -153,6 +155,38 @@ class BinanceClient:
         }
         return self._request("POST", "/api/v3/order", params, signed=True)
 
-    def get_order(self, symbol: str, client_order_id: str) -> Dict[str, Any]:
+    def get_order(self, symbol: str, client_order_id: Optional[str] = None,
+                  order_id: Optional[int] = None) -> Dict[str, Any]:
         return self._request("GET", "/api/v3/order",
-                             {"symbol": symbol, "origClientOrderId": client_order_id}, signed=True)
+                             {"symbol": symbol, "origClientOrderId": client_order_id, "orderId": order_id},
+                             signed=True)
+
+    def order_stop_loss(self, symbol: str, quantity: str, stop_price: str, limit_price: Optional[str] = None,
+                        client_order_id: Optional[str] = None) -> Dict[str, Any]:
+        """Borsada bekleyen satış stop emri. limit_price verilirse STOP_LOSS_LIMIT, yoksa STOP_LOSS (piyasa)."""
+        params = {
+            "symbol": symbol,
+            "side": "SELL",
+            "type": "STOP_LOSS_LIMIT" if limit_price else "STOP_LOSS",
+            "quantity": quantity,
+            "stopPrice": stop_price,
+            "price": limit_price,
+            "timeInForce": "GTC" if limit_price else None,
+            "newClientOrderId": client_order_id,
+            "newOrderRespType": "RESULT",
+        }
+        return self._request("POST", "/api/v3/order", params, signed=True)
+
+    def open_orders(self, symbol: str) -> List[Dict[str, Any]]:
+        return self._request("GET", "/api/v3/openOrders", {"symbol": symbol}, signed=True)
+
+    def cancel_order(self, symbol: str, order_id: int) -> Dict[str, Any]:
+        return self._request("DELETE", "/api/v3/order", {"symbol": symbol, "orderId": order_id}, signed=True)
+
+    def my_trades(self, symbol: str, start_time: Optional[int] = None, order_id: Optional[int] = None,
+                  limit: int = 500) -> List[Dict[str, Any]]:
+        return self._request("GET", "/api/v3/myTrades", {"symbol": symbol, "startTime": start_time,
+                                                         "orderId": order_id, "limit": limit}, signed=True)
+
+    def commission_rates(self, symbol: str) -> Dict[str, Any]:
+        return self._request("GET", "/api/v3/account/commission", {"symbol": symbol}, signed=True)

@@ -14,9 +14,9 @@ Tüm kâr/zarar kararları KOMİSYON DÜŞÜLDÜKTEN SONRAKİ NET para üzerinde
 """
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, field, fields
 from enum import Enum
-from typing import Optional
+from typing import Dict, Optional
 
 from exchange import SymbolRules, floor_decimals, to_dec
 
@@ -27,7 +27,11 @@ class ExitReason(str, Enum):
     TRAILING_STOP = "TRAILING_STOP"
     MAX_HOLD = "MAX_HOLD"
     KILL_SWITCH = "KILL_SWITCH"
-    EXTERNAL = "EXTERNAL"  # Coin bot dışından satılmış / bakiyede bulunamadı
+    EXTERNAL = "EXTERNAL"      # Coin bot dışından satılmış / bakiyede bulunamadı
+    BREAKEVEN = "BREAKEVEN"    # Başabaş koruması
+    MANUAL = "MANUAL"          # Telegram /sat komutuyla elle satış
+    BTC_CRASH = "BTC_CRASH"    # BTC sert düştüğü için erken çıkış
+    BACKUP_STOP = "BACKUP_STOP"  # Binance'teki yedek zarar-kes emri çalıştı
 
 
 @dataclass
@@ -42,6 +46,18 @@ class Position:
     peak_pnl_pct: float = 0.0
     trailing_active: bool = False
     signal_note: str = ""
+    min_pnl_pct: float = 0.0          # İşlem boyunca görülen en kötü net K/Z (%)
+    breakeven_active: bool = False
+    # Binance'te bekleyen yedek zarar-kes emri
+    backup_order_id: Optional[int] = None
+    backup_stop_price: float = 0.0
+    backup_qty: float = 0.0
+    # Ayrıntılı işlem kaydı için alış anı ölçümleri
+    score: float = 0.0
+    metrics: Dict[str, float] = field(default_factory=dict)
+    spread_pct: float = 0.0
+    btc_1h_pct: Optional[float] = None
+    regime: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -88,8 +104,23 @@ def update_trailing(pos: Position, current_pnl_pct: float, cfg) -> bool:
     """Zirveyi günceller. İzleyen stop bu çağrıda ilk kez aktifleştiyse True döner."""
     if current_pnl_pct > pos.peak_pnl_pct:
         pos.peak_pnl_pct = current_pnl_pct
+    if current_pnl_pct < pos.min_pnl_pct:
+        pos.min_pnl_pct = current_pnl_pct
     if not pos.trailing_active and pos.peak_pnl_pct >= cfg.trailing_activation_pct:
         pos.trailing_active = True
+        return True
+    return False
+
+
+def update_breakeven(pos: Position, cfg) -> bool:
+    """Başabaş koruması (isteğe bağlı): zirve net kâr BREAKEVEN_TRIGGER_PCT'yi gördüyse aktifleşir.
+
+    Yeni aktifleştiyse True döner. update_trailing'den SONRA çağrılmalıdır (zirve güncel olsun).
+    """
+    if not cfg.breakeven_enabled or pos.breakeven_active:
+        return False
+    if pos.peak_pnl_pct >= cfg.breakeven_trigger_pct:
+        pos.breakeven_active = True
         return True
     return False
 
@@ -102,6 +133,9 @@ def evaluate_exit(pos: Position, current_pnl_pct: float, now: float, cfg) -> Opt
         return ExitReason.STOP_LOSS
     if pos.trailing_active and current_pnl_pct <= trailing_floor_pct(pos, cfg):
         return ExitReason.TRAILING_STOP
+    if (getattr(cfg, "breakeven_enabled", False) and pos.breakeven_active
+            and current_pnl_pct <= cfg.breakeven_floor_pct):
+        return ExitReason.BREAKEVEN
     if cfg.max_hold_minutes > 0 and now - pos.opened_at >= cfg.max_hold_minutes * 60:
         return ExitReason.MAX_HOLD
     return None

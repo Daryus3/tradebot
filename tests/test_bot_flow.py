@@ -34,7 +34,7 @@ class CaptureNotifier(TelegramNotifier):
         super().__init__("", "")
         self.messages = []
 
-    def send(self, text, silent=False):
+    def send(self, text, silent=False, critical=False):
         self.messages.append(text)
         return True
 

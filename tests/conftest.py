@@ -29,11 +29,16 @@ class FakeClient:
     def price(self, symbol):
         return self.prices[symbol]
 
+    def klines(self, symbol, interval="5m", limit=100, start_time=None, end_time=None):
+        p = self.prices.get(symbol, 1.0)
+        return [[i * 60_000, str(p), str(p), str(p), str(p), "0", i * 60_000 + 59_999, "0", 0, "0", "0", "0"]
+                for i in range(limit)]
+
     def exchange_info(self):
         return {"symbols": [
             {
                 "symbol": sym, "status": "TRADING", "baseAsset": sym[:-4], "quoteAsset": "USDT",
-                "isSpotTradingAllowed": True, "orderTypes": ["LIMIT", "MARKET"],
+                "isSpotTradingAllowed": True, "orderTypes": ["LIMIT", "MARKET", "STOP_LOSS", "STOP_LOSS_LIMIT"],
                 "quoteOrderQtyMarketAllowed": True,
                 "filters": [
                     {"filterType": "PRICE_FILTER", "tickSize": "0.00010000"},

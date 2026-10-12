@@ -25,7 +25,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from binance_client import BinanceClient
 from exchange import SymbolRules
-from indicators import ema, mean, rsi
+from indicators import atr, ema, mean, rsi
 from logger import get_logger
 
 log = get_logger()
@@ -73,6 +73,10 @@ class ScanResult:
     market_ok: bool = True
     market_note: str = ""
     rejects: Counter = field(default_factory=Counter)
+    regime: str = "NORMAL"
+    regime_note: str = ""
+    btc_1h_pct: Optional[float] = None
+    near_misses: List[Tuple[str, str]] = field(default_factory=list)  # (parite, elenme nedeni)
 
     def summary(self) -> str:
         if not self.market_ok:
@@ -84,9 +88,13 @@ class ScanResult:
 
 
 class ReboundStrategy:
-    def __init__(self, client: BinanceClient, cfg):
+    def __init__(self, client: BinanceClient, cfg, coin_filter=None, regime=None):
         self.client = client
         self.cfg = cfg
+        self.coin_filter = coin_filter  # coin_filters.CoinSafetyFilter (delist / yeni / pompa)
+        self.regime = regime            # market_regime.MarketRegime
+        self._seen: Dict[str, int] = {}  # Art arda kaç taramada sinyal verdi (teyit için)
+        self.last_btc_1h_pct: Optional[float] = None
 
     # ------------------------------------------------------------ piyasa filtresi
     def market_ok(self) -> Tuple[bool, str]:
@@ -98,6 +106,7 @@ class ReboundStrategy:
             return True, ""
         closed = [Kline.from_raw(r) for r in rows[:-1]]
         change = (float(rows[-1][4]) - closed[0].open) / closed[0].open * 100
+        self.last_btc_1h_pct = change
         if change <= -self.cfg.btc_max_1h_drop_pct:
             return False, f"BTC son 1 saatte %{change:.2f} düştü (piyasa riskli)"
         return True, f"BTC 1s: %{change:+.2f}"
@@ -140,9 +149,15 @@ class ReboundStrategy:
         return out[: cfg.max_candidates]
 
     # ------------------------------------------------------------ ayrıntılı analiz
-    def analyze(self, symbol: str, raw_klines: List[list]) -> Tuple[Optional[Signal], str]:
-        """Sinyal varsa (Signal, ""), yoksa (None, elenme_nedeni) döner."""
+    def analyze(self, symbol: str, raw_klines: List[list], strict: bool = False) -> Tuple[Optional[Signal], str]:
+        """Sinyal varsa (Signal, ""), yoksa (None, elenme_nedeni) döner.
+
+        strict=True: piyasa 'zayıf' rejimdeyken giriş kuralları sıkılaşır (daha derin aşırı satım,
+        daha güçlü hacim teyidi).
+        """
         cfg = self.cfg
+        rsi_oversold = cfg.rsi_oversold - (5 if strict else 0)
+        min_volume_ratio = cfg.min_volume_ratio * (1.3 if strict else 1.0)
         if len(raw_klines) < 60:
             return None, "veri az"
         klines = [Kline.from_raw(r) for r in raw_klines]
@@ -186,7 +201,7 @@ class ReboundStrategy:
         if rsi_now is None or rsi_prev is None or not dip_rsis:
             return None, "veri az"
         rsi_min = min(dip_rsis)
-        if rsi_min > cfg.rsi_oversold:
+        if rsi_min > rsi_oversold:
             return None, "RSI aşırı satım görmedi"
         if not cfg.rsi_entry_min <= rsi_now <= cfg.rsi_entry_max:
             return None, "RSI aralık dışı"
@@ -206,13 +221,20 @@ class ReboundStrategy:
         vols = [k.quote_volume for k in closed]
         base_vol = mean(vols[-23:-3])
         vol_ratio = mean(vols[-3:]) / base_vol if base_vol > 0 else 0.0
-        if vol_ratio < cfg.min_volume_ratio:
+        if vol_ratio < min_volume_ratio:
             return None, "hacim zayıf"
         recent_quote = sum(vols[-3:])
         taker_ratio = sum(k.taker_buy_quote for k in closed[-3:]) / recent_quote if recent_quote > 0 else 0.5
 
-        # 6) Oynaklık: 15-60 dk içinde hedefe gidebilmek için fiyat yeterince hareketli olmalı
+        # 6) Oynaklık: 15-60 dk içinde hedefe gidebilmek için fiyat yeterince hareketli olmalı,
+        #    ama zarar kesi gürültüyle tetikleyecek kadar da çılgın olmamalı (ATR filtresi)
         avg_range_pct = mean([(k.high - k.low) / k.close * 100 for k in closed[-24:] if k.close > 0])
+        atr_vals = atr(highs, lows, closes, 14)
+        atr_pct = atr_vals[-1] / price * 100 if atr_vals[-1] and price > 0 else 0.0
+        if atr_pct < cfg.min_atr_pct:
+            return None, "oynaklık düşük"
+        if atr_pct > cfg.max_atr_pct:
+            return None, "aşırı oynak"
 
         score = (
             dip_pct * 1.0
@@ -225,34 +247,74 @@ class ReboundStrategy:
         metrics = {
             "dip_pct": dip_pct, "retrace": retrace, "rsi": rsi_now, "rsi_min": rsi_min,
             "vol_ratio": vol_ratio, "avg_range_pct": avg_range_pct, "taker_ratio": taker_ratio,
-            "bars_since_low": float(bars_since_low),
+            "bars_since_low": float(bars_since_low), "atr_pct": atr_pct,
         }
         return Signal(symbol, price, score, metrics), ""
 
     # ------------------------------------------------------------ tam tarama
     def scan(self, rules: Dict[str, SymbolRules], excluded_symbols: Set[str],
              invest_hint: float) -> ScanResult:
+        cfg = self.cfg
         result = ScanResult()
         ok, note = self.market_ok()
         result.market_ok, result.market_note = ok, note
+        result.btc_1h_pct = self.last_btc_1h_pct
         if not ok:
+            self._seen.clear()
             return result
 
-        candidates = self.prefilter(self.client.tickers_24h(), rules, excluded_symbols, invest_hint)
+        tickers = self.client.tickers_24h()
+        if self.regime is not None:
+            reg = self.regime.evaluate(tickers, rules)
+            result.regime, result.regime_note = reg.regime, reg.note
+            if reg.regime == "COKUS":
+                result.market_ok = False
+                result.market_note = f"Piyasa çöküş modunda: {reg.note}"
+                self._seen.clear()
+                return result
+        strict = result.regime == "ZAYIF"
+        if self.coin_filter is not None:
+            try:
+                self.coin_filter.refresh_delist()
+            except Exception as exc:  # noqa: BLE001
+                log.debug("Delist listesi yenilenemedi: %s", exc)
+
+        candidates = self.prefilter(tickers, rules, excluded_symbols, invest_hint)
         result.candidates = len(candidates)
+        found: Dict[str, Signal] = {}
         for t in candidates:
             symbol = t["symbol"]
+            if self.coin_filter is not None:
+                safe, why = self.coin_filter.check(symbol)
+                if not safe:
+                    result.rejects[why.split(" (")[0]] += 1
+                    result.near_misses.append((symbol, why))
+                    continue
             try:
-                raw = self.client.klines(symbol, self.cfg.kline_interval, KLINE_LIMIT)
+                raw = self.client.klines(symbol, cfg.kline_interval, KLINE_LIMIT)
             except Exception as exc:  # noqa: BLE001 - tek coin hatası taramayı durdurmasın
                 log.debug("%s mum verisi alınamadı: %s", symbol, exc)
                 result.rejects["veri hatası"] += 1
                 continue
             result.analyzed += 1
-            signal, reason = self.analyze(symbol, raw)
-            if signal:
+            signal, reason = self.analyze(symbol, raw, strict=strict)
+            if signal is None:
+                result.rejects[reason] += 1
+                result.near_misses.append((symbol, reason))
+                continue
+            if cfg.min_signal_score > 0 and signal.score < cfg.min_signal_score:
+                result.rejects["puan düşük"] += 1
+                result.near_misses.append((symbol, f"puan düşük ({signal.score:.1f})"))
+                continue
+            found[symbol] = signal
+
+        # Art arda tarama teyidi: sinyal N taramadır kesintisiz görülüyor mu?
+        self._seen = {s: self._seen.get(s, 0) + 1 for s in found}
+        for symbol, signal in found.items():
+            if self._seen[symbol] >= cfg.signal_confirm_scans:
                 result.signals.append(signal)
             else:
-                result.rejects[reason] += 1
+                result.rejects["teyit bekleniyor"] += 1
+                result.near_misses.append((symbol, "teyit bekleniyor"))
         result.signals.sort(key=lambda s: s.score, reverse=True)
         return result
