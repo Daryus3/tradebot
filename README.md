@@ -242,6 +242,7 @@ tradebot/
 | `Timestamp ... recvWindow` (-1021) | Bilgisayar saatinizi senkronize edin (Windows: Ayarlar → Saat → "Şimdi eşitle") |
 | `Invalid API-key, IP, or permissions` (-2015) | Anahtarı, izinleri ve IP kısıtlamasını kontrol edin |
 | `Service unavailable from a restricted location` | Binance bulunduğunuz konumdan API erişimine izin vermiyor |
+| "Serbest USDT bakiyesi yok" ama hesapta USDT var | Bot **Spot** cüzdanını kullanır. Futures/Funding cüzdanındaki USDT'yi Binance'te **Cüzdan → Transfer** ile **Spot**'a aktarın |
 | Kill-switch kilidi | `python main.py --reset-state` |
 | Bot hiç alım yapmıyor | Normal olabilir: kriterlere uyan fırsat yoksa bekler. Loglarda "Tarama:" satırlarına bakın |
 

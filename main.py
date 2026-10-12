@@ -154,7 +154,9 @@ def _start_bot(cfg, store, client, notifier, log) -> int:
                 client.sync_time()
                 free = LiveExchange(client, cfg.quote_asset, cfg.fee_rate).free_balance(cfg.quote_asset)
                 if free <= 0:
-                    print(f"❌ Binance hesabınızda serbest {cfg.quote_asset} bakiyesi yok.")
+                    print(f"❌ Binance SPOT cüzdanınızda serbest {cfg.quote_asset} bakiyesi yok.\n"
+                          f"   Bot Spot piyasada işlem yapar. Paranız Futures/Funding cüzdanındaysa Binance'te\n"
+                          f"   Cüzdan → Transfer ile Spot cüzdanına aktarın (ücretsiz ve anında).")
                     return 1
                 if free < start_capital:
                     log.warning("Serbest bakiye (%.2f) START_CAPITAL_USDT'den (%.2f) az; sermaye %.2f alındı.",

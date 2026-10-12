@@ -229,7 +229,8 @@ def _check_api_keys(cfg, client: BinanceClient) -> Result:
             log.debug("API kısıtlamaları okunamadı: %s", exc)
         detail = f"Serbest bakiye: {free:.2f} {cfg.quote_asset}"
         if free < cfg.start_capital:
-            problems.append(f"bakiye START_CAPITAL_USDT ({cfg.start_capital:g}) altında")
+            problems.append(f"Spot bakiyesi START_CAPITAL_USDT ({cfg.start_capital:g}) altında — para Futures/Funding "
+                            f"cüzdanındaysa Binance'te Transfer ile Spot'a aktarın")
         if problems:
             critical = any("ÇEKİM" in p or "YOK" in p for p in problems)
             return (FAIL if critical else WARN, title, detail + " | " + "; ".join(problems))
