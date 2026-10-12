@@ -11,6 +11,7 @@ Her iki sınıf da aynı arayüzü sunduğu için bot mantığı iki modda da ay
 from __future__ import annotations
 
 import time
+from collections import Counter
 from dataclasses import dataclass
 from decimal import ROUND_DOWN, Decimal
 from typing import Dict, Optional, Tuple
@@ -154,6 +155,11 @@ class BaseExchange:
         self.rules = parse_symbol_rules(self.client.exchange_info(), self.quote_asset)
         self.rules_loaded_at = time.time()
         return len(self.rules)
+
+    def typical_min_notional(self) -> float:
+        """Paritelerde en sık görülen minimum emir tutarı (Binance'te genelde 5 USDT)."""
+        values = [float(r.min_notional) for r in self.rules.values() if r.min_notional > 0]
+        return Counter(values).most_common(1)[0][0] if values else 5.0
 
     def rules_for(self, symbol: str) -> SymbolRules:
         rules = self.rules.get(symbol)

@@ -85,6 +85,7 @@ class Config:
     quote_asset: str
     start_capital: float          # Botun yöneteceği sermaye (USDT)
     capital_usage_pct: float      # Sermayenin işleme girilecek yüzdesi
+    max_open_positions: int       # Aynı anda en fazla kaç coin (bakiye yetmezse otomatik azalır)
     max_total_loss: float         # Kill-switch: toplam zarar limiti (USDT)
     take_profit_pct: float        # Net kâr hedefi (%)
     stop_loss_pct: float          # Net zarar limiti (%)
@@ -139,6 +140,8 @@ class Config:
             errors.append("TRADING_MODE 'paper' veya 'live' olmalı")
         if self.start_capital <= 0:
             errors.append("START_CAPITAL_USDT sıfırdan büyük olmalı")
+        if not 1 <= self.max_open_positions <= 10:
+            errors.append("MAX_OPEN_POSITIONS 1 ile 10 arasında olmalı")
         if not 0 < self.capital_usage_pct <= 100:
             errors.append("CAPITAL_USAGE_PCT 0-100 arasında olmalı")
         if self.max_total_loss <= 0:
@@ -188,6 +191,7 @@ def load_config(env_file: Optional[str] = None, mode_override: Optional[str] = N
         quote_asset=_env_str("QUOTE_ASSET", "USDT").upper(),
         start_capital=_env_float("START_CAPITAL_USDT", 11.0),
         capital_usage_pct=_env_float("CAPITAL_USAGE_PCT", 100.0),
+        max_open_positions=_env_int("MAX_OPEN_POSITIONS", 3),
         max_total_loss=_env_float("MAX_TOTAL_LOSS_USDT", 5.0),
         take_profit_pct=_env_float("TAKE_PROFIT_PCT", 15.0),
         stop_loss_pct=_env_float("STOP_LOSS_PCT", 10.0),

@@ -112,6 +112,24 @@ def kill_switch_hit(realized_pnl: float, unrealized_pnl: float, max_total_loss: 
     return realized_pnl + unrealized_pnl <= -abs(max_total_loss) + 1e-9
 
 
+def min_position_usdt(min_notional: float, cfg) -> float:
+    """Stop-loss seviyesinde bile satılabilmesi için bir pozisyonun olması gereken en küçük tutar.
+
+    Örn. min. emir 5 USDT, güvenlik payı 1.05, stop-loss %10 → 5 × 1.05 / 0.90 ≈ 5.83 USDT
+    """
+    return min_notional * cfg.min_notional_safety / (1 - cfg.stop_loss_pct / 100)
+
+
+def position_slots(capital: float, min_notional: float, cfg) -> int:
+    """Bakiyenin güvenle kaç pozisyona bölünebileceği (en az 1, en fazla MAX_OPEN_POSITIONS).
+
+    11 USDT → 1 | 12 USDT → 2 | 17.5+ USDT → 3  (min. emir 5 USDT, SL %10 ile)
+    """
+    usable = capital * cfg.capital_usage_pct / 100
+    fit = int(usable / min_position_usdt(min_notional, cfg) + 1e-9)
+    return max(1, min(cfg.max_open_positions, fit))
+
+
 def plan_entry(available_usdt: float, rules: SymbolRules, price: float, cfg) -> EntryPlan:
     """Küçük bakiyeyi Binance kurallarına göre optimize eden pozisyon boyutlandırma.
 

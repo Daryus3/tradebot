@@ -14,12 +14,13 @@ işlemleri açar ve her şeyi emojili mesajlarla Telegram'ınıza bildirir.
 
 | Kural | Ayrıntı (11 USDT örneği) |
 |---|---|
-| 💰 Sermaye | 11 USDT. Binance'in min. emir tutarı (~5 USDT) nedeniyle **tek pozisyon** açılır, bakiyenin tamamı kullanılır |
+| 💰 Sermaye | 11 USDT. Binance'in min. emir tutarı (~5 USDT) nedeniyle 11 USDT'de **tek pozisyon** açılır, bakiyenin tamamı kullanılır |
+| 📦 Çoklu pozisyon | Bakiye yettikçe aynı anda **en fazla 3 coin** (ayarlanabilir): ~12 USDT → 2, ~17.5 USDT → 3. Sermaye eşit bölünür |
 | 🎯 Kâr Al | Net kâr **+%15** → ≈ **12.65 USDT** olunca satar |
 | 🛑 Zarar Kes | Net zarar **−%10** → ≈ **9.90 USDT** olunca satar |
 | 📈 İzleyen Stop | Net kâr bir kez **+%10** (≈12.10) görülür, sonra **+%5**'e (≈11.55) düşerse anında satar |
 | 💸 Komisyon | Alış ve satışta **%0.1** (BNB'siz). Tüm kararlar komisyon **düşüldükten sonraki net** paraya göre verilir |
-| ☠️ Kill-switch | Toplam zarar **5 USDT**'ye ulaşırsa açık pozisyonu satar, botu kapatır ve kilitler |
+| ☠️ Kill-switch | Toplam zarar **5 USDT**'ye ulaşırsa tüm açık pozisyonları satar, botu kapatır ve kilitler |
 | 🔍 Tarama | Piyasa **30 sn**'de bir taranır; açık pozisyon **5 sn**'de bir kontrol edilir |
 | 📨 Telegram | Alım, satım, kâr/zarar, bakiye, hatalar → emojili anlık mesajlar |
 | 🧪 Test modu | 11 USDT **sanal** bakiye ile canlı fiyatlardan simülasyon (gerçek emir yok) |
@@ -157,8 +158,28 @@ Birkaç gün test modunda çalıştırıp sonuçları izlemenizi öneririz.
    en iyi aday seçilir ve alım yapılır.
 4. **Piyasa filtresi:** BTC son 1 saatte %1.5'ten fazla düşmüşse (genel çöküş) alım yapılmaz.
 
-**Pozisyon açıkken (her 5 saniyede):** Net kâr/zarar hesaplanır; kâr al, zarar kes,
-izleyen stop ve kill-switch koşulları kontrol edilir.
+**Pozisyon açıkken (her 5 saniyede):** Her pozisyonun net kâr/zararı ayrı ayrı hesaplanır;
+kâr al, zarar kes ve izleyen stop her coin için bağımsız çalışır. Kill-switch tüm pozisyonların
+toplamına bakar.
+
+### 📦 Aynı anda kaç coin? (`MAX_OPEN_POSITIONS`)
+Bot sermayeyi pozisyonlara **eşit** böler. Ancak her pozisyon, fiyat stop-loss'a (−%10) düşse bile
+Binance'in minimum satış tutarının (~5 USDT) üstünde kalmalıdır; aksi halde coin satılamaz ve
+zarar kes çalışmaz. Bu yüzden pozisyon başına en az **≈5.83 USDT** gerekir ve bot pozisyon sayısını
+bakiyeye göre **otomatik** ayarlar:
+
+| Bakiye | Aynı anda pozisyon |
+|---|---|
+| 11 USDT | 1 |
+| ~12 – 17.4 USDT | 2 |
+| ~17.5 USDT ve üstü | 3 (`MAX_OPEN_POSITIONS=3` ise) |
+
+Kâr ettikçe pozisyon sayısı artar, zarar ettikçe azalır. Her zaman tek pozisyon için
+`.env` içinde `MAX_OPEN_POSITIONS=1` yapın.
+
+> ⚠️ Daha çok pozisyon riski dağıtmaz: piyasa düşünce coinler genelde **birlikte** düşer ve
+> kill-switch limitine daha hızlı yaklaşılabilir. Küçük pozisyonlarda satılamayan "toz" payı da
+> oransal olarak büyür, bu yüzden uygun coin sayısı azalabilir.
 
 ### 💸 Komisyon ve "toz" hesabı
 - Binance alışta komisyonu **aldığınız coinden** keser (%0.1), satışta **USDT'den** keser (%0.1).
@@ -169,7 +190,7 @@ izleyen stop ve kill-switch koşulları kontrol edilir.
   (fiyat olarak yaklaşık %15.2-15.3 artış gerekir).
 
 ### ☠️ Kill-switch
-Toplam (gerçekleşen + açık pozisyondaki) zarar 5 USDT'ye ulaştığında bot açık pozisyonu satar,
+Toplam (gerçekleşen + tüm açık pozisyonlardaki) zarar 5 USDT'ye ulaştığında bot açık pozisyonların hepsini satar,
 Telegram'a bildirir ve kapanır. Bu durum `data/` klasörüne kaydedilir; botu yeniden başlatsanız
 bile **kilitli** kalır. Bilerek tekrar başlatmak için:
 ```bash
@@ -190,6 +211,7 @@ iddialı bir hedeftir; bazı işlemler 60 dakikadan uzun sürebilir. İsterseniz
 |---|---|---|
 | `TRADING_MODE` | `paper` | `paper` = test, `live` = gerçek |
 | `START_CAPITAL_USDT` | `11` | Botun yöneteceği sermaye |
+| `MAX_OPEN_POSITIONS` | `3` | Aynı anda en fazla pozisyon (bakiye yetmezse otomatik azalır) |
 | `MAX_TOTAL_LOSS_USDT` | `5` | Kill-switch zarar limiti |
 | `TAKE_PROFIT_PCT` | `15` | Net kâr hedefi (%) |
 | `STOP_LOSS_PCT` | `10` | Net zarar limiti (%) |

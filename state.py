@@ -29,7 +29,7 @@ class BotState:
     wins: int = 0
     losses: int = 0
     total_fees: float = 0.0
-    position: Optional[Position] = None
+    positions: Dict[str, Position] = field(default_factory=dict)  # parite → açık pozisyon
     paper_balances: Dict[str, float] = field(default_factory=dict)
     cooldowns: Dict[str, float] = field(default_factory=dict)
     killed: bool = False
@@ -42,6 +42,11 @@ class BotState:
         """Botun yönettiği güncel sermaye (başlangıç + gerçekleşen K/Z)."""
         return self.start_capital + self.realized_pnl
 
+    @property
+    def committed(self) -> float:
+        """Açık pozisyonlara bağlanmış toplam maliyet."""
+        return sum(p.cost_usdt for p in self.positions.values())
+
     @classmethod
     def new(cls, mode: str, start_capital: float, quote_asset: str = "USDT") -> "BotState":
         state = cls(mode=mode, start_capital=round(start_capital, 8))
@@ -51,16 +56,19 @@ class BotState:
 
     def to_dict(self) -> dict:
         data = asdict(self)
-        data["position"] = self.position.to_dict() if self.position else None
+        data["positions"] = [p.to_dict() for p in self.positions.values()]
         return data
 
     @classmethod
     def from_dict(cls, data: dict) -> "BotState":
         data = dict(data)
-        pos = data.pop("position", None)
+        raw = data.pop("positions", None) or []
+        legacy = data.pop("position", None)  # Eski sürüm: tek pozisyon
+        if legacy:
+            raw = list(raw) + [legacy]
         known = set(cls.__dataclass_fields__)
         state = cls(**{k: v for k, v in data.items() if k in known})
-        state.position = Position.from_dict(pos) if pos else None
+        state.positions = {p.symbol: p for p in (Position.from_dict(d) for d in raw)}
         return state
 
 

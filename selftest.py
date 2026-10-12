@@ -23,7 +23,7 @@ from binance_client import BinanceClient
 from exchange import PaperExchange, SymbolRules, parse_symbol_rules
 from logger import get_logger
 from risk import (ExitReason, Position, evaluate_exit, kill_switch_hit, net_exit_value, plan_entry,
-                  pnl_pct, price_for_pnl, update_trailing)
+                  min_position_usdt, pnl_pct, position_slots, price_for_pnl, update_trailing)
 from strategy import ReboundStrategy
 from telegram_bot import LINE, TelegramNotifier, esc, fmt_price, fmt_usdt
 
@@ -91,6 +91,12 @@ def run_risk_scenarios(cfg) -> List[Tuple[str, bool, str]]:
     checks.append(("Min. emir tutarı optimizasyonu", plan_ok.ok and not plan_small.ok,
                    f"{cfg.start_capital:g} USDT ile {plan_ok.quote_amount:.2f} USDT'lik işlem; "
                    f"5.50 USDT reddedildi (stop-loss'ta 5 USDT altına düşer)"))
+    min_pos = min_position_usdt(5.0, cfg)
+    slots = {c: position_slots(c, 5.0, cfg) for c in (cfg.start_capital, 12.0, 25.0)}
+    safe = all(1 <= n <= cfg.max_open_positions and (n == 1 or c / n >= min_pos) for c, n in slots.items())
+    checks.append(("Pozisyon sayısı bakiyeye göre", safe,
+                   " | ".join(f"{c:g} USDT → {n} pozisyon" for c, n in slots.items())
+                   + f" (pozisyon başı en az {min_pos:.2f} USDT)"))
     return checks
 
 
@@ -109,7 +115,7 @@ def run_selftest(cfg) -> int:
     # 1) Ayarlar
     mode = "TEST (paper)" if cfg.is_paper else "CANLI"
     results.append((OK, "Ayarlar", f"Mod: {mode}, sermaye {cfg.start_capital:g} {cfg.quote_asset}, "
-                                   f"komisyon %{cfg.fee_rate * 100:.2f}"))
+                                   f"komisyon %{cfg.fee_rate * 100:.2f}, en fazla {cfg.max_open_positions} pozisyon"))
 
     # 2) Risk motoru
     checks = run_risk_scenarios(cfg)

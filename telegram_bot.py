@@ -187,7 +187,7 @@ _EXIT_HEADERS = {
 
 class Messages:
     @staticmethod
-    def started(cfg, capital: float, realized: float, pairs: int) -> str:
+    def started(cfg, capital: float, realized: float, pairs: int, slots: int = 1) -> str:
         mode = "🧪 TEST (sanal bakiye, gerçek para kullanılmaz)" if cfg.is_paper else "💵 CANLI (gerçek para!)"
         trailing = (f"+%{cfg.trailing_activation_pct:g} sonrası zirve kârın yarısı (en az +%{cfg.trailing_floor_pct:g})"
                     if cfg.trailing_dynamic else
@@ -202,14 +202,16 @@ class Messages:
             f"📈 İzleyen Stop: {trailing}\n"
             f"💸 Komisyon: %{cfg.fee_rate * 100:.2f} (alış + satış, net hesaplanır)\n"
             f"☠️ Kill-switch: toplam {fmt_usdt(cfg.max_total_loss)} {cfg.quote_asset} zarar{hold}\n"
+            f"📦 Aynı anda pozisyon: şu an <b>{slots}</b> (ayar: en fazla {cfg.max_open_positions}, "
+            f"bakiye arttıkça otomatik artar)\n"
             f"🔍 Tarama: {cfg.scan_interval_sec} sn | {pairs} parite"
         )
 
     @staticmethod
-    def buy(pos, levels: Dict[str, float], note: str, cfg) -> str:
+    def buy(pos, levels: Dict[str, float], note: str, cfg, open_count: int = 1, slots: int = 1) -> str:
         q = cfg.quote_asset
         return (
-            f"🟢 <b>ALIM YAPILDI</b> — <b>{esc(pos.symbol)}</b>\n{LINE}\n"
+            f"🟢 <b>ALIM YAPILDI</b> — <b>{esc(pos.symbol)}</b> (📦 {open_count}/{slots})\n{LINE}\n"
             f"💵 Harcanan: {fmt_usdt(pos.cost_usdt)} {q}\n"
             f"🪙 Miktar: {fmt_qty(pos.qty)} {esc(pos.base_asset)}\n"
             f"🏷️ Ort. alış fiyatı: {fmt_price(pos.entry_price)}\n"
@@ -233,12 +235,14 @@ class Messages:
     @staticmethod
     def sell(reason: str, pos, exit_price: float, proceeds: float, sell_fee: float, pnl: float,
              pnl_pct_value: float, duration_sec: float, balance: float, total_pnl: float,
-             trades: int, wins: int, losses: int, cfg, estimated: bool = False) -> str:
+             trades: int, wins: int, losses: int, cfg, estimated: bool = False,
+             open_positions: int = 0) -> str:
         q = cfg.quote_asset
         header = _EXIT_HEADERS.get(reason, "🔴 <b>SATIŞ</b>")
         result = (f"✅ Net Kâr: <b>{fmt_signed(pnl)} {q}</b> ({fmt_signed(pnl_pct_value)}%)" if pnl >= 0 else
                   f"❌ Net Zarar: <b>{fmt_signed(pnl)} {q}</b> ({fmt_signed(pnl_pct_value)}%)")
         est = " (tahmini)" if estimated else ""
+        still_open = f"\n📦 Açık pozisyon: {open_positions}" if open_positions else ""
         return (
             f"{header}\n"
             f"🔴 <b>SATIŞ YAPILDI</b> — <b>{esc(pos.symbol)}</b>{est}\n{LINE}\n"
@@ -249,12 +253,13 @@ class Messages:
             f"⏳ Süre: {fmt_duration(duration_sec)}\n{LINE}\n"
             f"💰 Güncel Bakiye: <b>{fmt_usdt(balance)} {q}</b>\n"
             f"📊 Toplam K/Z: {fmt_signed(total_pnl)} {q} | İşlem: {trades} (✅{wins} / ❌{losses})"
+            f"{still_open}"
         )
 
     @staticmethod
-    def kill_switch(total_pnl: float, balance: float, cfg, position_left: Optional[str] = None) -> str:
-        warn = (f"\n⚠️ <b>{esc(position_left)} pozisyonu satılamadı!</b> Binance'ten elle kontrol edin."
-                if position_left else "")
+    def kill_switch(total_pnl: float, balance: float, cfg, positions_left: Optional[List[str]] = None) -> str:
+        warn = (f"\n⚠️ <b>Satılamayan pozisyon: {esc(', '.join(positions_left))}</b> — Binance'ten elle "
+                f"kontrol edin." if positions_left else "")
         return (
             f"🛑☠️ <b>KILL-SWITCH TETİKLENDİ!</b>\n{LINE}\n"
             f"Toplam zarar {fmt_usdt(-total_pnl)} {cfg.quote_asset} ile limite "
@@ -266,9 +271,11 @@ class Messages:
 
     @staticmethod
     def status(balance: float, realized: float, trades: int, wins: int, losses: int, cfg,
-               position_line: str = "", remaining_loss: float = 0.0) -> str:
+               position_lines: str = "", remaining_loss: float = 0.0, open_count: int = 0,
+               slots: int = 1) -> str:
         q = cfg.quote_asset
-        pos = position_line or "📦 Açık pozisyon yok, fırsat taranıyor 🔍"
+        pos = (f"📦 Açık pozisyon: {open_count}/{slots}\n{position_lines}" if position_lines
+               else f"📦 Açık pozisyon yok (0/{slots}), fırsat taranıyor 🔍")
         return (
             f"📊 <b>Durum Raporu</b>\n{LINE}\n"
             f"💰 Güncel Bakiye: <b>{fmt_usdt(balance)} {q}</b>\n"
@@ -294,8 +301,8 @@ class Messages:
         return f"⚠️ <b>Uyarı</b>\n{esc(text)}"
 
     @staticmethod
-    def stopped(balance: float, realized: float, cfg, open_symbol: Optional[str] = None) -> str:
-        warn = (f"\n⚠️ Açık pozisyon var: <b>{esc(open_symbol)}</b> — bot kapalıyken kâr al / zarar kes "
-                f"ÇALIŞMAZ! Tekrar başlatınca takip kaldığı yerden devam eder." if open_symbol else "")
+    def stopped(balance: float, realized: float, cfg, open_symbols: Optional[List[str]] = None) -> str:
+        warn = (f"\n⚠️ Açık pozisyon var: <b>{esc(', '.join(open_symbols))}</b> — bot kapalıyken kâr al / "
+                f"zarar kes ÇALIŞMAZ! Tekrar başlatınca takip kaldığı yerden devam eder." if open_symbols else "")
         return (f"👋 <b>Bot durduruldu</b>\n"
                 f"💰 Güncel Bakiye: {fmt_usdt(balance)} {cfg.quote_asset} (K/Z: {fmt_signed(realized)}){warn}")

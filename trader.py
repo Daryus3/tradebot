@@ -2,18 +2,19 @@
 Ana işlem motoru (TradingBot).
 
 Döngü:
-  - Açık pozisyon YOKSA: her SCAN_INTERVAL_SEC (30 sn) piyasayı tarar, sinyal varsa alır.
-  - Açık pozisyon VARSA: her POSITION_CHECK_SEC (5 sn) fiyatı kontrol eder;
+  - Boş pozisyon yeri (slot) varsa: her SCAN_INTERVAL_SEC (30 sn) piyasayı tarar, sinyal varsa alır.
+  - Açık pozisyon(lar) varsa: her POSITION_CHECK_SEC (5 sn) fiyatları kontrol eder;
     kâr al / zarar kes / izleyen stop / kill-switch koşullarına "anında" tepki verir.
 
-11 USDT'lik bakiye ve Binance'in ~5 USDT minimum emir kuralı nedeniyle aynı anda
-tek pozisyon açılır (iki pozisyona bölünürse stop-loss'ta satış minimumun altına düşer).
+Aynı anda kaç coin tutulacağı (MAX_OPEN_POSITIONS) bakiyeye göre otomatik ayarlanır:
+her pozisyon, fiyat stop-loss'a düşse bile Binance'in minimum emir tutarının (~5 USDT)
+üstünde kalmalıdır. 11 USDT → 1 pozisyon, ~12 USDT → 2, ~17.5 USDT ve üstü → 3.
 """
 from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import Dict, List, Optional
 
 import requests
 
@@ -21,7 +22,7 @@ from binance_client import BinanceAPIError, RateLimitError
 from exchange import BaseExchange, OrderError
 from logger import get_logger
 from risk import (ExitReason, Position, evaluate_exit, kill_switch_hit, net_exit_value,
-                  plan_entry, pnl_pct, price_for_pnl, trailing_floor_pct, update_trailing)
+                  plan_entry, pnl_pct, position_slots, price_for_pnl, trailing_floor_pct, update_trailing)
 from state import BotState, StateStore, TradeLog
 from strategy import ReboundStrategy
 from telegram_bot import Messages, TelegramNotifier, fmt_duration, fmt_signed
@@ -56,7 +57,7 @@ class TradingBot:
         self.next_scan_at = 0.0
         self.next_status_at = (time.time() + cfg.status_report_minutes * 60
                                if cfg.status_report_minutes > 0 else float("inf"))
-        self.last_mark: Optional[Mark] = None
+        self.marks: Dict[str, Mark] = {}
         self._last_position_log = 0.0
         self._error_streak = 0
 
@@ -90,8 +91,7 @@ class TradingBot:
             self.store.save(self.state)
             if not self.state.killed:
                 self.notifier.send(Messages.stopped(
-                    self.state.capital, self.state.realized_pnl, self.cfg,
-                    self.state.position.symbol if self.state.position else None))
+                    self.state.capital, self.state.realized_pnl, self.cfg, list(self.state.positions)))
         return 2 if self.state.killed else 0
 
     def startup(self) -> None:
@@ -102,10 +102,10 @@ class TradingBot:
         pairs = self.exchange.refresh_rules()
         log.info("%d adet %s paritesi yüklendi", pairs, self.cfg.quote_asset)
 
-        self.notifier.send(Messages.started(self.cfg, self.state.capital, self.state.realized_pnl, pairs))
+        self.notifier.send(Messages.started(self.cfg, self.state.capital, self.state.realized_pnl, pairs,
+                                            self.slots()))
 
-        pos = self.state.position
-        if pos:
+        for pos in list(self.state.positions.values()):
             if not self.exchange.is_paper and self.exchange.sellable_qty(
                     pos.symbol, min(pos.qty, self.exchange.free_balance(pos.base_asset))) <= 0:
                 self.notifier.send(Messages.warning(
@@ -128,36 +128,58 @@ class TradingBot:
             except Exception as exc:  # noqa: BLE001 - eski kurallarla devam et
                 log.warning("Parite kuralları yenilenemedi: %s", exc)
 
-        if self.state.position:
-            self.manage_position(now)
-        else:
-            if kill_switch_hit(self.state.realized_pnl, 0.0, self.cfg.max_total_loss):
-                self.trigger_kill(self.state.realized_pnl)
-                return
-            if now >= self.next_scan_at:
-                self.next_scan_at = now + self.cfg.scan_interval_sec
-                self.scan_and_enter(now)
+        if self.state.positions:
+            self.manage_positions(now)
+        elif kill_switch_hit(self.state.realized_pnl, 0.0, self.cfg.max_total_loss):
+            self.trigger_kill(self.state.realized_pnl)
+        if not self.running:
+            return
+
+        if now >= self.next_scan_at and self.free_slots() > 0:
+            self.next_scan_at = now + self.cfg.scan_interval_sec
+            self.scan_and_enter(now)
 
         if self.running and now >= self.next_status_at:
             self.next_status_at = now + self.cfg.status_report_minutes * 60
             self.send_status()
 
+    # ================================================================ pozisyon sayısı
+    def slots(self) -> int:
+        """Mevcut sermayeyle güvenle açılabilecek pozisyon sayısı."""
+        return position_slots(self.state.capital, self.exchange.typical_min_notional(), self.cfg)
+
+    def free_slots(self) -> int:
+        return max(0, self.slots() - len(self.state.positions))
+
     # ================================================================ giriş
     def scan_and_enter(self, now: float) -> None:
-        self.state.cooldowns = {s: t for s, t in self.state.cooldowns.items() if t > now}
-        capital = self.state.capital
-        result = self.strategy.scan(self.exchange.rules, set(self.state.cooldowns), capital)
-        log.info(result.summary())
+        state = self.state
+        state.cooldowns = {s: t for s, t in state.cooldowns.items() if t > now}
+        slots = self.slots()
+        free_slots = slots - len(state.positions)
+        if free_slots <= 0:
+            return
+
+        capital = state.capital
+        target = capital / slots  # Sermaye pozisyonlara eşit bölünür
+        excluded = set(state.cooldowns) | set(state.positions)
+        result = self.strategy.scan(self.exchange.rules, excluded, target)
+        log.info("%s | pozisyon %d/%d", result.summary(), len(state.positions), slots)
         if not result.signals:
             return
 
         free = self.exchange.free_balance(self.cfg.quote_asset)
-        available = min(capital, free)
-        for signal in result.signals[:3]:
+        opened = 0
+        for signal in result.signals[: free_slots + 2]:
+            if opened >= free_slots:
+                break
             rules = self.exchange.rules.get(signal.symbol)
-            if rules is None:
+            if rules is None or signal.symbol in state.positions:
                 continue
-            plan = plan_entry(available, rules, signal.price, self.cfg)
+            remaining = capital - state.committed
+            is_last_slot = len(state.positions) + 1 >= slots
+            budget = remaining if is_last_slot else min(target, remaining)  # Son slot artanı da kullanır
+            plan = plan_entry(min(budget, free), rules, signal.price, self.cfg)
             if not plan.ok:
                 log.info("%s atlandı: %s", signal.symbol, plan.reason)
                 if "bakiye" in plan.reason.lower():
@@ -165,10 +187,11 @@ class TradingBot:
                         f"{plan.reason}. Serbest bakiye: {free:.2f} {self.cfg.quote_asset}"), cooldown_sec=3600)
                     return
                 continue
-            self.open_position(signal, plan.quote_amount)
-            return
+            if self.open_position(signal, plan.quote_amount, slots):
+                opened += 1
+                free -= state.positions[signal.symbol].cost_usdt
 
-    def open_position(self, signal, quote_amount: float) -> bool:
+    def open_position(self, signal, quote_amount: float, slots: int = 1) -> bool:
         try:
             fill = self.exchange.market_buy(signal.symbol, quote_amount)
         except OrderError as exc:
@@ -188,10 +211,11 @@ class TradingBot:
             except Exception as exc:  # noqa: BLE001
                 log.warning("Alış sonrası bakiye doğrulanamadı: %s", exc)
 
-        self.state.position = pos
+        self.state.positions[pos.symbol] = pos
         self.state.total_fees += fill.fee_usdt
         self.store.save(self.state)
-        self.notifier.send(Messages.buy(pos, self.levels(pos), signal.note(), self.cfg))
+        self.notifier.send(Messages.buy(pos, self.levels(pos), signal.note(), self.cfg,
+                                        len(self.state.positions), slots))
         return True
 
     def levels(self, pos: Position) -> dict:
@@ -210,52 +234,72 @@ class TradingBot:
         }
 
     # ================================================================ pozisyon takibi
-    def manage_position(self, now: float) -> None:
-        pos = self.state.position
+    def mark_position(self, pos: Position, now: float) -> Mark:
         cfg = self.cfg
         bid, _ = self.exchange.get_bid_ask(pos.symbol)
         sellable = self.exchange.sellable_qty(pos.symbol, pos.qty)
         value = net_exit_value(sellable, bid, cfg.fee_rate)
-        pnl_usdt = value - pos.cost_usdt
-        pnl = pnl_pct(value, pos.cost_usdt)
-        self.last_mark = Mark(bid, value, pnl_usdt, pnl, now)
+        mark = Mark(bid, value, value - pos.cost_usdt, pnl_pct(value, pos.cost_usdt), now)
+        self.marks[pos.symbol] = mark
 
         old_peak = pos.peak_pnl_pct
-        if update_trailing(pos, pnl, cfg):
+        if update_trailing(pos, mark.pnl_pct, cfg):
             floor = trailing_floor_pct(pos, cfg)
             self.notifier.send(Messages.trailing_activated(
-                pos, pnl, price_for_pnl(floor, pos.cost_usdt, sellable, cfg.fee_rate), floor, cfg))
+                pos, mark.pnl_pct, price_for_pnl(floor, pos.cost_usdt, sellable, cfg.fee_rate), floor, cfg))
             self.store.save(self.state)
         elif pos.peak_pnl_pct > old_peak + 0.25:
             self.store.save(self.state)
+        return mark
+
+    def unrealized(self) -> float:
+        return sum(m.pnl_usdt for s, m in self.marks.items() if s in self.state.positions)
+
+    def manage_positions(self, now: float) -> None:
+        cfg = self.cfg
+        for pos in list(self.state.positions.values()):
+            self.mark_position(pos, now)
 
         if now - self._last_position_log >= POSITION_LOG_SEC:
             self._last_position_log = now
-            log.info("Pozisyon %s | fiyat %.8g | net değer %.4f | K/Z %s USDT (%s%%) | zirve %.2f%% | %s",
-                     pos.symbol, bid, value, fmt_signed(pnl_usdt, 4), fmt_signed(pnl),
-                     pos.peak_pnl_pct, fmt_duration(now - pos.opened_at))
+            for pos in self.state.positions.values():
+                m = self.marks[pos.symbol]
+                log.info("Pozisyon %s | fiyat %.8g | net değer %.4f | K/Z %s USDT (%s%%) | zirve %.2f%% | %s",
+                         pos.symbol, m.bid, m.net_value, fmt_signed(m.pnl_usdt, 4), fmt_signed(m.pnl_pct),
+                         pos.peak_pnl_pct, fmt_duration(now - pos.opened_at))
 
-        # Kill-switch: gerçekleşen + açık pozisyon zararı toplamı
-        if kill_switch_hit(self.state.realized_pnl, pnl_usdt, cfg.max_total_loss):
-            total = self.state.realized_pnl + pnl_usdt
-            log.error("KILL-SWITCH: toplam K/Z %.4f USDT", total)
-            sold = self.close_position(ExitReason.KILL_SWITCH)
-            self.trigger_kill(self.state.realized_pnl if sold else total,
-                              position_left=None if sold else pos.symbol)
+        # Kill-switch: gerçekleşen + tüm açık pozisyonların zararı toplamı
+        if self._check_kill_switch():
             return
 
-        reason = evaluate_exit(pos, pnl, now, cfg)
-        if reason:
-            log.info("Çıkış koşulu: %s (net K/Z %%%.2f)", reason.value, pnl)
-            self.close_position(reason)
+        for pos in list(self.state.positions.values()):
+            mark = self.marks[pos.symbol]
+            reason = evaluate_exit(pos, mark.pnl_pct, now, cfg)
+            if reason:
+                log.info("%s çıkış koşulu: %s (net K/Z %%%.2f)", pos.symbol, reason.value, mark.pnl_pct)
+                self.close_position(pos, reason)
 
-    def close_position(self, reason: ExitReason) -> bool:
-        pos = self.state.position
+        # Bir pozisyon zararla kapandıysa, kalanlarla birlikte limit aşılmış olabilir
+        self._check_kill_switch()
+
+    def _check_kill_switch(self) -> bool:
+        realized, unrealized = self.state.realized_pnl, self.unrealized()
+        if not kill_switch_hit(realized, unrealized, self.cfg.max_total_loss):
+            return False
+        log.error("KILL-SWITCH: toplam K/Z %.4f USDT", realized + unrealized)
+        left: List[str] = []
+        for pos in list(self.state.positions.values()):
+            if not self.close_position(pos, ExitReason.KILL_SWITCH):
+                left.append(pos.symbol)
+        self.trigger_kill(self.state.realized_pnl + self.unrealized(), left)
+        return True
+
+    def close_position(self, pos: Position, reason: ExitReason) -> bool:
         try:
             fill = self.exchange.market_sell(pos.symbol, pos.qty)
         except OrderError as exc:
             if exc.code == "NO_BALANCE" and not self.exchange.is_paper:
-                mark = self.last_mark
+                mark = self.marks.get(pos.symbol)
                 proceeds = mark.net_value if mark else pos.cost_usdt
                 price = mark.bid if mark else pos.entry_price
                 self.notifier.send(Messages.warning(
@@ -281,21 +325,19 @@ class TradingBot:
         else:
             state.losses += 1
         state.total_fees += sell_fee
-        state.position = None
+        state.positions.pop(pos.symbol, None)
         state.cooldowns[pos.symbol] = now + self.cfg.symbol_cooldown_minutes * 60
-        self.last_mark = None
+        self.marks.pop(pos.symbol, None)
         self.store.save(state)
         self.trade_log.append(pos, exit_price, proceeds, pos.buy_fee_usdt + sell_fee, reason.value, now)
 
         self.notifier.send(Messages.sell(
             reason.value, pos, exit_price, proceeds, sell_fee, pnl, pct, now - pos.opened_at,
-            state.capital, state.realized_pnl, state.trades, state.wins, state.losses, self.cfg, estimated))
-
-        if reason != ExitReason.KILL_SWITCH and kill_switch_hit(state.realized_pnl, 0.0, self.cfg.max_total_loss):
-            self.trigger_kill(state.realized_pnl)
+            state.capital, state.realized_pnl, state.trades, state.wins, state.losses, self.cfg, estimated,
+            open_positions=len(state.positions)))
 
     # ================================================================ kill-switch
-    def trigger_kill(self, total_pnl: float, position_left: Optional[str] = None) -> None:
+    def trigger_kill(self, total_pnl: float, positions_left: Optional[List[str]] = None) -> None:
         if self.state.killed:
             self.running = False
             return
@@ -303,28 +345,28 @@ class TradingBot:
         self.state.kill_reason = f"Toplam K/Z {total_pnl:.4f} USDT (limit -{self.cfg.max_total_loss})"
         self.state.killed_at = time.time()
         self.store.save(self.state)
-        balance = self.state.capital if position_left is None else self.state.start_capital + total_pnl
-        self.notifier.send(Messages.kill_switch(total_pnl, balance, self.cfg, position_left))
+        balance = self.state.start_capital + total_pnl
+        self.notifier.send(Messages.kill_switch(total_pnl, balance, self.cfg, positions_left or []))
         self.running = False
 
     # ================================================================ yardımcılar
     def send_status(self) -> None:
         state = self.state
-        unrealized = 0.0
-        position_line = ""
-        if state.position and self.last_mark:
-            m = self.last_mark
-            unrealized = m.pnl_usdt
-            position_line = (f"📦 Açık pozisyon: <b>{state.position.symbol}</b> "
-                             f"{fmt_signed(m.pnl_pct)}% ({fmt_signed(m.pnl_usdt)} {self.cfg.quote_asset}) | "
-                             f"{fmt_duration(time.time() - state.position.opened_at)}")
+        lines = []
+        for pos in state.positions.values():
+            m = self.marks.get(pos.symbol)
+            if m:
+                lines.append(f"📦 <b>{pos.symbol}</b> {fmt_signed(m.pnl_pct)}% "
+                             f"({fmt_signed(m.pnl_usdt)} {self.cfg.quote_asset}) | "
+                             f"{fmt_duration(time.time() - pos.opened_at)}")
+        unrealized = self.unrealized()
         total = state.realized_pnl + unrealized
         self.notifier.send(Messages.status(
             state.capital + unrealized, total, state.trades, state.wins, state.losses, self.cfg,
-            position_line, self.cfg.max_total_loss + total), silent=True)
+            "\n".join(lines), self.cfg.max_total_loss + total, len(state.positions), self.slots()), silent=True)
 
     def _next_sleep(self) -> float:
-        if self.state.position:
+        if self.state.positions:
             return self.cfg.position_check_sec
         return max(1.0, min(self.next_scan_at - time.time(), self.cfg.scan_interval_sec))
 
