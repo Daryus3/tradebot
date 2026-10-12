@@ -437,8 +437,15 @@ class Messages:
         return f"⚠️ <b>Uyarı</b>\n{esc(text)}"
 
     @staticmethod
-    def stopped(balance: float, realized: float, cfg, open_symbols: Optional[List[str]] = None) -> str:
-        warn = (f"\n⚠️ Açık pozisyon var: <b>{esc(', '.join(open_symbols))}</b> — bot kapalıyken kâr al / "
-                f"zarar kes ÇALIŞMAZ! Tekrar başlatınca takip kaldığı yerden devam eder." if open_symbols else "")
+    def stopped(balance: float, realized: float, cfg, open_symbols: Optional[List[str]] = None,
+                protected: int = 0) -> str:
+        warn = ""
+        if open_symbols:
+            guard = (f"Binance'teki yedek stop emri (-%{cfg.backup_stop_pct:g}) zarar kesi korumaya devam ediyor; "
+                     f"kâr al ve izleyen stop ise bot kapalıyken ÇALIŞMAZ."
+                     if protected == len(open_symbols) else
+                     "bot kapalıyken kâr al / zarar kes ÇALIŞMAZ!")
+            warn = (f"\n⚠️ Açık pozisyon var: <b>{esc(', '.join(open_symbols))}</b> — {guard} "
+                    f"Tekrar başlatınca takip kaldığı yerden devam eder.")
         return (f"👋 <b>Bot durduruldu</b>\n"
                 f"💰 Güncel Bakiye: {fmt_usdt(balance)} {cfg.quote_asset} (K/Z: {fmt_signed(realized)}){warn}")

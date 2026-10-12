@@ -144,8 +144,9 @@ class TradingBot:
             if self.price_stream is not None:
                 self.price_stream.stop()
             if not self.state.killed:
+                protected = sum(1 for p in self.state.positions.values() if p.backup_order_id is not None)
                 self.notifier.send(Messages.stopped(
-                    self.state.capital, self.state.realized_pnl, self.cfg, list(self.state.positions)))
+                    self.state.capital, self.state.realized_pnl, self.cfg, list(self.state.positions), protected))
         return 2 if self.state.killed else self.exit_code
 
     def startup(self) -> None:

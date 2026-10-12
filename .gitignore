@@ -1,5 +1,7 @@
 # Gizli bilgiler — ASLA paylaşmayın / GitHub'a yüklemeyin
 .env
+.env.bak-*
+.env.tmp
 
 # Botun çalışma verileri
 data/

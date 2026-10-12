@@ -31,8 +31,14 @@ EXIT_OK, EXIT_CONFIG, EXIT_KILLED, EXIT_CRASH = 0, 1, 2, 3
 NETWORK_RETRY_SEC = 30
 
 
+class _Parser(argparse.ArgumentParser):
+    def error(self, message):  # argparse varsayılanı 2 ile çıkar; 2 kill-switch'e ayrıldı
+        self.print_usage(sys.stderr)
+        self.exit(EXIT_CONFIG, f"❌ Hatalı komut: {message}\n")
+
+
 def parse_args(argv=None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Kripto Para Al-Sat Botu (Binance Spot)")
+    parser = _Parser(description="Kripto Para Al-Sat Botu (Binance Spot)")
     parser.add_argument("--mode", choices=["paper", "live"], help="Çalışma modu (.env'deki TRADING_MODE'u ezer)")
     parser.add_argument("--selftest", action="store_true", help="Bağlantı ve kural testlerini çalıştırır")
     parser.add_argument("--kurulum", action="store_true", help="Türkçe kurulum sihirbazı (.env hazırlar)")
@@ -312,5 +318,16 @@ def _start_bot(cfg, store, client, notifier, log) -> int:
     return bot.run(do_startup=False)
 
 
+def _entry() -> int:
+    try:
+        return main()
+    except KeyboardInterrupt:
+        return EXIT_OK
+    except Exception:  # noqa: BLE001 - yakalanmamış her hata "çökme" sayılır → bekçi yeniden başlatır
+        import traceback
+        traceback.print_exc()
+        return EXIT_CRASH
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(_entry())

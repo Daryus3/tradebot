@@ -1,0 +1,3 @@
+# Windows .bat dosyalari her zaman CRLF satir sonlariyla cikarilsin (LF ile cmd hatali calisir)
+*.bat text eol=crlf
+*.cmd text eol=crlf
