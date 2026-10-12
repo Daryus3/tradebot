@@ -14,6 +14,7 @@ Tüm kâr/zarar kararları KOMİSYON DÜŞÜLDÜKTEN SONRAKİ NET para üzerinde
 """
 from __future__ import annotations
 
+import math
 from dataclasses import asdict, dataclass, field, fields
 from enum import Enum
 from typing import Dict, Optional
@@ -52,6 +53,7 @@ class Position:
     backup_order_id: Optional[int] = None
     backup_stop_price: float = 0.0
     backup_qty: float = 0.0
+    pending_sell_client_id: str = ""  # Sonucu belirsiz kalan satış emri (tekrar satmadan önce sorgulanır)
     # Ayrıntılı işlem kaydı için alış anı ölçümleri
     score: float = 0.0
     metrics: Dict[str, float] = field(default_factory=dict)
@@ -160,7 +162,10 @@ def position_slots(capital: float, min_notional: float, cfg) -> int:
     11 USDT → 1 | 12 USDT → 2 | 17.5+ USDT → 3  (min. emir 5 USDT, SL %10 ile)
     """
     usable = capital * cfg.capital_usage_pct / 100
-    fit = int(usable / min_position_usdt(min_notional, cfg) + 1e-9)
+    # plan_entry tutarı kuruşa AŞAĞI yuvarladığı için en küçük pozisyon da kuruşa YUKARI yuvarlanır;
+    # yoksa ör. 11.67 USDT'de 2 slot hesaplanıp her alım reddedilir.
+    per = math.ceil(min_position_usdt(min_notional, cfg) * 100 - 1e-9) / 100
+    fit = int(usable / per + 1e-9)
     return max(1, min(cfg.max_open_positions, fit))
 
 

@@ -15,9 +15,12 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
+from logger import get_logger
 from risk import Position
+
+log = get_logger()
 
 
 @dataclass
@@ -116,6 +119,11 @@ class TradeLog:
 
     def __init__(self, path: Path):
         self.path = Path(path)
+        self._pending: List[list] = []   # Yazılamayan satırlar (ör. dosya Excel'de açıkken)
+
+    @property
+    def pending_count(self) -> int:
+        return len(self._pending)
 
     def _migrate_header(self) -> None:
         """Eski sürümün daha az sütunlu dosyasını yeni başlığa taşır (eski satırlar korunur)."""
@@ -123,8 +131,10 @@ class TradeLog:
             rows = list(csv.reader(fh))
         if not rows or rows[0] == self.HEADER:
             return
+        has_header = bool(rows[0]) and rows[0][0] == self.HEADER[0]
         width = len(self.HEADER)
-        body = [r + [""] * (width - len(r)) if len(r) < width else r for r in rows[1:]]
+        body = rows[1:] if has_header else rows   # Başlıksız dosyada ilk satır da işlemdir
+        body = [r + [""] * (width - len(r)) if len(r) < width else r for r in body if r]
         tmp = self.path.with_suffix(".tmp")
         with tmp.open("w", newline="", encoding="utf-8") as fh:
             writer = csv.writer(fh)
@@ -132,33 +142,50 @@ class TradeLog:
             writer.writerows(body)
         os.replace(tmp, self.path)
 
-    def append(self, pos: Position, exit_price: float, proceeds: float, fee_total: float,
-               reason: str, closed_at: float) -> None:
+    def _write_rows(self, rows: List[list]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        new_file = not self.path.exists()
+        new_file = not self.path.exists() or self.path.stat().st_size == 0
         if not new_file:
             self._migrate_header()
+        with self.path.open("a", newline="", encoding="utf-8") as fh:
+            writer = csv.writer(fh)
+            if new_file:
+                writer.writerow(self.HEADER)
+            writer.writerows(rows)
+
+    def flush_pending(self) -> bool:
+        """Bekleyen satırları yazmayı dener. Dosya kilitliyse (Excel) False döner, satırlar saklanır."""
+        if not self._pending:
+            return True
+        try:
+            self._write_rows(self._pending)
+        except OSError as exc:
+            log.warning("İşlem kaydı yazılamadı (%s); dosya kapanınca tekrar denenecek. Bekleyen: %d",
+                        exc, len(self._pending))
+            return False
+        self._pending.clear()
+        return True
+
+    def append(self, pos: Position, exit_price: float, proceeds: float, fee_total: float,
+               reason: str, closed_at: float) -> bool:
         pnl = proceeds - pos.cost_usdt
         m = pos.metrics or {}
 
         def num(value, digits=2):
             return "" if value is None else f"{value:.{digits}f}"
 
-        with self.path.open("a", newline="", encoding="utf-8") as fh:
-            writer = csv.writer(fh)
-            if new_file:
-                writer.writerow(self.HEADER)
-            writer.writerow([
-                datetime.fromtimestamp(pos.opened_at).strftime("%Y-%m-%d %H:%M:%S"),
-                datetime.fromtimestamp(closed_at).strftime("%Y-%m-%d %H:%M:%S"),
-                pos.symbol, f"{pos.qty:.8f}", f"{pos.entry_price:.8f}", f"{exit_price:.8f}",
-                f"{pos.cost_usdt:.4f}", f"{proceeds:.4f}", f"{pnl:.4f}",
-                f"{(pnl / pos.cost_usdt * 100) if pos.cost_usdt else 0:.2f}", f"{fee_total:.4f}",
-                reason, f"{(closed_at - pos.opened_at) / 60:.1f}",
-                num(pos.score), num(m.get("dip_pct")), num(m.get("rsi"), 1), num(m.get("vol_ratio")),
-                num(pos.spread_pct, 3), num(pos.btc_1h_pct), pos.regime,
-                num(pos.peak_pnl_pct), num(pos.min_pnl_pct),
-            ])
+        self._pending.append([
+            datetime.fromtimestamp(pos.opened_at).strftime("%Y-%m-%d %H:%M:%S"),
+            datetime.fromtimestamp(closed_at).strftime("%Y-%m-%d %H:%M:%S"),
+            pos.symbol, f"{pos.qty:.8f}", f"{pos.entry_price:.8f}", f"{exit_price:.8f}",
+            f"{pos.cost_usdt:.4f}", f"{proceeds:.4f}", f"{pnl:.4f}",
+            f"{(pnl / pos.cost_usdt * 100) if pos.cost_usdt else 0:.2f}", f"{fee_total:.4f}",
+            reason, f"{(closed_at - pos.opened_at) / 60:.1f}",
+            num(pos.score), num(m.get("dip_pct")), num(m.get("rsi"), 1), num(m.get("vol_ratio")),
+            num(pos.spread_pct, 3), num(pos.btc_1h_pct), pos.regime,
+            num(pos.peak_pnl_pct), num(pos.min_pnl_pct),
+        ])
+        return self.flush_pending()
 
 
 class EquityLog:
@@ -169,11 +196,14 @@ class EquityLog:
         self.path = Path(path)
 
     def append(self, at: float, capital: float, unrealized: float, open_positions: int) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        new_file = not self.path.exists()
-        with self.path.open("a", newline="", encoding="utf-8") as fh:
-            writer = csv.writer(fh)
-            if new_file:
-                writer.writerow(self.HEADER)
-            writer.writerow([datetime.fromtimestamp(at).strftime("%Y-%m-%d %H:%M:%S"), f"{capital:.4f}",
-                             f"{unrealized:.4f}", f"{capital + unrealized:.4f}", open_positions])
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            new_file = not self.path.exists() or self.path.stat().st_size == 0
+            with self.path.open("a", newline="", encoding="utf-8") as fh:
+                writer = csv.writer(fh)
+                if new_file:
+                    writer.writerow(self.HEADER)
+                writer.writerow([datetime.fromtimestamp(at).strftime("%Y-%m-%d %H:%M:%S"), f"{capital:.4f}",
+                                 f"{unrealized:.4f}", f"{capital + unrealized:.4f}", open_positions])
+        except OSError as exc:  # Dosya Excel'de açıksa bu kayıt atlanır, bot çalışmaya devam eder
+            log.warning("Bakiye kaydı yazılamadı: %s", exc)

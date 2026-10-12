@@ -372,17 +372,18 @@ class Messages:
         )
 
     @staticmethod
-    def kill_switch(total_pnl: float, balance: float, cfg, positions_left: Optional[List[str]] = None) -> str:
-        warn = (f"\n⚠️ <b>Satılamayan pozisyon: {esc(', '.join(positions_left))}</b> — Binance'ten elle "
-                f"kontrol edin." if positions_left else "")
-        return (
-            f"🛑☠️ <b>KILL-SWITCH TETİKLENDİ!</b>\n{LINE}\n"
-            f"Toplam zarar {fmt_usdt(-total_pnl)} {cfg.quote_asset} ile limite "
-            f"({fmt_usdt(cfg.max_total_loss)} {cfg.quote_asset}) ulaştı.\n"
-            f"⛔ Tüm işlemler durduruldu, bot kapatılıyor.\n"
-            f"💰 Son Bakiye: <b>{fmt_usdt(balance)} {cfg.quote_asset}</b>{warn}\n"
-            f"🔒 Yeniden başlatmak için: <code>python main.py --reset-state</code>"
-        )
+    def kill_switch(total_pnl: float, balance: float, cfg, positions_left: Optional[List[str]] = None,
+                    retrying: bool = False) -> str:
+        head = (f"🛑☠️ <b>KILL-SWITCH TETİKLENDİ!</b>\n{LINE}\n"
+                f"Toplam zarar {fmt_usdt(-total_pnl)} {cfg.quote_asset} ile limite "
+                f"({fmt_usdt(cfg.max_total_loss)} {cfg.quote_asset}) ulaştı.\n")
+        if retrying and positions_left:
+            return (head + f"⛔ Yeni alımlar kalıcı olarak durduruldu.\n"
+                    f"⚠️ <b>Henüz satılamayan: {esc(', '.join(positions_left))}</b> — satış birkaç saniyede bir "
+                    f"tekrar deneniyor; bu sırada Binance'teki yedek stop emri korumada. Hepsi satılınca bot kapanacak.")
+        return (head + f"⛔ Tüm pozisyonlar satıldı, bot kapatılıyor.\n"
+                f"💰 Son Bakiye: <b>{fmt_usdt(balance)} {cfg.quote_asset}</b>\n"
+                f"🔒 Yeniden başlatmak için: <code>python main.py --reset-state</code>")
 
     @staticmethod
     def status(balance: float, realized: float, trades: int, wins: int, losses: int, cfg,

@@ -43,6 +43,8 @@ PENDING_GIVE_UP_SEC = 180    # Bu süre sonunda Binance'te bulunamayan emir hiç
 ALIVE_SAVE_SEC = 60
 DELIST_WARN_SEC = 3600
 STREAM_MAX_AGE = 3.0         # Anlık fiyat bu kadar saniyeden eskiyse REST'e dön
+KILL_RETRY_SEC = 5           # Kill-switch sonrası satılamayan pozisyonlar için tekrar deneme aralığı
+UNSELLABLE_CODES = {"MIN_NOTIONAL", "LOT_SIZE", "NO_BALANCE"}  # Kalanın satılamayacak kadar az olduğu hatalar
 
 
 @dataclass
@@ -101,6 +103,8 @@ class TradingBot:
         self._next_pending_check = 0.0
         self._next_btc_check = 0.0
         self._next_delist_warn = 0.0
+        self._next_kill_retry = 0.0
+        self._next_kill_notice = 0.0
         self._error_streak = 0
 
     # ================================================================ yaşam döngüsü
@@ -143,11 +147,11 @@ class TradingBot:
                 self.command_listener.stop()
             if self.price_stream is not None:
                 self.price_stream.stop()
-            if not self.state.killed:
+            if not self.state.killed or self.state.positions:
                 protected = sum(1 for p in self.state.positions.values() if p.backup_order_id is not None)
                 self.notifier.send(Messages.stopped(
                     self.state.capital, self.state.realized_pnl, self.cfg, list(self.state.positions), protected))
-        return 2 if self.state.killed else self.exit_code
+        return 2 if self.state.killed and not self.state.positions else self.exit_code
 
     def startup(self) -> None:
         cfg = self.cfg
@@ -161,6 +165,10 @@ class TradingBot:
         self.notifier.send(Messages.started(cfg, self.state.capital, self.state.realized_pnl, pairs, self.slots()))
         if self.state.paused:
             self.notifier.send("⏸️ Yeni alımlar daha önce /durdur ile durdurulmuştu. Devam için /devam yazın.")
+        if self.state.killed and self.state.positions:
+            self.notifier.send(Messages.warning(
+                "Kill-switch daha önce tetiklenmişti ama satılamamış pozisyon kaldı. Bot yalnızca bu pozisyonları "
+                "satmak için çalışıyor; yeni alım yapılmayacak."), critical=True)
 
         now = self.time_fn()
         if self.state.last_alive and now - self.state.last_alive > cfg.outage_alert_sec:
@@ -204,12 +212,13 @@ class TradingBot:
 
         if self.state.positions:
             self.manage_positions(now)
-        elif kill_switch_hit(self.state.realized_pnl, 0.0, self.cfg.max_total_loss):
+        elif self.state.killed or kill_switch_hit(self.state.realized_pnl, 0.0, self.cfg.max_total_loss):
             self.trigger_kill(self.state.realized_pnl)
         if not self.running:
             return
 
-        if not self.state.paused and now >= self.next_scan_at and self.free_slots() > 0:
+        if (not self.state.paused and not self.state.killed and now >= self.next_scan_at
+                and self.free_slots() > 0):
             self.next_scan_at = now + self.cfg.scan_interval_sec
             self.scan_and_enter(now)
 
@@ -291,6 +300,7 @@ class TradingBot:
             plan = plan_entry(min(budget, free), rules, ask, cfg)
             if not plan.ok:
                 log.info("%s atlandı: %s", signal.symbol, plan.reason)
+                self.day_stats.rejects[plan.reason.split(" (")[0][:40]] += 1
                 if "bakiye" in plan.reason.lower():
                     self.notifier.send_error("low-balance", Messages.warning(
                         f"{plan.reason}. Serbest bakiye: {free:.2f} {cfg.quote_asset}"), cooldown_sec=3600)
@@ -419,6 +429,7 @@ class TradingBot:
                 self._realize_partial(pos, st.fill)
             log.warning("%s yedek stop emri artık Binance'te yok (%s), yeniden konulacak", pos.symbol, st.detail)
             pos.backup_order_id = None
+            self._sync_with_wallet(pos)
             self._next_backup_check[pos.symbol] = 0
             self.store.save(self.state)
         return False
@@ -522,20 +533,53 @@ class TradingBot:
         return drop <= -self.cfg.btc_crash_drop_pct
 
     def _check_kill_switch(self) -> bool:
+        """Kill-switch iki aşamalıdır:
+        1) Toplam zarar limite ulaşınca durum hemen 'killed' olarak kaydedilir (yeni alım ASLA yapılmaz,
+           bot yeniden başlatılsa bile).
+        2) Açık pozisyonlar satılana kadar satış tekrar denenir; satılamayanların yedek stop emri yeniden
+           konur. Hepsi satılınca bot kapanır ve kilitli kalır.
+        """
+        if self.state.killed:
+            self._liquidate()
+            return True
         realized, unrealized = self.state.realized_pnl, self.unrealized()
         if not kill_switch_hit(realized, unrealized, self.cfg.max_total_loss):
             return False
-        log.error("KILL-SWITCH: toplam K/Z %.4f USDT", realized + unrealized)
-        left: List[str] = []
-        for pos in list(self.state.positions.values()):
-            if not self.close_position(pos, ExitReason.KILL_SWITCH):
-                left.append(pos.symbol)
-        self.trigger_kill(self.state.realized_pnl + self.unrealized(), left)
+        total = realized + unrealized
+        log.error("KILL-SWITCH: toplam K/Z %.4f USDT", total)
+        self._mark_killed(total)
+        self._liquidate(first=True)
         return True
+
+    def _mark_killed(self, total_pnl: float) -> None:
+        self.state.killed = True
+        self.state.kill_reason = f"Toplam K/Z {total_pnl:.4f} USDT (limit -{self.cfg.max_total_loss})"
+        self.state.killed_at = self.time_fn()
+        self.store.save(self.state)
+
+    def _liquidate(self, first: bool = False) -> None:
+        """Kill-switch sonrası tüm pozisyonları satmayı dener (başarısızlar ~5 sn sonra tekrar)."""
+        now = self.time_fn()
+        if not first and now < self._next_kill_retry:
+            return
+        self._next_kill_retry = now + KILL_RETRY_SEC
+        left = [pos.symbol for pos in list(self.state.positions.values())
+                if not self.close_position(pos, ExitReason.KILL_SWITCH)]
+        total = self.state.realized_pnl + self.unrealized()
+        if not left:
+            self.trigger_kill(total)
+        elif first or now >= self._next_kill_notice:
+            self._next_kill_notice = now + 600
+            self.notifier.send(Messages.kill_switch(total, self.state.start_capital + total, self.cfg, left,
+                                                    retrying=True), critical=True)
 
     # ================================================================ çıkış
     def close_position(self, pos: Position, reason: ExitReason) -> bool:
-        """Önce Binance'teki yedek stop emrini iptal eder, sonra piyasa fiyatından satar."""
+        """Önce Binance'teki yedek stop emrini iptal eder, sonra piyasa fiyatından satar.
+
+        Satış yapılamazsa pozisyon açık kalır (dolan kısımlar muhasebeye yazılır), yedek stop yeniden
+        konur ve False döner; bir sonraki kontrolde tekrar denenir.
+        """
         fills: List[Fill] = []
         if pos.backup_order_id is not None:
             st = self.exchange.cancel_backup_stop(pos.symbol, pos.backup_order_id)
@@ -552,33 +596,65 @@ class TradingBot:
             pos.backup_order_id = None
             self.store.save(self.state)
 
+        if pos.pending_sell_client_id:
+            # Önceki satış emrinin sonucu belirsizdi: tekrar satmadan önce gerçekleşmiş mi bak
+            try:
+                earlier = self.exchange.recover_order(pos.symbol, pos.pending_sell_client_id, "SELL")
+            except (OrderError, requests.RequestException, BinanceAPIError) as exc:
+                log.warning("%s önceki satış emri sorgulanamadı: %s", pos.symbol, exc)
+                return self._sell_failed(pos, reason, fills, None)
+            pos.pending_sell_client_id = ""
+            if earlier is not None:
+                fills.append(earlier)
+
         remaining = pos.qty - sum(f.qty for f in fills)
+        if fills and self.exchange.sellable_qty(pos.symbol, remaining) <= 0:
+            self._close_with_fills(pos, fills, reason)  # Kalan yalnızca satılamaz toz
+            return True
         try:
             fills.append(self.exchange.market_sell(pos.symbol, remaining))
         except OrderError as exc:
             if exc.code == "NO_BALANCE" and not self.exchange.is_paper:
                 return self._handle_missing_balance(pos, reason, fills)
-            if fills:  # Yedek emir bir kısmını satmış, kalan satılamayacak kadar az
-                self._close_with_fills(pos, fills, reason)
+            if fills and exc.code in UNSELLABLE_CODES:
+                self._close_with_fills(pos, fills, reason)  # Kalan minimum emir tutarının altında
                 return True
-            self.notifier.send_error(f"sell-{pos.symbol}-{exc.code}", Messages.error(
-                f"{pos.symbol} satılamadı ({reason.value}): {exc}. Tekrar denenecek."), cooldown_sec=300)
-            if exc.code != "UNKNOWN":
-                self._next_backup_check[pos.symbol] = 0  # Pozisyon korunmasız kalmasın: yedek stopu geri koy
-            return False
+            return self._sell_failed(pos, reason, fills, exc)
         self._close_with_fills(pos, fills, reason)
         return True
 
+    def _sell_failed(self, pos: Position, reason: ExitReason, fills: List[Fill], exc: Optional[OrderError]) -> bool:
+        """Satış yapılamadı: satılan kısmı hesaba yaz, pozisyonu koru, yedek stopu geri koy."""
+        part = combine_fills(fills)
+        if part is not None:
+            self._realize_partial(pos, part)
+        if exc is not None and exc.code == "UNKNOWN" and exc.client_order_id:
+            pos.pending_sell_client_id = exc.client_order_id
+        self._next_backup_check[pos.symbol] = 0  # Pozisyon korunmasız kalmasın
+        self.store.save(self.state)
+        if exc is not None:
+            self.notifier.send_error(f"sell-{pos.symbol}-{exc.code}", Messages.error(
+                f"{pos.symbol} satılamadı ({reason.value}): {exc}. Tekrar denenecek."), cooldown_sec=300)
+        return False
+
     def _handle_missing_balance(self, pos: Position, reason: ExitReason, fills: List[Fill]) -> bool:
-        """Canlı modda coin cüzdanda yok: kilitli bir bot emri mi, yoksa bot dışında mı satıldı?"""
-        try:
-            if self.exchange.cancel_bot_stop_orders(pos.symbol) > 0:
+        """Canlı modda coin serbest bakiyede yok: kilitli bir bot emri mi, yoksa bot dışında mı satıldı?"""
+        if self.exchange.cancel_bot_stop_orders(pos.symbol) > 0:
+            # Bilinmeyen (yetim) bot stop emri coinleri kilitliyordu; artık serbestler
+            try:
                 remaining = pos.qty - sum(f.qty for f in fills)
                 fills.append(self.exchange.market_sell(pos.symbol, remaining))
-                self._close_with_fills(pos, fills, reason)
-                return True
-        except OrderError as exc:
-            log.warning("%s kilitli emir sonrası satış başarısız: %s", pos.symbol, exc)
+            except OrderError as exc:
+                return self._sell_failed(pos, reason, fills, exc)
+            self._close_with_fills(pos, fills, reason)
+            return True
+        held = self.exchange.total_balance(pos.base_asset)
+        if self.exchange.sellable_qty(pos.symbol, held) > 0:
+            # Coinler cüzdanda ama başka (kullanıcının) bir emirde kilitli: kapatılmış SAYMA
+            self.notifier.send_error(f"locked-{pos.symbol}", Messages.warning(
+                f"{pos.symbol} coinleri Binance'te sizin açtığınız bir emirde kilitli görünüyor; bot satamıyor. "
+                f"Emri iptal ederseniz bot satışı tekrar dener."), cooldown_sec=1800)
+            return self._sell_failed(pos, reason, fills, None)
         real = None
         try:
             real = self.exchange.find_sell_fills(pos.symbol, pos.opened_at)
@@ -595,9 +671,40 @@ class TradingBot:
         self.notifier.send(Messages.warning(
             f"{pos.symbol} cüzdanda bulunamadı (elle satılmış olabilir). Güncel fiyattan kapatılmış sayılıyor."),
             critical=True)
-        proceeds = mark.net_value if mark else net_exit_value(pos.qty, pos.entry_price, self.cfg.fee_rate)
+        part = combine_fills(fills)
+        proceeds = (part.usdt if part else 0.0) + (mark.net_value if mark else
+                                                   net_exit_value(pos.qty, pos.entry_price, self.cfg.fee_rate))
         self._finalize(pos, mark.bid if mark else pos.entry_price, proceeds, 0.0, ExitReason.EXTERNAL, estimated=True)
         return True
+
+    def _sync_with_wallet(self, pos: Position) -> None:
+        """Canlı modda cüzdandaki miktar pozisyondan belirgin azsa (elle kısmi satış), farkı
+        Binance işlem geçmişindeki gerçek fiyatla (bulunamazsa güncel fiyatla) gerçekleşmiş say."""
+        if self.exchange.is_paper:
+            return
+        rules = self.exchange.rules.get(pos.symbol)
+        step = float(rules.market_step_size) if rules else 0.0
+        held = self.exchange.total_balance(pos.base_asset)
+        missing = pos.qty - held
+        if missing <= max(step, pos.qty * 0.001):
+            return
+        real = None
+        try:
+            real = self.exchange.find_sell_fills(pos.symbol, pos.opened_at)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("%s satış geçmişi okunamadı: %s", pos.symbol, exc)
+        if real is not None and real.qty > 0:
+            part = _scaled_fill(real, missing)
+        else:
+            mark = self.marks.get(pos.symbol)
+            price = mark.bid if mark else pos.entry_price
+            part = Fill(pos.symbol, "SELL", missing, price, net_exit_value(missing, price, self.cfg.fee_rate),
+                        missing * price * self.cfg.fee_rate, "EXTERNAL")
+        self._realize_partial(pos, part)
+        self.notifier.send(Messages.warning(
+            f"{pos.symbol}: cüzdanda {missing:.8g} adet eksik (bot dışında kısmen satılmış). Bu kısım "
+            f"hesaba yazıldı, kalan {pos.qty:.8g} adet takip edilmeye devam ediyor."), critical=True)
+        self.store.save(self.state)
 
     def _close_with_fills(self, pos: Position, fills: List[Fill], reason: ExitReason) -> None:
         fill = combine_fills(fills)
@@ -626,7 +733,15 @@ class TradingBot:
         self.marks.pop(pos.symbol, None)
         self._next_backup_check.pop(pos.symbol, None)
         self.store.save(state)
-        self.trade_log.append(pos, exit_price, proceeds, pos.buy_fee_usdt + sell_fee, reason.value, now)
+        try:
+            logged = self.trade_log.append(pos, exit_price, proceeds, pos.buy_fee_usdt + sell_fee, reason.value, now)
+        except Exception as exc:  # noqa: BLE001 - kayıt hatası satış bildirimini / kill-switch'i engellemesin
+            log.error("İşlem kaydı yazılamadı: %s", exc)
+            logged = False
+        if not logged:
+            self.notifier.send_error("tradelog-locked", Messages.warning(
+                f"İşlem kaydı dosyası ({self.trade_log.path.name}) yazılamadı — Excel'de açık olabilir. "
+                f"Kapattığınızda bekleyen kayıtlar otomatik yazılacak."), cooldown_sec=3600)
         self._sync_stream_symbols()
 
         self.notifier.send(Messages.sell(
@@ -635,16 +750,12 @@ class TradingBot:
             open_positions=len(state.positions)), critical=reason.value in CRITICAL_EXITS)
 
     # ================================================================ kill-switch
-    def trigger_kill(self, total_pnl: float, positions_left: Optional[List[str]] = None) -> None:
-        if self.state.killed:
-            self.running = False
-            return
-        self.state.killed = True
-        self.state.kill_reason = f"Toplam K/Z {total_pnl:.4f} USDT (limit -{self.cfg.max_total_loss})"
-        self.state.killed_at = self.time_fn()
-        self.store.save(self.state)
+    def trigger_kill(self, total_pnl: float) -> None:
+        """Kill-switch'in son adımı: tüm pozisyonlar satıldı, bot kilitlenip kapanır."""
+        if not self.state.killed:
+            self._mark_killed(total_pnl)
         balance = self.state.start_capital + total_pnl
-        self.notifier.send(Messages.kill_switch(total_pnl, balance, self.cfg, positions_left or []), critical=True)
+        self.notifier.send(Messages.kill_switch(total_pnl, balance, self.cfg, []), critical=True)
         self.running = False
 
     # ================================================================ mutabakat
@@ -668,12 +779,15 @@ class TradingBot:
                     self._close_with_fills(pos, [st.fill], ExitReason.BACKUP_STOP)
                     continue
                 if st.status == "GONE":
+                    if st.fill:
+                        self._realize_partial(pos, st.fill)
                     pos.backup_order_id = None
             total = self.exchange.total_balance(pos.base_asset)
             if self.exchange.sellable_qty(pos.symbol, min(pos.qty, total)) <= 0:
                 self._handle_missing_balance(pos, ExitReason.EXTERNAL, [])
                 continue
             if pos.backup_order_id is None:
+                self._sync_with_wallet(pos)
                 self._place_backup(pos)
             self.notifier.send(Messages.position_resumed(pos))
         self.store.save(self.state)
@@ -868,6 +982,7 @@ class TradingBot:
                 self.notifier.send_error(f"delist-{text[:20]}", Messages.warning(text), cooldown_sec=6 * 3600)
         if now - self._last_alive_save >= ALIVE_SAVE_SEC:
             self._last_alive_save = now
+            self.trade_log.flush_pending()
             self.state.last_alive = now
             self.store.save(self.state)
 

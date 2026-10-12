@@ -130,6 +130,12 @@ def parse_symbol_rules(exchange_info: dict, quote_asset: str = "USDT") -> Dict[s
     return rules
 
 
+def is_unknown_outcome(exc: BinanceAPIError) -> bool:
+    """Binance belgelerine göre 5xx ve -1006/-1007 yanıtlarında emrin sonucu BİLİNMEZ
+    (gerçekleşmiş olabilir). Bunlar 'red' sayılmamalı, emir sorgulanmalıdır."""
+    return (exc.status or 0) >= 500 or exc.code in (-1006, -1007)
+
+
 class OrderError(Exception):
     """Emir verilemedi/reddedildi. `code`: NO_BALANCE, MIN_NOTIONAL, LOT_SIZE, NOT_FILLED, Binance kodu..."""
 
@@ -426,9 +432,9 @@ class LiveExchange(BaseExchange):
         try:
             resp = self.client.order_stop_loss(symbol, dec_to_str(q), dec_to_str(stop),
                                                dec_to_str(limit) if limit is not None else None, client_id)
-        except BinanceAPIError as exc:
-            raise OrderError(f"Yedek stop emri reddedildi: {exc.message}", str(exc.code)) from exc
-        except requests.RequestException as exc:
+        except (BinanceAPIError, requests.RequestException) as exc:
+            if isinstance(exc, BinanceAPIError) and not is_unknown_outcome(exc):
+                raise OrderError(f"Yedek stop emri reddedildi: {exc.message}", str(exc.code)) from exc
             time.sleep(2)
             try:
                 resp = self.client.get_order(symbol, client_order_id=client_id)
@@ -482,14 +488,7 @@ class LiveExchange(BaseExchange):
     def _fill_from_order(self, symbol: str, order: dict) -> Fill:
         """Emir özetini (komisyonları işlem geçmişinden alarak) Fill'e çevirir."""
         rules = self.rules_for(symbol)
-        order = dict(order)
-        if not order.get("fills") and order.get("orderId") is not None:
-            try:
-                trades = self.client.my_trades(symbol, order_id=int(order["orderId"]))
-                order["fills"] = [{"commission": t.get("commission"), "commissionAsset": t.get("commissionAsset")}
-                                  for t in trades]
-            except Exception as exc:  # noqa: BLE001 - komisyon tahmin edilir
-                log.debug("İşlem geçmişi okunamadı: %s", exc)
+        order = self._with_fills(symbol, order)
         return self._parse_fill(order, rules, order.get("side", "SELL"))
 
     def find_sell_fills(self, symbol: str, since_sec: float) -> Optional[Fill]:
@@ -534,17 +533,34 @@ class LiveExchange(BaseExchange):
             return self.client.order_market(symbol, side, quantity=quantity,
                                             quote_order_qty=quote_order_qty, client_order_id=client_id)
         except BinanceAPIError as exc:
-            raise OrderError(f"Binance emri reddetti: {exc.message}", str(exc.code)) from exc
+            if not is_unknown_outcome(exc):
+                raise OrderError(f"Binance emri reddetti: {exc.message}", str(exc.code)) from exc
+            return self._resolve_unknown(symbol, client_id, exc)
         except requests.RequestException as exc:
-            # Ağ hatası: emir borsaya ulaşmış olabilir. Çift işlem olmaması için
-            # tekrar emir GÖNDERMEK yerine emrin durumunu sorguluyoruz.
-            log.warning("Emir sırasında ağ hatası (%s). Emir durumu kontrol ediliyor...", exc)
-            time.sleep(2)
+            return self._resolve_unknown(symbol, client_id, exc)
+
+    def _resolve_unknown(self, symbol: str, client_id: str, exc: Exception) -> dict:
+        """Emir borsaya ulaşmış olabilir (ağ hatası / 5xx). Çift işlem olmaması için tekrar emir
+        GÖNDERMEK yerine emrin durumu sorgulanır; öğrenilemezse UNKNOWN fırlatılır ve bot takip eder."""
+        log.warning("Emrin sonucu belirsiz (%s). Emir durumu kontrol ediliyor...", exc)
+        time.sleep(2)
+        try:
+            return self._with_fills(symbol, self.client.get_order(symbol, client_order_id=client_id))
+        except Exception as exc2:  # noqa: BLE001
+            raise OrderError(f"Emir durumu belirlenemedi, bot tekrar kontrol edecek: {exc2}",
+                             "UNKNOWN", client_id) from exc
+
+    def _with_fills(self, symbol: str, order: dict) -> dict:
+        """Sorgulanan emir özetine komisyon bilgilerini işlem geçmişinden ekler."""
+        order = dict(order)
+        if not order.get("fills") and order.get("orderId") is not None and float(order.get("executedQty") or 0) > 0:
             try:
-                return self.client.get_order(symbol, client_order_id=client_id)
-            except Exception as exc2:  # noqa: BLE001
-                raise OrderError(f"Emir durumu belirlenemedi, bot tekrar kontrol edecek: {exc2}",
-                                 "UNKNOWN", client_id) from exc
+                trades = self.client.my_trades(symbol, order_id=int(order["orderId"]))
+                order["fills"] = [{"commission": t.get("commission"), "commissionAsset": t.get("commissionAsset")}
+                                  for t in trades]
+            except Exception as exc:  # noqa: BLE001 - komisyon tahmin edilir
+                log.debug("İşlem geçmişi okunamadı: %s", exc)
+        return order
 
     def _asset_usdt_price(self, asset: str) -> float:
         if asset == self.quote_asset:

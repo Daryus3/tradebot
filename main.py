@@ -141,6 +141,12 @@ def main(argv=None) -> int:
         return EXIT_CRASH
 
 
+def must_refuse_killed(state) -> bool:
+    """Kill-switch tetiklenmiş ve tüm pozisyonlar satılmışsa bot başlamaz (kilit).
+    Satılamamış pozisyon kaldıysa bot yalnızca onları satmak için başlar (yeni alım yapmaz)."""
+    return bool(state.killed and not state.positions)
+
+
 def show_stats(cfg) -> int:
     import stats
     from telegram_bot import _strip_html
@@ -268,7 +274,7 @@ def _start_bot(cfg, store, client, notifier, log) -> int:
         print(f"❌ Durum dosyası okunamadı ({store.path}): {exc}\n   Sıfırlamak için: python main.py --reset-state")
         return EXIT_CONFIG
 
-    if state and state.killed:
+    if state and must_refuse_killed(state):
         msg = (f"🛑 Kill-switch daha önce tetiklenmiş: {state.kill_reason}\n"
                f"   Bot güvenlik nedeniyle başlatılmadı. Yeniden başlatmak için: "
                f"python main.py --mode {cfg.trading_mode} --reset-state")
