@@ -2,7 +2,7 @@
 chcp 65001 >nul
 title Kripto Bot - CANLI MOD
 echo ================================================================
-echo   ⚠️  DİKKAT: CANLI MOD - Bot GERÇEK PARANIZLA Binance'te işlem yapacak!
+echo    DİKKAT: CANLI MOD - Bot GERÇEK PARANIZLA Binance'te işlem yapacak!
 echo.
 echo   - Önce TEST_ET.bat ve birkaç gün BASLAT.bat (test modu) ile deneyin.
 echo   - Binance API anahtarında para çekme (Withdraw) izni KAPALI olmalı.

@@ -2,7 +2,7 @@
 chcp 65001 >nul
 title Kripto Bot - Backtest
 echo ================================================================
-echo   🔬 Kripto Al-Sat Botu - BACKTEST (geriye dönük test)
+echo   Kripto Al-Sat Botu - BACKTEST (geriye dönük test)
 echo   Stratejiyi son 30 günün geçmiş fiyat verileriyle dener; gerçek işlem yapılmaz.
 echo   İnternet bağlantısı gerekir, birkaç dakika sürebilir.
 echo ================================================================

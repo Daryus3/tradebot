@@ -11,7 +11,7 @@ cd /d "%~dp0"
 
 if exist "venv\Scripts\python.exe" (
     "venv\Scripts\python.exe" --version >nul 2>&1 && goto :venv_hazir
-    echo ⚠️ Sanal ortam bozuk görünüyor, yeniden oluşturulacak...
+    echo Sanal ortam bozuk görünüyor, yeniden oluşturulacak...
 )
 
 set "PY_CMD="
@@ -21,7 +21,7 @@ if not defined PY_CMD (
 )
 if not defined PY_CMD (
     echo.
-    echo ❌ Python bulunamadı!
+    echo Python bulunamadı!
     echo.
     echo    1. https://www.python.org/downloads/ adresinden Python 3.10 veya üstünü indirip kurun.
     echo    2. Kurulumun ilk ekranında "Add Python to PATH" kutusunu MUTLAKA işaretleyin.
@@ -31,7 +31,7 @@ if not defined PY_CMD (
     exit /b 1
 )
 
-echo 📦 İlk kurulum: sanal ortam (venv) oluşturuluyor...
+echo İlk kurulum: sanal ortam (venv) oluşturuluyor...
 %PY_CMD% -m venv --clear venv
 if errorlevel 1 goto :venv_hata
 if not exist "venv\Scripts\activate.bat" goto :venv_hata
@@ -47,11 +47,11 @@ if defined REQ_OK (
     python -c "import requests, dotenv, websocket" >nul 2>&1 || set "REQ_OK="
 )
 if not defined REQ_OK (
-    echo 📦 Gerekli paketler kuruluyor, ilk seferde birkaç dakika sürebilir...
+    echo Gerekli paketler kuruluyor, ilk seferde birkaç dakika sürebilir...
     python -m pip install --disable-pip-version-check -r requirements.txt
     if errorlevel 1 (
         echo.
-        echo ❌ Paketler kurulamadı. İnternet bağlantınızı kontrol edip tekrar deneyin.
+        echo Paketler kurulamadı. İnternet bağlantınızı kontrol edip tekrar deneyin.
         echo.
         pause
         exit /b 1
@@ -64,7 +64,7 @@ exit /b 0
 
 :venv_hata
 echo.
-echo ❌ Sanal ortam (venv) oluşturulamadı. Proje klasöründeki "venv" klasörünü silip tekrar deneyin.
+echo Sanal ortam (venv) oluşturulamadı. Proje klasöründeki "venv" klasörünü silip tekrar deneyin.
 echo.
 pause
 exit /b 1
