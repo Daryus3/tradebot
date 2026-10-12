@@ -1,6 +1,4 @@
 """Bağımsız incelemede bulunan hataların regresyon testleri (önce düşer, düzeltmeden sonra geçer)."""
-import os
-
 import pytest
 
 
@@ -9,8 +7,7 @@ def _no_sleep(monkeypatch):
     monkeypatch.setattr("exchange.time.sleep", lambda s: None)
 
 from binance_client import BinanceAPIError
-from exchange import Fill
-from risk import ExitReason, plan_entry, position_slots
+from risk import plan_entry, position_slots
 from state import BotState, StateStore, TradeLog
 
 from fake_binance import FakeBinance
@@ -236,3 +233,161 @@ def test_every_slot_size_is_plannable(cfg, capital):
                         d("1000000"), d("5"))
     slots = position_slots(capital, 5.0, cfg)
     assert plan_entry(capital / slots, rules, 1.0, cfg).ok, f"{capital} USDT, {slots} slot"
+
+
+# ================================================================ ikinci inceleme grubu
+def test_startup_retries_transient_binance_errors(cfg, monkeypatch):
+    import logging
+    import main
+    monkeypatch.setattr(main.time, "sleep", lambda s: None)
+    calls = {"n": 0}
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise BinanceAPIError(503, -1008, "Server is currently overloaded")
+        return "tamam"
+
+    assert main.wait_for_network(flaky, "test", cfg, logging.getLogger("t")) == "tamam"
+    with pytest.raises(BinanceAPIError):        # Gerçek ayar hatası tekrar denenmez
+        main.wait_for_network(lambda: (_ for _ in ()).throw(BinanceAPIError(401, -2015, "Invalid API-key")),
+                              "test", cfg, logging.getLogger("t"))
+
+
+class _ErrHttp:
+    def __init__(self, status, data):
+        self.status, self.data, self.calls = status, data, 0
+
+    def post(self, url, json=None, timeout=None):
+        self.calls += 1
+        data = self.data
+
+        class R:
+            status_code = self.status
+            text = "x"
+
+            def json(self_inner):
+                return data
+        return R()
+
+
+def test_listener_backs_off_on_telegram_errors():
+    import time
+    from commands import TelegramCommandListener
+    for status, data in ((401, {"ok": False, "error_code": 401, "description": "Unauthorized"}),
+                         (429, {"ok": False, "error_code": 429, "parameters": {"retry_after": 5}}),
+                         (502, {"ok": False, "error_code": 502, "description": "Bad Gateway"})):
+        http = _ErrHttp(status, data)
+        lst = TelegramCommandListener("t" * 10, "1", http=http)
+        lst.start()
+        time.sleep(0.4)
+        lst.stop()
+        assert http.calls <= 6, (status, http.calls)   # Meşgul döngü yok
+
+
+def test_listener_ignores_commands_for_other_bots():
+    from commands import TelegramCommandListener
+    lst = TelegramCommandListener("t" * 10, "42", http=_ErrHttp(200, {"ok": True, "result": []}))
+    lst.username = "kriptocanlibot"
+    lst._handle_update({"update_id": 1, "message": {"chat": {"id": 42}, "text": "/hepsinisat@KriptoTestBot"}})
+    lst._handle_update({"update_id": 2, "message": {"chat": {"id": 42}, "text": "/durum@KriptoCanliBot"}})
+    lst._handle_update({"update_id": 3, "message": {"chat": {"id": 42}, "text": "/ping"}})
+    assert [c.name for c in lst.get_commands()] == ["durum", "ping"]
+
+
+def test_rate_limit_wait_not_cut_by_commands(cfg, fake_client, tmp_path):
+    import threading
+    import time
+    bot, _, _ = make_bot(cfg, fake_client, tmp_path)
+
+    class L:
+        wakeup = threading.Event()
+    bot.command_listener = L()
+    L.wakeup.set()                                 # Komut geldi
+    t0 = time.monotonic()
+    bot._wait_rate_limit(0.5)
+    assert time.monotonic() - t0 >= 0.45
+    assert time.time() - bot.last_loop_at < 1      # Sahte "bot çalışmadı" uyarısı üretmez
+
+
+def test_scan_propagates_rate_limit(cfg, fake_client):
+    from binance_client import RateLimitError
+    from test_new_features import ScanClient, scaled_rows, scan_rules
+    from strategy import ReboundStrategy
+
+    class Limited(ScanClient):
+        def klines(self, symbol, *a, **k):
+            if symbol != "BTCUSDT":
+                raise RateLimitError(429, 60, "limit")
+            return super().klines(symbol, *a, **k)
+
+    with pytest.raises(RateLimitError):
+        ReboundStrategy(Limited(scaled_rows()), cfg).scan(scan_rules(fake_client), set(), 11)
+
+
+def test_startup_announces_once(cfg, fake_client, tmp_path):
+    bot, _, notes = make_bot(cfg, fake_client, tmp_path)
+    bot.startup()
+    assert sum("Botu Başlatıldı" in m for m in notes.messages) == 1
+
+
+def test_chat_id_error_is_redacted(cfg, monkeypatch, capsys):
+    import requests
+    import main
+    import telegram_bot
+    from dataclasses import replace
+    token = "1234567890:AAHfiqksKZ8WmR2zSjiQ7_v4TMAKdiHm9T0"
+    monkeypatch.setattr(telegram_bot, "discover_chat_ids", lambda t: (_ for _ in ()).throw(
+        requests.ConnectionError(f"Max retries exceeded with url: /bot{token}/getUpdates")))
+    main.find_chat_id(replace(cfg, telegram_bot_token=token))
+    out = capsys.readouterr().out
+    assert token not in out and "bot***" in out
+
+
+def test_daily_report_window_covers_late_trades(cfg, fake_client, tmp_path):
+    from datetime import datetime
+    bot, _, notes = make_bot(cfg, fake_client, tmp_path)
+    start, end = bot._report_window(datetime(2026, 10, 12).date(), 23 * 60 + 55, 1)
+    assert start == datetime(2026, 10, 11, 23, 55) and end == datetime(2026, 10, 12, 23, 55)
+    # 00:00 ayarında rapor bir önceki günü kapsar ve etiket o günü gösterir
+    from dataclasses import replace
+    bot.cfg = replace(cfg, daily_report_time="00:00")
+    bot.state.last_daily_report = "2026-10-10"
+    bot._maybe_reports(datetime(2026, 10, 12, 0, 5).timestamp())
+    assert any("Günlük Özet (11.10.2026)" in m for m in notes.messages)
+
+
+def test_weekly_report_without_daily(cfg, fake_client, tmp_path):
+    from dataclasses import replace
+    from datetime import datetime
+    bot, _, notes = make_bot(replace(cfg, daily_report_time=""), fake_client, tmp_path)
+    bot.state.last_weekly_report = "2026-W40"
+    bot._maybe_reports(datetime(2026, 10, 12, 0, 10).timestamp())   # Pazartesi: dünkü pazar raporu
+    assert any("Haftalık Özet" in m for m in notes.messages)
+    assert not any("Günlük Özet" in m for m in notes.messages)
+
+
+def test_btc_filter_rejects_grouped(cfg, fake_client, tmp_path):
+    import time
+    from strategy import ScanResult
+    bot, _, _ = make_bot(cfg, fake_client, tmp_path)
+    for pct in ("-1.62", "-1.75", "-2.01"):
+        bot._record_scan(ScanResult(market_ok=False, market_note=f"BTC son 1 saatte %{pct} düştü (piyasa riskli)"),
+                         time.time())
+    assert bot.day_stats.rejects["BTC filtresi"] == 3
+
+
+def test_confirm_counter_resets_after_gap(cfg, fake_client, monkeypatch):
+    from dataclasses import replace
+    import strategy as strategy_mod
+    from test_new_features import ScanClient, scaled_rows, scan_rules
+    two = replace(cfg, signal_confirm_scans=2)
+    strat = strategy_mod.ReboundStrategy(ScanClient(scaled_rows()), two)
+    rules = scan_rules(fake_client)
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(strategy_mod.time, "time", lambda: clock["t"])
+    assert not strat.scan(rules, set(), 11).signals
+    clock["t"] += 3600                         # Slot doluydu, 1 saat tarama yapılmadı
+    assert not strat.scan(rules, set(), 11).signals   # Tek taramalık sinyal teyit sayılmaz
+    clock["t"] += 30
+    assert strat.scan(rules, set(), 11).signals

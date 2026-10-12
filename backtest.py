@@ -538,6 +538,9 @@ class _Simulator:
         for _, symbol in candidates[: cfg.max_candidates]:
             self.stats["analiz"] += 1
             signal, _reason = self.strategy.analyze(symbol, self.series[symbol].window(k))
+            if signal and cfg.min_signal_score > 0 and signal.score < cfg.min_signal_score:
+                self.stats["puan_dusuk"] += 1  # Canlı bot da MIN_SIGNAL_SCORE altını almaz
+                continue
             if signal:
                 signals.append(signal)
         if not signals:
@@ -626,8 +629,8 @@ def _base_notes(spread_pct: float) -> List[str]:
         "varsayıldı; zirve (izleyen stop) güncellemesi düşük taraf kontrolünden sonra yapıldı.",
         f"Sabit %{spread_pct:g} spread varsayıldı (alış +%{spread_pct / 2:g}, satış -%{spread_pct / 2:g}); "
         "kayma (slippage) ve emir defteri derinliği hesaba katılmadı.",
-        "Spread, delist, rejim, ATR ve pump filtreleri; başabaş koruması, BTC çöküş çıkışı ve "
-        "sinyal teyidi simüle edilmedi.",
+        "Spread, delist, piyasa rejimi ve pompa filtreleri; başabaş koruması, BTC çöküş çıkışı ve "
+        "sinyal teyidi simüle edilmedi (ATR filtresi ve minimum sinyal puanı uygulandı).",
         "Geçmiş performans gelecekteki sonuçları garanti etmez.",
     ]
 

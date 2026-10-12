@@ -25,7 +25,7 @@ import sys
 import time
 
 from config import BASE_DIR, DATA_DIR, ConfigError, load_config
-from logger import register_secrets, setup_logging
+from logger import redact, register_secrets, setup_logging
 
 EXIT_OK, EXIT_CONFIG, EXIT_KILLED, EXIT_CRASH = 0, 1, 2, 3
 NETWORK_RETRY_SEC = 30
@@ -70,7 +70,7 @@ def find_chat_id(cfg) -> int:
     try:
         chats = discover_chat_ids(cfg.telegram_bot_token)
     except Exception as exc:  # noqa: BLE001
-        print(f"❌ Telegram'a bağlanılamadı: {exc}")
+        print(f"❌ Telegram'a bağlanılamadı: {redact(str(exc))}")
         return EXIT_CONFIG
     if not chats:
         print("⚠️ Hiç mesaj bulunamadı. Telegram'da botunuzu açıp /start yazın, sonra bu komutu tekrar çalıştırın.")
@@ -181,11 +181,16 @@ def run_backtest_cli(cfg, days: int, max_symbols: int) -> int:
     return EXIT_OK
 
 
+def is_transient_binance_error(exc) -> bool:
+    """Binance bakım / aşırı yük gibi geçici sunucu hataları (ayar hatası DEĞİL)."""
+    return (exc.status or 0) >= 500 or exc.code in (-1001, -1006, -1007, -1008)
+
+
 def wait_for_network(fn, what: str, cfg, log):
     """İnternet yoksa kapanmak yerine bekler ve tekrar dener (WAIT_FOR_NETWORK=true)."""
     import requests
 
-    from binance_client import RateLimitError
+    from binance_client import BinanceAPIError, RateLimitError
 
     announced = False
     while True:
@@ -194,7 +199,9 @@ def wait_for_network(fn, what: str, cfg, log):
         except RateLimitError as exc:
             log.warning("%s: Binance istek limiti, %s sn bekleniyor", what, exc.retry_after)
             time.sleep(exc.retry_after)
-        except requests.RequestException as exc:
+        except (requests.RequestException, BinanceAPIError) as exc:
+            if isinstance(exc, BinanceAPIError) and not is_transient_binance_error(exc):
+                raise  # Gerçek ayar hatası (geçersiz anahtar, izin yok...)
             if not cfg.wait_for_network:
                 raise
             log.warning("%s: Binance'e bağlanılamadı (%s)", what, exc)
@@ -320,6 +327,8 @@ def _start_bot(cfg, store, client, notifier, log) -> int:
     except (OrderError, BinanceAPIError) as exc:  # Örn. API anahtarı geçersiz / işlem izni yok
         print(f"❌ {exc}")
         notifier.send(Messages.error(f"Bot başlatılamadı: {exc}", fatal=True), critical=True)
+        if isinstance(exc, BinanceAPIError) and is_transient_binance_error(exc):
+            return EXIT_CRASH  # Geçici sunucu hatası: bekçi yeniden denesin
         return EXIT_CONFIG
     return bot.run(do_startup=False)
 

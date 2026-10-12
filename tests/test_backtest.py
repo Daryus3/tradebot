@@ -313,3 +313,10 @@ def test_report_without_trades(cfg):
         days=30.0, notes=[], equity_curve=[])
     text = format_backtest_report(empty, cfg)
     assert "hiç işlem açmadı" in text and "İşlem sayısı: 0" in text
+
+
+def test_min_signal_score_respected(cfg, make_client, tmp_path):
+    from dataclasses import replace
+    client = make_client({"ABCUSDT": scenario(lambda p: trend(p, 1.03, 8)), "BTCUSDT": btc_flat()})
+    result = run(replace(cfg, min_signal_score=10_000), client, tmp_path)
+    assert not result.trades and result.stats["puan_dusuk"] > 0

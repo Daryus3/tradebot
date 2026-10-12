@@ -15,6 +15,7 @@ import time
 from datetime import datetime
 from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
+from binance_client import RateLimitError
 from logger import get_logger
 
 log = get_logger()
@@ -69,6 +70,8 @@ class CoinSafetyFilter:
         try:
             data = self.client._request("GET", DELIST_PATH)
             schedule = self._parse_schedule(data)
+        except RateLimitError:
+            raise  # Binance istek limiti: tarama durmalı, döngü beklesin
         except Exception as exc:  # noqa: BLE001 - takvim alınamazsa eski liste kullanılır
             log.debug("Delist takvimi alınamadı (eski liste korunuyor): %s", exc)
             self._next_delist_at = now + min(DELIST_RETRY_SEC, self.delist_refresh_sec)
@@ -141,6 +144,8 @@ class CoinSafetyFilter:
             if cfg.min_listing_days > 0 and len(rows) < cfg.min_listing_days:
                 return False, f"yeni listelendi ({len(rows)} gün)"
             pump = self._pump_pct(rows) if cfg.pump_filter_pct > 0 else None
+        except RateLimitError:
+            raise  # Binance istek limiti: tarama durmalı, döngü beklesin
         except Exception as exc:  # noqa: BLE001 - veri yoksa coini eleme (fail-open)
             log.debug("%s günlük mumları alınamadı, güvenlik filtresi atlandı: %s", symbol, exc)
             return True, ""
@@ -156,6 +161,8 @@ class CoinSafetyFilter:
         """
         try:
             self.refresh_delist()
+        except RateLimitError:
+            raise  # Binance istek limiti: tarama durmalı, döngü beklesin
         except Exception as exc:  # noqa: BLE001
             log.debug("Delist takvimi yenilenemedi: %s", exc)
         now = self.time_fn()

@@ -43,6 +43,7 @@ PENDING_GIVE_UP_SEC = 180    # Bu süre sonunda Binance'te bulunamayan emir hiç
 ALIVE_SAVE_SEC = 60
 DELIST_WARN_SEC = 3600
 STREAM_MAX_AGE = 3.0         # Anlık fiyat bu kadar saniyeden eskiyse REST'e dön
+WEEKLY_DEFAULT_TIME = "23:55"  # Günlük rapor kapalıyken haftalık raporun saati
 KILL_RETRY_SEC = 5           # Kill-switch sonrası satılamayan pozisyonlar için tekrar deneme aralığı
 UNSELLABLE_CODES = {"MIN_NOTIONAL", "LOT_SIZE", "NO_BALANCE"}  # Kalanın satılamayacak kadar az olduğu hatalar
 
@@ -103,6 +104,7 @@ class TradingBot:
         self._next_pending_check = 0.0
         self._next_btc_check = 0.0
         self._next_delist_warn = 0.0
+        self._announced = False  # Açılış mesajları ağ hatasıyla tekrarlanan denemelerde yinelenmesin
         self._next_kill_retry = 0.0
         self._next_kill_notice = 0.0
         self._error_streak = 0
@@ -125,7 +127,7 @@ class TradingBot:
                     log.warning("Binance istek limiti: %s sn bekleniyor", exc.retry_after)
                     self.notifier.send_error("ratelimit", Messages.warning(
                         f"Binance istek limiti aşıldı, {exc.retry_after} sn bekleniyor."))
-                    self._sleep(exc.retry_after)
+                    self._wait_rate_limit(exc.retry_after)
                     continue
                 except (requests.RequestException, BinanceAPIError) as exc:
                     if isinstance(exc, requests.RequestException):
@@ -162,18 +164,10 @@ class TradingBot:
         pairs = self.exchange.refresh_rules()
         log.info("%d adet %s paritesi yüklendi", pairs, cfg.quote_asset)
 
-        self.notifier.send(Messages.started(cfg, self.state.capital, self.state.realized_pnl, pairs, self.slots()))
-        if self.state.paused:
-            self.notifier.send("⏸️ Yeni alımlar daha önce /durdur ile durdurulmuştu. Devam için /devam yazın.")
-        if self.state.killed and self.state.positions:
-            self.notifier.send(Messages.warning(
-                "Kill-switch daha önce tetiklenmişti ama satılamamış pozisyon kaldı. Bot yalnızca bu pozisyonları "
-                "satmak için çalışıyor; yeni alım yapılmayacak."), critical=True)
-
         now = self.time_fn()
-        if self.state.last_alive and now - self.state.last_alive > cfg.outage_alert_sec:
-            self.notifier.send(Messages.outage((now - self.state.last_alive) / 60, list(self.state.positions),
-                                               startup=True), critical=bool(self.state.positions))
+        if not self._announced:
+            self._announce_startup(pairs, now)
+            self._announced = True
         self._reconcile_positions_on_startup()
         if not self.exchange.is_paper:
             self._check_commission()
@@ -187,6 +181,20 @@ class TradingBot:
             self._sync_stream_symbols()
         if self.command_listener is not None:
             self.command_listener.start()
+
+    def _announce_startup(self, pairs: int, now: float) -> None:
+        cfg = self.cfg
+        self.notifier.send(Messages.started(cfg, self.state.capital, self.state.realized_pnl, pairs, self.slots()))
+        if self.state.paused:
+            self.notifier.send("⏸️ Yeni alımlar daha önce /durdur ile durdurulmuştu. Devam için /devam yazın.")
+        if self.state.killed and self.state.positions:
+            self.notifier.send(Messages.warning(
+                "Kill-switch daha önce tetiklenmişti ama satılamamış pozisyon kaldı. Bot yalnızca bu pozisyonları "
+                "satmak için çalışıyor; yeni alım yapılmayacak."), critical=True)
+
+        if self.state.last_alive and now - self.state.last_alive > cfg.outage_alert_sec:
+            self.notifier.send(Messages.outage((now - self.state.last_alive) / 60, list(self.state.positions),
+                                               startup=True), critical=bool(self.state.positions))
 
     def stop(self, exit_code: int = 0) -> None:
         self.exit_code = exit_code
@@ -228,7 +236,8 @@ class TradingBot:
         if self.command_listener is None:
             return
         for cmd in self.command_listener.get_commands():
-            log.info("Telegram komutu: /%s %s", cmd.name, " ".join(cmd.args))
+            shown = "***" if cmd.name == "evet" and cmd.args else " ".join(cmd.args)  # PIN log'a yazılmasın
+            log.info("Telegram komutu: /%s %s", cmd.name, shown)
             self.commands.handle(cmd)
             if not self.running:
                 return
@@ -867,7 +876,8 @@ class TradingBot:
         self.day_stats.signals += len(result.signals)
         self.day_stats.rejects.update(result.rejects)
         if not result.market_ok:
-            self.day_stats.rejects[result.market_note.split(":")[0]] += 1
+            key = "BTC filtresi" if result.market_note.startswith("BTC") else result.market_note.split(":")[0]
+            self.day_stats.rejects[key] += 1
 
     def scan_report(self) -> str:
         r = self.last_scan
@@ -919,11 +929,29 @@ class TradingBot:
                  f"☠️ Kill-switch'e kalan: {fmt_usdt(self.cfg.max_total_loss + self.state.realized_pnl + unrealized)} "
                  f"{self.cfg.quote_asset}"]
         d = self.day_stats
-        if d.scans and d.day == start.date().isoformat():
+        report_day = (end - timedelta(seconds=1)).date().isoformat()
+        if d.scans and d.day == report_day:
             reasons = ", ".join(f"{k}: {v}" for k, v in d.rejects.most_common(3))
             extra.append(f"🔍 {d.scans} tarama, {d.signals} sinyal, {d.buys} alım"
                          + (f" | en sık eleme: {esc(reasons)}" if reasons else ""))
         return stats.format_period_report(trades, start, end, title, self.cfg.quote_asset, extra)
+
+    def _report_minute(self, weekly: bool = False) -> Optional[int]:
+        """Rapor saati (gece yarısından dakika). Günlük rapor kapalıysa haftalık rapor 23:55'te gider."""
+        text = self.cfg.daily_report_time or (WEEKLY_DEFAULT_TIME if weekly else "")
+        return parse_hhmm(text) if text else None
+
+    @staticmethod
+    def _last_report_day(now: float, minute: int) -> date:
+        """Rapor saati geçmişse bugün, geçmemişse dün."""
+        dt = datetime.fromtimestamp(now)
+        return dt.date() if dt.hour * 60 + dt.minute >= minute else dt.date() - timedelta(days=1)
+
+    @staticmethod
+    def _report_window(day: date, minute: int, days: int):
+        """Rapor penceresi: bir önceki rapor anından bu rapor anına kadar (hiçbir işlem arada kalmaz)."""
+        end = datetime.combine(day, datetime.min.time()) + timedelta(minutes=minute)
+        return end - timedelta(days=days), end
 
     def _init_report_markers(self, now: float) -> None:
         """İlk çalıştırmada geçmiş günler için rapor gönderilmesin."""
@@ -935,34 +963,31 @@ class TradingBot:
             self.state.last_weekly_report = _week_key(week)
 
     def _daily_target(self, now: float) -> Optional[date]:
-        """Raporu gönderilmesi gereken en son gün (rapor saati geçmişse bugün, değilse dün)."""
-        minute = parse_hhmm(self.cfg.daily_report_time) if self.cfg.daily_report_time else None
-        if minute is None:
-            return None
-        dt = datetime.fromtimestamp(now)
-        today = dt.date()
-        return today if dt.hour * 60 + dt.minute >= minute else today - timedelta(days=1)
+        """Raporu gönderilmesi gereken en son gün."""
+        minute = self._report_minute()
+        return None if minute is None else self._last_report_day(now, minute)
 
     def _weekly_target(self, now: float) -> Optional[date]:
         """Haftalık raporu gönderilmesi gereken en son pazar günü."""
-        last_day = self._daily_target(now)
-        if last_day is None or not self.cfg.weekly_report:
+        if not self.cfg.weekly_report:
             return None
+        last_day = self._last_report_day(now, self._report_minute(weekly=True))
         return last_day - timedelta(days=(last_day.weekday() - 6) % 7)
 
     def _maybe_reports(self, now: float) -> None:
         target = self._daily_target(now)
         if target and self.state.last_daily_report < target.isoformat():
-            start = datetime.combine(target, datetime.min.time())
-            self.notifier.send(self.period_report(start, start + timedelta(days=1),
-                                                  f"📅 Günlük Özet ({target:%d.%m.%Y})"), silent=True)
+            start, end = self._report_window(target, self._report_minute(), 1)
+            label = (end - timedelta(hours=12)).date()  # Pencerenin büyük kısmının düştüğü gün
+            self.notifier.send(self.period_report(start, end, f"📅 Günlük Özet ({label:%d.%m.%Y})"), silent=True)
             self.state.last_daily_report = target.isoformat()
             self.store.save(self.state)
         sunday = self._weekly_target(now)
         if sunday and self.state.last_weekly_report < _week_key(sunday):
-            start = datetime.combine(sunday - timedelta(days=6), datetime.min.time())
-            self.notifier.send(self.period_report(start, start + timedelta(days=7),
-                                                  f"🗓️ Haftalık Özet ({start:%d.%m} – {sunday:%d.%m.%Y})"),
+            start, end = self._report_window(sunday, self._report_minute(weekly=True), 7)
+            first_day = (end - timedelta(days=6, hours=12)).date()
+            self.notifier.send(self.period_report(start, end,
+                                                  f"🗓️ Haftalık Özet ({first_day:%d.%m} – {sunday:%d.%m.%Y})"),
                                silent=True)
             self.state.last_weekly_report = _week_key(sunday)
             self.store.save(self.state)
@@ -1016,6 +1041,17 @@ class TradingBot:
         # Açık pozisyon varken bağlantıyı sık dene ki internet gelir gelmez kontrol yapılsın
         cap = 10 if self.state.positions else 60
         self._sleep(min(cap, 5 * self._error_streak))
+
+    def _wait_rate_limit(self, seconds: float) -> None:
+        """Binance istek yasağı: süre dolana kadar Binance'e HİÇ istek atılmaz (yasak uzamasın).
+        Gelen Telegram komutları kuyrukta bekler ve yasak bitince işlenir."""
+        until = time.monotonic() + max(0.0, seconds)
+        while self.running:
+            left = until - time.monotonic()
+            if left <= 0:
+                break
+            time.sleep(min(left, 1.0))
+        self.last_loop_at = self.time_fn()  # Bilinçli bekleme "bot çalışmadı" uyarısı üretmesin
 
     def _sleep(self, seconds: float) -> None:
         """Bekler; Telegram komutu gelirse beklemeyi erken bitirir."""

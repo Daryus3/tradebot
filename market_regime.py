@@ -18,6 +18,7 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
+from binance_client import RateLimitError
 from indicators import ema
 from logger import get_logger
 
@@ -150,6 +151,8 @@ class MarketRegime:
         try:
             c4 = [float(r[4]) for r in self.client.klines(BTC_SYMBOL, "4h", limit=KLINE_4H_LIMIT) or []]
             c1 = [float(r[4]) for r in self.client.klines(BTC_SYMBOL, "1d", limit=KLINE_1D_LIMIT) or []]
+        except RateLimitError:
+            raise  # Binance istek limiti: tarama durmalı, döngü beklesin
         except Exception as exc:  # noqa: BLE001 - rejim verisi alınamazsa tarama yine sürsün
             log.debug("BTC rejim mumları alınamadı: %s", exc)
             self._retry_at = now + RETRY_SEC
@@ -169,6 +172,8 @@ class MarketRegime:
             if not fresh:
                 extra = "BTC mumları için veri alınamadı" + (" (eski veri)" if c4 or c1 else "")
                 res.note = f"{res.note}; {extra}" if res.note else extra
+        except RateLimitError:
+            raise  # Binance istek limiti: tarama durmalı, döngü beklesin
         except Exception as exc:  # noqa: BLE001
             log.debug("Piyasa rejimi hesaplanamadı: %s", exc)
             res = RegimeResult(NORMAL, "veri alınamadı")

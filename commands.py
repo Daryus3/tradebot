@@ -93,6 +93,7 @@ class TelegramCommandListener:
         self._thread: Optional[threading.Thread] = None
         self._rejected: Dict[str, float] = {}
         self.conflict = False
+        self.username = ""  # Botun Telegram kullanıcı adı (/komut@BaskaBot ayırt etmek için)
 
     @property
     def enabled(self) -> bool:
@@ -135,6 +136,8 @@ class TelegramCommandListener:
         data = self._call("getUpdates", {"offset": -1, "timeout": 0})
         results = data.get("result") or []
         self._offset = results[-1]["update_id"] + 1 if results else None
+        me = self._call("getMe").get("result")
+        self.username = str(me.get("username") or "").lower() if isinstance(me, dict) else ""
         self._call("setMyCommands", {"commands": [{"command": c, "description": d} for c, d in COMMAND_MENU]})
 
     def _run(self) -> None:
@@ -149,6 +152,18 @@ class TelegramCommandListener:
                 if self._offset is not None:
                     params["offset"] = self._offset
                 data = self._call("getUpdates", params, timeout=self.poll_timeout + 10)
+                if not data.get("ok"):
+                    wait = (data.get("parameters") or {}).get("retry_after")
+                    if wait:  # 429: Telegram'ın istediği kadar bekle
+                        self._stop.wait(float(wait))
+                        continue
+                    code = data.get("error_code")
+                    if code in (401, 404):  # Token geçersiz/iptal edilmiş: uzun bekle, spam yapma
+                        log.error("Telegram komutları alınamıyor: bot token'ı geçersiz (%s). .env'deki "
+                                  "TELEGRAM_BOT_TOKEN'ı kontrol edin.", data.get("description"))
+                        self._stop.wait(300)
+                        continue
+                    raise RuntimeError(f"getUpdates başarısız: {data.get('description')}")
                 for update in data.get("result") or []:
                     self._offset = update["update_id"] + 1
                     self._handle_update(update)
@@ -169,9 +184,13 @@ class TelegramCommandListener:
     def _handle_update(self, update: dict) -> None:
         msg = update.get("message") or {}
         chat_id = str((msg.get("chat") or {}).get("id", ""))
-        cmd = parse_command(msg.get("text", ""))
+        text = (msg.get("text") or "").strip()
+        cmd = parse_command(text)
         if cmd is None:
             return
+        head = text.split(maxsplit=1)[0]
+        if "@" in head and self.username and head.split("@", 1)[1].lower() != self.username:
+            return  # Gruptaki başka bir bota yazılmış komut
         if chat_id != self.chat_id:
             log.warning("Yetkisiz sohbetten komut reddedildi (chat %s): /%s", chat_id, cmd.name)
             if time.time() - self._rejected.get(chat_id, 0) > 3600:

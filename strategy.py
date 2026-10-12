@@ -19,11 +19,12 @@ Ek güvenlik: BTC son 1 saatte sert düşüyorsa (piyasa geneli çöküyorsa) al
 """
 from __future__ import annotations
 
+import time
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 
-from binance_client import BinanceClient
+from binance_client import BinanceClient, RateLimitError
 from exchange import SymbolRules
 from indicators import atr, ema, mean, rsi
 from logger import get_logger
@@ -94,6 +95,7 @@ class ReboundStrategy:
         self.coin_filter = coin_filter  # coin_filters.CoinSafetyFilter (delist / yeni / pompa)
         self.regime = regime            # market_regime.MarketRegime
         self._seen: Dict[str, int] = {}  # Art arda kaç taramada sinyal verdi (teyit için)
+        self._last_scan_at = 0.0
         self.last_btc_1h_pct: Optional[float] = None
 
     # ------------------------------------------------------------ piyasa filtresi
@@ -276,6 +278,8 @@ class ReboundStrategy:
         if self.coin_filter is not None:
             try:
                 self.coin_filter.refresh_delist()
+            except RateLimitError:
+                raise  # Binance istek limiti: tarama durmalı, döngü beklesin
             except Exception as exc:  # noqa: BLE001
                 log.debug("Delist listesi yenilenemedi: %s", exc)
 
@@ -292,6 +296,8 @@ class ReboundStrategy:
                     continue
             try:
                 raw = self.client.klines(symbol, cfg.kline_interval, KLINE_LIMIT)
+            except RateLimitError:
+                raise  # Binance istek limiti: tarama durmalı, döngü beklesin
             except Exception as exc:  # noqa: BLE001 - tek coin hatası taramayı durdurmasın
                 log.debug("%s mum verisi alınamadı: %s", symbol, exc)
                 result.rejects["veri hatası"] += 1
@@ -309,6 +315,11 @@ class ReboundStrategy:
             found[symbol] = signal
 
         # Art arda tarama teyidi: sinyal N taramadır kesintisiz görülüyor mu?
+        # (Slot doluyken / durdurulmuşken tarama yapılmadıysa önceki sayımlar "art arda" sayılmaz.)
+        now = time.time()
+        if now - self._last_scan_at > 2 * cfg.scan_interval_sec:
+            self._seen = {}
+        self._last_scan_at = now
         self._seen = {s: self._seen.get(s, 0) + 1 for s in found}
         for symbol, signal in found.items():
             if self._seen[symbol] >= cfg.signal_confirm_scans:
