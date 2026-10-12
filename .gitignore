@@ -1,0 +1,13 @@
+# Gizli bilgiler — ASLA paylaşmayın / GitHub'a yüklemeyin
+.env
+
+# Botun çalışma verileri
+data/
+logs/
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+.pytest_cache/
