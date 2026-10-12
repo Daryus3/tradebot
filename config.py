@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import FrozenSet, Optional
+from typing import FrozenSet, Optional, Tuple
 
 from dotenv import load_dotenv
 
@@ -25,6 +25,36 @@ DEFAULT_EXCLUDED_ASSETS = frozenset({
     "ZAR", "RUB", "NGN", "PLN", "RON", "ARS", "JPY", "MXN", "COP", "CZK",
     "PAXG", "XUSD", "USD1", "BFUSD", "RLUSD", "USDE", "USDS", "PYUSD",
 })
+
+
+def parse_hhmm(text: str) -> Optional[int]:
+    """'23:55' → gece yarısından itibaren dakika; hatalıysa None."""
+    try:
+        hh, mm = text.strip().split(":")
+        h, m = int(hh), int(mm)
+    except (ValueError, AttributeError):
+        return None
+    return h * 60 + m if 0 <= h < 24 and 0 <= m < 60 else None
+
+
+def parse_time_range(text: str) -> Optional[Tuple[int, int]]:
+    """'23:00-08:00' → (1380, 480); boş/hatalıysa None."""
+    if not text or "-" not in text:
+        return None
+    start, end = (parse_hhmm(x) for x in text.split("-", 1))
+    if start is None or end is None or start == end:
+        return None
+    return start, end
+
+
+def in_time_range(minute_of_day: int, window: Optional[Tuple[int, int]]) -> bool:
+    """Gece yarısını aşan aralıkları da (23:00-08:00) doğru değerlendirir."""
+    if window is None:
+        return False
+    start, end = window
+    if start < end:
+        return start <= minute_of_day < end
+    return minute_of_day >= start or minute_of_day < end
 
 
 class ConfigError(Exception):
@@ -122,6 +152,61 @@ class Config:
     btc_max_1h_drop_pct: float
     excluded_assets: FrozenSet[str]
 
+    # ================= Ek özellikler (varsayılanlı) =================
+    # 1) Binance'te yedek zarar-kes emri (bot ulaşılamazsa devreye girer)
+    backup_stop_enabled: bool = True
+    backup_stop_pct: float = 12.0          # Net zarar % (bot normalde STOP_LOSS_PCT'de kendisi satar)
+    backup_stop_limit_gap_pct: float = 1.0  # STOP_LOSS_LIMIT gerekiyorsa limit fiyatın stop altındaki payı
+    # 4) Başabaş koruması (isteğe bağlı)
+    breakeven_enabled: bool = False
+    breakeven_trigger_pct: float = 5.0     # Net kâr bu seviyeyi görünce koruma başlar
+    breakeven_floor_pct: float = 0.3       # Sonra net kâr bu seviyeye inerse satılır
+    # 5) BTC çökerken açık pozisyonlardan erken çıkış (isteğe bağlı)
+    btc_crash_exit: bool = False
+    btc_crash_drop_pct: float = 2.0        # BTC son X dakikadaki zirvesinden bu kadar düşerse
+    btc_crash_window_min: int = 15
+    # 6) Anlık fiyat akışı (WebSocket)
+    use_websocket: bool = True
+    binance_ws_url: str = "wss://stream.binance.com:9443/ws"
+    ws_position_check_sec: float = 1.0     # Akış canlıyken pozisyon kontrol aralığı
+    # 12) Kesinti uyarısı
+    outage_alert_sec: int = 120            # Döngü bu kadar saniye durursa "bot çalışmadı" uyarısı
+    # 13) İnternet kesintisi
+    wait_for_network: bool = True          # Açılışta internet yoksa kapanmak yerine bekle
+    telegram_queue_max: int = 300          # Gönderilemeyen mesaj kuyruğu üst sınırı
+    # 16-20) Telegram komutları
+    telegram_commands: bool = True
+    command_pin: str = ""                  # Doluysa riskli komut onayı "/evet PIN" ister
+    show_try: bool = True                  # Bakiyeyi TL karşılığıyla da göster
+    # 21) Günlük / haftalık rapor
+    daily_report_time: str = "23:55"       # "" = kapalı
+    weekly_report: bool = True             # Pazar günü haftalık özet
+    # 24) Sessiz saatler ("23:00-08:00", boş = kapalı)
+    quiet_hours: str = ""
+    # 28) Spread filtresi
+    max_spread_pct: float = 0.3
+    slippage_warn_pct: float = 0.5
+    # 29) Tehlikeli coin filtresi
+    delist_filter: bool = True
+    min_listing_days: int = 14
+    pump_filter_pct: float = 50.0          # Son PUMP_LOOKBACK_DAYS günde bu kadar yükselmişse ele
+    pump_lookback_days: int = 3
+    # 30) Sinyal kalitesi
+    min_signal_score: float = 0.0          # 0 = kapalı
+    signal_confirm_scans: int = 1          # 1 = kapalı (2 = sinyal art arda 2 taramada görülmeli)
+    # 31) Oynaklık (ATR) filtresi — 5 dk ATR(14) / fiyat (%)
+    min_atr_pct: float = 0.25
+    max_atr_pct: float = 4.0
+    # 33) Piyasa rejimi
+    regime_filter: bool = True
+    # 37) Ayrıntılı kayıt
+    equity_log_minutes: int = 15           # 0 = kapalı
+
+    @property
+    def quiet_window(self) -> Optional[Tuple[int, int]]:
+        """Sessiz saatler (başlangıç, bitiş) gece yarısından itibaren dakika olarak; kapalıysa None."""
+        return parse_time_range(self.quiet_hours)
+
     @property
     def is_paper(self) -> bool:
         return self.trading_mode == "paper"
@@ -168,6 +253,22 @@ class Config:
             errors.append("MIN_NOTIONAL_SAFETY en az 1.0 olmalı")
         if self.max_candidates < 1:
             errors.append("MAX_CANDIDATES en az 1 olmalı")
+        if not 0 < self.backup_stop_pct < 100:
+            errors.append("BACKUP_STOP_PCT 0-100 arasında olmalı")
+        if self.backup_stop_enabled and self.backup_stop_pct <= self.stop_loss_pct:
+            errors.append("BACKUP_STOP_PCT, STOP_LOSS_PCT'den büyük olmalı (yedek emir botun zarar kesinin altında beklemeli)")
+        if self.breakeven_enabled and not 0 <= self.breakeven_floor_pct < self.breakeven_trigger_pct:
+            errors.append("BREAKEVEN_FLOOR_PCT, BREAKEVEN_TRIGGER_PCT'den küçük olmalı")
+        if self.signal_confirm_scans < 1:
+            errors.append("SIGNAL_CONFIRM_SCANS en az 1 olmalı")
+        if self.min_atr_pct >= self.max_atr_pct:
+            errors.append("MIN_ATR_PCT, MAX_ATR_PCT'den küçük olmalı")
+        if self.ws_position_check_sec <= 0:
+            errors.append("WS_POSITION_CHECK_SEC sıfırdan büyük olmalı")
+        if self.daily_report_time and parse_hhmm(self.daily_report_time) is None:
+            errors.append("DAILY_REPORT_TIME SS:DD biçiminde olmalı (örn. 23:55) veya boş")
+        if self.quiet_hours and parse_time_range(self.quiet_hours) is None:
+            errors.append("QUIET_HOURS SS:DD-SS:DD biçiminde olmalı (örn. 23:00-08:00) veya boş")
         if errors:
             raise ConfigError("Ayar hataları:\n  - " + "\n  - ".join(errors))
 
@@ -223,6 +324,39 @@ def load_config(env_file: Optional[str] = None, mode_override: Optional[str] = N
         btc_filter=_env_bool("BTC_FILTER", True),
         btc_max_1h_drop_pct=_env_float("BTC_MAX_1H_DROP_PCT", 1.5),
         excluded_assets=DEFAULT_EXCLUDED_ASSETS | _env_set("EXCLUDED_ASSETS"),
+        backup_stop_enabled=_env_bool("BACKUP_STOP_ENABLED", True),
+        backup_stop_pct=_env_float("BACKUP_STOP_PCT", 12.0),
+        backup_stop_limit_gap_pct=_env_float("BACKUP_STOP_LIMIT_GAP_PCT", 1.0),
+        breakeven_enabled=_env_bool("BREAKEVEN_ENABLED", False),
+        breakeven_trigger_pct=_env_float("BREAKEVEN_TRIGGER_PCT", 5.0),
+        breakeven_floor_pct=_env_float("BREAKEVEN_FLOOR_PCT", 0.3),
+        btc_crash_exit=_env_bool("BTC_CRASH_EXIT", False),
+        btc_crash_drop_pct=_env_float("BTC_CRASH_DROP_PCT", 2.0),
+        btc_crash_window_min=_env_int("BTC_CRASH_WINDOW_MIN", 15),
+        use_websocket=_env_bool("USE_WEBSOCKET", True),
+        binance_ws_url=_env_str("BINANCE_WS_URL", "wss://stream.binance.com:9443/ws"),
+        ws_position_check_sec=_env_float("WS_POSITION_CHECK_SEC", 1.0),
+        outage_alert_sec=_env_int("OUTAGE_ALERT_SEC", 120),
+        wait_for_network=_env_bool("WAIT_FOR_NETWORK", True),
+        telegram_queue_max=_env_int("TELEGRAM_QUEUE_MAX", 300),
+        telegram_commands=_env_bool("TELEGRAM_COMMANDS", True),
+        command_pin=_env_str("COMMAND_PIN"),
+        show_try=_env_bool("SHOW_TRY", True),
+        daily_report_time=_env_str("DAILY_REPORT_TIME", "23:55"),
+        weekly_report=_env_bool("WEEKLY_REPORT", True),
+        quiet_hours=_env_str("QUIET_HOURS"),
+        max_spread_pct=_env_float("MAX_SPREAD_PCT", 0.3),
+        slippage_warn_pct=_env_float("SLIPPAGE_WARN_PCT", 0.5),
+        delist_filter=_env_bool("DELIST_FILTER", True),
+        min_listing_days=_env_int("MIN_LISTING_DAYS", 14),
+        pump_filter_pct=_env_float("PUMP_FILTER_PCT", 50.0),
+        pump_lookback_days=_env_int("PUMP_LOOKBACK_DAYS", 3),
+        min_signal_score=_env_float("MIN_SIGNAL_SCORE", 0.0),
+        signal_confirm_scans=_env_int("SIGNAL_CONFIRM_SCANS", 1),
+        min_atr_pct=_env_float("MIN_ATR_PCT", 0.25),
+        max_atr_pct=_env_float("MAX_ATR_PCT", 4.0),
+        regime_filter=_env_bool("REGIME_FILTER", True),
+        equity_log_minutes=_env_int("EQUITY_LOG_MINUTES", 15),
     )
     cfg.validate()
     return cfg
