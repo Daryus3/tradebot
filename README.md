@@ -365,7 +365,10 @@ iddialı bir hedeftir; bazı işlemler 60 dakikadan uzun sürebilir. İsterseniz
 - **Giriş taraması** (`--tara-giris`): çıkış ayarlarınız sabit kalır; zayıf piyasada hiç almama
   (`REGIME_SKIP_WEAK`), en fazla 24s düşüş (`MAX_24H_DROP_PCT` .env değeri / 15 / 8), sinyal puanı eşiği
   (0 / verideki sinyallerin ortancası / üst çeyreği) ve hedef alanı (0 / 0.5 / 1) birlikte denenir.
-  `--tara --tara-giris` ikisini aynı veriyle art arda çalıştırır.
+  `--tara --tara-giris` ikisini aynı veriyle art arda çalıştırır. Rapordaki işaretler: ✅ aday (iki yarıda
+  kârlı ve denenen ayar sayısı hesaba katılarak şanstan ayırt edilebiliyor), ≈ iki yarıda kârlı ama şans
+  olabilir, · 30'dan az işlem. Bir satırı sınamak için satırları `.env`'e yazıp `--bitis` ile daha önceki
+  dönemde normal backtest çalıştırın. CSV dosyası Türkçe Excel'e göredir (`;` ayırıcı, `,` ondalık).
 
 ---
 
@@ -393,7 +396,7 @@ iddialı bir hedeftir; bazı işlemler 60 dakikadan uzun sürebilir. İsterseniz
 | `MAX_SPREAD_PCT` | `0.3` | Spread filtresi |
 | `DELIST_FILTER` | `true` | Tehlikeli coin filtresi |
 | `REGIME_FILTER` | `true` | Piyasa rejimi filtresi |
-| `REGIME_SKIP_WEAK` | `false` | `true`: piyasa zayıfken hiç alım yapma (yalnızca kuralları sıkılaştırmak yerine) |
+| `REGIME_SKIP_WEAK` | `false` | `true`: piyasa zayıfken hiç alım yapma (yalnızca kuralları sıkılaştırmak yerine; `REGIME_FILTER=true` gerekir) |
 | `MIN_SIGNAL_SCORE` / `SIGNAL_CONFIRM_SCANS` | `0` / `1` | Sinyal puanı alt sınırı / tarama teyidi (kapalı) |
 | `MIN_ATR_PCT` / `MAX_ATR_PCT` | `0.25` / `4` | Oynaklık filtresi |
 | `MAX_HOLD_MINUTES` | `0` | Maks. pozisyon süresi (0 = sınırsız) |

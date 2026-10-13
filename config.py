@@ -439,6 +439,8 @@ def _setting_notes(cfg: Config) -> List[str]:
     """Hata sayılmayan ama işe yaramayan ayar birleşimleri için uyarılar."""
     notes: List[str] = []
     from risk import breakeven_effective  # risk config'i içe aktarmaz; döngüsel bağımlılık yok
+    if cfg.regime_skip_weak and not cfg.regime_filter:
+        notes.append("REGIME_SKIP_WEAK=true yalnızca REGIME_FILTER=true iken çalışır; şu an etkisi yok.")
     if cfg.breakeven_enabled:
         if not breakeven_effective(cfg):
             first_exit = min(cfg.take_profit_pct, cfg.trailing_activation_pct)

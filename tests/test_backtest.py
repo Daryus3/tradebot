@@ -623,3 +623,65 @@ def test_sweep_candidate_needs_multiple_testing_significance(cfg):
     assert strong.proven(len(rows))
     text2 = format_sweep_report([base, strong] + fillers, cfg, data, kind="giris")
     assert "✅ En tutarlı aday" in text2 and "MIN_ROOM_RATIO=1" in text2
+
+
+def test_sweep_critical_value_uses_student_t_for_few_trades():
+    from backtest import sweep_critical, sweep_z
+    assert sweep_z(60) == pytest.approx(3.34, abs=0.01)
+    assert sweep_critical(54, 30) == pytest.approx(3.69, abs=0.03)    # t(29) Bonferroni 54
+    assert sweep_critical(54, 50) == pytest.approx(3.53, abs=0.03)
+    assert sweep_z(54) < sweep_critical(54, 1000) < sweep_critical(54, 100) < sweep_critical(54, 30)
+
+
+def test_lucky_mark_requires_positive_per_trade_result(cfg):
+    from backtest import BacktestData, SweepRow, format_sweep_report
+    data = BacktestData(series={}, btc=None, regime=None, min_notional=5, start_ms=0, end_ms=10 * 86_400_000,
+                        n=2880, k_start=288, days=9, notes=[])
+    st = {"REGIME_SKIP_WEAK": False, "MAX_24H_DROP_PCT": 15.0, "MIN_SIGNAL_SCORE": 0.0, "MIN_ROOM_RATIO": 0.5}
+    # USDT toplamı pozitif ama işlem başı ortalama negatif (pozisyon büyüklüğü değiştiği için)
+    odd = SweepRow(st, False, 56, 60, 0.45, -0.03, 8, 0.2, 0.25, 1.1, se_net_pct=0.1)
+    base = SweepRow({**st, "MIN_ROOM_RATIO": 0.0}, True, 111, 58, -5.6, -0.65, 51, -5.6, 0.0, 0.6, se_net_pct=0.2)
+    text = format_sweep_report([base, odd], cfg, data, kind="giris")
+    assert "kârlı: 0" in text and "≈" not in text.split("━━━━━━━━━━━━━━━━")[3] and "HİÇBİRİ kârlı değil" in text
+
+
+def test_sweep_csv_is_turkish_excel_friendly(cfg, tmp_path):
+    import csv
+    from backtest import SweepRow, save_sweep_csv
+    st = {"TAKE_PROFIT_PCT": 3.5, "STOP_LOSS_PCT": 2.0, "TRAILING_ACTIVATION_PCT": 1.0, "TRAILING_FLOOR_PCT": 0.5,
+          "MAX_HOLD_MINUTES": 120, "MIN_ROOM_RATIO": 0.0}
+    path = save_sweep_csv([SweepRow(st, True, 40, 61.3, -1.5345, -0.287, 12.5, -0.5, -1.0, 1.234, 0.11)],
+                          tmp_path / "t.csv")
+    with path.open(encoding="utf-8-sig", newline="") as fh:
+        header, row = list(csv.reader(fh, delimiter=";"))
+    cells = dict(zip(header, row))
+    assert cells["TAKE_PROFIT_PCT"] == "3,5" and cells["MAX_HOLD_MINUTES"] == "120"
+    assert cells["islem_basi_net_yuzde"] == "-0,287" and cells["kar_faktoru"] == "1,234"
+    assert cells["net_usdt"] == "-1,5345" and cells["mevcut"] == "evet"
+    assert not any("." in v for v in row)                     # Hiçbir sayı noktayla yazılmadı
+
+
+def test_entry_sweep_regime_variants_and_own_thresholds(cfg, make_client, tmp_path, monkeypatch):
+    import backtest as bt
+    from backtest import entry_combos, prepare_backtest, run_entry_sweep
+    from strategy import Signal
+    no_regime = replace(cfg, regime_filter=False)
+    assert {c["REGIME_SKIP_WEAK"] for c, _ in entry_combos(no_regime, [0.0])} == {False}
+    assert {c["REGIME_SKIP_WEAK"] for c, _ in entry_combos(cfg, [0.0], regime_available=False)} == {False}
+    from config import _setting_notes
+    assert any("REGIME_SKIP_WEAK" in n for n in _setting_notes(replace(no_regime, regime_skip_weak=True)))
+
+    client = make_client({"ABCUSDT": scenario(lambda p: trend(p, 1.03, 8)), "BTCUSDT": btc_flat()})
+    data = prepare_backtest(cfg, client, days=DAYS, cache_dir=tmp_path / "c", progress=None,
+                            symbols=["ABCUSDT"], end_time_ms=END_TIME_MS)
+    shared = {("ZZZUSDT", i, False): Signal("ZZZUSDT", 1.0, 99.0, {}) for i in range(50)}   # Önceki --tara'dan
+    seen = {}
+    real = bt.score_thresholds
+
+    def spy(cache):
+        seen["keys"] = set(cache)
+        return real(cache)
+    monkeypatch.setattr(bt, "score_thresholds", spy)
+    run_entry_sweep(cfg, data, signal_cache=shared)
+    assert seen["keys"] and not any(k[0] == "ZZZUSDT" for k in seen["keys"])   # Eşikler yalnızca kendi sinyallerinden
+    assert any(k[0] == "ABCUSDT" for k in shared)                              # Ortak önbelleğe de eklendi

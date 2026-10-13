@@ -997,13 +997,28 @@ class SweepRow:
         """
         if not (self.enough_trades and self.net > 0 and self.consistent and self.se_net_pct > 0):
             return False
-        return self.mean_net_pct - sweep_z(tested) * self.se_net_pct > 0
+        return self.mean_net_pct - sweep_critical(tested, self.trades) * self.se_net_pct > 0
+
+    @property
+    def profitable(self) -> bool:
+        """Hem toplam USDT hem işlem başı ortalama pozitif (pozisyon büyüklüğü değiştiği için ikisi ayrışabilir)."""
+        return self.net > 0 and self.mean_net_pct > 0
 
 
 def sweep_z(tested: int) -> float:
-    """Denenen ayar sayısına göre (Bonferroni, iki yönlü %5) gereken z değeri: 1 ayar → 1.96, 60 → ~3.1."""
+    """Denenen ayar sayısına göre (Bonferroni, iki yönlü %5) gereken z değeri: 1 ayar → 1.96, 60 → ~3.34."""
     from statistics import NormalDist
     return NormalDist().inv_cdf(1 - 0.05 / (2 * max(1, tested)))
+
+
+def sweep_critical(tested: int, trades: int) -> float:
+    """sweep_z'nin az işlem için Student-t karşılığı (Cornish-Fisher yaklaşımı, serbestlik = işlem - 1).
+
+    Örn. 54 ayar denenmiş ve 30 işlem → ~3.69 (normal dağılımla 3.31 olurdu, fazla gevşek kalırdı).
+    """
+    z = sweep_z(tested)
+    df = max(1, trades - 1)
+    return z + (z ** 3 + z) / (4 * df) + (5 * z ** 5 + 16 * z ** 3 + 3 * z) / (96 * df ** 2)
 
 
 def _current(cfg, keys: Sequence[str]) -> Settings:
@@ -1050,12 +1065,17 @@ def score_thresholds(signal_cache: dict) -> List[float]:
 
 
 def entry_combos(cfg, scores: Sequence[float], max_drops: Sequence[float] = SWEEP_MAX_DROP,
-                 rooms: Sequence[float] = SWEEP_ENTRY_ROOM) -> List[Combo]:
-    """Giriş taraması kombinasyonları (çıkışlar .env'deki gibi); ilk satır mevcut ayarlardır."""
+                 rooms: Sequence[float] = SWEEP_ENTRY_ROOM, regime_available: bool = True) -> List[Combo]:
+    """Giriş taraması kombinasyonları (çıkışlar .env'deki gibi); ilk satır mevcut ayarlardır.
+
+    Piyasa rejimi filtresi kapalıysa (veya BTC verisi yoksa) REGIME_SKIP_WEAK hiçbir şeyi değiştirmez;
+    o durumda aynı satırları iki kez denememek için yalnızca mevcut değeri kullanılır.
+    """
     base = _current(cfg, ENTRY_KEYS)
     drops = sorted({cfg.max_24h_drop_pct, *(d for d in max_drops if d > cfg.min_24h_drop_pct)}, reverse=True)
+    skips = (False, True) if cfg.regime_filter and regime_available else (bool(cfg.regime_skip_weak),)
     combos: List[Combo] = [(base, True)]
-    for skip in (False, True):
+    for skip in skips:
         for drop in drops:
             for score in scores:
                 for room in rooms:
@@ -1087,10 +1107,14 @@ def run_sweep(cfg, data: BacktestData, spread_pct: float = 0.05, progress: Progr
 
 def run_entry_sweep(cfg, data: BacktestData, spread_pct: float = 0.05, progress: Progress = None,
                     signal_cache: Optional[dict] = None) -> List[SweepRow]:
-    """Giriş taraması: önce mevcut ayarlar çalışır (puan eşikleri onun sinyallerinden çıkar), sonra diğerleri."""
+    """Giriş taraması: önce mevcut ayarlar çalışır (puan eşikleri YALNIZCA onun sinyallerinden çıkar; önceki
+    bir --tara'nın önbelleği eşikleri değiştirmez), sonra diğerleri."""
     cache = signal_cache if signal_cache is not None else {}
-    base = run_sweep(cfg, data, spread_pct, None, [(_current(cfg, ENTRY_KEYS), True)], cache)
-    combos = entry_combos(cfg, score_thresholds(cache))[1:]
+    own: dict = {}
+    base = run_sweep(cfg, data, spread_pct, None, [(_current(cfg, ENTRY_KEYS), True)], own)
+    thresholds = score_thresholds(own)
+    cache.update(own)
+    combos = entry_combos(cfg, thresholds, regime_available=data.regime is not None)[1:]
     return base + run_sweep(cfg, data, spread_pct, progress, combos, cache)
 
 
@@ -1107,8 +1131,13 @@ def _env_lines(r: SweepRow) -> List[str]:
     return [f"{k}={_fmt_setting(k, v)}" for k, v in r.settings.items()]
 
 
+def _csv_num(text: str) -> str:
+    """Türkçe Excel: alan ayırıcı ';' iken ondalık ayırıcı ',' olmalı (yoksa 3.5 tarihe, 1.234 bine dönüşür)."""
+    return text.replace(".", ",")
+
+
 def save_sweep_csv(rows: Sequence[SweepRow], path: Union[str, Path]) -> Path:
-    """Tüm tarama satırlarını Excel ile açılabilir CSV'ye yazar."""
+    """Tüm tarama satırlarını Türkçe Excel'in doğrudan açabileceği CSV'ye yazar (';' ve ondalık ',')."""
     import csv
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1120,11 +1149,19 @@ def save_sweep_csv(rows: Sequence[SweepRow], path: Union[str, Path]) -> Path:
                                 "standart_hata", "aday"])
         for r in rows:
             pf = "" if r.profit_factor is None or math.isinf(r.profit_factor) else f"{r.profit_factor:.3f}"
-            writer.writerow([_fmt_setting(k, r.settings[k]) if k in r.settings else "" for k in keys] + [
-                "evet" if r.baseline else "", r.trades, f"{r.win_rate:.1f}", f"{r.net:.4f}",
+            values = [_fmt_setting(k, r.settings[k]) if k in r.settings else "" for k in keys] + [
+                "evet" if r.baseline else "", str(r.trades), f"{r.win_rate:.1f}", f"{r.net:.4f}",
                 f"{r.mean_net_pct:.3f}", f"{r.max_dd_pct:.2f}", f"{r.first_net:.4f}", f"{r.second_net:.4f}", pf,
-                f"{r.se_net_pct:.4f}", "evet" if r.proven(len(rows)) else ""])
+                f"{r.se_net_pct:.4f}", "evet" if r.proven(len(rows)) else ""]
+            writer.writerow([_csv_num(v) for v in values])
     return path
+
+
+def _validation_lines(data: BacktestData) -> List[str]:
+    """Bir satırı bağımsız (çakışmayan, daha önceki) dönemde sınama talimatı."""
+    return ["   Bu satırları .env'e yazın (aynı isimli eski satırları silin) ve test edilen dönemle ÇAKIŞMAYAN",
+            f"   önceki dönemde deneyin: python main.py --backtest --gun {data.days:g} --bitis "
+            f"{_fmt_date(data.sim_start_ms)}"]
 
 
 def _rank(rows: Sequence[SweepRow]) -> List[SweepRow]:
@@ -1147,9 +1184,9 @@ def format_sweep_report(rows: Sequence[SweepRow], cfg, data: BacktestData, sprea
     if base is not None and base not in shown:
         shown = shown + [base]
     few = [r for r in rows if not r.enough_trades]
-    profitable = [r for r in rows if r.net > 0]
+    profitable = [r for r in rows if r.profitable]
     robust = [r for r in ranked if r.proven(len(rows))]
-    lucky = [r for r in ranked if r.net > 0 and r.consistent and r.enough_trades and not r.proven(len(rows))]
+    lucky = [r for r in ranked if r.profitable and r.consistent and r.enough_trades and not r.proven(len(rows))]
     columns = [k for k in dict.fromkeys(k for r in rows for k in r.settings) if SWEEP_FIELDS[k][2]]
 
     title = ("🧪 GİRİŞ TARAMASI (aynı veriyle farklı giriş filtreleri; çıkışlar .env'deki gibi)" if entry
@@ -1215,8 +1252,9 @@ def format_sweep_report(rows: Sequence[SweepRow], cfg, data: BacktestData, sprea
             "   çıkması beklenir — tamamen rastgele fiyat verisinde bile. Canlıya geçmek için yeterli kanıt yok.",
         ]
         if lucky:
-            lines.append(f"   ≈ işaretli {len(lucky)} ayarı yine de daha önceki bir dönemde deneyebilirsiniz (aşağıdaki "
-                         f"--bitis komutu); orada da kârlı çıkan ayar ciddiye alınabilir.")
+            lines.append(f"   ≈ işaretli {len(lucky)} ayardan en iyisini yine de daha önceki bir dönemde sınayabilirsiniz:")
+            lines += [f"      {line}" for line in _env_lines(lucky[0])]
+            lines += _validation_lines(data)
     else:
         cand = robust[0]
         lines += [
@@ -1224,12 +1262,14 @@ def format_sweep_report(rows: Sequence[SweepRow], cfg, data: BacktestData, sprea
             "   .env dosyanızdaki şu satırları DEĞİŞTİRİN (aynı isimli eski satırları silin):",
         ] + [f"      {line}" for line in _env_lines(cand)] + [
             f"   (İşlem başı sonucun alt sınırı, {len(rows)} ayar denendiği hesaba katılarak sıfırın üstünde.)",
-            "   Yine de: çok ayar denendiği için en iyi sonuç iyimserdir. Önce bu ayarı test edilen dönemle",
-            "   ÇAKIŞMAYAN daha önceki bir dönemde deneyin (aşağıdaki --bitis komutu); orada da kârlıysa",
-            "   birkaç gün TEST modunda izleyin. --gun 30 / 60 aynı dönemin parçasıdır, bağımsız kanıt sayılmaz.",
+            "   Yine de: çok ayar denendiği için en iyi sonuç iyimserdir.",
+        ] + _validation_lines(data) + [
+            "   Orada da kârlıysa birkaç gün TEST modunda izleyin. --gun 30 / 60 aynı dönemin parçasıdır,",
+            "   bağımsız kanıt sayılmaz.",
         ]
     flag = "--tara-giris" if entry else "--tara"
-    lines.append(f"🔁 Bağımsız dönem (bu testten önceki {data.days:g} gün): python main.py --backtest --gun "
+    note = " (puan eşikleri o dönemin verisinden yeniden hesaplanır)" if entry else ""
+    lines.append(f"🔁 Aynı taramayı önceki {data.days:g} günde yapmak için{note}: python main.py --backtest --gun "
                  f"{data.days:g} {flag} --bitis {_fmt_date(data.sim_start_ms)}")
     lines.append("📝 Kayma (slippage) yok, 5 dk mum çözünürlüğü, bugünün en hacimli coinleri (hayatta kalma "
                  "yanlılığı). Geçmiş sonuçlar geleceği garanti etmez.")
