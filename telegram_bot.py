@@ -52,6 +52,12 @@ def fmt_usdt(x: float) -> str:
     return f"{x:.2f}"
 
 
+def fmt_rate(rate: float) -> str:
+    """Komisyon oranı: 0.001 → '%0.10', 0.00075 → '%0.075'."""
+    text = f"{rate * 100:.3f}"
+    return "%" + (text[:-1] if text.endswith("0") else text)
+
+
 def fmt_signed(x: float, d: int = 2) -> str:
     return f"{x:+.{d}f}"
 
@@ -313,7 +319,7 @@ class Messages:
             f" (K/Z: {fmt_signed(realized)})\n"
             f"🎯 Kâr Al: +%{cfg.take_profit_pct:g} | 🛑 Zarar Kes: -%{cfg.stop_loss_pct:g}\n"
             f"📈 İzleyen Stop: {trailing}\n"
-            f"💸 Komisyon: %{cfg.fee_rate * 100:.2f} (alış + satış, net hesaplanır)\n"
+            f"💸 Komisyon: {fmt_rate(cfg.fee_rate)} (alış + satış, net hesaplanır)\n"
             f"☠️ Kill-switch: toplam zarar sermayenin %{loss_pct:.4g}'i "
             f"(şu an {fmt_usdt(loss_limit)} {cfg.quote_asset}){hold}\n"
             f"📦 Aynı anda pozisyon: şu an <b>{slots}</b> (ayar: en fazla {cfg.max_open_positions}, "
@@ -438,6 +444,25 @@ class Messages:
     @staticmethod
     def warning(text: str) -> str:
         return f"⚠️ <b>Uyarı</b>\n{esc(text)}"
+
+    @staticmethod
+    def info(text: str) -> str:
+        return f"ℹ️ <b>Bilgi</b>\n{esc(text)}"
+
+    @staticmethod
+    def bnb_status(info, position_usdt: float, quote: str = "USDT") -> str:
+        """BNB indirimi durumu (düz metin), örn. 'BNB indirimi: açık (%0.075, BNB ≈ 3.00 USDT ≈ 90 işlem)'."""
+        if info.bnb_active:
+            left = info.bnb_trades(position_usdt)
+            if left is None:  # BNB fiyatı öğrenilemedi
+                value = f", {fmt_qty(info.bnb_free)} BNB"
+            else:
+                count = f"≈ {int(left)}" if left >= 1 else "< 1"
+                value = f", BNB ≈ {fmt_usdt(info.bnb_value)} {quote} {count} işlem"
+            return f"BNB indirimi: açık ({fmt_rate(info.effective_rate)}{value})"
+        if info.bnb_enabled:
+            return f"BNB indirimi: açık ama BNB yok ({fmt_rate(info.taker)} kesiliyor)"
+        return "BNB indirimi: kapalı"
 
     @staticmethod
     def stopped(balance: float, realized: float, cfg, open_symbols: Optional[List[str]] = None,

@@ -201,6 +201,9 @@ class Config:
     regime_filter: bool = True
     # 37) Ayrıntılı kayıt
     equity_log_minutes: int = 15           # 0 = kapalı
+    # 38) BNB ile komisyon indirimi takibi: yalnızca izler ve uyarır (BNB ALMAZ, Binance ayarını değiştirmez)
+    bnb_fee_check: bool = True             # false = komisyon/BNB kontrolü tamamen kapalı
+    bnb_min_trades: int = 20               # BNB bundan az al-sat işlemine yetecekse uyar (0 = uyarma)
     # Eski sabit USDT kill-switch ayarı (MAX_TOTAL_LOSS_USDT). Yalnızca MAX_TOTAL_LOSS_PCT yazılmamışsa dolu.
     legacy_loss_usdt: Optional[float] = None
     # Ayar okunurken oluşan uyarılar (eski ayar adı, işe yaramayan değer...). Bot açılırken gösterilir.
@@ -295,6 +298,8 @@ class Config:
             errors.append("DAILY_REPORT_TIME SS:DD biçiminde olmalı (örn. 23:55) veya boş")
         if self.quiet_hours and parse_time_range(self.quiet_hours) is None:
             errors.append("QUIET_HOURS SS:DD-SS:DD biçiminde olmalı (örn. 23:00-08:00) veya boş")
+        if self.bnb_min_trades < 0:
+            errors.append("BNB_MIN_TRADES 0 veya daha büyük olmalı (0 = az BNB uyarısı kapalı)")
         if errors:
             raise ConfigError("Ayar hataları:\n  - " + "\n  - ".join(errors))
 
@@ -385,6 +390,8 @@ def load_config(env_file: Optional[str] = None, mode_override: Optional[str] = N
         max_atr_pct=_env_float("MAX_ATR_PCT", 4.0),
         regime_filter=_env_bool("REGIME_FILTER", True),
         equity_log_minutes=_env_int("EQUITY_LOG_MINUTES", 15),
+        bnb_fee_check=_env_bool("BNB_FEE_CHECK", True),
+        bnb_min_trades=_env_int("BNB_MIN_TRADES", 20),
     )
     cfg.validate()
     notes += _setting_notes(cfg)

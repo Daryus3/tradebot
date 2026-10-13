@@ -403,6 +403,7 @@ class CommandProcessor:
             f"🧷 Binance yedek stop: {on(cfg.backup_stop_enabled)} (-%{cfg.backup_stop_pct:g})\n"
             f"🔒 Başabaş: {on(cfg.breakeven_enabled)} | 📉 BTC çöküş çıkışı: {on(cfg.btc_crash_exit)}\n"
             f"↔️ Maks. spread: %{cfg.max_spread_pct:g} | 🌡️ Piyasa rejimi filtresi: {on(cfg.regime_filter)}\n"
+            f"{esc(self.bot.fee_status_line())}\n"
             f"⏱️ Tarama: {cfg.scan_interval_sec} sn | Maks. tutma: "
             f"{str(cfg.max_hold_minutes) + ' dk' if cfg.max_hold_minutes else 'sınırsız'}\n"
             "<i>Ayarlar bilgisayardaki .env dosyasından değiştirilir.</i>")

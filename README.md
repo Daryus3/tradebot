@@ -22,7 +22,7 @@ komutla yönetilebilir.
 | 🎯 Kâr Al | Net kâr **+%15** → ≈ **12.65 USDT** olunca satar |
 | 🛑 Zarar Kes | Net zarar **−%10** → ≈ **9.90 USDT** olunca satar |
 | 📈 İzleyen Stop | Net kâr bir kez **+%10** (≈12.10) görülür, sonra **+%5**'e (≈11.55) düşerse anında satar |
-| 💸 Komisyon | Alış ve satışta **%0.1** (BNB'siz). Tüm kararlar komisyon **düşüldükten sonraki net** paraya göre verilir |
+| 💸 Komisyon | Alış ve satışta **%0.1** (BNB ile ödenirse %0.075). Tüm kararlar komisyon **düşüldükten sonraki net** paraya göre verilir |
 | ☠️ Kill-switch | Toplam zarar sermayenin **%45**'ine (11 USDT'de ≈ **4.95 USDT**) ulaşırsa tüm açık pozisyonları satar, botu kapatır ve kilitler. Yüzde olduğu için sermaye büyüdükçe limit de büyür |
 | 🔍 Tarama | Piyasa **30 sn**'de bir taranır; açık pozisyon **~1 sn**'de (anlık fiyat akışı) bir kontrol edilir |
 | 📨 Telegram | Alım, satım, kâr/zarar, bakiye, hatalar → emojili anlık mesajlar |
@@ -33,7 +33,7 @@ komutla yönetilebilir.
 | Özellik | Ne yapar? |
 |---|---|
 | 🧷 Binance'te yedek zarar-kes | Her alımdan sonra Binance'e −%12'de bekleyen bir stop emri bırakır. **Bilgisayar kapalı, uykuda veya internetsizken bile** pozisyon korunur |
-| 🔄 Hesap mutabakatı | Açılışta Binance ile karşılaştırma yapar: bot kapalıyken stop çalıştıysa veya coini elle sattıysanız **gerçek satış fiyatını** kaydeder; internet kesintisinde sonucu belirsiz kalan alımı bulup takibe alır; gerçek komisyon oranınızı kontrol eder |
+| 🔄 Hesap mutabakatı | Açılışta Binance ile karşılaştırma yapar: bot kapalıyken stop çalıştıysa veya coini elle sattıysanız **gerçek satış fiyatını** kaydeder; internet kesintisinde sonucu belirsiz kalan alımı bulup takibe alır; gerçek komisyon oranınızı (BNB indirimi dahil) ve BNB bakiyenizi saatte bir kontrol eder |
 | ♻️ Otomatik yeniden başlatma | `watchdog.py` (veya `BASLAT.bat`) ile bot çökerse kendiliğinden yeniden açılır. İsterseniz Windows açılışında başlar |
 | ⏰ Kesinti uyarısı | Bilgisayar uykuya geçip uyanınca veya bot uzun süre kapalı kalınca "Bot 47 dk çalışmadı" uyarısı |
 | 📶 İnternet kesintisi | Telegram mesajları kaybolmaz, bağlantı gelince gönderilir; açılışta internet yoksa bot bekler |
@@ -284,6 +284,19 @@ Kâr ettikçe pozisyon sayısı artar, zarar ettikçe azalır. Her zaman tek poz
 - Bu yüzden fiyat tam %15 artınca değil, komisyonlar karşılandıktan sonra **net %15** olunca satılır
   (fiyat olarak yaklaşık %15.2-15.3 artış gerekir).
 
+### 🪙 BNB ile komisyon indirimi (isteğe bağlı)
+- Binance'te komisyonu BNB ile öderseniz **%25 indirim** alırsınız (%0.1 → **%0.075**). Açmak için Binance'te
+  Kontrol Paneli / Ücret Oranı sayfasındaki **"BNB ile komisyon öde"** (Pay fees with BNB) anahtarını açın
+  ve Spot cüzdanınızda biraz BNB tutun. Ardından `.env` içinde `FEE_RATE=0.00075` yapın.
+- BNB biterse Binance uyarı vermeden komisyonu yine %0.1 olarak alınan coinden / USDT'den keser.
+  Bot bunu **yalnızca izler**: açılışta ve saatte bir gerçek oranı okur; `FEE_RATE` gerçek orandan düşükse
+  (net kâr al / zarar kes hesabı fazla iyimser kalır) ya da BNB'niz `BNB_MIN_TRADES` (20) al-sat işleminden
+  azına yetecek kadar kaldıysa Telegram'dan uyarır. `FEE_RATE` gerçek orandan yüksekse yalnızca bilgi verir
+  (bot temkinli hesaplar). Durumu `/ayarlar` komutunda ve self-test'te de görürsünüz.
+- Bot Binance'teki bu ayarı **değiştirmez** ve **otomatik BNB almaz**: en küçük emir ~5 USDT olduğu için
+  11 USDT'lik hesapta paranın yarısına yakını oynak bir coine bağlanırdı; kazanç ise taraf başına yalnızca
+  %0.025 (11 USDT'lik bir al-satta ≈0.0055 USDT). BNB'yi isterseniz kendiniz, az miktarda alın.
+
 ### ☠️ Kill-switch
 Toplam (gerçekleşen + tüm açık pozisyonlardaki) zarar, botun sermayesinin `MAX_TOTAL_LOSS_PCT` yüzdesine
 (varsayılan **%45** → 11 USDT'de ≈4.95 USDT) ulaştığında bot açık pozisyonların hepsini satar,
@@ -342,7 +355,8 @@ iddialı bir hedeftir; bazı işlemler 60 dakikadan uzun sürebilir. İsterseniz
 | `TAKE_PROFIT_PCT` | `15` | Net kâr hedefi (%) |
 | `STOP_LOSS_PCT` | `10` | Net zarar limiti (%) |
 | `TRAILING_ACTIVATION_PCT` / `TRAILING_FLOOR_PCT` | `10` / `5` | İzleyen stop |
-| `FEE_RATE` | `0.001` | Komisyon oranı (%0.1) |
+| `FEE_RATE` | `0.001` | Komisyon oranı (%0.1; komisyonu BNB ile ödüyorsanız `0.00075`) |
+| `BNB_FEE_CHECK` / `BNB_MIN_TRADES` | `true` / `20` | Komisyon ve BNB bakiyesi takibi (yalnızca uyarır, BNB almaz) |
 | `BACKUP_STOP_ENABLED` / `BACKUP_STOP_PCT` | `true` / `12` | Binance'teki yedek zarar-kes emri |
 | `BREAKEVEN_ENABLED` / `BREAKEVEN_TRIGGER_PCT` | `true` / `5` | Başabaş koruması (TRIGGER, izleyen stop başlangıcından küçük olmalı) |
 | `BTC_CRASH_EXIT` | `false` | BTC çöküşünde erken çıkış |

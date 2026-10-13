@@ -26,6 +26,10 @@ class FakeBinance:
         self.fail_next_order_network = False   # Bir sonraki emirde ağ hatası (emir yine de gerçekleşir)
         self.fail_get_order = False
         self.taker = 0.001
+        self.discount_block = None     # commission yanıtındaki "discount" kısmı (None = yanıtta yok)
+        self.bnb_fees = False          # True: indirim açık ve BNB yetiyorsa komisyon BNB'den kesilir
+        self.bnb_ref_price = 600.0     # BNB komisyonu için iç fiyat (BNBUSDT fiyat listesinde olmasa da)
+        self.commission_calls = 0
 
     # ------------------------------------------------------------ herkese açık
     def sync_time(self):
@@ -63,8 +67,34 @@ class FakeBinance:
             {"asset": a, "free": f"{self.free.get(a, 0):.8f}", "locked": f"{self.locked.get(a, 0):.8f}"}
             for a in sorted(assets)]}
 
+    def api_restrictions(self):
+        return {"enableWithdrawals": False, "enableSpotAndMarginTrading": True, "ipRestrict": True}
+
+    def set_bnb_discount(self, account=True, symbol=True, discount="0.25000000", asset="BNB"):
+        """Binance'teki "BNB ile komisyon öde" durumu (hesap / parite bayrakları)."""
+        self.discount_block = {"enabledForAccount": account, "enabledForSymbol": symbol,
+                               "discountAsset": asset, "discount": discount}
+
     def commission_rates(self, symbol):
-        return {"standardCommission": {"maker": "0.001", "taker": str(self.taker)}}
+        self.commission_calls += 1
+        data = {"symbol": symbol,
+                "standardCommission": {"maker": "0.001", "taker": str(self.taker), "buyer": "0", "seller": "0"}}
+        if self.discount_block is not None:
+            data["discount"] = dict(self.discount_block)
+        return data
+
+    def _bnb_fee(self, notional):
+        """Binance gibi: indirim hesapta ve paritede açıksa ve yeterli BNB varsa komisyonu indirimli
+        olarak BNB'den keser; yoksa None (komisyon normal şekilde coinden/USDT'den kesilir)."""
+        d = self.discount_block
+        if not (self.bnb_fees and d and d["enabledForAccount"] is True and d["enabledForSymbol"] is True
+                and d["discountAsset"] == "BNB"):
+            return None
+        fee = notional * self.FEE * (1 - float(d["discount"])) / self.prices.get("BNBUSDT", self.bnb_ref_price)
+        if fee > self.free.get("BNB", 0.0):
+            return None
+        self._add(self.free, "BNB", -fee)
+        return fee
 
     def _add(self, book, asset, amount):
         book[asset] = book.get(asset, 0.0) + amount
@@ -82,18 +112,20 @@ class FakeBinance:
             qty = int(float(quote_order_qty) / price / 0.01) * 0.01
             if qty * price > self.free.get("USDT", 0) + 1e-9:
                 raise BinanceAPIError(400, -2010, "Account has insufficient balance for requested action.")
-            fee = qty * self.FEE
+            bnb = self._bnb_fee(qty * price)
+            fee = 0.0 if bnb is not None else qty * self.FEE
             self._add(self.free, "USDT", -qty * price)
             self._add(self.free, base, qty - fee)
-            comm, comm_asset = fee, base
+            comm, comm_asset = (bnb, "BNB") if bnb is not None else (fee, base)
         else:
             qty = float(quantity)
             if qty > self.free.get(base, 0) + 1e-9:
                 raise BinanceAPIError(400, -2010, "Account has insufficient balance for requested action.")
-            fee = qty * price * self.FEE
+            bnb = self._bnb_fee(qty * price)
+            fee = 0.0 if bnb is not None else qty * price * self.FEE
             self._add(self.free, base, -qty)
             self._add(self.free, "USDT", qty * price - fee)
-            comm, comm_asset = fee, "USDT"
+            comm, comm_asset = (bnb, "BNB") if bnb is not None else (fee, "USDT")
         order = {"symbol": symbol, "orderId": oid, "clientOrderId": client_order_id or f"x{oid}", "side": side,
                  "type": "MARKET", "status": "FILLED", "executedQty": f"{qty:.8f}",
                  "cummulativeQuoteQty": f"{qty * price:.8f}"}

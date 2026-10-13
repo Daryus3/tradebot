@@ -21,12 +21,12 @@ from decimal import Decimal
 from typing import List, Tuple
 
 from binance_client import BinanceClient
-from exchange import PaperExchange, SymbolRules, parse_symbol_rules
+from exchange import LiveExchange, PaperExchange, SymbolRules, parse_symbol_rules
 from logger import get_logger
 from risk import (ExitReason, Position, evaluate_exit, kill_switch_hit, min_position_usdt, net_exit_value,
                   plan_entry, pnl_pct, position_slots, price_for_pnl, update_breakeven, update_trailing)
 from strategy import ReboundStrategy
-from telegram_bot import LINE, TelegramNotifier, esc, fmt_price, fmt_usdt
+from telegram_bot import LINE, Messages, TelegramNotifier, esc, fmt_price, fmt_rate, fmt_usdt
 
 log = get_logger()
 
@@ -143,7 +143,7 @@ def run_selftest(cfg) -> int:
     mode = "TEST (paper)" if cfg.is_paper else "CANLI"
     results.append((WARN if cfg.notes else OK, "Ayarlar",
                     f"Mod: {mode}, sermaye {cfg.start_capital:g} {cfg.quote_asset}, "
-                    f"komisyon %{cfg.fee_rate * 100:.2f}, en fazla {cfg.max_open_positions} pozisyon"
+                    f"komisyon {fmt_rate(cfg.fee_rate)}, en fazla {cfg.max_open_positions} pozisyon"
                     + "".join(f"\n     ⚠️ {note}" for note in cfg.notes)))
 
     # 2) Risk motoru
@@ -293,11 +293,7 @@ def _check_api_keys(cfg, client: BinanceClient) -> Result:
             log.debug("API kısıtlamaları okunamadı: %s", exc)
         detail = f"Serbest bakiye: {free:.2f} {cfg.quote_asset}"
         try:
-            taker = float(client.commission_rates("BTCUSDT")["standardCommission"]["taker"])
-            detail += f" | komisyon %{taker * 100:.3f}"
-            if abs(taker - cfg.fee_rate) > 1e-6:
-                problems.append(f"gerçek komisyon %{taker * 100:.3f}, FEE_RATE ayarı %{cfg.fee_rate * 100:.3f} "
-                                f"(.env'de FEE_RATE={taker:g} yapın)")
+            detail += _check_fees(cfg, client, problems)
         except Exception as exc:  # noqa: BLE001
             log.debug("Komisyon oranı okunamadı: %s", exc)
         if free < cfg.start_capital:
@@ -309,3 +305,27 @@ def _check_api_keys(cfg, client: BinanceClient) -> Result:
         return (OK, title, detail + " | işlem izni var, çekim izni kapalı")
     except Exception as exc:  # noqa: BLE001
         return (FAIL, title, str(exc))
+
+
+def _check_fees(cfg, client: BinanceClient, problems: List[str]) -> str:
+    """Komisyon ve BNB indirimi (yalnızca okur). FEE_RATE kuralı botla aynı: ayar gerçek orandan
+    düşükse uyarı (hesap fazla iyimser), yüksekse yalnızca bilgi (hesap temkinli)."""
+    info = LiveExchange(client, cfg.quote_asset, cfg.fee_rate).fee_info(f"BTC{cfg.quote_asset}")
+    position = cfg.start_capital / position_slots(cfg.start_capital, 5.0, cfg)
+    detail = f" | komisyon {fmt_rate(info.taker)} | {Messages.bnb_status(info, position, cfg.quote_asset)}"
+    status, real = info.fee_rate_status(cfg.fee_rate), info.effective_rate
+    if status == "optimistic":
+        problems.append(f"gerçek komisyon {fmt_rate(real)}, FEE_RATE ayarı {fmt_rate(cfg.fee_rate)}: net kâr/zarar "
+                        f"hesabı fazla iyimser (.env'de FEE_RATE={info.taker:g} yapın veya BNB indirimini kullanın)")
+    elif status == "conservative":
+        detail += f" | FEE_RATE {fmt_rate(cfg.fee_rate)}, temkinli hesap (isterseniz FEE_RATE={real:g})"
+    if cfg.bnb_fee_check and cfg.bnb_min_trades > 0 and info.bnb_enabled and info.discount > 0:
+        left = info.bnb_trades(position)
+        if left is not None and left < cfg.bnb_min_trades and not (left <= 0 and status == "optimistic"):
+            if left <= 0:
+                what = "Spot'ta BNB olmadığı için indirim uygulanmıyor"
+            else:
+                enough = f"yalnızca ~{int(left)} işleme yetiyor" if left >= 1 else "bir işleme bile yetmiyor"
+                what = f"BNB {enough}; bitince komisyon {fmt_rate(info.taker)}'a döner"
+            problems.append(f"{what} (bot otomatik BNB almaz, Binance'ten kendiniz alın)")
+    return detail

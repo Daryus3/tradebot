@@ -169,6 +169,79 @@ def combine_fills(fills: List[Fill]) -> Optional[Fill]:
                 ",".join(f.order_id for f in fills if f.order_id))
 
 
+BNB = "BNB"
+
+
+def _flag(value) -> bool:
+    """Binance bayrağı: JSON true veya "true" metni (bool("false") True olacağı için ayrı kontrol)."""
+    return value is True or str(value).strip().lower() == "true"
+
+
+@dataclass(frozen=True)
+class FeeInfo:
+    """Hesabın gerçek komisyon durumu (BNB indirimi dahil). Yalnızca okunur bilgidir.
+
+    Binance komisyonu BNB'den ancak hem hesapta hem paritede "BNB ile komisyon öde" açıksa VE yeterli
+    serbest BNB varsa keser; yoksa sessizce alınan coinden/USDT'den tam oranla keser.
+    """
+    taker: float                # Standart taker oranı (0.001 = %0.1)
+    discount: float = 0.0       # BNB ile ödemedeki İNDİRİM payı (0.25 = %25 indirim)
+    bnb_enabled: bool = False   # Hesapta ve paritede BNB ile ödeme açık (discountAsset BNB)
+    bnb_free: float = 0.0       # Serbest BNB bakiyesi
+    bnb_usdt: float = 0.0       # BNB fiyatı (USDT); öğrenilemediyse veya BNB yoksa 0
+
+    @property
+    def discounted_rate(self) -> float:
+        """BNB ile ödenince uygulanan oran (%0.1 → %0.075)."""
+        return round(self.taker * (1 - self.discount), 10)
+
+    @property
+    def bnb_active(self) -> bool:
+        """İndirim şu an gerçekten uygulanıyor mu (açık ve BNB var)?"""
+        return self.bnb_enabled and self.bnb_free > 0
+
+    @property
+    def effective_rate(self) -> float:
+        return self.discounted_rate if self.bnb_active else self.taker
+
+    @property
+    def bnb_value(self) -> float:
+        return self.bnb_free * self.bnb_usdt
+
+    def bnb_trades(self, position_usdt: float) -> Optional[float]:
+        """BNB bakiyesi bu büyüklükte kaç al-sat (alış + satış) işleminin komisyonuna yeter?
+        BNB yoksa 0; BNB fiyatı bilinmiyorsa None."""
+        if self.bnb_free <= 0:
+            return 0.0
+        per_trade = 2 * position_usdt * self.discounted_rate
+        if self.bnb_usdt <= 0 or per_trade <= 0:
+            return None
+        return self.bnb_value / per_trade
+
+    def fee_rate_status(self, cfg_rate: float) -> str:
+        """FEE_RATE ayarı gerçek orana göre: "ok", "conservative" (ayar yüksek, hesap temkinli) veya
+        "optimistic" (ayar düşük: net kâr al / zarar kes hesapları fazla iyimser)."""
+        real = self.effective_rate
+        if abs(cfg_rate - real) <= 1e-6:
+            return "ok"
+        return "conservative" if cfg_rate > real else "optimistic"
+
+
+def parse_fee_info(commission: dict, bnb_free: float = 0.0, bnb_usdt: float = 0.0) -> FeeInfo:
+    """`/api/v3/account/commission` yanıtını FeeInfo'ya çevirir. `discount` kısmı yoksa veya
+    indirim varlığı BNB değilse indirim yok sayılır."""
+    taker = float(commission["standardCommission"]["taker"])
+    block = commission.get("discount")
+    discount, enabled = 0.0, False
+    if isinstance(block, dict) and str(block.get("discountAsset", "")).upper() == BNB:
+        try:
+            discount = min(max(float(block.get("discount") or 0), 0.0), 1.0)
+        except (TypeError, ValueError):
+            discount = 0.0
+        enabled = _flag(block.get("enabledForAccount")) and _flag(block.get("enabledForSymbol"))
+    return FeeInfo(taker, discount, enabled, max(0.0, bnb_free), max(0.0, bnb_usdt))
+
+
 @dataclass
 class BackupStop:
     """Binance'te bekleyen yedek zarar-kes emri."""
@@ -279,6 +352,10 @@ class BaseExchange:
         """Hesaba uygulanan gerçek komisyon oranı (sadece canlı modda)."""
         return None
 
+    def fee_info(self, symbol: str = "BTCUSDT") -> Optional[FeeInfo]:
+        """Komisyon ve BNB indirimi durumu (sadece canlı modda)."""
+        return None
+
     def market_buy(self, symbol: str, quote_amount: float) -> Fill:
         raise NotImplementedError
 
@@ -384,6 +461,10 @@ class LiveExchange(BaseExchange):
     """Gerçek Binance hesabı. DİKKAT: Gerçek para ile emir verir."""
 
     name = "live"
+
+    def __init__(self, client: BinanceClient, quote_asset: str = "USDT", fee_rate: float = 0.001):
+        super().__init__(client, quote_asset, fee_rate)
+        self.last_fee_info: Optional[FeeInfo] = None  # Son fee_info() sonucu (BNB komisyon tahmini için)
 
     def balances(self) -> Dict[str, float]:
         acc = self.client.account()
@@ -500,14 +581,15 @@ class LiveExchange(BaseExchange):
         qty = sum(float(t["qty"]) for t in sells)
         quote = sum(float(t["quoteQty"]) for t in sells)
         fee = 0.0
+        prices: Dict[str, float] = {}
         for t in sells:
             c, asset = float(t.get("commission") or 0), t.get("commissionAsset", "")
             if asset == rules.quote_asset:
                 fee += c
             elif asset == rules.base_asset:
                 fee += c * float(t["price"])
-            else:
-                fee += c * self._asset_usdt_price(asset)
+            elif c > 0:
+                fee += self._commission_usdt(asset, c, float(t.get("quoteQty") or 0), prices)
         return Fill(symbol, "SELL", qty, quote / qty if qty else 0.0, quote - fee, fee, "EXTERNAL")
 
     def recover_order(self, symbol: str, client_order_id: str, side: str) -> Optional[Fill]:
@@ -525,6 +607,31 @@ class LiveExchange(BaseExchange):
     def taker_fee_rate(self, symbol: str) -> Optional[float]:
         data = self.client.commission_rates(symbol)
         return float(data["standardCommission"]["taker"])
+
+    def fee_info(self, symbol: str = "BTCUSDT") -> FeeInfo:
+        """Komisyon oranı + BNB indirimi durumu + BNB bakiyesi. YALNIZCA OKUR: "BNB ile komisyon öde"
+        ayarını değiştirmez ve BNB satın almaz (bu kararlar kullanıcınındır)."""
+        data = self.client.commission_rates(symbol)
+        bnb_free = self.balances().get(BNB, 0.0)
+        bnb_usdt = self._asset_usdt_price(BNB) if bnb_free > 0 else 0.0
+        info = parse_fee_info(data, bnb_free, bnb_usdt)
+        self.last_fee_info = info
+        return info
+
+    def _commission_usdt(self, asset: str, commission: float, notional: float,
+                         prices: Dict[str, float]) -> float:
+        """Üçüncü bir varlıkla (örn. BNB) ödenen komisyonun USDT karşılığı.
+
+        Fiyat öğrenilemezse 0 yazmak kârı olduğundan yüksek gösterir; bu durumda komisyon işlem
+        tutarı × oran ile tahmin edilir (BNB için son okunan indirimli oran, yoksa FEE_RATE)."""
+        if asset not in prices:
+            prices[asset] = self._asset_usdt_price(asset)
+        if prices[asset] > 0:
+            return commission * prices[asset]
+        info = self.last_fee_info
+        rate = info.discounted_rate if asset == BNB and info is not None and info.bnb_enabled else self.fee_rate
+        log.debug("%s fiyatı alınamadı; komisyon %.4f × %g ile tahmin edildi", asset, notional, rate)
+        return notional * rate
 
     def _place(self, symbol: str, side: str, quantity: Optional[str] = None,
                quote_order_qty: Optional[str] = None) -> dict:
@@ -556,8 +663,8 @@ class LiveExchange(BaseExchange):
         if not order.get("fills") and order.get("orderId") is not None and float(order.get("executedQty") or 0) > 0:
             try:
                 trades = self.client.my_trades(symbol, order_id=int(order["orderId"]))
-                order["fills"] = [{"commission": t.get("commission"), "commissionAsset": t.get("commissionAsset")}
-                                  for t in trades]
+                order["fills"] = [{"commission": t.get("commission"), "commissionAsset": t.get("commissionAsset"),
+                                   "price": t.get("price"), "qty": t.get("qty")} for t in trades]
             except Exception as exc:  # noqa: BLE001 - komisyon tahmin edilir
                 log.debug("İşlem geçmişi okunamadı: %s", exc)
         return order
@@ -580,6 +687,7 @@ class LiveExchange(BaseExchange):
 
         fills = resp.get("fills") or []
         comm_base = comm_quote = comm_other = 0.0
+        prices: Dict[str, float] = {}
         for f in fills:
             c = float(f.get("commission") or 0)
             asset = f.get("commissionAsset", "")
@@ -590,7 +698,8 @@ class LiveExchange(BaseExchange):
             elif asset == rules.quote_asset:
                 comm_quote += c
             else:  # Örn. BNB ile ödenmişse USDT karşılığına çevir
-                comm_other += c * self._asset_usdt_price(asset)
+                notional = float(f.get("qty") or 0) * float(f.get("price") or 0) or quote / len(fills)
+                comm_other += self._commission_usdt(asset, c, notional, prices)
 
         if not fills:  # Ayrıntı yoksa standart komisyon oranıyla tahmin et
             if side == "BUY":
