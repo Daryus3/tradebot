@@ -4,7 +4,7 @@ Geriye dönük test (backtest): stratejiyi geçmiş 5 dakikalık mumlarla dener.
 Canlı botla AYNI karar fonksiyonları kullanılır:
   - Giriş sinyali : strategy.ReboundStrategy.analyze
   - Boyutlandırma : risk.position_slots + risk.plan_entry (son slot kalan sermayenin tamamını kullanır)
-  - Çıkışlar      : risk.evaluate_exit / update_trailing / price_for_pnl / net_exit_value
+  - Çıkışlar      : risk.evaluate_exit / update_trailing / update_breakeven / price_for_pnl / net_exit_value
   - Kill-switch   : risk.kill_switch_hit
 
 Akış:
@@ -34,8 +34,9 @@ from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Un
 from binance_client import RateLimitError
 from config import DATA_DIR
 from exchange import SymbolRules, parse_symbol_rules, to_dec
-from risk import (ExitReason, Position, evaluate_exit, kill_switch_hit, net_exit_value, plan_entry,
-                  pnl_pct, position_slots, price_for_pnl, trailing_floor_pct, update_trailing)
+from risk import (ExitReason, Position, breakeven_effective, evaluate_exit, kill_switch_hit, net_exit_value,
+                  plan_entry, pnl_pct, position_slots, price_for_pnl, trailing_floor_pct, update_breakeven,
+                  update_trailing)
 from strategy import KLINE_LIMIT, ReboundStrategy
 from telegram_bot import LINE, fmt_duration, fmt_price, fmt_signed, fmt_usdt
 
@@ -59,6 +60,7 @@ REASON_LABELS = {
     ExitReason.TAKE_PROFIT.value: "🎯 Kâr Al",
     ExitReason.STOP_LOSS.value: "🛑 Zarar Kes",
     ExitReason.TRAILING_STOP.value: "🛡️ İzleyen Stop",
+    ExitReason.BREAKEVEN.value: "🔒 Başabaş",
     ExitReason.MAX_HOLD.value: "⏱️ Süre Doldu",
     ExitReason.KILL_SWITCH.value: "☠️ Kill-switch",
     END_REASON: "🏁 Dönem Sonu",
@@ -432,22 +434,26 @@ class _Simulator:
                   now_sec: float) -> Optional[Tuple[float, str]]:
         """KÖTÜMSER mum içi sıralama: önce düşük taraf (SL / izleyen stop tabanı), sonra TP."""
         cfg, pos = self.cfg, op.pos
-        # a) Düşük taraf
-        level, reason = op.sl_price, ExitReason.STOP_LOSS
+        # a) Düşük taraf: en yüksek koruma seviyesi (SL / izleyen stop tabanı / başabaş tabanı)
+        level, reason, level_pct = op.sl_price, ExitReason.STOP_LOSS, -cfg.stop_loss_pct
         if pos.trailing_active:
             floor = trailing_floor_pct(pos, cfg)
-            if floor > -cfg.stop_loss_pct:
-                level, reason = self._market_level(floor, op), ExitReason.TRAILING_STOP
+            if floor > level_pct:
+                level, reason, level_pct = self._market_level(floor, op), ExitReason.TRAILING_STOP, floor
+        if pos.breakeven_active and cfg.breakeven_floor_pct > level_pct:
+            # Canlıda izleyen stop önce kontrol edilir; başabaş yalnızca tabanı daha yüksekse önce tetiklenir
+            level, reason = self._market_level(cfg.breakeven_floor_pct, op), ExitReason.BREAKEVEN
         if low <= level:
             price = min(level, o)  # Açılış zaten eşiğin altındaysa açılıştan
-            if reason is ExitReason.TRAILING_STOP and self._pnl_at(op, price) <= -cfg.stop_loss_pct:
+            if reason is not ExitReason.STOP_LOSS and self._pnl_at(op, price) <= -cfg.stop_loss_pct:
                 reason = ExitReason.STOP_LOSS  # Canlı evaluate_exit de SL'yi önce kontrol eder
             return price, reason.value
         # b) Yüksek taraf
         if h >= op.tp_price:
             return max(op.tp_price, o), ExitReason.TAKE_PROFIT.value
-        # c) Zirve güncellemesi (düşük taraf kontrolünden SONRA)
+        # c) Zirve güncellemesi (düşük taraf kontrolünden SONRA); canlıdaki gibi önce izleyen stop, sonra başabaş
         update_trailing(pos, self._pnl_at(op, h), cfg)
+        update_breakeven(pos, cfg)
         # d) Kapanışta canlı kurallar (yeni aktifleşen izleyen stop, MAX_HOLD)
         exit_reason = evaluate_exit(pos, self._pnl_at(op, c), now_sec, cfg)
         if exit_reason:
@@ -776,6 +782,12 @@ def format_backtest_report(result: BacktestResult, cfg) -> str:
                 if cfg.trailing_dynamic else
                 f"+%{cfg.trailing_activation_pct:g} → +%{cfg.trailing_floor_pct:g}")
     hold = f" | Maks. süre {cfg.max_hold_minutes} dk" if cfg.max_hold_minutes > 0 else ""
+    if not cfg.breakeven_enabled:
+        breakeven = "kapalı"
+    elif breakeven_effective(cfg):
+        breakeven = f"+%{cfg.breakeven_trigger_pct:g} → +%{cfg.breakeven_floor_pct:g}"
+    else:
+        breakeven = f"etkisiz (tetik +%{cfg.breakeven_trigger_pct:g}, izleyen stop / kâr al'dan küçük olmalı)"
 
     lines = [
         "📊 BACKTEST RAPORU (geçmiş veriyle strateji testi)",
@@ -783,8 +795,10 @@ def format_backtest_report(result: BacktestResult, cfg) -> str:
         f"🗓️ Dönem: {_fmt_time(result.start_ms)} → {_fmt_time(result.end_ms)} ({result.days:g} gün, 5 dk mumlar)",
         f"🪙 Sembol sayısı: {len(result.symbols_used)}",
         f"⚙️ Kâr Al +%{cfg.take_profit_pct:g} | Zarar Kes -%{cfg.stop_loss_pct:g} | İzleyen stop {trailing}{hold}",
+        f"   Başabaş: {breakeven}",
         f"   Komisyon %{cfg.fee_rate * 100:.2f} | Spread %{result.spread_pct:g} | "
-        f"Kill-switch -%{cfg.max_total_loss_pct:g} (-{fmt_usdt(cfg.loss_limit(result.start_capital))} {q}) | "
+        f"Kill-switch -%{cfg.loss_pct(result.start_capital):.4g} "
+        f"(-{fmt_usdt(cfg.loss_limit(result.start_capital))} {q}) | "
         f"En fazla {cfg.max_open_positions} pozisyon",
         f"💼 Başlangıç sermayesi: {fmt_usdt(result.start_capital)} {q}",
         LINE,
@@ -827,7 +841,7 @@ def format_backtest_report(result: BacktestResult, cfg) -> str:
         lines.append(f"☠️ Kill-switch: TETİKLENDİ ({_fmt_time(result.killed_at_ms)}) — "
                      f"sonrasında işlem yapılmadı")
     else:
-        lines.append(f"✅ Kill-switch: tetiklenmedi (limit -%{cfg.max_total_loss_pct:g} = "
+        lines.append(f"✅ Kill-switch: tetiklenmedi (limit -%{cfg.loss_pct(result.start_capital):.4g} = "
                      f"-{fmt_usdt(cfg.loss_limit(result.start_capital))} {q})")
 
     if result.notes:

@@ -516,13 +516,13 @@ def format_stats(stats: dict, quote_asset: str, realized_pnl: float, loss_limit:
 
 
 def stats_message(trades: Iterable[dict], cfg, realized_pnl: float, horizon: int = 50,
-                  base_capital: Optional[float] = None) -> str:
+                  base_capital: Optional[float] = None, capital_added: float = 0.0) -> str:
     """Kısayol: istatistik + Monte Carlo + mesaj.
 
     Kill-switch limiti `base_capital` (botun sermayesi; verilmezse START_CAPITAL_USDT) × MAX_TOTAL_LOSS_PCT.
     """
     trades = list(trades)
-    limit = cfg.loss_limit(cfg.start_capital if base_capital is None else base_capital)
+    limit = cfg.loss_limit(cfg.start_capital if base_capital is None else base_capital, capital_added)
     prob = kill_switch_probability(trade_pnls(trades), realized_pnl, limit, horizon=horizon)
     return format_stats(compute_stats(trades), cfg.quote_asset, realized_pnl, limit,
                         cfg.take_profit_pct, cfg.stop_loss_pct, prob, kill_horizon=horizon)

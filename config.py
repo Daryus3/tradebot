@@ -201,6 +201,8 @@ class Config:
     regime_filter: bool = True
     # 37) Ayrıntılı kayıt
     equity_log_minutes: int = 15           # 0 = kapalı
+    # Eski sabit USDT kill-switch ayarı (MAX_TOTAL_LOSS_USDT). Yalnızca MAX_TOTAL_LOSS_PCT yazılmamışsa dolu.
+    legacy_loss_usdt: Optional[float] = None
     # Ayar okunurken oluşan uyarılar (eski ayar adı, işe yaramayan değer...). Bot açılırken gösterilir.
     notes: Tuple[str, ...] = ()
 
@@ -209,13 +211,26 @@ class Config:
         """Sessiz saatler (başlangıç, bitiş) gece yarısından itibaren dakika olarak; kapalıysa None."""
         return parse_time_range(self.quiet_hours)
 
-    def loss_limit(self, base_capital: float) -> float:
+    def loss_limit(self, base_capital: float, capital_added: float = 0.0) -> float:
         """Kill-switch'in USDT karşılığı: botun sermayesi × MAX_TOTAL_LOSS_PCT.
 
-        `base_capital` botun yönettiği toplam sermayedir (başlangıç + /sermayeekle ile eklenenler).
-        Hesaba para eklendikçe limit de aynı oranda büyür.
+        `base_capital` botun yönettiği toplam sermayedir (başlangıç + /sermayeekle ile eklenenler,
+        `capital_added` bunların sonradan eklenen kısmı). Hesaba para eklendikçe limit de aynı oranda büyür.
+
+        Eski MAX_TOTAL_LOSS_USDT ayarı hâlâ kullanılıyorsa limit, ilk sermayede tam o USDT tutarıdır
+        (koruma ne sıkılaşır ne gevşer); sonradan sermaye eklenirse aynı oranda büyür.
         """
-        return max(0.0, base_capital) * self.max_total_loss_pct / 100
+        base = max(0.0, base_capital)
+        if self.legacy_loss_usdt is not None:
+            original = base - max(0.0, capital_added)
+            return self.legacy_loss_usdt * base / original if original > 0 else self.legacy_loss_usdt
+        return base * self.max_total_loss_pct / 100
+
+    def loss_pct(self, base_capital: float, capital_added: float = 0.0) -> float:
+        """Kill-switch limitinin sermayeye oranı (%) — mesajlarda göstermek için."""
+        if base_capital <= 0:
+            return self.max_total_loss_pct
+        return self.loss_limit(base_capital, capital_added) / base_capital * 100
 
     @property
     def is_paper(self) -> bool:
@@ -239,7 +254,10 @@ class Config:
             errors.append("MAX_OPEN_POSITIONS 1 ile 10 arasında olmalı")
         if not 0 < self.capital_usage_pct <= 100:
             errors.append("CAPITAL_USAGE_PCT 0-100 arasında olmalı")
-        if not 0 < self.max_total_loss_pct < 100:
+        if self.legacy_loss_usdt is not None:
+            if self.legacy_loss_usdt <= 0:
+                errors.append("MAX_TOTAL_LOSS_USDT sıfırdan büyük olmalı (yeni ayar: MAX_TOTAL_LOSS_PCT)")
+        elif not 0 < self.max_total_loss_pct < 100:
             errors.append("MAX_TOTAL_LOSS_PCT 0 ile 100 arasında olmalı (örn. 45 = sermayenin %45'i)")
         if not 0 < self.stop_loss_pct < 100:
             errors.append("STOP_LOSS_PCT 0-100 arasında olmalı")
@@ -288,7 +306,7 @@ def load_config(env_file: Optional[str] = None, mode_override: Optional[str] = N
         load_dotenv(env_path, override=False)
 
     mode = (mode_override or _env_str("TRADING_MODE", "paper")).lower()
-    loss_pct, notes = _loss_pct_setting(_env_float("START_CAPITAL_USDT", 11.0))
+    loss_pct, legacy_usdt, notes = _loss_pct_setting(_env_float("START_CAPITAL_USDT", 11.0))
 
     cfg = Config(
         binance_api_key=_env_str("BINANCE_API_KEY"),
@@ -303,6 +321,7 @@ def load_config(env_file: Optional[str] = None, mode_override: Optional[str] = N
         capital_usage_pct=_env_float("CAPITAL_USAGE_PCT", 100.0),
         max_open_positions=_env_int("MAX_OPEN_POSITIONS", 3),
         max_total_loss_pct=loss_pct,
+        legacy_loss_usdt=legacy_usdt,
         take_profit_pct=_env_float("TAKE_PROFIT_PCT", 15.0),
         stop_loss_pct=_env_float("STOP_LOSS_PCT", 10.0),
         trailing_activation_pct=_env_float("TRAILING_ACTIVATION_PCT", 10.0),
@@ -375,11 +394,12 @@ def load_config(env_file: Optional[str] = None, mode_override: Optional[str] = N
 DEFAULT_MAX_TOTAL_LOSS_PCT = 45.0  # 11 USDT sermayede ≈ 5 USDT
 
 
-def _loss_pct_setting(start_capital: float) -> Tuple[float, List[str]]:
-    """Kill-switch yüzdesini okur. Eski MAX_TOTAL_LOSS_USDT ayarı varsa yüzdeye çevirir.
+def _loss_pct_setting(start_capital: float) -> Tuple[float, Optional[float], List[str]]:
+    """Kill-switch ayarını okur: (yüzde, eski USDT değeri veya None, uyarılar).
 
     - MAX_TOTAL_LOSS_PCT yazılıysa o geçerlidir (eski USDT satırı yok sayılır).
-    - Yalnızca eski MAX_TOTAL_LOSS_USDT varsa: USDT / START_CAPITAL_USDT × 100 (koruma gevşemesin diye).
+    - Yalnızca eski MAX_TOTAL_LOSS_USDT varsa o USDT tutarı aynen korunur (bkz. Config.loss_limit);
+      yüzde değeri yalnızca sermaye bilinmeyen yerlerde (backtest, self-test) gösterim içindir.
     - Hiçbiri yoksa varsayılan %45.
     """
     notes: List[str] = []
@@ -389,26 +409,24 @@ def _loss_pct_setting(start_capital: float) -> Tuple[float, List[str]]:
         if has_usdt:
             notes.append("MAX_TOTAL_LOSS_USDT artık kullanılmıyor (MAX_TOTAL_LOSS_PCT geçerli); "
                          ".env'den bu satırı silebilirsiniz.")
-        return _env_float("MAX_TOTAL_LOSS_PCT", DEFAULT_MAX_TOTAL_LOSS_PCT), notes
+        return _env_float("MAX_TOTAL_LOSS_PCT", DEFAULT_MAX_TOTAL_LOSS_PCT), None, notes
     if has_usdt:
         usdt = _env_float("MAX_TOTAL_LOSS_USDT", 0.0)
-        if usdt <= 0 or start_capital <= 0:
-            raise ConfigError("MAX_TOTAL_LOSS_USDT sıfırdan büyük olmalı (yeni ayar: MAX_TOTAL_LOSS_PCT)")
-        pct = round(usdt / start_capital * 100, 2)
-        notes.append(f"Eski ayar MAX_TOTAL_LOSS_USDT={usdt:g} → kill-switch sermayenin %{pct:g}'i olarak "
-                     f"uygulandı. .env'de bu satırı MAX_TOTAL_LOSS_PCT={pct:g} ile değiştirin.")
-        return pct, notes
-    return DEFAULT_MAX_TOTAL_LOSS_PCT, notes
+        pct = round(usdt / start_capital * 100, 2) if start_capital > 0 else DEFAULT_MAX_TOTAL_LOSS_PCT
+        notes.append(f"Eski ayar MAX_TOTAL_LOSS_USDT={usdt:g} kullanılıyor: kill-switch şimdilik sabit "
+                     f"{usdt:g} USDT (sermaye eklenirse aynı oranda büyür). Yüzdeye geçmek için .env'de bu "
+                     f"satırı silip MAX_TOTAL_LOSS_PCT=45 gibi bir değer yazın "
+                     f"({start_capital:g} USDT'de {usdt:g} USDT ≈ %{pct:g}).")
+        return pct, usdt, notes
+    return DEFAULT_MAX_TOTAL_LOSS_PCT, None, notes
 
 
 def _setting_notes(cfg: Config) -> List[str]:
     """Hata sayılmayan ama işe yaramayan ayar birleşimleri için uyarılar."""
     notes: List[str] = []
+    from risk import breakeven_effective  # risk config'i içe aktarmaz; döngüsel bağımlılık yok
     if cfg.breakeven_enabled:
-        # Kâr Al'dan önce görülemiyorsa ya da izleyen stop daha yüksek bir tabanla zaten koruyorsa etkisizdir
-        shadowed_by_trailing = (cfg.breakeven_trigger_pct >= cfg.trailing_activation_pct
-                                and cfg.breakeven_floor_pct <= cfg.trailing_floor_pct)
-        if cfg.breakeven_trigger_pct >= cfg.take_profit_pct or shadowed_by_trailing:
+        if not breakeven_effective(cfg):
             first_exit = min(cfg.take_profit_pct, cfg.trailing_activation_pct)
             hint = round(first_exit / 2, 1)
             tip = (f" Örn. BREAKEVEN_TRIGGER_PCT={hint:g} yapın." if hint > cfg.breakeven_floor_pct else "")

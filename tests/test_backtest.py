@@ -320,3 +320,24 @@ def test_min_signal_score_respected(cfg, make_client, tmp_path):
     client = make_client({"ABCUSDT": scenario(lambda p: trend(p, 1.03, 8)), "BTCUSDT": btc_flat()})
     result = run(replace(cfg, min_signal_score=10_000), client, tmp_path)
     assert not result.trades and result.stats["puan_dusuk"] > 0
+
+
+def test_breakeven_simulated_like_live(cfg, make_client, tmp_path):
+    def small_rally_then_fade(p):
+        up, p = trend(p, 1.02, 3)          # ~+%6 → başabaş (tetik %5) aktif; izleyen stop (+%10) ve TP değil
+        down, p = trend(p, 0.99, 12)
+        return up + down, p
+
+    client = make_client({"ABCUSDT": scenario(small_rally_then_fade), "BTCUSDT": btc_flat()})
+    assert cfg.breakeven_enabled                       # Varsayılan açık
+    result = run(cfg, client, tmp_path)
+    t = result.trades[0]
+    assert t.reason == ExitReason.BREAKEVEN.value
+    assert t.pnl_pct == pytest.approx(cfg.breakeven_floor_pct, abs=0.05)
+    report = format_backtest_report(result, cfg)
+    assert "🔒 Başabaş: 1 işlem" in report and "Başabaş: +%5 → +%0.3" in report
+
+    off = replace(cfg, breakeven_enabled=False)
+    result_off = run(off, client, tmp_path)
+    assert result_off.trades[0].reason != ExitReason.BREAKEVEN.value
+    assert result_off.trades[0].pnl < t.pnl

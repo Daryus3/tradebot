@@ -190,22 +190,21 @@ def _to_float(raw: Optional[str], default: float) -> float:
 
 
 def migrate_legacy(values: Dict[str, str]) -> Tuple[Dict[str, str], List[str]]:
-    """Eski ayar adlarını yenilerine çevirir (koruma seviyesi değişmeden).
+    """Eski ayar adlarını yeni şablonla uyumlu hale getirir (koruma seviyesi değişmeden).
 
-    MAX_TOTAL_LOSS_USDT (sabit USDT) → MAX_TOTAL_LOSS_PCT (sermayenin yüzdesi) = USDT / START_CAPITAL × 100.
+    Eski MAX_TOTAL_LOSS_USDT (sabit USDT) yüzdeye ÇEVRİLMEZ: doğru oran botun kayıtlı sermayesine bağlıdır
+    ve .env'deki START_CAPITAL_USDT'den farklı olabilir. Satır korunur, MAX_TOTAL_LOSS_PCT boş bırakılır
+    (yoksa şablondaki %45 eski limitin yerine geçerdi); bot eski tutarı aynen uygular.
     """
     out, notes = dict(values), []
-    usdt_raw = (out.get("MAX_TOTAL_LOSS_USDT") or "").strip()
-    if "MAX_TOTAL_LOSS_USDT" in out and not (out.get("MAX_TOTAL_LOSS_PCT") or "").strip():
-        usdt = _to_float(usdt_raw, 0.0)
-        capital = _to_float(out.get("START_CAPITAL_USDT"), 11.0)
-        if usdt > 0 and capital > 0:
-            pct = round(usdt / capital * 100, 2)
-            out["MAX_TOTAL_LOSS_PCT"] = f"{pct:g}"
-            notes.append(f"Kill-switch artık yüzdeyle çalışıyor: MAX_TOTAL_LOSS_USDT={usdt_raw} → "
-                         f"MAX_TOTAL_LOSS_PCT={pct:g} (sermayenin %{pct:g}'i, koruma seviyesi aynı).")
-    if "MAX_TOTAL_LOSS_USDT" in out and (out.get("MAX_TOTAL_LOSS_PCT") or "").strip():
-        del out["MAX_TOTAL_LOSS_USDT"]
+    has_pct = bool((out.get("MAX_TOTAL_LOSS_PCT") or "").strip())
+    usdt = (out.get("MAX_TOTAL_LOSS_USDT") or "").strip()
+    if usdt and not has_pct:
+        out["MAX_TOTAL_LOSS_PCT"] = ""
+        notes.append(f"Kill-switch: eski MAX_TOTAL_LOSS_USDT={usdt} ayarınız korundu. Yüzdeye geçmek isterseniz "
+                     f".env'de bu satırı silip MAX_TOTAL_LOSS_PCT=45 gibi bir değer yazın.")
+    elif "MAX_TOTAL_LOSS_USDT" in out and (has_pct or not usdt):
+        del out["MAX_TOTAL_LOSS_USDT"]   # Yüzde zaten yazılı (veya eski satır boş): artık işe yaramıyor
     return out, notes
 
 

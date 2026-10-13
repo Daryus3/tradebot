@@ -84,9 +84,9 @@ def run_risk_scenarios(cfg) -> List[Tuple[str, bool, str]]:
     m = cfg.loss_limit(cfg.start_capital)
     hit = kill_switch_hit(-(m - 0.5), -0.6, m)
     no_hit = not kill_switch_hit(-(m - 0.5), -0.4, m)
-    grown = cfg.loss_limit(cfg.start_capital * 2)   # Sermaye eklenince limit de büyümeli
+    grown = cfg.loss_limit(cfg.start_capital * 2, cfg.start_capital)   # Sermaye eklenince limit de büyümeli
     checks.append(("Kill-switch", hit and no_hit and abs(grown - 2 * m) < 1e-9,
-                   f"sermayenin %{cfg.max_total_loss_pct:g}'i: {cfg.start_capital:g} USDT'de -{m:.2f}, "
+                   f"sermayenin %{cfg.loss_pct(cfg.start_capital):.4g}'i: {cfg.start_capital:g} USDT'de -{m:.2f}, "
                    f"{cfg.start_capital * 2:g} USDT'de -{grown:.2f} USDT'de tetikleniyor"))
 
     rules = _fake_rules()

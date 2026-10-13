@@ -33,11 +33,28 @@ def test_default_is_percent_of_capital(cfg):
     assert not cfg.notes
 
 
-def test_legacy_usdt_setting_is_converted_without_loosening(monkeypatch, tmp_path):
+def test_legacy_usdt_setting_keeps_exact_limit(monkeypatch, tmp_path):
     cfg = load(monkeypatch, tmp_path, MAX_TOTAL_LOSS_USDT="5", START_CAPITAL_USDT="11")
-    assert cfg.max_total_loss_pct == pytest.approx(45.45)
-    assert cfg.loss_limit(11) == pytest.approx(5.0, abs=0.001)
-    assert any("MAX_TOTAL_LOSS_PCT=45.45" in n for n in cfg.notes)
+    assert cfg.legacy_loss_usdt == 5
+    assert cfg.loss_limit(11) == pytest.approx(5.0)
+    assert cfg.loss_limit(10.36) == pytest.approx(5.0)          # Canlı ilk açılış: sermaye = serbest bakiye
+    assert cfg.loss_limit(22, capital_added=11) == pytest.approx(10.0)   # Sermaye 2 katına çıkınca limit de
+    assert cfg.loss_pct(10) == pytest.approx(50)
+    assert any("MAX_TOTAL_LOSS_USDT=5" in n and "MAX_TOTAL_LOSS_PCT" in n for n in cfg.notes)
+
+
+def test_legacy_usdt_ignores_edited_start_capital(monkeypatch, tmp_path, fake_client):
+    # START_CAPITAL_USDT sonradan 31 yapılmış ama kayıtlı sermaye hâlâ 11: limit eskisi gibi 5 USDT kalmalı
+    cfg = load(monkeypatch, tmp_path, MAX_TOTAL_LOSS_USDT="5", START_CAPITAL_USDT="31")
+    state = BotState.new("paper", 11.0)
+    state.realized_pnl = -2.0
+    bot, _, _ = make_bot(cfg, fake_client, tmp_path, state=state)
+    assert bot.loss_limit == pytest.approx(5.0)
+    tick(bot)
+    assert not bot.state.killed
+    bot.add_capital(11.0)
+    assert bot.loss_limit == pytest.approx(10.0)
+    assert bot.loss_pct == pytest.approx(10 / 22 * 100)
 
 
 def test_percent_setting_wins_over_legacy_usdt(monkeypatch, tmp_path):
@@ -73,9 +90,21 @@ def test_breakeven_enabled_by_default_and_warns_when_ineffective(monkeypatch, tm
     assert not off.breakeven_enabled and not off.notes
 
 
-def test_wizard_migrates_legacy_usdt():
+def test_wizard_keeps_legacy_usdt_and_blanks_template_percent(monkeypatch, tmp_path):
+    from pathlib import Path
+
+    from setup_wizard import render_env
     out, notes = migrate_legacy({"MAX_TOTAL_LOSS_USDT": "2", "START_CAPITAL_USDT": "10"})
-    assert out["MAX_TOTAL_LOSS_PCT"] == "20" and "MAX_TOTAL_LOSS_USDT" not in out and notes
+    assert out["MAX_TOTAL_LOSS_USDT"] == "2" and out["MAX_TOTAL_LOSS_PCT"] == "" and notes
+    # Yeni şablonla yazılan .env yüklendiğinde eski 2 USDT limiti aynen geçerli olmalı (şablondaki %45 değil)
+    template = (Path(__file__).resolve().parent.parent / ".env.example").read_text(encoding="utf-8")
+    env_file = tmp_path / "yeni.env"
+    env_file.write_text(render_env(template, out), encoding="utf-8")
+    for key in ("MAX_TOTAL_LOSS_USDT", "MAX_TOTAL_LOSS_PCT", "START_CAPITAL_USDT"):
+        monkeypatch.delenv(key, raising=False)
+    cfg = load_config(env_file=str(env_file), mode_override="paper")
+    assert cfg.loss_limit(10) == pytest.approx(2.0) and cfg.loss_limit(7) == pytest.approx(2.0)
+
     out, notes = migrate_legacy({"MAX_TOTAL_LOSS_USDT": "5", "MAX_TOTAL_LOSS_PCT": "40"})
     assert out == {"MAX_TOTAL_LOSS_PCT": "40"} and not notes
     out, notes = migrate_legacy({"TRADING_MODE": "paper"})
@@ -184,3 +213,65 @@ def test_add_capital_live_with_open_position(cfg, tmp_path):
     bot.commands.handle(Command("sermayeekle", ["10"]))
     bot.commands.handle(Command("evet"))
     assert bot.state.start_capital == pytest.approx(21.0)
+
+
+def test_add_capital_refused_while_backup_stop_fill_is_unbooked(cfg, tmp_path):
+    fake = FakeBinance({"ABCUSDT": 1.0}, usdt=11.0)
+    bot, notes = _live_bot(cfg, tmp_path, fake)
+    tick(bot)
+    fake.prices["ABCUSDT"] = 0.85
+    fake.trigger_stops()                     # Ani iğne: Binance'teki yedek stop çalıştı...
+    fake.prices["ABCUSDT"] = 1.0             # ...fiyat geri geldi, bot henüz fark etmedi
+    bot.commands.handle(Command("sermayeekle", ["9"]))
+    bot.commands.handle(Command("evet"))
+    assert bot.state.start_capital == pytest.approx(11.0)   # Botun kendi satış geliri "yatırılan para" sayılmadı
+    assert any("cüzdanda yok" in m for m in notes.messages)
+
+
+def test_add_capital_refused_while_sell_outcome_unknown(cfg, tmp_path):
+    fake = FakeBinance({"ABCUSDT": 1.0}, usdt=11.0)
+    bot, notes = _live_bot(cfg, tmp_path, fake)
+    tick(bot)
+    bot.state.positions["ABCUSDT"].pending_sell_client_id = "x123"
+    fake.free["USDT"] += 20.0
+    bot.commands.handle(Command("sermayeekle", ["10"]))
+    assert bot.commands.pending is None
+    assert any("sonucu henüz belli değil" in m for m in notes.messages)
+
+
+def test_add_capital_balance_error_is_escaped_once(cfg, tmp_path):
+    fake = FakeBinance({"ABCUSDT": 1.0}, usdt=11.0)
+    bot, notes = _live_bot(cfg, tmp_path, fake)
+
+    def broken():
+        raise RuntimeError("a&b <x>")
+    fake.account = broken
+    bot.commands.handle(Command("sermayeekle", ["10"]))
+    assert any("a&amp;b &lt;x&gt;" in m for m in notes.messages)
+    assert not any("&amp;amp;" in m for m in notes.messages)
+
+
+def test_no_breakeven_noise_when_ineffective(cfg, fake_client, tmp_path):
+    # Kullanıcının ayarları: TP 5, izleyen stop +2 → +1; varsayılan başabaş tetiği 5 hiçbir işe yaramaz
+    user = replace(cfg, take_profit_pct=5, stop_loss_pct=3.5, trailing_activation_pct=2, trailing_floor_pct=1,
+                   trailing_dynamic=True)
+    bot, client, notes = make_bot(user, fake_client, tmp_path)
+    tick(bot)
+    client.prices["ABCUSDT"] = 1.055                      # Doğrudan Kâr Al bölgesine sıçradı
+    tick(bot)
+    assert not bot.state.positions
+    assert not any("BAŞABAŞ KORUMASI AKTİF" in m or "İZLEYEN STOP AKTİF" in m for m in notes.messages)
+    assert any("KÂR HEDEFİNE" in m for m in notes.messages)
+
+
+def test_breakeven_with_suggested_trigger_protects_small_gains(cfg, fake_client, tmp_path):
+    user = replace(cfg, take_profit_pct=5, stop_loss_pct=3.5, trailing_activation_pct=2, trailing_floor_pct=1,
+                   trailing_dynamic=True, breakeven_trigger_pct=1, breakeven_floor_pct=0.3)
+    bot, client, notes = make_bot(user, fake_client, tmp_path)
+    tick(bot)
+    client.prices["ABCUSDT"] = 1.015                      # net ~+%1.3 → başabaş aktif, izleyen stop değil
+    tick(bot)
+    assert bot.state.positions["ABCUSDT"].breakeven_active
+    client.prices["ABCUSDT"] = 1.004                      # net ~+%0.2 → zarara dönmeden sat
+    tick(bot)
+    assert not bot.state.positions and bot.state.wins == 1

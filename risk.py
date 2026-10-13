@@ -114,12 +114,27 @@ def update_trailing(pos: Position, current_pnl_pct: float, cfg) -> bool:
     return False
 
 
+def breakeven_effective(cfg) -> bool:
+    """Başabaş koruması bu ayarlarla bir işe yarar mı?
+
+    Tetik Kâr Al'a eşit/üstündeyse önce Kâr Al satar. Tetik izleyen stop başlangıcına eşit/üstündeyse
+    ve başabaş tabanı izleyen stop tabanından yüksek değilse, izleyen stop (daha yüksek tabanla) her
+    zaman önce satar. Bu durumlarda koruma etkisizdir.
+    """
+    if not getattr(cfg, "breakeven_enabled", False):
+        return False
+    if cfg.breakeven_trigger_pct >= cfg.take_profit_pct:
+        return False
+    return not (cfg.breakeven_trigger_pct >= cfg.trailing_activation_pct
+                and cfg.breakeven_floor_pct <= cfg.trailing_floor_pct)
+
+
 def update_breakeven(pos: Position, cfg) -> bool:
-    """Başabaş koruması (isteğe bağlı): zirve net kâr BREAKEVEN_TRIGGER_PCT'yi gördüyse aktifleşir.
+    """Başabaş koruması (varsayılan açık): zirve net kâr BREAKEVEN_TRIGGER_PCT'yi gördüyse aktifleşir.
 
     Yeni aktifleştiyse True döner. update_trailing'den SONRA çağrılmalıdır (zirve güncel olsun).
     """
-    if not cfg.breakeven_enabled or pos.breakeven_active:
+    if pos.breakeven_active or not breakeven_effective(cfg):
         return False
     if pos.peak_pnl_pct >= cfg.breakeven_trigger_pct:
         pos.breakeven_active = True

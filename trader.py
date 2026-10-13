@@ -185,7 +185,7 @@ class TradingBot:
     def _announce_startup(self, pairs: int, now: float) -> None:
         cfg = self.cfg
         self.notifier.send(Messages.started(cfg, self.state.capital, self.state.realized_pnl, pairs, self.slots(),
-                                            loss_limit=self.loss_limit))
+                                            loss_limit=self.loss_limit, loss_pct=self.loss_pct))
         for note in cfg.notes:
             self.notifier.send(Messages.warning(note))
         if self.state.paused:
@@ -257,15 +257,38 @@ class TradingBot:
     @property
     def loss_limit(self) -> float:
         """Kill-switch limiti (USDT): botun toplam sermayesinin MAX_TOTAL_LOSS_PCT'si."""
-        return self.cfg.loss_limit(self.state.start_capital)
+        return self.cfg.loss_limit(self.state.start_capital, self.state.capital_added)
+
+    @property
+    def loss_pct(self) -> float:
+        """Kill-switch limitinin botun sermayesine oranı (%)."""
+        return self.cfg.loss_pct(self.state.start_capital, self.state.capital_added)
 
     def unallocated_balance(self) -> Optional[float]:
-        """Canlı modda Spot'ta olup bota henüz ayrılmamış serbest bakiye (okunamazsa None)."""
+        """Canlı modda Spot'ta olup bota henüz ayrılmamış serbest bakiye (test modunda None).
+
+        Yalnızca `unreconciled_reason()` None iken güvenilirdir: aksi halde botun kendi satış geliri
+        (henüz işlenmemiş yedek stop / belirsiz satış) serbest bakiyede görünüp yatırılmış para sanılabilir.
+        """
         if self.exchange.is_paper:
             return None
         free = self.exchange.free_balance(self.cfg.quote_asset)
         bot_cash = max(0.0, self.state.capital - self.state.committed)
         return free - bot_cash
+
+    def unreconciled_reason(self) -> Optional[str]:
+        """Botun kayıtları cüzdanla henüz eşleşmiyorsa nedeni (canlı mod), eşleşiyorsa None."""
+        if self.exchange.is_paper:
+            return None
+        if self.state.pending_orders:
+            return "sonucu henüz belli olmayan bir emir var"
+        for pos in self.state.positions.values():
+            if pos.pending_sell_client_id:
+                return f"{pos.symbol} satışının sonucu henüz belli değil"
+            # Yedek stop (tamamen ya da kısmen) çalışıp bot bunu henüz işlemediyse coinler cüzdanda eksiktir
+            if self.exchange.total_balance(pos.base_asset) < pos.qty * 0.995:
+                return f"{pos.symbol} coinlerinin bir kısmı cüzdanda yok (yedek stop çalışmış olabilir)"
+        return None
 
     def add_capital(self, amount: float) -> None:
         """Hesaba yatırılan parayı botun sermayesine ekler (/sermayeekle).
@@ -503,14 +526,19 @@ class TradingBot:
 
         old_peak = pos.peak_pnl_pct
         changed = False
+        # Bu kontrolde zaten Kâr Al ile satılacaksa "koruma aktif" mesajları gereksiz ve kafa karıştırıcı
+        announce = mark.pnl_pct < cfg.take_profit_pct
         if update_trailing(pos, mark.pnl_pct, cfg):
             floor = trailing_floor_pct(pos, cfg)
-            self.notifier.send(Messages.trailing_activated(
-                pos, mark.pnl_pct, price_for_pnl(floor, pos.cost_usdt, sellable, cfg.fee_rate), floor, cfg))
+            if announce:
+                self.notifier.send(Messages.trailing_activated(
+                    pos, mark.pnl_pct, price_for_pnl(floor, pos.cost_usdt, sellable, cfg.fee_rate), floor, cfg))
             changed = True
         if update_breakeven(pos, cfg):
-            self.notifier.send(Messages.breakeven_activated(
-                pos, mark.pnl_pct, price_for_pnl(cfg.breakeven_floor_pct, pos.cost_usdt, sellable, cfg.fee_rate), cfg))
+            if announce:
+                self.notifier.send(Messages.breakeven_activated(
+                    pos, mark.pnl_pct, price_for_pnl(cfg.breakeven_floor_pct, pos.cost_usdt, sellable, cfg.fee_rate),
+                    cfg))
             changed = True
         if changed or pos.peak_pnl_pct > old_peak + 0.25:
             self.store.save(self.state)
@@ -597,7 +625,7 @@ class TradingBot:
 
     def _mark_killed(self, total_pnl: float) -> None:
         self.state.killed = True
-        self.state.kill_reason = (f"Toplam K/Z {total_pnl:.4f} USDT (limit -%{self.cfg.max_total_loss_pct:g} = "
+        self.state.kill_reason = (f"Toplam K/Z {total_pnl:.4f} USDT (limit -%{self.loss_pct:.4g} = "
                                   f"-{self.loss_limit:.2f} USDT)")
         self.state.killed_at = self.time_fn()
         self.store.save(self.state)
@@ -616,7 +644,7 @@ class TradingBot:
         elif first or now >= self._next_kill_notice:
             self._next_kill_notice = now + 600
             self.notifier.send(Messages.kill_switch(total, self.state.start_capital + total, self.cfg,
-                                                    self.loss_limit, left,
+                                                    self.loss_limit, self.loss_pct, left,
                                                     retrying=True), critical=True)
 
     # ================================================================ çıkış
@@ -801,7 +829,8 @@ class TradingBot:
         if not self.state.killed:
             self._mark_killed(total_pnl)
         balance = self.state.start_capital + total_pnl
-        self.notifier.send(Messages.kill_switch(total_pnl, balance, self.cfg, self.loss_limit, []), critical=True)
+        self.notifier.send(Messages.kill_switch(total_pnl, balance, self.cfg, self.loss_limit, self.loss_pct, []),
+                           critical=True)
         self.running = False
 
     # ================================================================ mutabakat

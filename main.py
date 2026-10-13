@@ -162,7 +162,8 @@ def show_stats(cfg) -> int:
     state = StateStore(DATA_DIR / f"state_{cfg.trading_mode}.json").load()
     realized = state.realized_pnl if state else sum(t["kar_zarar_usdt"] for t in trades)
     st = stats.compute_stats(trades)
-    limit = cfg.loss_limit(state.start_capital if state else cfg.start_capital)
+    limit = (cfg.loss_limit(state.start_capital, state.capital_added) if state
+             else cfg.loss_limit(cfg.start_capital))
     prob = stats.kill_switch_probability([t["kar_zarar_usdt"] for t in trades], realized, limit)
     print(_strip_html(stats.format_stats(st, cfg.quote_asset, realized, limit,
                                          cfg.take_profit_pct, cfg.stop_loss_pct, prob)))
@@ -225,8 +226,10 @@ def run_bot(cfg, store, args, log) -> int:
             return EXIT_CONFIG
         print("\n" + "!" * 64)
         print("  ⚠️  CANLI MOD: Bot GERÇEK PARANIZLA Binance'te işlem yapacak!")
-        print(f"  Sermaye: {cfg.start_capital:g} {cfg.quote_asset} | Kill-switch: sermayenin "
-              f"%{cfg.max_total_loss_pct:g}'i | TP +%{cfg.take_profit_pct:g} | SL -%{cfg.stop_loss_pct:g}")
+        kill = (f"-{cfg.legacy_loss_usdt:g} {cfg.quote_asset}" if cfg.legacy_loss_usdt is not None
+                else f"sermayenin %{cfg.max_total_loss_pct:g}'i")
+        print(f"  Sermaye: {cfg.start_capital:g} {cfg.quote_asset} | Kill-switch: {kill} "
+              f"| TP +%{cfg.take_profit_pct:g} | SL -%{cfg.stop_loss_pct:g}")
         print("!" * 64)
         if not args.yes and not confirm("Devam etmek için EVET yazın: "):
             print("İptal edildi.")

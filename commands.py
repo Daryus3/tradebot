@@ -397,7 +397,7 @@ class CommandProcessor:
             f"Mod: {'🧪 TEST' if cfg.is_paper else '💵 CANLI'}\n"
             f"🎯 Kâr Al +%{cfg.take_profit_pct:g} | 🛑 Zarar Kes -%{cfg.stop_loss_pct:g}\n"
             f"📈 İzleyen stop: +%{cfg.trailing_activation_pct:g} → +%{cfg.trailing_floor_pct:g}\n"
-            f"☠️ Kill-switch: sermayenin %{cfg.max_total_loss_pct:g}'i "
+            f"☠️ Kill-switch: sermayenin %{self.bot.loss_pct:.4g}'i "
             f"(şu an {fmt_usdt(self.bot.loss_limit)} {cfg.quote_asset})\n"
             f"📦 En fazla pozisyon: {cfg.max_open_positions} (şu an {self.bot.slots()})\n"
             f"🧷 Binance yedek stop: {on(cfg.backup_stop_enabled)} (-%{cfg.backup_stop_pct:g})\n"
@@ -458,9 +458,10 @@ class CommandProcessor:
             self.reply(problem)
             return
         new_base = bot.state.start_capital + amount
+        new_limit = bot.cfg.loss_limit(new_base, bot.state.capital_added + amount)
         detail = (f"\n💼 Bota verilen sermaye: {fmt_usdt(bot.state.start_capital)} → <b>{fmt_usdt(new_base)} {q}</b>"
                   f"\n☠️ Kill-switch limiti: {fmt_usdt(bot.loss_limit)} → "
-                  f"<b>{fmt_usdt(bot.cfg.loss_limit(new_base))} {q}</b> (%{bot.cfg.max_total_loss_pct:g})"
+                  f"<b>{fmt_usdt(new_limit)} {q}</b> (%{new_limit / new_base * 100:.4g})"
                   + ("\n🧪 Test modu: tutar sanal bakiyeye eklenecek." if bot.exchange.is_paper else ""))
         self._ask(PendingConfirm("addcap", amount=amount), detail,
                   f"Bota <b>{fmt_usdt(amount)} {q}</b> sermaye eklensin mi?")
@@ -473,9 +474,13 @@ class CommandProcessor:
         if bot.exchange.is_paper:
             return None
         try:
+            pending = bot.unreconciled_reason()
+            if pending:
+                return (f"⏳ Şu an sermaye eklenemiyor: {esc(pending)}. Bot bunu işledikten sonra "
+                        f"(genelde 1 dakika içinde) tekrar deneyin.")
             spare = bot.unallocated_balance()
         except Exception as exc:  # noqa: BLE001
-            return Messages.error(f"Binance bakiyesi okunamadı, sermaye eklenmedi: {esc(str(exc))}")
+            return Messages.error(f"Binance bakiyesi okunamadı, sermaye eklenmedi: {exc}")
         if spare is not None and amount > spare + 0.01:
             return (f"⚠️ Spot cüzdanında bota ayrılmamış serbest bakiye yalnızca "
                     f"<b>{fmt_usdt(max(0.0, spare))} {q}</b>.\nÖnce parayı Binance'te Spot cüzdanına "

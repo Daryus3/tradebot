@@ -300,8 +300,10 @@ onaylayın. Botun sermayesi 20 USDT artar; kill-switch limiti (sermayenin %45'i)
 pozisyon sayısı da buna göre büyür. Kill-switch sayacı (şimdiye kadarki kâr/zarar) sıfırlanmaz.
 Canlı modda bot, eklenen tutarın Spot'ta gerçekten serbest olup olmadığını kontrol eder.
 
-> Eski sürümlerdeki `MAX_TOTAL_LOSS_USDT` ayarı artık kullanılmıyor. `.env`'de hâlâ varsa bot onu
-> sermayeye oranlayıp yüzdeye çevirir ve sizi uyarır; satırı `MAX_TOTAL_LOSS_PCT=45` ile değiştirin.
+> **Eski `.env` dosyaları:** `MAX_TOTAL_LOSS_USDT` hâlâ yazılıysa (ve `MAX_TOTAL_LOSS_PCT` boşsa) bot o
+> tutarı aynen uygular (sermaye eklenirse aynı oranda büyütür) ve açılışta sizi uyarır. Yüzdeye geçmek
+> için o satırı silip `MAX_TOTAL_LOSS_PCT=45` yazın. Aynı şekilde eski `.env`'de `BREAKEVEN_ENABLED=false`
+> yazıyorsa yeni varsayılan (açık) uygulanmaz; başabaşı açmak için o satırı `true` yapın.
 
 ### ⏱️ 15-60 dakika hakkında
 Strateji, kısa sürede toparlanma potansiyeli olan oynak coinleri seçer. Ancak %15'lik kâr hedefi
