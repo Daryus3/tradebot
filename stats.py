@@ -381,18 +381,18 @@ def compute_stats(trades: Iterable[dict]) -> dict:
     }
 
 
-def kill_switch_probability(pnls: Iterable[float], realized_pnl: float, max_total_loss: float,
+def kill_switch_probability(pnls: Iterable[float], realized_pnl: float, loss_limit: float,
                             horizon: int = 50, sims: int = 5000, seed: int = 42) -> Optional[float]:
     """Bootstrap Monte Carlo ile kill-switch olasılığı (0-1 arası).
 
     Geçmiş işlem K/Z'lerinden (yerine koyarak) rastgele seçilen `horizon` işlemlik
-    `sims` gelecek senaryosunda, kümülatif K/Z'nin (gerçekleşen dahil) -max_total_loss'a
+    `sims` gelecek senaryosunda, kümülatif K/Z'nin (gerçekleşen dahil) -loss_limit'a
     değdiği senaryoların oranı. 10'dan az işlem varsa None. `seed` ile tekrarlanabilir.
     """
     sample = [p for p in (_to_float(x) for x in pnls) if p is not None]
     if len(sample) < MIN_MONTE_CARLO_TRADES or horizon <= 0 or sims <= 0:
         return None
-    limit = -abs(max_total_loss) + 1e-9  # risk.kill_switch_hit ile aynı eşik
+    limit = -abs(loss_limit) + 1e-9  # risk.kill_switch_hit ile aynı eşik
     start = float(realized_pnl)
     if start <= limit:
         return 1.0
@@ -427,16 +427,16 @@ def _kill_prob_line(kill_prob: Optional[float], horizon: int) -> str:
     return f"🎲 Sonraki {horizon} işlemde kill-switch olasılığı: {icon} <b>%{pct:.1f}</b> (Monte Carlo)"
 
 
-def format_stats(stats: dict, quote_asset: str, realized_pnl: float, max_total_loss: float,
+def format_stats(stats: dict, quote_asset: str, realized_pnl: float, loss_limit: float,
                  tp_pct: float, sl_pct: float, kill_prob: Optional[float],
                  kill_horizon: int = 50) -> str:
     """/istatistik komutu için Telegram (HTML) mesajı. `kill_prob` 0-1 arası (veya None)."""
     q = esc(quote_asset)
     count = int(stats.get("count") or 0)
-    remaining = max(0.0, abs(max_total_loss) + realized_pnl)
+    remaining = max(0.0, abs(loss_limit) + realized_pnl)
     kill_lines = [
         f"☠️ Kill-switch: gerçekleşen K/Z {_money(realized_pnl, quote_asset)} | limit "
-        f"-{fmt_usdt(abs(max_total_loss))} {q} | kalan {fmt_usdt(remaining)} {q}",
+        f"-{fmt_usdt(abs(loss_limit))} {q} | kalan {fmt_usdt(remaining)} {q}",
         _kill_prob_line(kill_prob, kill_horizon),
     ]
     lines = ["📊 <b>Performans İstatistikleri</b>", LINE]
@@ -515,11 +515,16 @@ def format_stats(stats: dict, quote_asset: str, realized_pnl: float, max_total_l
     return _clip(lines)
 
 
-def stats_message(trades: Iterable[dict], cfg, realized_pnl: float, horizon: int = 50) -> str:
-    """Kısayol: istatistik + Monte Carlo + mesaj (cfg: quote_asset, max_total_loss, take_profit_pct, stop_loss_pct)."""
+def stats_message(trades: Iterable[dict], cfg, realized_pnl: float, horizon: int = 50,
+                  base_capital: Optional[float] = None) -> str:
+    """Kısayol: istatistik + Monte Carlo + mesaj.
+
+    Kill-switch limiti `base_capital` (botun sermayesi; verilmezse START_CAPITAL_USDT) × MAX_TOTAL_LOSS_PCT.
+    """
     trades = list(trades)
-    prob = kill_switch_probability(trade_pnls(trades), realized_pnl, cfg.max_total_loss, horizon=horizon)
-    return format_stats(compute_stats(trades), cfg.quote_asset, realized_pnl, cfg.max_total_loss,
+    limit = cfg.loss_limit(cfg.start_capital if base_capital is None else base_capital)
+    prob = kill_switch_probability(trade_pnls(trades), realized_pnl, limit, horizon=horizon)
+    return format_stats(compute_stats(trades), cfg.quote_asset, realized_pnl, limit,
                         cfg.take_profit_pct, cfg.stop_loss_pct, prob, kill_horizon=horizon)
 
 

@@ -121,7 +121,7 @@ def test_kill_switch_after_realized_loss(cfg, fake_client, tmp_path):
     state = BotState.new("paper", cfg.start_capital)
     state.realized_pnl = -4.0
     state.paper_balances["USDT"] = 7.0
-    tight = replace(cfg, max_total_loss=4.5)
+    tight = replace(cfg, max_total_loss_pct=4.5 / 11 * 100)
     bot, client, notes = make_bot(tight, fake_client, tmp_path, state=state)
     tick(bot)
     client.prices["ABCUSDT"] = 0.89   # SL: ~-0.77 → toplam -4.77 ≤ -4.5
@@ -204,6 +204,7 @@ def test_positions_close_independently_and_slot_refills(cfg, fake_client, tmp_pa
 
 
 def test_kill_switch_counts_all_positions(cfg, fake_client, tmp_path):
+    cfg = replace(cfg, max_total_loss_pct=20)   # 25 USDT sermayede limit 5 USDT
     state = BotState.new("paper", 25.0)
     state.realized_pnl = -2.0
     state.paper_balances["USDT"] = 23.0

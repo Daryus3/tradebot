@@ -299,7 +299,7 @@ CRITICAL_EXITS = {"STOP_LOSS", "KILL_SWITCH", "EXTERNAL", "BTC_CRASH", "BACKUP_S
 
 class Messages:
     @staticmethod
-    def started(cfg, capital: float, realized: float, pairs: int, slots: int = 1) -> str:
+    def started(cfg, capital: float, realized: float, pairs: int, slots: int = 1, loss_limit: float = 0.0) -> str:
         mode = "🧪 TEST (sanal bakiye, gerçek para kullanılmaz)" if cfg.is_paper else "💵 CANLI (gerçek para!)"
         trailing = (f"+%{cfg.trailing_activation_pct:g} sonrası zirve kârın yarısı (en az +%{cfg.trailing_floor_pct:g})"
                     if cfg.trailing_dynamic else
@@ -313,7 +313,8 @@ class Messages:
             f"🎯 Kâr Al: +%{cfg.take_profit_pct:g} | 🛑 Zarar Kes: -%{cfg.stop_loss_pct:g}\n"
             f"📈 İzleyen Stop: {trailing}\n"
             f"💸 Komisyon: %{cfg.fee_rate * 100:.2f} (alış + satış, net hesaplanır)\n"
-            f"☠️ Kill-switch: toplam {fmt_usdt(cfg.max_total_loss)} {cfg.quote_asset} zarar{hold}\n"
+            f"☠️ Kill-switch: toplam zarar sermayenin %{cfg.max_total_loss_pct:g}'i "
+            f"(şu an {fmt_usdt(loss_limit)} {cfg.quote_asset}){hold}\n"
             f"📦 Aynı anda pozisyon: şu an <b>{slots}</b> (ayar: en fazla {cfg.max_open_positions}, "
             f"bakiye arttıkça otomatik artar)\n"
             f"🔍 Tarama: {cfg.scan_interval_sec} sn | {pairs} parite"
@@ -372,11 +373,11 @@ class Messages:
         )
 
     @staticmethod
-    def kill_switch(total_pnl: float, balance: float, cfg, positions_left: Optional[List[str]] = None,
-                    retrying: bool = False) -> str:
+    def kill_switch(total_pnl: float, balance: float, cfg, loss_limit: float,
+                    positions_left: Optional[List[str]] = None, retrying: bool = False) -> str:
         head = (f"🛑☠️ <b>KILL-SWITCH TETİKLENDİ!</b>\n{LINE}\n"
                 f"Toplam zarar {fmt_usdt(-total_pnl)} {cfg.quote_asset} ile limite "
-                f"({fmt_usdt(cfg.max_total_loss)} {cfg.quote_asset}) ulaştı.\n")
+                f"(sermayenin %{cfg.max_total_loss_pct:g}'i = {fmt_usdt(loss_limit)} {cfg.quote_asset}) ulaştı.\n")
         if retrying and positions_left:
             return (head + f"⛔ Yeni alımlar kalıcı olarak durduruldu.\n"
                     f"⚠️ <b>Henüz satılamayan: {esc(', '.join(positions_left))}</b> — satış birkaç saniyede bir "

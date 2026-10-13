@@ -32,8 +32,12 @@ def test_breakeven_exit_when_enabled(cfg, fake_client, tmp_path):
     assert any("BAŞABAŞ KORUMASI ÇALIŞTI" in m for m in notes.messages)
 
 
-def test_breakeven_disabled_by_default(cfg, fake_client, tmp_path):
-    bot, client, _ = make_bot(cfg, fake_client, tmp_path)
+def test_breakeven_enabled_by_default(cfg):
+    assert cfg.breakeven_enabled
+
+
+def test_breakeven_can_be_disabled(cfg, fake_client, tmp_path):
+    bot, client, _ = make_bot(replace(cfg, breakeven_enabled=False), fake_client, tmp_path)
     tick(bot)
     client.prices["ABCUSDT"] = 1.06
     tick(bot)
@@ -456,7 +460,7 @@ def test_stats_optional_columns_match_trade_log():
 # ------------------------------------------------------------------ komut satırı
 def test_main_exit_codes(monkeypatch, tmp_path):
     import main
-    monkeypatch.setenv("START_CAPITAL_USDT", "4")         # Kill-switch limitinden küçük → ayar hatası
+    monkeypatch.setenv("MAX_TOTAL_LOSS_PCT", "150")       # %100'den büyük kill-switch → ayar hatası
     assert main.main(["--env", str(tmp_path / "yok.env")]) == main.EXIT_CONFIG
 
 

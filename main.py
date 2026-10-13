@@ -100,6 +100,8 @@ def main(argv=None) -> int:
 
     register_secrets(cfg.binance_api_key, cfg.binance_api_secret, cfg.telegram_bot_token)
     log = setup_logging(cfg.log_level)
+    for note in cfg.notes:
+        log.warning("⚠️ %s", note)
 
     if args.telegram_chat_id:
         return find_chat_id(cfg)
@@ -160,8 +162,9 @@ def show_stats(cfg) -> int:
     state = StateStore(DATA_DIR / f"state_{cfg.trading_mode}.json").load()
     realized = state.realized_pnl if state else sum(t["kar_zarar_usdt"] for t in trades)
     st = stats.compute_stats(trades)
-    prob = stats.kill_switch_probability([t["kar_zarar_usdt"] for t in trades], realized, cfg.max_total_loss)
-    print(_strip_html(stats.format_stats(st, cfg.quote_asset, realized, cfg.max_total_loss,
+    limit = cfg.loss_limit(state.start_capital if state else cfg.start_capital)
+    prob = stats.kill_switch_probability([t["kar_zarar_usdt"] for t in trades], realized, limit)
+    print(_strip_html(stats.format_stats(st, cfg.quote_asset, realized, limit,
                                          cfg.take_profit_pct, cfg.stop_loss_pct, prob)))
     return EXIT_OK
 
@@ -222,8 +225,8 @@ def run_bot(cfg, store, args, log) -> int:
             return EXIT_CONFIG
         print("\n" + "!" * 64)
         print("  ⚠️  CANLI MOD: Bot GERÇEK PARANIZLA Binance'te işlem yapacak!")
-        print(f"  Sermaye: {cfg.start_capital:g} {cfg.quote_asset} | Kill-switch: -{cfg.max_total_loss:g} "
-              f"{cfg.quote_asset} | TP +%{cfg.take_profit_pct:g} | SL -%{cfg.stop_loss_pct:g}")
+        print(f"  Sermaye: {cfg.start_capital:g} {cfg.quote_asset} | Kill-switch: sermayenin "
+              f"%{cfg.max_total_loss_pct:g}'i | TP +%{cfg.take_profit_pct:g} | SL -%{cfg.stop_loss_pct:g}")
         print("!" * 64)
         if not args.yes and not confirm("Devam etmek için EVET yazın: "):
             print("İptal edildi.")

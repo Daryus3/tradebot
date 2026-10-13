@@ -81,10 +81,13 @@ def run_risk_scenarios(cfg) -> List[Tuple[str, bool, str]]:
     checks.append(("İzleyen stop erken çalışmıyor", r is None or r == ExitReason.MAX_HOLD,
                    f"+%{act - 1:g} zirvede aktifleşmedi"))
 
-    m = cfg.max_total_loss
+    m = cfg.loss_limit(cfg.start_capital)
     hit = kill_switch_hit(-(m - 0.5), -0.6, m)
     no_hit = not kill_switch_hit(-(m - 0.5), -0.4, m)
-    checks.append(("Kill-switch", hit and no_hit, f"toplam -{m:g} USDT'de tetikleniyor"))
+    grown = cfg.loss_limit(cfg.start_capital * 2)   # Sermaye eklenince limit de büyümeli
+    checks.append(("Kill-switch", hit and no_hit and abs(grown - 2 * m) < 1e-9,
+                   f"sermayenin %{cfg.max_total_loss_pct:g}'i: {cfg.start_capital:g} USDT'de -{m:.2f}, "
+                   f"{cfg.start_capital * 2:g} USDT'de -{grown:.2f} USDT'de tetikleniyor"))
 
     rules = _fake_rules()
     plan_ok = plan_entry(cfg.start_capital, rules, 1.0, cfg)
@@ -138,8 +141,10 @@ def run_selftest(cfg) -> int:
 
     # 1) Ayarlar
     mode = "TEST (paper)" if cfg.is_paper else "CANLI"
-    results.append((OK, "Ayarlar", f"Mod: {mode}, sermaye {cfg.start_capital:g} {cfg.quote_asset}, "
-                                   f"komisyon %{cfg.fee_rate * 100:.2f}, en fazla {cfg.max_open_positions} pozisyon"))
+    results.append((WARN if cfg.notes else OK, "Ayarlar",
+                    f"Mod: {mode}, sermaye {cfg.start_capital:g} {cfg.quote_asset}, "
+                    f"komisyon %{cfg.fee_rate * 100:.2f}, en fazla {cfg.max_open_positions} pozisyon"
+                    + "".join(f"\n     ⚠️ {note}" for note in cfg.notes)))
 
     # 2) Risk motoru
     checks = run_risk_scenarios(cfg)

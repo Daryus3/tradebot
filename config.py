@@ -7,9 +7,9 @@ kontrol eder. Botun tüm parametreleri tek bir `Config` nesnesinde toplanır.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import FrozenSet, Optional, Tuple
+from typing import FrozenSet, List, Optional, Tuple
 
 from dotenv import load_dotenv
 
@@ -116,7 +116,7 @@ class Config:
     start_capital: float          # Botun yöneteceği sermaye (USDT)
     capital_usage_pct: float      # Sermayenin işleme girilecek yüzdesi
     max_open_positions: int       # Aynı anda en fazla kaç coin (bakiye yetmezse otomatik azalır)
-    max_total_loss: float         # Kill-switch: toplam zarar limiti (USDT)
+    max_total_loss_pct: float     # Kill-switch: toplam zarar limiti (botun sermayesinin %'si)
     take_profit_pct: float        # Net kâr hedefi (%)
     stop_loss_pct: float          # Net zarar limiti (%)
     trailing_activation_pct: float  # İzleyen stop'un devreye girdiği net kâr (%)
@@ -158,7 +158,7 @@ class Config:
     backup_stop_pct: float = 12.0          # Net zarar % (bot normalde STOP_LOSS_PCT'de kendisi satar)
     backup_stop_limit_gap_pct: float = 1.0  # STOP_LOSS_LIMIT gerekiyorsa limit fiyatın stop altındaki payı
     # 4) Başabaş koruması (isteğe bağlı)
-    breakeven_enabled: bool = False
+    breakeven_enabled: bool = True
     breakeven_trigger_pct: float = 5.0     # Net kâr bu seviyeyi görünce koruma başlar
     breakeven_floor_pct: float = 0.3       # Sonra net kâr bu seviyeye inerse satılır
     # 5) BTC çökerken açık pozisyonlardan erken çıkış (isteğe bağlı)
@@ -201,11 +201,21 @@ class Config:
     regime_filter: bool = True
     # 37) Ayrıntılı kayıt
     equity_log_minutes: int = 15           # 0 = kapalı
+    # Ayar okunurken oluşan uyarılar (eski ayar adı, işe yaramayan değer...). Bot açılırken gösterilir.
+    notes: Tuple[str, ...] = ()
 
     @property
     def quiet_window(self) -> Optional[Tuple[int, int]]:
         """Sessiz saatler (başlangıç, bitiş) gece yarısından itibaren dakika olarak; kapalıysa None."""
         return parse_time_range(self.quiet_hours)
+
+    def loss_limit(self, base_capital: float) -> float:
+        """Kill-switch'in USDT karşılığı: botun sermayesi × MAX_TOTAL_LOSS_PCT.
+
+        `base_capital` botun yönettiği toplam sermayedir (başlangıç + /sermayeekle ile eklenenler).
+        Hesaba para eklendikçe limit de aynı oranda büyür.
+        """
+        return max(0.0, base_capital) * self.max_total_loss_pct / 100
 
     @property
     def is_paper(self) -> bool:
@@ -229,10 +239,8 @@ class Config:
             errors.append("MAX_OPEN_POSITIONS 1 ile 10 arasında olmalı")
         if not 0 < self.capital_usage_pct <= 100:
             errors.append("CAPITAL_USAGE_PCT 0-100 arasında olmalı")
-        if self.max_total_loss <= 0:
-            errors.append("MAX_TOTAL_LOSS_USDT sıfırdan büyük olmalı")
-        if self.max_total_loss >= self.start_capital:
-            errors.append("MAX_TOTAL_LOSS_USDT başlangıç sermayesinden küçük olmalı")
+        if not 0 < self.max_total_loss_pct < 100:
+            errors.append("MAX_TOTAL_LOSS_PCT 0 ile 100 arasında olmalı (örn. 45 = sermayenin %45'i)")
         if not 0 < self.stop_loss_pct < 100:
             errors.append("STOP_LOSS_PCT 0-100 arasında olmalı")
         if self.take_profit_pct <= 0:
@@ -280,6 +288,7 @@ def load_config(env_file: Optional[str] = None, mode_override: Optional[str] = N
         load_dotenv(env_path, override=False)
 
     mode = (mode_override or _env_str("TRADING_MODE", "paper")).lower()
+    loss_pct, notes = _loss_pct_setting(_env_float("START_CAPITAL_USDT", 11.0))
 
     cfg = Config(
         binance_api_key=_env_str("BINANCE_API_KEY"),
@@ -293,7 +302,7 @@ def load_config(env_file: Optional[str] = None, mode_override: Optional[str] = N
         start_capital=_env_float("START_CAPITAL_USDT", 11.0),
         capital_usage_pct=_env_float("CAPITAL_USAGE_PCT", 100.0),
         max_open_positions=_env_int("MAX_OPEN_POSITIONS", 3),
-        max_total_loss=_env_float("MAX_TOTAL_LOSS_USDT", 5.0),
+        max_total_loss_pct=loss_pct,
         take_profit_pct=_env_float("TAKE_PROFIT_PCT", 15.0),
         stop_loss_pct=_env_float("STOP_LOSS_PCT", 10.0),
         trailing_activation_pct=_env_float("TRAILING_ACTIVATION_PCT", 10.0),
@@ -327,7 +336,7 @@ def load_config(env_file: Optional[str] = None, mode_override: Optional[str] = N
         backup_stop_enabled=_env_bool("BACKUP_STOP_ENABLED", True),
         backup_stop_pct=_env_float("BACKUP_STOP_PCT", 12.0),
         backup_stop_limit_gap_pct=_env_float("BACKUP_STOP_LIMIT_GAP_PCT", 1.0),
-        breakeven_enabled=_env_bool("BREAKEVEN_ENABLED", False),
+        breakeven_enabled=_env_bool("BREAKEVEN_ENABLED", True),
         breakeven_trigger_pct=_env_float("BREAKEVEN_TRIGGER_PCT", 5.0),
         breakeven_floor_pct=_env_float("BREAKEVEN_FLOOR_PCT", 0.3),
         btc_crash_exit=_env_bool("BTC_CRASH_EXIT", False),
@@ -359,4 +368,51 @@ def load_config(env_file: Optional[str] = None, mode_override: Optional[str] = N
         equity_log_minutes=_env_int("EQUITY_LOG_MINUTES", 15),
     )
     cfg.validate()
-    return cfg
+    notes += _setting_notes(cfg)
+    return replace(cfg, notes=tuple(notes)) if notes else cfg
+
+
+DEFAULT_MAX_TOTAL_LOSS_PCT = 45.0  # 11 USDT sermayede ≈ 5 USDT
+
+
+def _loss_pct_setting(start_capital: float) -> Tuple[float, List[str]]:
+    """Kill-switch yüzdesini okur. Eski MAX_TOTAL_LOSS_USDT ayarı varsa yüzdeye çevirir.
+
+    - MAX_TOTAL_LOSS_PCT yazılıysa o geçerlidir (eski USDT satırı yok sayılır).
+    - Yalnızca eski MAX_TOTAL_LOSS_USDT varsa: USDT / START_CAPITAL_USDT × 100 (koruma gevşemesin diye).
+    - Hiçbiri yoksa varsayılan %45.
+    """
+    notes: List[str] = []
+    has_pct = (os.getenv("MAX_TOTAL_LOSS_PCT") or "").strip() != ""
+    has_usdt = (os.getenv("MAX_TOTAL_LOSS_USDT") or "").strip() != ""
+    if has_pct:
+        if has_usdt:
+            notes.append("MAX_TOTAL_LOSS_USDT artık kullanılmıyor (MAX_TOTAL_LOSS_PCT geçerli); "
+                         ".env'den bu satırı silebilirsiniz.")
+        return _env_float("MAX_TOTAL_LOSS_PCT", DEFAULT_MAX_TOTAL_LOSS_PCT), notes
+    if has_usdt:
+        usdt = _env_float("MAX_TOTAL_LOSS_USDT", 0.0)
+        if usdt <= 0 or start_capital <= 0:
+            raise ConfigError("MAX_TOTAL_LOSS_USDT sıfırdan büyük olmalı (yeni ayar: MAX_TOTAL_LOSS_PCT)")
+        pct = round(usdt / start_capital * 100, 2)
+        notes.append(f"Eski ayar MAX_TOTAL_LOSS_USDT={usdt:g} → kill-switch sermayenin %{pct:g}'i olarak "
+                     f"uygulandı. .env'de bu satırı MAX_TOTAL_LOSS_PCT={pct:g} ile değiştirin.")
+        return pct, notes
+    return DEFAULT_MAX_TOTAL_LOSS_PCT, notes
+
+
+def _setting_notes(cfg: Config) -> List[str]:
+    """Hata sayılmayan ama işe yaramayan ayar birleşimleri için uyarılar."""
+    notes: List[str] = []
+    if cfg.breakeven_enabled:
+        # Kâr Al'dan önce görülemiyorsa ya da izleyen stop daha yüksek bir tabanla zaten koruyorsa etkisizdir
+        shadowed_by_trailing = (cfg.breakeven_trigger_pct >= cfg.trailing_activation_pct
+                                and cfg.breakeven_floor_pct <= cfg.trailing_floor_pct)
+        if cfg.breakeven_trigger_pct >= cfg.take_profit_pct or shadowed_by_trailing:
+            first_exit = min(cfg.take_profit_pct, cfg.trailing_activation_pct)
+            hint = round(first_exit / 2, 1)
+            tip = (f" Örn. BREAKEVEN_TRIGGER_PCT={hint:g} yapın." if hint > cfg.breakeven_floor_pct else "")
+            notes.append(f"Başabaş koruması açık ama BREAKEVEN_TRIGGER_PCT ({cfg.breakeven_trigger_pct:g}), "
+                         f"izleyen stop / kâr al seviyesinden (+%{first_exit:g}) küçük olmadığı için hiç "
+                         f"devreye girmez.{tip}")
+    return notes

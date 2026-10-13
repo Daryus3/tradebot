@@ -6,7 +6,7 @@ echo    DİKKAT: CANLI MOD - Bot GERÇEK PARANIZLA Binance'te işlem yapacak!
 echo.
 echo   - Önce TEST_ET.bat ve birkaç gün BASLAT.bat (test modu) ile deneyin.
 echo   - Binance API anahtarında para çekme (Withdraw) izni KAPALI olmalı.
-echo   - .env dosyasındaki MAX_TOTAL_LOSS_USDT kadar zarar olursa bot kendini durdurur.
+echo   - Toplam zarar sermayenin MAX_TOTAL_LOSS_PCT yüzdesine (varsayılan %%45) ulaşırsa bot kendini durdurur.
 echo   - Birazdan onay için EVET yazmanız istenecek.
 echo   - Bot çökerse bekçi onu onay sormadan yeniden başlatır.
 echo   - Vazgeçmek için pencereyi kapatın veya Ctrl+C'ye basın.

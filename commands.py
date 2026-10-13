@@ -45,6 +45,7 @@ COMMAND_MENU = [
     ("sat", "Bir coini hemen sat: /sat ETH"),
     ("hepsinisat", "Tüm pozisyonları hemen sat"),
     ("kapat", "Botu güvenle kapat"),
+    ("sermayeekle", "Hesaba eklediğiniz parayı bota tanıtın: /sermayeekle 10"),
     ("ayarlar", "Geçerli kurallar ve ayarlar"),
     ("ping", "Bot çalışıyor mu?"),
     ("yardim", "Komut listesi"),
@@ -210,8 +211,9 @@ class ConflictError(Exception):
 
 @dataclass
 class PendingConfirm:
-    action: str            # sell | sellall | close
+    action: str            # sell | sellall | close | addcap
     symbol: str = ""
+    amount: float = 0.0
     expires: float = 0.0
 
 
@@ -339,8 +341,11 @@ class CommandProcessor:
             f"Açık pozisyon K/Z: {fmt_signed(unrealized)} {q}",
             f"Toplam (tahmini): <b>{fmt_usdt(equity)} {q}</b>{self._tl(equity)}",
             f"Toplam K/Z: {fmt_signed(bot.state.realized_pnl + unrealized)} {q} | "
-            f"Kill-switch'e kalan: {fmt_usdt(bot.cfg.max_total_loss + bot.state.realized_pnl + unrealized)} {q}",
+            f"Kill-switch'e kalan: {fmt_usdt(bot.loss_limit + bot.state.realized_pnl + unrealized)} {q}",
         ]
+        if bot.state.capital_added:
+            lines.append(f"Bota verilen sermaye: {fmt_usdt(bot.state.start_capital)} {q} "
+                         f"(sonradan eklenen: {fmt_usdt(bot.state.capital_added)} {q})")
         if not bot.exchange.is_paper:
             try:
                 free = bot.exchange.free_balance(q)
@@ -392,7 +397,8 @@ class CommandProcessor:
             f"Mod: {'🧪 TEST' if cfg.is_paper else '💵 CANLI'}\n"
             f"🎯 Kâr Al +%{cfg.take_profit_pct:g} | 🛑 Zarar Kes -%{cfg.stop_loss_pct:g}\n"
             f"📈 İzleyen stop: +%{cfg.trailing_activation_pct:g} → +%{cfg.trailing_floor_pct:g}\n"
-            f"☠️ Kill-switch: {fmt_usdt(cfg.max_total_loss)} {cfg.quote_asset}\n"
+            f"☠️ Kill-switch: sermayenin %{cfg.max_total_loss_pct:g}'i "
+            f"(şu an {fmt_usdt(self.bot.loss_limit)} {cfg.quote_asset})\n"
             f"📦 En fazla pozisyon: {cfg.max_open_positions} (şu an {self.bot.slots()})\n"
             f"🧷 Binance yedek stop: {on(cfg.backup_stop_enabled)} (-%{cfg.backup_stop_pct:g})\n"
             f"🔒 Başabaş: {on(cfg.breakeven_enabled)} | 📉 BTC çöküş çıkışı: {on(cfg.btc_crash_exit)}\n"
@@ -436,6 +442,46 @@ class CommandProcessor:
         self._ask(PendingConfirm("close"), open_note,
                   "Bot kapatılsın mı? (Yeniden başlatmak için bilgisayardan açmanız gerekir)")
 
+    def cmd_sermayeekle(self, args) -> None:
+        bot, q = self.bot, self.bot.cfg.quote_asset
+        usage = (f"Kullanım: /sermayeekle 10  → Binance Spot hesabınıza eklediğiniz {q} tutarını bota tanıtır.\n"
+                 f"Bot normalde yalnızca kendisine verilen sermayeyle işlem yapar; para eklemek tek başına yetmez.")
+        try:
+            amount = float(args[0].replace(",", ".")) if args else 0.0
+        except ValueError:
+            amount = 0.0
+        if not amount > 0 or amount != amount or amount == float("inf"):
+            self.reply(usage)
+            return
+        problem = self._capital_problem(amount)
+        if problem:
+            self.reply(problem)
+            return
+        new_base = bot.state.start_capital + amount
+        detail = (f"\n💼 Bota verilen sermaye: {fmt_usdt(bot.state.start_capital)} → <b>{fmt_usdt(new_base)} {q}</b>"
+                  f"\n☠️ Kill-switch limiti: {fmt_usdt(bot.loss_limit)} → "
+                  f"<b>{fmt_usdt(bot.cfg.loss_limit(new_base))} {q}</b> (%{bot.cfg.max_total_loss_pct:g})"
+                  + ("\n🧪 Test modu: tutar sanal bakiyeye eklenecek." if bot.exchange.is_paper else ""))
+        self._ask(PendingConfirm("addcap", amount=amount), detail,
+                  f"Bota <b>{fmt_usdt(amount)} {q}</b> sermaye eklensin mi?")
+
+    def _capital_problem(self, amount: float) -> Optional[str]:
+        """Sermaye eklenemiyorsa nedenini (Telegram mesajı) döndürür, eklenebiliyorsa None."""
+        bot, q = self.bot, self.bot.cfg.quote_asset
+        if bot.state.killed:
+            return "⛔ Kill-switch tetiklenmiş; sermaye eklenemez. Önce durumu sıfırlayın (--reset-state)."
+        if bot.exchange.is_paper:
+            return None
+        try:
+            spare = bot.unallocated_balance()
+        except Exception as exc:  # noqa: BLE001
+            return Messages.error(f"Binance bakiyesi okunamadı, sermaye eklenmedi: {esc(str(exc))}")
+        if spare is not None and amount > spare + 0.01:
+            return (f"⚠️ Spot cüzdanında bota ayrılmamış serbest bakiye yalnızca "
+                    f"<b>{fmt_usdt(max(0.0, spare))} {q}</b>.\nÖnce parayı Binance'te Spot cüzdanına "
+                    f"aktarın, sonra tekrar deneyin.")
+        return None
+
     def cmd_evet(self, args) -> None:
         pending = self.pending
         if pending is None or self.time_fn() > pending.expires:
@@ -460,6 +506,18 @@ class CommandProcessor:
         elif pending.action == "close":
             self.reply("👋 Bot kapatılıyor...")
             self.bot.stop()
+        elif pending.action == "addcap":
+            bot, q = self.bot, self.bot.cfg.quote_asset
+            problem = self._capital_problem(pending.amount)  # Onay beklerken bakiye değişmiş olabilir
+            if problem:
+                self.reply(problem)
+                return
+            bot.add_capital(pending.amount)
+            self.reply(f"✅ <b>{fmt_usdt(pending.amount)} {q} sermaye eklendi.</b>\n"
+                       f"💼 Bota verilen sermaye: {fmt_usdt(bot.state.start_capital)} {q} | "
+                       f"Güncel: {fmt_usdt(bot.state.capital)} {q}\n"
+                       f"☠️ Kill-switch limiti: {fmt_usdt(bot.loss_limit)} {q} | "
+                       f"📦 Pozisyon hakkı: {bot.slots()}")
 
     def cmd_hayir(self, args) -> None:
         had = self.pending is not None

@@ -58,7 +58,8 @@ def cfg(monkeypatch, tmp_path):
     # Kullanıcının .env dosyası testleri etkilemesin
     for key in ["TRADING_MODE", "START_CAPITAL_USDT", "TAKE_PROFIT_PCT", "STOP_LOSS_PCT", "MAX_HOLD_MINUTES",
                 "TRAILING_ACTIVATION_PCT", "TRAILING_FLOOR_PCT", "TRAILING_DYNAMIC", "FEE_RATE",
-                "MAX_TOTAL_LOSS_USDT", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"]:
+                "MAX_TOTAL_LOSS_USDT", "MAX_TOTAL_LOSS_PCT", "BREAKEVEN_ENABLED", "BREAKEVEN_TRIGGER_PCT",
+                "BREAKEVEN_FLOOR_PCT", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"]:
         monkeypatch.delenv(key, raising=False)
     return load_config(env_file=str(tmp_path / "yok.env"), mode_override="paper")
 

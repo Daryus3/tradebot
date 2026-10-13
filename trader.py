@@ -184,7 +184,10 @@ class TradingBot:
 
     def _announce_startup(self, pairs: int, now: float) -> None:
         cfg = self.cfg
-        self.notifier.send(Messages.started(cfg, self.state.capital, self.state.realized_pnl, pairs, self.slots()))
+        self.notifier.send(Messages.started(cfg, self.state.capital, self.state.realized_pnl, pairs, self.slots(),
+                                            loss_limit=self.loss_limit))
+        for note in cfg.notes:
+            self.notifier.send(Messages.warning(note))
         if self.state.paused:
             self.notifier.send("⏸️ Yeni alımlar daha önce /durdur ile durdurulmuştu. Devam için /devam yazın.")
         if self.state.killed and self.state.positions:
@@ -220,7 +223,7 @@ class TradingBot:
 
         if self.state.positions:
             self.manage_positions(now)
-        elif self.state.killed or kill_switch_hit(self.state.realized_pnl, 0.0, self.cfg.max_total_loss):
+        elif self.state.killed or kill_switch_hit(self.state.realized_pnl, 0.0, self.loss_limit):
             self.trigger_kill(self.state.realized_pnl)
         if not self.running:
             return
@@ -249,6 +252,38 @@ class TradingBot:
 
     def free_slots(self) -> int:
         return max(0, self.slots() - len(self.state.positions))
+
+    # ================================================================ sermaye / kill-switch limiti
+    @property
+    def loss_limit(self) -> float:
+        """Kill-switch limiti (USDT): botun toplam sermayesinin MAX_TOTAL_LOSS_PCT'si."""
+        return self.cfg.loss_limit(self.state.start_capital)
+
+    def unallocated_balance(self) -> Optional[float]:
+        """Canlı modda Spot'ta olup bota henüz ayrılmamış serbest bakiye (okunamazsa None)."""
+        if self.exchange.is_paper:
+            return None
+        free = self.exchange.free_balance(self.cfg.quote_asset)
+        bot_cash = max(0.0, self.state.capital - self.state.committed)
+        return free - bot_cash
+
+    def add_capital(self, amount: float) -> None:
+        """Hesaba yatırılan parayı botun sermayesine ekler (/sermayeekle).
+
+        Sermaye tabanı büyüdüğü için kill-switch limiti ve pozisyon sayısı da buna göre artar.
+        Test modunda sanal bakiyeye de eklenir.
+        """
+        if amount <= 0:
+            raise ValueError("Eklenecek tutar sıfırdan büyük olmalı")
+        state = self.state
+        state.start_capital = round(state.start_capital + amount, 8)
+        state.capital_added = round(state.capital_added + amount, 8)
+        if self.exchange.is_paper:
+            q = self.cfg.quote_asset
+            state.paper_balances[q] = round(state.paper_balances.get(q, 0.0) + amount, 8)
+        self.store.save(state)
+        log.info("Sermaye eklendi: +%.2f %s → toplam sermaye %.2f, kill-switch limiti %.2f",
+                 amount, self.cfg.quote_asset, state.capital, self.loss_limit)
 
     # ================================================================ fiyat
     def bid_ask(self, symbol: str):
@@ -552,7 +587,7 @@ class TradingBot:
             self._liquidate()
             return True
         realized, unrealized = self.state.realized_pnl, self.unrealized()
-        if not kill_switch_hit(realized, unrealized, self.cfg.max_total_loss):
+        if not kill_switch_hit(realized, unrealized, self.loss_limit):
             return False
         total = realized + unrealized
         log.error("KILL-SWITCH: toplam K/Z %.4f USDT", total)
@@ -562,7 +597,8 @@ class TradingBot:
 
     def _mark_killed(self, total_pnl: float) -> None:
         self.state.killed = True
-        self.state.kill_reason = f"Toplam K/Z {total_pnl:.4f} USDT (limit -{self.cfg.max_total_loss})"
+        self.state.kill_reason = (f"Toplam K/Z {total_pnl:.4f} USDT (limit -%{self.cfg.max_total_loss_pct:g} = "
+                                  f"-{self.loss_limit:.2f} USDT)")
         self.state.killed_at = self.time_fn()
         self.store.save(self.state)
 
@@ -579,7 +615,8 @@ class TradingBot:
             self.trigger_kill(total)
         elif first or now >= self._next_kill_notice:
             self._next_kill_notice = now + 600
-            self.notifier.send(Messages.kill_switch(total, self.state.start_capital + total, self.cfg, left,
+            self.notifier.send(Messages.kill_switch(total, self.state.start_capital + total, self.cfg,
+                                                    self.loss_limit, left,
                                                     retrying=True), critical=True)
 
     # ================================================================ çıkış
@@ -764,7 +801,7 @@ class TradingBot:
         if not self.state.killed:
             self._mark_killed(total_pnl)
         balance = self.state.start_capital + total_pnl
-        self.notifier.send(Messages.kill_switch(total_pnl, balance, self.cfg, []), critical=True)
+        self.notifier.send(Messages.kill_switch(total_pnl, balance, self.cfg, self.loss_limit, []), critical=True)
         self.running = False
 
     # ================================================================ mutabakat
@@ -916,8 +953,8 @@ class TradingBot:
             return "📭 Henüz kapanmış işlem yok; istatistikler ilk işlemlerden sonra oluşur."
         st = stats.compute_stats(trades)
         prob = stats.kill_switch_probability([t["kar_zarar_usdt"] for t in trades], self.state.realized_pnl,
-                                             self.cfg.max_total_loss)
-        return stats.format_stats(st, self.cfg.quote_asset, self.state.realized_pnl, self.cfg.max_total_loss,
+                                             self.loss_limit)
+        return stats.format_stats(st, self.cfg.quote_asset, self.state.realized_pnl, self.loss_limit,
                                   self.cfg.take_profit_pct, self.cfg.stop_loss_pct, prob)
 
     def period_report(self, start: datetime, end: datetime, title: str) -> str:
@@ -926,7 +963,7 @@ class TradingBot:
         unrealized = self.unrealized()
         extra = [f"💰 Bakiye: {fmt_usdt(self.state.capital + unrealized)} {self.cfg.quote_asset} | "
                  f"Toplam K/Z: {fmt_signed(self.state.realized_pnl + unrealized)}",
-                 f"☠️ Kill-switch'e kalan: {fmt_usdt(self.cfg.max_total_loss + self.state.realized_pnl + unrealized)} "
+                 f"☠️ Kill-switch'e kalan: {fmt_usdt(self.loss_limit + self.state.realized_pnl + unrealized)} "
                  f"{self.cfg.quote_asset}"]
         d = self.day_stats
         report_day = (end - timedelta(seconds=1)).date().isoformat()
@@ -1024,7 +1061,7 @@ class TradingBot:
         total = state.realized_pnl + unrealized
         self.notifier.send(Messages.status(
             state.capital + unrealized, total, state.trades, state.wins, state.losses, self.cfg,
-            "\n".join(lines), self.cfg.max_total_loss + total, len(state.positions), self.slots()), silent=silent)
+            "\n".join(lines), self.loss_limit + total, len(state.positions), self.slots()), silent=silent)
 
     # ================================================================ yardımcılar
     def _next_sleep(self) -> float:

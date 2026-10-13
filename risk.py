@@ -143,9 +143,9 @@ def evaluate_exit(pos: Position, current_pnl_pct: float, now: float, cfg) -> Opt
     return None
 
 
-def kill_switch_hit(realized_pnl: float, unrealized_pnl: float, max_total_loss: float) -> bool:
+def kill_switch_hit(realized_pnl: float, unrealized_pnl: float, loss_limit: float) -> bool:
     """Gerçekleşen + açık pozisyon zararı toplamı limite ulaştı mı?"""
-    return realized_pnl + unrealized_pnl <= -abs(max_total_loss) + 1e-9
+    return realized_pnl + unrealized_pnl <= -abs(loss_limit) + 1e-9
 
 
 def min_position_usdt(min_notional: float, cfg) -> float:

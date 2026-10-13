@@ -189,6 +189,26 @@ def _to_float(raw: Optional[str], default: float) -> float:
         return default
 
 
+def migrate_legacy(values: Dict[str, str]) -> Tuple[Dict[str, str], List[str]]:
+    """Eski ayar adlarını yenilerine çevirir (koruma seviyesi değişmeden).
+
+    MAX_TOTAL_LOSS_USDT (sabit USDT) → MAX_TOTAL_LOSS_PCT (sermayenin yüzdesi) = USDT / START_CAPITAL × 100.
+    """
+    out, notes = dict(values), []
+    usdt_raw = (out.get("MAX_TOTAL_LOSS_USDT") or "").strip()
+    if "MAX_TOTAL_LOSS_USDT" in out and not (out.get("MAX_TOTAL_LOSS_PCT") or "").strip():
+        usdt = _to_float(usdt_raw, 0.0)
+        capital = _to_float(out.get("START_CAPITAL_USDT"), 11.0)
+        if usdt > 0 and capital > 0:
+            pct = round(usdt / capital * 100, 2)
+            out["MAX_TOTAL_LOSS_PCT"] = f"{pct:g}"
+            notes.append(f"Kill-switch artık yüzdeyle çalışıyor: MAX_TOTAL_LOSS_USDT={usdt_raw} → "
+                         f"MAX_TOTAL_LOSS_PCT={pct:g} (sermayenin %{pct:g}'i, koruma seviyesi aynı).")
+    if "MAX_TOTAL_LOSS_USDT" in out and (out.get("MAX_TOTAL_LOSS_PCT") or "").strip():
+        del out["MAX_TOTAL_LOSS_USDT"]
+    return out, notes
+
+
 def _read_text(path: Path) -> str:
     try:
         return path.read_text(encoding="utf-8-sig")
@@ -696,7 +716,7 @@ def run_wizard(env_path: Path = BASE_DIR / ".env",
     if updates is None:
         return False
 
-    merged = dict(old_values)
+    merged, migration_notes = migrate_legacy(old_values)
     merged.update(updates)
     try:
         template = _read_text(example_path) if example_path.exists() else None
@@ -713,6 +733,8 @@ def run_wizard(env_path: Path = BASE_DIR / ".env",
 
     print_fn("")
     print_fn(f"💾 Ayarlar kaydedildi: {env_path}")
+    for note in migration_notes:
+        print_fn(f"🔁 {note}")
     if backup:
         print_fn(f"🗂️ Eski ayar dosyanız yedeklendi: {backup.name}")
     print_fn("")

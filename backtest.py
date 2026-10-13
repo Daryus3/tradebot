@@ -485,7 +485,7 @@ class _Simulator:
     def _check_kill_switch(self, k: int, t_close: int) -> bool:
         unrealized = sum(self._value_at(op, self._close_price(sym, k)) - op.pos.cost_usdt
                          for sym, op in self.open.items())
-        if not kill_switch_hit(self.realized, unrealized, self.cfg.max_total_loss):
+        if not kill_switch_hit(self.realized, unrealized, self.cfg.loss_limit(self.cfg.start_capital)):
             return False
         for symbol in list(self.open):
             self._close(symbol, self._close_price(symbol, k), ExitReason.KILL_SWITCH.value, t_close)
@@ -784,7 +784,8 @@ def format_backtest_report(result: BacktestResult, cfg) -> str:
         f"🪙 Sembol sayısı: {len(result.symbols_used)}",
         f"⚙️ Kâr Al +%{cfg.take_profit_pct:g} | Zarar Kes -%{cfg.stop_loss_pct:g} | İzleyen stop {trailing}{hold}",
         f"   Komisyon %{cfg.fee_rate * 100:.2f} | Spread %{result.spread_pct:g} | "
-        f"Kill-switch -{cfg.max_total_loss:g} {q} | En fazla {cfg.max_open_positions} pozisyon",
+        f"Kill-switch -%{cfg.max_total_loss_pct:g} (-{fmt_usdt(cfg.loss_limit(result.start_capital))} {q}) | "
+        f"En fazla {cfg.max_open_positions} pozisyon",
         f"💼 Başlangıç sermayesi: {fmt_usdt(result.start_capital)} {q}",
         LINE,
         f"🔢 İşlem sayısı: {len(trades)} (✅ {len(wins)} kazanan / ❌ {len(losses)} kaybeden)",
@@ -826,7 +827,8 @@ def format_backtest_report(result: BacktestResult, cfg) -> str:
         lines.append(f"☠️ Kill-switch: TETİKLENDİ ({_fmt_time(result.killed_at_ms)}) — "
                      f"sonrasında işlem yapılmadı")
     else:
-        lines.append(f"✅ Kill-switch: tetiklenmedi (limit -{cfg.max_total_loss:g} {q})")
+        lines.append(f"✅ Kill-switch: tetiklenmedi (limit -%{cfg.max_total_loss_pct:g} = "
+                     f"-{fmt_usdt(cfg.loss_limit(result.start_capital))} {q})")
 
     if result.notes:
         lines.append(LINE)

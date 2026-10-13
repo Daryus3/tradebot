@@ -26,7 +26,7 @@ log = get_logger()
 @dataclass
 class BotState:
     mode: str
-    start_capital: float
+    start_capital: float             # Bota verilen toplam sermaye (ilk sermaye + /sermayeekle ile eklenenler)
     realized_pnl: float = 0.0
     trades: int = 0
     wins: int = 0
@@ -45,6 +45,7 @@ class BotState:
     last_alive: float = 0.0          # Botun en son çalıştığı an (kesinti tespiti için)
     last_daily_report: str = ""      # En son günlük raporun tarihi (YYYY-MM-DD)
     last_weekly_report: str = ""     # En son haftalık raporun haftası (YYYY-Www)
+    capital_added: float = 0.0       # /sermayeekle ile sonradan eklenen toplam tutar (bilgi amaçlı)
 
     @property
     def capital(self) -> float:

@@ -197,7 +197,7 @@ def test_position_closed_when_symbol_data_ends(cfg, make_client, tmp_path):
 
 
 def test_crash_triggers_kill_switch(cfg, make_client, tmp_path):
-    cfg = replace(cfg, max_total_loss=0.5)
+    cfg = replace(cfg, max_total_loss_pct=0.5 / 11 * 100)
 
     def crash_then_new_setup(p):
         c = p * 0.94  # SL'ye değmeyen ama toplam zararı limitin altına iten kapanış

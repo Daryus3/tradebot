@@ -23,7 +23,7 @@ komutla yönetilebilir.
 | 🛑 Zarar Kes | Net zarar **−%10** → ≈ **9.90 USDT** olunca satar |
 | 📈 İzleyen Stop | Net kâr bir kez **+%10** (≈12.10) görülür, sonra **+%5**'e (≈11.55) düşerse anında satar |
 | 💸 Komisyon | Alış ve satışta **%0.1** (BNB'siz). Tüm kararlar komisyon **düşüldükten sonraki net** paraya göre verilir |
-| ☠️ Kill-switch | Toplam zarar **5 USDT**'ye ulaşırsa tüm açık pozisyonları satar, botu kapatır ve kilitler |
+| ☠️ Kill-switch | Toplam zarar sermayenin **%45**'ine (11 USDT'de ≈ **4.95 USDT**) ulaşırsa tüm açık pozisyonları satar, botu kapatır ve kilitler. Yüzde olduğu için sermaye büyüdükçe limit de büyür |
 | 🔍 Tarama | Piyasa **30 sn**'de bir taranır; açık pozisyon **~1 sn**'de (anlık fiyat akışı) bir kontrol edilir |
 | 📨 Telegram | Alım, satım, kâr/zarar, bakiye, hatalar → emojili anlık mesajlar |
 | 🧪 Test modu | 11 USDT **sanal** bakiye ile canlı fiyatlardan simülasyon (gerçek emir yok) |
@@ -37,7 +37,7 @@ komutla yönetilebilir.
 | ♻️ Otomatik yeniden başlatma | `watchdog.py` (veya `BASLAT.bat`) ile bot çökerse kendiliğinden yeniden açılır. İsterseniz Windows açılışında başlar |
 | ⏰ Kesinti uyarısı | Bilgisayar uykuya geçip uyanınca veya bot uzun süre kapalı kalınca "Bot 47 dk çalışmadı" uyarısı |
 | 📶 İnternet kesintisi | Telegram mesajları kaybolmaz, bağlantı gelince gönderilir; açılışta internet yoksa bot bekler |
-| 🔒 Başabaş koruması *(isteğe bağlı)* | +%5 görmüş işlem geri dönerse zarara geçmeden ~+%0.3'te satar |
+| 🔒 Başabaş koruması *(varsayılan açık)* | +%5 görmüş işlem geri dönerse zarara geçmeden ~+%0.3'te satar |
 | 📉 BTC çöküş çıkışı *(isteğe bağlı)* | BTC 15 dk'da %2'den fazla düşerse açık pozisyonları erkenden satar |
 | ⚡ Anlık fiyat akışı | Fiyatlar Binance WebSocket'ten anında gelir; bağlantı koparsa otomatik olarak normal sorguya döner |
 | 🔐 Gizli bilgi koruması | Bot token'ı ve API anahtarları log dosyalarına ve mesajlara asla açık yazılmaz |
@@ -215,6 +215,7 @@ Telegram'da `/` yazınca komut listesi çıkar.
 | `/durdur` · `/devam` | Yeni alımları durdurur / devam ettirir (açık pozisyon takibi sürer) |
 | `/sat ETH` · `/hepsinisat` | Pozisyonu hedefi beklemeden hemen satar (onay ister) |
 | `/kapat` | Botu güvenle kapatır (onay ister) |
+| `/sermayeekle 10` | Binance hesabınıza eklediğiniz parayı bota tanıtır; sermaye, kill-switch limiti ve pozisyon sayısı buna göre büyür (onay ister) |
 | `/ayarlar` · `/ping` · `/yardim` | Ayarlar, "çalışıyor musun?", komut listesi |
 
 Riskli komutlar `/evet` onayı ister (60 sn içinde). `.env`'de `COMMAND_PIN=1234` gibi bir PIN
@@ -284,12 +285,23 @@ Kâr ettikçe pozisyon sayısı artar, zarar ettikçe azalır. Her zaman tek poz
   (fiyat olarak yaklaşık %15.2-15.3 artış gerekir).
 
 ### ☠️ Kill-switch
-Toplam (gerçekleşen + tüm açık pozisyonlardaki) zarar 5 USDT'ye ulaştığında bot açık pozisyonların hepsini satar,
+Toplam (gerçekleşen + tüm açık pozisyonlardaki) zarar, botun sermayesinin `MAX_TOTAL_LOSS_PCT` yüzdesine
+(varsayılan **%45** → 11 USDT'de ≈4.95 USDT) ulaştığında bot açık pozisyonların hepsini satar,
 Telegram'a bildirir ve kapanır. Bu durum `data/` klasörüne kaydedilir; botu yeniden başlatsanız
 bile **kilitli** kalır (bekçi de yeniden başlatmaz). Bilerek tekrar başlatmak için:
 ```bash
 python main.py --reset-state
 ```
+
+### 💵 Hesaba para eklemek
+Bot yalnızca kendisine verilen sermayeyle işlem yapar; Binance'e para yatırmak tek başına yetmez.
+Parayı **Spot** cüzdanına aktardıktan sonra Telegram'dan örneğin `/sermayeekle 20` yazıp `/evet` ile
+onaylayın. Botun sermayesi 20 USDT artar; kill-switch limiti (sermayenin %45'i) ve aynı anda açılabilecek
+pozisyon sayısı da buna göre büyür. Kill-switch sayacı (şimdiye kadarki kâr/zarar) sıfırlanmaz.
+Canlı modda bot, eklenen tutarın Spot'ta gerçekten serbest olup olmadığını kontrol eder.
+
+> Eski sürümlerdeki `MAX_TOTAL_LOSS_USDT` ayarı artık kullanılmıyor. `.env`'de hâlâ varsa bot onu
+> sermayeye oranlayıp yüzdeye çevirir ve sizi uyarır; satırı `MAX_TOTAL_LOSS_PCT=45` ile değiştirin.
 
 ### ⏱️ 15-60 dakika hakkında
 Strateji, kısa sürede toparlanma potansiyeli olan oynak coinleri seçer. Ancak %15'lik kâr hedefi
@@ -324,13 +336,13 @@ iddialı bir hedeftir; bazı işlemler 60 dakikadan uzun sürebilir. İsterseniz
 | `TRADING_MODE` | `paper` | `paper` = test, `live` = gerçek |
 | `START_CAPITAL_USDT` | `11` | Botun yöneteceği sermaye |
 | `MAX_OPEN_POSITIONS` | `3` | Aynı anda en fazla pozisyon (bakiye yetmezse otomatik azalır) |
-| `MAX_TOTAL_LOSS_USDT` | `5` | Kill-switch zarar limiti |
+| `MAX_TOTAL_LOSS_PCT` | `45` | Kill-switch: toplam zarar sermayenin bu yüzdesine ulaşınca bot durur |
 | `TAKE_PROFIT_PCT` | `15` | Net kâr hedefi (%) |
 | `STOP_LOSS_PCT` | `10` | Net zarar limiti (%) |
 | `TRAILING_ACTIVATION_PCT` / `TRAILING_FLOOR_PCT` | `10` / `5` | İzleyen stop |
 | `FEE_RATE` | `0.001` | Komisyon oranı (%0.1) |
 | `BACKUP_STOP_ENABLED` / `BACKUP_STOP_PCT` | `true` / `12` | Binance'teki yedek zarar-kes emri |
-| `BREAKEVEN_ENABLED` | `false` | Başabaş koruması |
+| `BREAKEVEN_ENABLED` / `BREAKEVEN_TRIGGER_PCT` | `true` / `5` | Başabaş koruması (TRIGGER, izleyen stop başlangıcından küçük olmalı) |
 | `BTC_CRASH_EXIT` | `false` | BTC çöküşünde erken çıkış |
 | `USE_WEBSOCKET` | `true` | Anlık fiyat akışı |
 | `TELEGRAM_COMMANDS` / `COMMAND_PIN` | `true` / boş | Telegram komutları / onay PIN'i |
