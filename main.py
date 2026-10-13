@@ -11,6 +11,7 @@ Kullanım:
     python main.py --backtest --gun 30 # Stratejiyi geçmiş verilerle dener
     python main.py --backtest --gun 90 --tara       # Aynı veriyle farklı TP/SL/süre ayarlarını karşılaştırır
     python main.py --backtest --gun 90 --sermaye 25 # Farklı bir başlangıç sermayesiyle dener
+    python main.py --backtest --gun 90 --bitis 2026-07-01  # Bu tarihte biten (daha eski) bir dönemi dener
     python main.py --telegram-chat-id  # Telegram chat ID'nizi bulur
     python main.py --reset-state       # Kayıtlı durumu (K/Z, kill-switch) sıfırlar
 
@@ -25,6 +26,8 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+from datetime import datetime
+from typing import Optional
 
 from config import BASE_DIR, DATA_DIR, ConfigError, load_config
 from logger import redact, register_secrets, setup_logging
@@ -50,6 +53,9 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--coin-sayisi", type=int, default=40, help="Backtest'te kullanılacak coin sayısı")
     parser.add_argument("--sermaye", type=float, default=None,
                         help="Backtest başlangıç sermayesi (.env'deki START_CAPITAL_USDT yerine)")
+    parser.add_argument("--bitis", default=None,
+                        help="Backtest döneminin bitiş tarihi YYYY-AA-GG (varsayılan: şimdi). Bulunan ayarları "
+                             "test edilen dönemle çakışmayan daha eski bir dönemde doğrulamak için")
     parser.add_argument("--tara", action="store_true",
                         help="Backtest: aynı veriyle farklı Kâr Al / Zarar Kes / süre ayarlarını karşılaştırır")
     parser.add_argument("--tp", default=None, help="--tara için Kâr Al değerleri, örn. 2,3,5")
@@ -194,6 +200,19 @@ def _number_list(text, name: str, cast=float, allow_zero: bool = False):
     return values
 
 
+def _end_date_ms(text) -> Optional[int]:
+    """'2026-07-01' → o günün başlangıcı (yerel saat, ms); boşsa None (= şimdi)."""
+    if not text:
+        return None
+    try:
+        day = datetime.strptime(text.strip(), "%Y-%m-%d")
+    except ValueError:
+        raise ValueError(f"--bitis YYYY-AA-GG biçiminde olmalı, örn. 2026-07-01 (girilen: {text!r})") from None
+    if day.timestamp() > time.time():
+        raise ValueError(f"--bitis gelecekte olamaz (girilen: {text})")
+    return int(day.timestamp() * 1000)
+
+
 def run_backtest_cli(cfg, args) -> int:
     from dataclasses import replace
 
@@ -214,18 +233,20 @@ def run_backtest_cli(cfg, args) -> int:
                 "trails": _number_list(args.iz, "iz"),
                 "holds": _number_list(args.sure, "sure", int, allow_zero=True),   # 0 = süre sınırı yok
                 "rooms": _number_list(args.alan, "alan", allow_zero=True)}        # 0 = filtre kapalı
+        end_ms = _end_date_ms(args.bitis)
     except ValueError as exc:
         print(f"❌ {exc}")
         return EXIT_CONFIG
 
-    print(f"⏳ Son {days} günün verisi indiriliyor ve strateji deneniyor (ilk seferde birkaç dakika sürebilir)...")
+    period = f"{args.bitis} tarihinde biten {days} günün" if end_ms else f"Son {days} günün"
+    print(f"⏳ {period} verisi indiriliyor ve strateji deneniyor (ilk seferde birkaç dakika sürebilir)...")
     client = BinanceClient(cfg.binance_api_key, cfg.binance_api_secret, cfg.binance_base_url)
     try:
         if not args.tara:
-            result = backtest.run_backtest(cfg, client, days=days, max_symbols=args.coin_sayisi)
+            result = backtest.run_backtest(cfg, client, days=days, max_symbols=args.coin_sayisi, end_time_ms=end_ms)
             print(backtest.format_backtest_report(result, cfg))
             return EXIT_OK
-        data = backtest.prepare_backtest(cfg, client, days=days, max_symbols=args.coin_sayisi)
+        data = backtest.prepare_backtest(cfg, client, days=days, max_symbols=args.coin_sayisi, end_time_ms=end_ms)
         combos = backtest.sweep_combos(cfg, **{k: v for k, v in grid.items() if v is not None})
         print(f"🧪 {len(combos)} ayar aynı veriyle denenecek (giriş analizleri bir kez yapılır, sonra hızlanır)...")
         rows = backtest.run_sweep(cfg, data, progress=print, combos=combos)

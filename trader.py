@@ -47,7 +47,8 @@ STREAM_MAX_AGE = 3.0         # Anlık fiyat bu kadar saniyeden eskiyse REST'e d�
 WEEKLY_DEFAULT_TIME = "23:55"  # Günlük rapor kapalıyken haftalık raporun saati
 KILL_RETRY_SEC = 5           # Kill-switch sonrası satılamayan pozisyonlar için tekrar deneme aralığı
 FEE_CHECK_SEC = 3600         # Komisyon / BNB bakiyesi kontrol aralığı
-FEE_WARN_COOLDOWN_SEC = 6 * 3600  # Aynı komisyon/BNB uyarısı en fazla bu aralıkla tekrarlanır
+FEE_WARN_COOLDOWN_SEC = 6 * 3600  # Yanlış FEE_RATE uyarısı en fazla bu aralıkla tekrarlanır
+BNB_LOW_NOTICE_SEC = 24 * 3600   # "BNB azalıyor" bilgisi en fazla günde bir
 UNSELLABLE_CODES = {"MIN_NOTIONAL", "LOT_SIZE", "NO_BALANCE"}  # Kalanın satılamayacak kadar az olduğu hatalar
 
 
@@ -110,6 +111,8 @@ class TradingBot:
         self._next_fee_check = now + FEE_CHECK_SEC
         self.fee_info: Optional[FeeInfo] = None  # Son okunan komisyon / BNB durumu (/ayarlar bunu gösterir)
         self._fee_noted_rate: Optional[float] = None  # "FEE_RATE temkinli" bilgisi bu oran için verildi
+        self._bnb_empty_noted = False     # "BNB yetmiyor" bilgisi bu süreçte verildi
+        self._next_bnb_low_notice = 0.0   # "BNB azalıyor" bilgisi en erken bu anda tekrar verilir
         self._announced = False  # Açılış mesajları ağ hatasıyla tekrarlanan denemelerde yinelenmesin
         self._next_kill_retry = 0.0
         self._next_kill_notice = 0.0
@@ -906,15 +909,17 @@ class TradingBot:
         """Gerçek komisyonu (BNB indirimi dahil) FEE_RATE ile karşılaştırır ve BNB bakiyesini izler.
 
         Sadece OKUR ve uyarır: BNB satın almaz, Binance'teki "BNB ile komisyon öde" ayarını değiştirmez.
-        Açılışta ve FEE_CHECK_SEC'te bir çalışır; aynı uyarı FEE_WARN_COOLDOWN_SEC içinde tekrarlanmaz.
+        Açılışta ve FEE_CHECK_SEC'te bir çalışır. FEE_RATE karşılaştırması (ve BNBUSDT'nin işlem dışı
+        bırakılması) her zaman yapılır; BNB_FEE_CHECK=false yalnızca BNB bakiyesi bildirimlerini kapatır.
         """
-        if self.exchange.is_paper or not self.cfg.bnb_fee_check:
+        if self.exchange.is_paper:
             return
         try:
             info = self.refresh_fee_info()
             if info is not None:
                 self._fee_rate_notice(info)
-                self._bnb_balance_notice(info)
+                if self.cfg.bnb_fee_check:
+                    self._bnb_balance_notice(info)
         except Exception as exc:  # noqa: BLE001 - izleme hatası işlemleri etkilemesin
             log.debug("Komisyon/BNB kontrolü yapılamadı: %s", exc)
 
@@ -934,8 +939,9 @@ class TradingBot:
         return self.state.capital / max(1, self.slots())
 
     def _fee_rate_notice(self, info: FeeInfo) -> None:
-        cfg_rate, real = self.cfg.fee_rate, info.effective_rate
-        status = info.fee_rate_status(cfg_rate)
+        size = self.position_size()
+        cfg_rate, real = self.cfg.fee_rate, info.rate_for(size)
+        status = info.status_for(cfg_rate, size)
         if status != "conservative":
             self._fee_noted_rate = None  # Durum sonra tekrar değişirse bilgi notu yeniden verilsin
         if status == "conservative":
@@ -943,63 +949,79 @@ class TradingBot:
             if self._fee_noted_rate is not None and abs(self._fee_noted_rate - real) <= 1e-9:
                 return
             self._fee_noted_rate = real
-            why = (f"BNB ile komisyon ödeme açık, %{info.discount * 100:g} indirim" if info.bnb_active
+            why = (f"BNB ile komisyon ödeme açık, %{info.discount * 100:g} indirim" if info.covers(size)
                    else "hesabınızın oranı daha düşük")
             self.notifier.send(Messages.info(
                 f"Gerçek işlem komisyonunuz {fmt_rate(real)} ({why}); bot ise FEE_RATE {fmt_rate(cfg_rate)} ile "
                 f"hesaplıyor. Bu temkinli bir hesap: gerçek kâr/zarar biraz daha iyi çıkar. İsterseniz .env "
                 f"dosyasında FEE_RATE={real:g} yapabilirsiniz."), silent=True)
         elif status == "optimistic":
-            if info.bnb_active:
+            if info.covers(size):
                 why, advice = "hesabınızın oranı ayardan yüksek", f".env dosyasında FEE_RATE={real:g} yapın."
             elif info.bnb_enabled:
-                why = "BNB bakiyeniz bitmiş, indirim uygulanmıyor"
+                why = "BNB bakiyeniz bitmiş ya da bir işlemin komisyonuna yetmiyor, indirim uygulanmıyor"
                 advice = f"Binance'te biraz BNB alın ya da .env dosyasında FEE_RATE={info.taker:g} yapın."
             else:
                 why = "Binance'te BNB ile komisyon ödeme kapalı"
                 advice = (f".env dosyasında FEE_RATE={info.taker:g} yapın ya da Binance'te \"BNB ile komisyon "
                           f"öde\" seçeneğini açıp biraz BNB alın.")
+            # Hesaplar gerçekten yanlış olduğu için önemli uyarı (sessiz saatlerde de gelir, 6 saatte bir)
             self.notifier.send_error("fee-optimistic", Messages.warning(
                 f"Gerçek işlem komisyonu {fmt_rate(real)}, ayardaki FEE_RATE ise {fmt_rate(cfg_rate)} ({why}). "
                 f"Net kâr al / zarar kes hesapları fazla iyimser: satışlar hedeflenenden biraz düşük kârla "
                 f"veya biraz büyük zararla gerçekleşir. {advice}"), cooldown_sec=FEE_WARN_COOLDOWN_SEC)
 
     def _bnb_balance_notice(self, info: FeeInfo) -> None:
-        """BNB indirimi açıkken BNB azaldıysa/bittiyse uyarır. Bot otomatik BNB ALMAZ."""
+        """BNB indirimi açıkken BNB azaldıysa/bittiyse SESSİZ bilgi verir. Bot otomatik BNB ALMAZ.
+
+        Hesaplar doğru olduğu sürece (FEE_RATE gerçek oranla uyumlu) bu yalnızca bir fırsat bilgisidir:
+        BNB bitti bildirimi süreç başına bir kez, "azalıyor" bildirimi en fazla günde bir kez gönderilir.
+        """
         if not info.bnb_enabled or info.discount <= 0 or self.cfg.bnb_min_trades <= 0:
             return
-        left = info.bnb_trades(self.position_size())
+        size = self.position_size()
+        left = info.bnb_trades(size)
         if left is None or left >= self.cfg.bnb_min_trades:
+            self._bnb_empty_noted = False
             return
-        if left <= 0:
-            if info.fee_rate_status(self.cfg.fee_rate) == "optimistic":
+        hint = " Bot otomatik BNB almaz. (Bu bildirimi kapatmak için .env: BNB_MIN_TRADES=0)"
+        if not info.covers(size):
+            if info.status_for(self.cfg.fee_rate, size) == "optimistic":
                 return  # FEE_RATE uyarısı BNB'nin bittiğini zaten söyledi
-            text = (f"Binance'te BNB ile komisyon ödeme açık ama Spot'ta BNB yok: komisyon {fmt_rate(info.taker)} "
-                    f"olarak kesiliyor (BNB ile {fmt_rate(info.discounted_rate)} olurdu). İndirim için Binance'te "
-                    f"biraz BNB alın.")
-        else:
-            enough = (f"yaklaşık {int(left)} işlemlik (alış + satış) kaldı" if left >= 1
-                      else "bir işleme (alış + satış) bile yetmiyor")
-            text = (f"BNB bakiyeniz ({fmt_qty(info.bnb_free)} BNB ≈ {fmt_usdt(info.bnb_value)} "
-                    f"{self.cfg.quote_asset}) {enough}; bitince komisyon {fmt_rate(info.taker)}'a döner. "
-                    f"Binance'te biraz BNB alın.")
-        self.notifier.send_error("bnb-low", Messages.warning(
-            text + " Bot otomatik BNB almaz. (Bu kontrolü kapatmak için .env: BNB_FEE_CHECK=false)"),
-            cooldown_sec=FEE_WARN_COOLDOWN_SEC)
+            if self._bnb_empty_noted:
+                return
+            self._bnb_empty_noted = True
+            what = "Spot'ta BNB yok" if info.bnb_free <= 0 else "Spot'taki BNB bir işlemin komisyonuna yetmiyor"
+            self.notifier.send(Messages.info(
+                f"Binance'te BNB ile komisyon ödeme açık ama {what}: "
+                f"komisyon şu an {fmt_rate(info.taker)} olarak kesiliyor (bot da böyle hesaplıyor, sorun yok). "
+                f"%25 indirim isterseniz Binance'te biraz BNB alın." + hint), silent=True)
+            return
+        self._bnb_empty_noted = False
+        now = self.time_fn()
+        if now < self._next_bnb_low_notice:
+            return
+        self._next_bnb_low_notice = now + BNB_LOW_NOTICE_SEC
+        enough = f"yaklaşık {int(left)} işlemlik (alış + satış) kaldı" if left >= 1 else "bir al-sata yetmiyor"
+        after = (f" O zaman .env'de FEE_RATE={info.taker:g} yapın." if self.cfg.fee_rate < info.taker - 1e-9 else "")
+        self.notifier.send(Messages.warning(
+            f"BNB bakiyeniz ({fmt_qty(info.bnb_free)} BNB ≈ {fmt_usdt(info.bnb_value)} {self.cfg.quote_asset}) "
+            f"{enough}; bitince komisyon {fmt_rate(info.taker)}'a döner.{after} Devam etmesini isterseniz "
+            f"Binance'te biraz BNB alın." + hint), silent=True)
 
     def fee_status_line(self) -> str:
         """/ayarlar için BNB indirimi durumu (son kontrolden; yoksa bir kez okunur)."""
         fee_rate = f"FEE_RATE {fmt_rate(self.cfg.fee_rate)}"
         if self.exchange.is_paper:
             return f"🪙 BNB indirimi: test modunda kullanılmaz | {fee_rate}"
-        if not self.cfg.bnb_fee_check:
-            return f"🪙 Komisyon / BNB kontrolü kapalı (BNB_FEE_CHECK=false) | {fee_rate}"
         info = self.fee_info or self.refresh_fee_info()
         if info is None:
             return f"🪙 BNB indirimi: bilinmiyor (Binance'ten okunamadı) | {fee_rate}"
-        status = Messages.bnb_status(info, self.position_size(), self.cfg.quote_asset)
+        size = self.position_size()
+        status = Messages.bnb_status(info, size, self.cfg.quote_asset)
         taker = "" if info.bnb_enabled else f" (komisyon {fmt_rate(info.taker)})"
-        return f"🪙 {status}{taker} | {fee_rate}"
+        off = "" if self.cfg.bnb_fee_check else " | BNB bildirimleri kapalı"
+        return f"🪙 {status}{taker} | {fee_rate}{off}"
 
     # ================================================================ kesinti / internet
     def _check_loop_gap(self, now: float) -> None:

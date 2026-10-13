@@ -218,6 +218,26 @@ class FeeInfo:
             return None
         return self.bnb_value / per_trade
 
+    def covers(self, position_usdt: float) -> bool:
+        """İndirim bu büyüklükteki bir işlemde gerçekten uygulanır mı? Binance komisyonu BNB'den ancak
+        BNB TEK BİR emrin komisyonunun tamamına yetiyorsa keser; yetmeyen kırıntı BNB'de tam oran alınır."""
+        if not self.bnb_active:
+            return False
+        if self.bnb_usdt <= 0 or position_usdt <= 0:  # Fiyat/boyut bilinmiyorsa eldeki BNB'ye güven
+            return True
+        return self.bnb_value >= position_usdt * self.discounted_rate
+
+    def rate_for(self, position_usdt: float) -> float:
+        """Bu büyüklükteki bir işlemde gerçekten kesilecek oran."""
+        return self.discounted_rate if self.covers(position_usdt) else self.taker
+
+    def status_for(self, cfg_rate: float, position_usdt: float) -> str:
+        """fee_rate_status'un işlem büyüklüğünü (BNB kırıntısını) hesaba katan hali."""
+        real = self.rate_for(position_usdt)
+        if abs(cfg_rate - real) <= 1e-6:
+            return "ok"
+        return "conservative" if cfg_rate > real else "optimistic"
+
     def fee_rate_status(self, cfg_rate: float) -> str:
         """FEE_RATE ayarı gerçek orana göre: "ok", "conservative" (ayar yüksek, hesap temkinli) veya
         "optimistic" (ayar düşük: net kâr al / zarar kes hesapları fazla iyimser)."""

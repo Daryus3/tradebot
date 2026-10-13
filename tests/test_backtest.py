@@ -472,8 +472,8 @@ def test_cli_sweep_and_capital_override(cfg, make_client, tmp_path, monkeypatch,
     real_prepare = backtest.prepare_backtest
     seen = {}
 
-    def prepare(c, cl, days, max_symbols):
-        seen["capital"] = c.start_capital
+    def prepare(c, cl, days, max_symbols, end_time_ms=None):
+        seen["capital"], seen["end"] = c.start_capital, end_time_ms
         return real_prepare(c, cl, days, max_symbols, cache_dir=tmp_path / "c", progress=None,
                             symbols=["ABCUSDT"], end_time_ms=END_TIME_MS)
     monkeypatch.setattr(backtest, "prepare_backtest", prepare)
@@ -481,7 +481,14 @@ def test_cli_sweep_and_capital_override(cfg, make_client, tmp_path, monkeypatch,
                             "--sl", "2", "--iz", "2", "--sure", "0,120", "--alan", "0"])
     assert main.run_backtest_cli(cfg, args) == main.EXIT_OK
     out = capsys.readouterr().out
-    assert seen["capital"] == 25 and "PARAMETRE TARAMASI" in out and "sermaye 25.00" in out
+    assert seen["capital"] == 25 and seen["end"] is None and "PARAMETRE TARAMASI" in out and "sermaye 25.00" in out
+    assert "--bitis" in out                                                # Bağımsız dönem önerisi
+    args2 = main.parse_args(["--backtest", "--gun", "2", "--tara", "--bitis", "2023-11-14", "--tp", "15"])
+    assert main.run_backtest_cli(cfg, args2) == main.EXIT_OK
+    from datetime import datetime as _dt
+    assert seen["end"] == int(_dt(2023, 11, 14).timestamp() * 1000)
+    for wrong in ("14.11.2023", "2999-01-01"):
+        assert main.run_backtest_cli(cfg, main.parse_args(["--backtest", "--bitis", wrong])) == main.EXIT_CONFIG
     bad = main.parse_args(["--backtest", "--tara", "--tp", "abc"])
     assert main.run_backtest_cli(cfg, bad) == main.EXIT_CONFIG
     assert main.run_backtest_cli(cfg, main.parse_args(["--backtest", "--sermaye", "0"])) == main.EXIT_CONFIG
@@ -489,3 +496,36 @@ def test_cli_sweep_and_capital_override(cfg, make_client, tmp_path, monkeypatch,
     import pytest as _pytest
     with _pytest.raises(ValueError):
         main._number_list("0", "tp")
+
+
+def test_few_identical_trades_are_not_called_evidence(cfg):
+    from backtest import BacktestResult, BacktestTrade, diagnostics_lines
+
+    def tp_trade(t):
+        return BacktestTrade("X", t, t + 1, 1, 1.15, 10, 11.5, 1.5, 15.0, ExitReason.TAKE_PROFIT.value, 0,
+                             move_pct=15.3, peak_pct=15, trough_pct=-0.2)
+    res = BacktestResult(trades=[tp_trade(0), tp_trade(10)], start_capital=11, end_capital=14, realized_pnl=3,
+                         total_fees=0.1, max_drawdown_usdt=0, max_drawdown_pct=0, killed=False, killed_at_ms=None,
+                         symbols_used=["X"], days=1, notes=[], equity_curve=[], start_ms=0, end_ms=100)
+    text = "\n".join(diagnostics_lines(res, cfg))
+    assert "şans eseri olma ihtimali düşük" not in text and "✅" not in text
+    assert "30'dan az" in text and "kanıt yetersiz" in text
+
+
+def test_sweep_suggestion_is_pasteable_env_lines(cfg, tmp_path, monkeypatch):
+    from backtest import BacktestData, SweepRow, format_sweep_report
+    row = SweepRow(3, 2, 2, 1, 120, 1, False, 40, 60, 2.5, 0.3, 5, 1.0, 1.5, 1.4)
+    base = SweepRow(5, 3.5, 2, 1, 240, 0, True, 40, 40, -1.0, -0.2, 9, -0.5, -0.5, 0.8)
+    data = BacktestData(series={}, btc=None, regime=None, min_notional=5, start_ms=0, end_ms=10 * 86_400_000,
+                        n=2880, k_start=288, days=9, notes=[])
+    text = format_sweep_report([base, row], cfg, data)
+    lines = [ln.strip() for ln in text.splitlines()]
+    for key in ("TAKE_PROFIT_PCT=3", "STOP_LOSS_PCT=2", "TRAILING_FLOOR_PCT=1", "MAX_HOLD_MINUTES=120"):
+        assert key in lines                      # Her ayar kendi satırında → .env'e yapıştırılabilir
+    env = tmp_path / "aday.env"
+    env.write_text("\n".join(ln for ln in lines if "=" in ln and ln.split("=")[0].isupper()), encoding="utf-8")
+    from dotenv import dotenv_values             # load_config os.environ'u kalıcı değiştirirdi
+    values = dotenv_values(env)
+    assert values["TAKE_PROFIT_PCT"] == "3" and values["MAX_HOLD_MINUTES"] == "120"
+    assert values["MIN_ROOM_RATIO"] == "1" and values["TRAILING_FLOOR_PCT"] == "1"
+    assert "--bitis" in text and "bağımsız kanıt sayılmaz" in text

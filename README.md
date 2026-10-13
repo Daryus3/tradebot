@@ -187,6 +187,7 @@ Birkaç gün test modunda çalıştırıp sonuçları izlemenizi öneririz (`/is
 | `python main.py --istatistik` | Performans istatistikleri |
 | `python main.py --backtest --gun 30` | Stratejiyi geçmiş verilerle dener (`--coin-sayisi 40`, `--sermaye 25`) |
 | `python main.py --backtest --gun 90 --tara` | Aynı veriyle onlarca Kâr Al / Zarar Kes / süre ayarını karşılaştırır |
+| `python main.py --backtest --gun 90 --bitis 2026-07-01` | O tarihte biten (daha eski) bir dönemi dener: bulunan ayarı bağımsız dönemde doğrulamak için |
 | `python main.py --telegram-chat-id` | Telegram chat ID'nizi bulur |
 | `python main.py --reset-state` | Kayıtlı durumu sıfırlar (kill-switch kilidi dahil) |
 | `python watchdog.py --install-autostart --mode paper` | Windows açılışında otomatik başlatmayı kurar |
@@ -291,9 +292,11 @@ Kâr ettikçe pozisyon sayısı artar, zarar ettikçe azalır. Her zaman tek poz
   ve Spot cüzdanınızda biraz BNB tutun. Ardından `.env` içinde `FEE_RATE=0.00075` yapın.
 - BNB biterse Binance uyarı vermeden komisyonu yine %0.1 olarak alınan coinden / USDT'den keser.
   Bot bunu **yalnızca izler**: açılışta ve saatte bir gerçek oranı okur; `FEE_RATE` gerçek orandan düşükse
-  (net kâr al / zarar kes hesabı fazla iyimser kalır) ya da BNB'niz `BNB_MIN_TRADES` (20) al-sat işleminden
-  azına yetecek kadar kaldıysa Telegram'dan uyarır. `FEE_RATE` gerçek orandan yüksekse yalnızca bilgi verir
-  (bot temkinli hesaplar). Durumu `/ayarlar` komutunda ve self-test'te de görürsünüz.
+  (net kâr al / zarar kes hesabı fazla iyimser kalır) Telegram'dan uyarır. BNB'niz `BNB_MIN_TRADES` (20)
+  al-sat işleminden azına yetecek kadar kaldıysa ya da bittiyse sessiz bir bilgi mesajı gönderir (günde en
+  fazla bir). Binance kırıntı BNB'yi kullanmaz; bir işlemin komisyonuna yetmeyen BNB "bitmiş" sayılır.
+  `FEE_RATE` gerçek orandan yüksekse yalnızca bilgi verir (bot temkinli hesaplar). Durumu `/ayarlar`
+  komutunda ve self-test'te de görürsünüz.
 - Bot Binance'teki bu ayarı **değiştirmez** ve **otomatik BNB almaz**: en küçük emir ~5 USDT olduğu için
   11 USDT'lik hesapta paranın yarısına yakını oynak bir coine bağlanırdı; kazanç ise taraf başına yalnızca
   %0.025 (11 USDT'lik bir al-satta ≈0.0055 USDT). BNB'yi isterseniz kendiniz, az miktarda alın.
@@ -354,7 +357,9 @@ iddialı bir hedeftir; bazı işlemler 60 dakikadan uzun sürebilir. İsterseniz
   (kapalı/1) kombinasyonları aynı veriyle denenir. Değerleri değiştirmek için `--tp 2,3 --sl 2
   --iz 1 --sure 90,180 --alan 0,1`. Karşılaştırma adil olsun diye taramada kill-switch kapalıdır.
   **Çok ayar denendiğinde birkaçı tesadüfen kârlı çıkar**: yalnızca dönemin iki yarısında da kârlı
-  (✅) ve yeterli işlemi olan ayarları ciddiye alın, sonra farklı bir dönemle tekrar deneyin.
+  (✅) ve yeterli işlemi olan ayarları ciddiye alın, sonra test edilen dönemle **çakışmayan** daha eski
+  bir dönemde deneyin (`--bitis`; rapor tam komutu yazar). `--gun 30` / `--gun 60` aynı dönemin
+  parçasıdır, bağımsız kanıt sayılmaz.
 
 ---
 
@@ -370,7 +375,7 @@ iddialı bir hedeftir; bazı işlemler 60 dakikadan uzun sürebilir. İsterseniz
 | `STOP_LOSS_PCT` | `10` | Net zarar limiti (%) |
 | `TRAILING_ACTIVATION_PCT` / `TRAILING_FLOOR_PCT` | `10` / `5` | İzleyen stop |
 | `FEE_RATE` | `0.001` | Komisyon oranı (%0.1; komisyonu BNB ile ödüyorsanız `0.00075`) |
-| `BNB_FEE_CHECK` / `BNB_MIN_TRADES` | `true` / `20` | Komisyon ve BNB bakiyesi takibi (yalnızca uyarır, BNB almaz) |
+| `BNB_FEE_CHECK` / `BNB_MIN_TRADES` | `true` / `20` | BNB bakiyesi bildirimleri (yalnızca bilgi verir, BNB almaz). Yanlış `FEE_RATE` uyarısı her zaman açıktır |
 | `BACKUP_STOP_ENABLED` / `BACKUP_STOP_PCT` | `true` / `12` | Binance'teki yedek zarar-kes emri |
 | `BREAKEVEN_ENABLED` / `BREAKEVEN_TRIGGER_PCT` | `true` / `5` | Başabaş koruması (TRIGGER, izleyen stop başlangıcından küçük olmalı) |
 | `MIN_ROOM_RATIO` | `0` | Hedef alanı filtresi: düşüş öncesi zirveye kalan alan Kâr Al için yetmiyorsa alma (0 = kapalı) |

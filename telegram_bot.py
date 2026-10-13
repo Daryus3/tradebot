@@ -452,16 +452,17 @@ class Messages:
     @staticmethod
     def bnb_status(info, position_usdt: float, quote: str = "USDT") -> str:
         """BNB indirimi durumu (düz metin), örn. 'BNB indirimi: açık (%0.075, BNB ≈ 3.00 USDT ≈ 90 işlem)'."""
-        if info.bnb_active:
+        if info.covers(position_usdt):
             left = info.bnb_trades(position_usdt)
             if left is None:  # BNB fiyatı öğrenilemedi
                 value = f", {fmt_qty(info.bnb_free)} BNB"
             else:
                 count = f"≈ {int(left)}" if left >= 1 else "< 1"
                 value = f", BNB ≈ {fmt_usdt(info.bnb_value)} {quote} {count} işlem"
-            return f"BNB indirimi: açık ({fmt_rate(info.effective_rate)}{value})"
+            return f"BNB indirimi: açık ({fmt_rate(info.discounted_rate)}{value})"
         if info.bnb_enabled:
-            return f"BNB indirimi: açık ama BNB yok ({fmt_rate(info.taker)} kesiliyor)"
+            what = "BNB yok" if info.bnb_free <= 0 else "BNB bir işleme yetmiyor"
+            return f"BNB indirimi: açık ama {what} ({fmt_rate(info.taker)} kesiliyor)"
         return "BNB indirimi: kapalı"
 
     @staticmethod

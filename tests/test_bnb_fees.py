@@ -11,7 +11,7 @@ from commands import Command
 from config import ConfigError, load_config
 from exchange import FeeInfo, LiveExchange, parse_fee_info
 from state import BotState, StateStore, TradeLog
-from trader import FEE_CHECK_SEC, FEE_WARN_COOLDOWN_SEC, TradingBot
+from trader import BNB_LOW_NOTICE_SEC, FEE_CHECK_SEC, TradingBot
 
 from fake_binance import FakeBinance
 from test_bot_flow import CaptureNotifier
@@ -165,10 +165,25 @@ def test_bnb_ran_out_with_discounted_fee_rate(cfg, tmp_path):
 
 
 def test_bnb_enabled_but_empty_with_standard_fee_rate(cfg, tmp_path):
-    _, notes = live_bot(cfg, tmp_path, make_fake(bnb=0.0, enabled=True), fee_rate=0.001)
+    # Hesap doğru (FEE_RATE = gerçek oran): yalnızca bir kez, sessiz bilgi; tekrar etmez
+    bot, notes = live_bot(cfg, tmp_path, make_fake(bnb=0.0, enabled=True), fee_rate=0.001)
     msgs = fee_msgs(notes)
     assert len(msgs) == 1
-    assert "BNB yok" in msgs[0] and "otomatik BNB almaz" in msgs[0]
+    assert "BNB yok" in msgs[0] and "otomatik BNB almaz" in msgs[0] and "BNB_MIN_TRADES=0" in msgs[0]
+    assert "Bilgi" in msgs[0]
+    for hours in (2, 8, 30):
+        bot._periodic(time.time() + hours * 3600)
+    assert len(fee_msgs(notes)) == 1
+
+
+def test_bnb_dust_is_not_an_active_discount(cfg, tmp_path):
+    # Binance kırıntı BNB'yi kullanmaz, tam oranı coinden keser: FEE_RATE=0.00075 artık fazla iyimser
+    fake = make_fake(bnb=0.00001)                     # ≈0.006 USDT < 11 USDT'lik bir tarafın %0.075'i
+    bot, notes = live_bot(cfg, tmp_path, fake, fee_rate=0.00075)
+    msgs = fee_msgs(notes)
+    assert len(msgs) == 1 and "FEE_RATE=0.001" in msgs[0] and "yetmiyor" in msgs[0]
+    assert bot.fee_info.rate_for(bot.position_size()) == pytest.approx(0.001)
+    assert "yetmiyor" in bot.fee_status_line()
 
 
 # ------------------------------------------------------------------ az BNB uyarısı
@@ -183,7 +198,7 @@ def test_low_bnb_warning_is_rate_limited(cfg, tmp_path):
     assert "yaklaşık 18 işlemlik" in low()[0]
     assert "%0.10'a döner" in low()[0] and "otomatik BNB almaz" in low()[0]
 
-    # Saatlik kontrol çalışır ama 6 saat dolmadan aynı uyarı tekrar gönderilmez
+    # Saatlik kontrol çalışır ama bir gün dolmadan aynı bilgi tekrar gönderilmez (sessiz bildirim)
     calls = fake.commission_calls
     bot._periodic(time.time() + 60)
     assert fake.commission_calls == calls            # Henüz saati gelmedi
@@ -192,7 +207,7 @@ def test_low_bnb_warning_is_rate_limited(cfg, tmp_path):
     assert len(low()) == 1
 
     # Bekleme süresi dolunca tekrar hatırlatılır
-    bot.notifier._last_error_sent["bnb-low"] -= FEE_WARN_COOLDOWN_SEC + 1
+    bot._next_bnb_low_notice -= BNB_LOW_NOTICE_SEC + 1
     bot._check_commission()
     assert len(low()) == 2
 
@@ -215,13 +230,16 @@ def test_paper_mode_is_noop(cfg, fake_client, tmp_path):
     assert "test modunda" in bot.fee_status_line()
 
 
-def test_bnb_fee_check_disabled(cfg, tmp_path):
+def test_bnb_fee_check_disabled_only_silences_bnb_notices(cfg, tmp_path):
+    # BNB_FEE_CHECK=false: BNB bakiye bildirimleri kapanır ama yanlış FEE_RATE uyarısı ve BNBUSDT dışlaması sürer
     fake = make_fake(bnb=0.0, enabled=True)
     bot, notes = live_bot(cfg, tmp_path, fake, fee_rate=0.00075, bnb_fee_check=False)
-    bot._periodic(time.time() + FEE_CHECK_SEC + 1)
-    assert fee_msgs(notes) == []
-    assert "kapalı" in bot.fee_status_line()
-    assert fake.commission_calls == 0                 # Binance'e hiç sorulmadı
+    msgs = fee_msgs(notes)
+    assert len(msgs) == 1 and "FEE_RATE=0.001" in msgs[0]
+    quiet, notes2 = live_bot(cfg, tmp_path / "q", make_fake(bnb=0.0005), fee_rate=0.00075, bnb_fee_check=False)
+    assert fee_msgs(notes2) == []                     # Az BNB bildirimi yok
+    assert quiet.fee_info is not None and quiet.fee_info.bnb_enabled
+    assert "BNB bildirimleri kapalı" in quiet.fee_status_line()
 
 
 def test_fee_check_errors_never_raise(cfg, tmp_path, monkeypatch):

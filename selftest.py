@@ -313,19 +313,17 @@ def _check_fees(cfg, client: BinanceClient, problems: List[str]) -> str:
     info = LiveExchange(client, cfg.quote_asset, cfg.fee_rate).fee_info(f"BTC{cfg.quote_asset}")
     position = cfg.start_capital / position_slots(cfg.start_capital, 5.0, cfg)
     detail = f" | komisyon {fmt_rate(info.taker)} | {Messages.bnb_status(info, position, cfg.quote_asset)}"
-    status, real = info.fee_rate_status(cfg.fee_rate), info.effective_rate
+    status, real = info.status_for(cfg.fee_rate, position), info.rate_for(position)
     if status == "optimistic":
+        fix = (f".env'de FEE_RATE={real:g} yapın" if info.covers(position)
+               else f".env'de FEE_RATE={info.taker:g} yapın veya Binance'te biraz BNB alın")
         problems.append(f"gerçek komisyon {fmt_rate(real)}, FEE_RATE ayarı {fmt_rate(cfg.fee_rate)}: net kâr/zarar "
-                        f"hesabı fazla iyimser (.env'de FEE_RATE={info.taker:g} yapın veya BNB indirimini kullanın)")
+                        f"hesabı fazla iyimser ({fix})")
     elif status == "conservative":
         detail += f" | FEE_RATE {fmt_rate(cfg.fee_rate)}, temkinli hesap (isterseniz FEE_RATE={real:g})"
-    if cfg.bnb_fee_check and cfg.bnb_min_trades > 0 and info.bnb_enabled and info.discount > 0:
+    if cfg.bnb_fee_check and cfg.bnb_min_trades > 0 and info.covers(position) and info.discount > 0:
         left = info.bnb_trades(position)
-        if left is not None and left < cfg.bnb_min_trades and not (left <= 0 and status == "optimistic"):
-            if left <= 0:
-                what = "Spot'ta BNB olmadığı için indirim uygulanmıyor"
-            else:
-                enough = f"yalnızca ~{int(left)} işleme yetiyor" if left >= 1 else "bir işleme bile yetmiyor"
-                what = f"BNB {enough}; bitince komisyon {fmt_rate(info.taker)}'a döner"
-            problems.append(f"{what} (bot otomatik BNB almaz, Binance'ten kendiniz alın)")
+        if left is not None and left < cfg.bnb_min_trades:
+            problems.append(f"BNB yalnızca ~{int(left)} işleme yetiyor; bitince komisyon {fmt_rate(info.taker)}'a "
+                            f"döner (bot otomatik BNB almaz, Binance'ten kendiniz alın)")
     return detail

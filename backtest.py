@@ -40,7 +40,7 @@ from risk import (ExitReason, Position, breakeven_effective, evaluate_exit, kill
                   plan_entry, pnl_pct, position_slots, price_for_pnl, trailing_floor_pct, update_breakeven,
                   update_trailing)
 from strategy import KLINE_LIMIT, ReboundStrategy, Signal, required_move_pct, room_ok
-from telegram_bot import LINE, fmt_duration, fmt_price, fmt_signed, fmt_usdt
+from telegram_bot import LINE, fmt_duration, fmt_price, fmt_rate, fmt_signed, fmt_usdt
 
 INTERVAL = "5m"
 INTERVAL_MS = 300_000
@@ -1012,9 +1012,10 @@ def run_sweep(cfg, data: BacktestData, spread_pct: float = 0.05, progress: Progr
     return rows
 
 
-def _env_lines(r: SweepRow) -> str:
-    return (f"TAKE_PROFIT_PCT={r.tp:g} STOP_LOSS_PCT={r.sl:g} TRAILING_ACTIVATION_PCT={r.trail:g} "
-            f"TRAILING_FLOOR_PCT={r.floor:g} MAX_HOLD_MINUTES={r.hold} MIN_ROOM_RATIO={r.room:g}")
+def _env_lines(r: SweepRow) -> List[str]:
+    """.env'e yapıştırılabilir satırlar (her ayar ayrı satırda)."""
+    return [f"TAKE_PROFIT_PCT={r.tp:g}", f"STOP_LOSS_PCT={r.sl:g}", f"TRAILING_ACTIVATION_PCT={r.trail:g}",
+            f"TRAILING_FLOOR_PCT={r.floor:g}", f"MAX_HOLD_MINUTES={r.hold}", f"MIN_ROOM_RATIO={r.room:g}"]
 
 
 def format_sweep_report(rows: Sequence[SweepRow], cfg, data: BacktestData, spread_pct: float = 0.05) -> str:
@@ -1031,7 +1032,7 @@ def format_sweep_report(rows: Sequence[SweepRow], cfg, data: BacktestData, sprea
         "🧪 PARAMETRE TARAMASI (aynı veriyle farklı çıkış ayarları)",
         LINE,
         f"🗓️ Dönem: {_fmt_time(data.sim_start_ms)} → {_fmt_time(data.end_ms)} ({data.days:g} gün) | "
-        f"{len(data.series)} sembol | sermaye {fmt_usdt(cfg.start_capital)} {q} | komisyon %{cfg.fee_rate * 100:.3g} "
+        f"{len(data.series)} sembol | sermaye {fmt_usdt(cfg.start_capital)} {q} | komisyon {fmt_rate(cfg.fee_rate)} "
         f"| spread %{spread_pct:g}",
         f"🔢 Denenen ayar: {len(rows)} | kârlı: {len(profitable)} | iki yarıda da kârlı ve ≥30 işlem: {len(robust)}",
         "   (Karşılaştırma adil olsun diye taramada kill-switch kapalıdır; maks. düşüşe bakın.)",
@@ -1054,7 +1055,8 @@ def format_sweep_report(rows: Sequence[SweepRow], cfg, data: BacktestData, sprea
         lines += [
             "❗ Denenen ayarların HİÇBİRİ kârlı değil. Sorun çıkış ayarlarında değil, giriş sinyalinde:",
             "   bu dönemde strateji fiyatın yükseleceği anları yakalayamıyor. Canlıda gerçek parayla",
-            "   ÇALIŞTIRMAYIN; farklı dönemleri (--gun 30 / 60) ve giriş ayarlarını deneyin.",
+            "   ÇALIŞTIRMAYIN. Daha önceki bir dönemi de deneyin (aşağıdaki --bitis komutu); orada da kârlı",
+            "   ayar çıkmazsa strateji bu piyasa koşullarında işe yaramıyor demektir.",
         ]
     elif not robust:
         best = ranked[0]
@@ -1066,17 +1068,25 @@ def format_sweep_report(rows: Sequence[SweepRow], cfg, data: BacktestData, sprea
     else:
         best = robust[0]
         lines += [
-            f"✅ En tutarlı aday: {_env_lines(best)}",
-            f"   ({best.trades} işlem, net {fmt_signed(best.net, 4)} {q}, iki yarıda da kârlı)",
-            "   Yine de: çok ayar denendiği için en iyi sonuç iyimserdir. Bu ayarı .env'e yazıp önce FARKLI bir",
-            "   dönemle (örn. --gun 30 ve --gun 60) tekrar backtest edin, sonra birkaç gün TEST modunda izleyin.",
+            f"✅ En tutarlı aday ({best.trades} işlem, net {fmt_signed(best.net, 4)} {q}, iki yarıda da kârlı).",
+            "   .env dosyanızdaki şu satırları DEĞİŞTİRİN (aynı isimli eski satırları silin):",
+        ] + [f"      {line}" for line in _env_lines(best)] + [
+            "   Yine de: çok ayar denendiği için en iyi sonuç iyimserdir. Önce bu ayarı test edilen dönemle",
+            "   ÇAKIŞMAYAN daha önceki bir dönemde deneyin (aşağıdaki --bitis komutu); orada da kârlıysa",
+            "   birkaç gün TEST modunda izleyin. --gun 30 / 60 aynı dönemin parçasıdır, bağımsız kanıt sayılmaz.",
         ]
+    lines.append(f"🔁 Bağımsız dönem (bu testten önceki {data.days:g} gün): python main.py --backtest --gun "
+                 f"{data.days:g} --tara --bitis {_fmt_date(data.sim_start_ms)}")
     lines.append("📝 Kayma (slippage) yok, 5 dk mum çözünürlüğü, bugünün en hacimli coinleri (hayatta kalma "
                  "yanlılığı). Geçmiş sonuçlar geleceği garanti etmez.")
     return "\n".join(lines)
 
 
 # ================================================================ rapor
+def _fmt_date(ms: int) -> str:
+    return datetime.fromtimestamp(ms / 1000).strftime("%Y-%m-%d")
+
+
 def _fmt_time(ms: Optional[int]) -> str:
     if not ms:
         return "-"
@@ -1129,6 +1139,19 @@ def split_halves(trades: Sequence[BacktestTrade], start_ms: int, end_ms: int
     return [t for t in trades if t.open_time_ms < mid], [t for t in trades if t.open_time_ms >= mid]
 
 
+MIN_TRADES_FOR_EVIDENCE = 30
+# Student-t %97.5 kritik değerleri (serbestlik derecesi → değer); 30 ve üstü için ~1.96-2.04
+_T_TABLE = ((1, 12.71), (2, 4.30), (3, 3.18), (4, 2.78), (5, 2.57), (6, 2.45), (7, 2.36), (8, 2.31), (9, 2.26),
+            (10, 2.23), (12, 2.18), (15, 2.13), (20, 2.09), (25, 2.06), (30, 2.04), (60, 2.00), (120, 1.98))
+
+
+def _t_critical(df: int) -> float:
+    """Küçük örneklemde %95 güven aralığı için t değeri (tabloda yoksa bir alttaki, yani daha temkinli)."""
+    if df < 1:
+        return math.inf
+    return next(t for d, t in reversed(_T_TABLE) if df >= d)
+
+
 def _share(trades: Sequence[BacktestTrade], pred) -> str:
     return f"%{sum(1 for t in trades if pred(t)) / len(trades) * 100:.0f}" if trades else "-"
 
@@ -1150,20 +1173,33 @@ def diagnostics_lines(result: BacktestResult, cfg) -> List[str]:
              f"   İşlem başına ortalama: fiyat hareketi {fmt_signed(sm.mean_move_pct)}% | komisyon+spread+toz "
              f"-{sm.cost_pct:.2f}% | net {fmt_signed(sm.mean_net_pct)}%",
              f"   Kâr faktörü: {_pf_text(sm.profit_factor)} (toplam kazanç / toplam kayıp; 1'in altı zarar demek)"]
-    lo, hi = sm.mean_net_pct - 1.96 * sm.se_net_pct, sm.mean_net_pct + 1.96 * sm.se_net_pct
-    significant = sm.count >= 2 and (lo > 0 or hi < 0)
-    lines.append(f"   İşlem başı net sonucun %95 güven aralığı: {fmt_signed(lo)}% … {fmt_signed(hi)}% "
-                 + ("(şans eseri olma ihtimali düşük)" if significant
-                    else "(sıfırdan ayırt edilemiyor; daha uzun dönemle doğrulayın)"))
-    if sm.mean_move_pct <= 0:
-        lines.append("   ❗ Sinyal komisyon ÖNCESİNDE bile kaybettiriyor: işlem sayısını artırmak zararı büyütür, "
-                     "komisyon indirimi de kurtarmaz. Önce giriş/çıkış kuralları düzelmeli.")
-    elif sm.mean_net_pct <= 0:
+    margin = _t_critical(sm.count - 1) * sm.se_net_pct
+    lo, hi = sm.mean_net_pct - margin, sm.mean_net_pct + margin
+    # Az işlemde (veya hepsi aynı seviyeden kapandıysa) aralık yanıltıcı derecede dar çıkar: sonuç sayılmaz
+    significant = sm.count >= MIN_TRADES_FOR_EVIDENCE and sm.se_net_pct > 0 and (lo > 0 or hi < 0)
+    if sm.count < MIN_TRADES_FOR_EVIDENCE:
+        verdict = f"(işlem sayısı {MIN_TRADES_FOR_EVIDENCE}'dan az: sonuç şanstan ayırt edilemez)"
+    elif significant:
+        verdict = "(şans eseri olma ihtimali düşük)"
+    else:
+        verdict = "(sıfırdan ayırt edilemiyor; daha uzun dönemle doğrulayın)"
+    lines.append(f"   İşlem başı net sonucun %95 güven aralığı: {fmt_signed(lo)}% … {fmt_signed(hi)}% {verdict}")
+    lines.append("   (Aynı anda açılan işlemler aynı piyasa hareketinden etkilenir; gerçek belirsizlik daha büyüktür.)")
+    proven_gain = significant and lo > 0 and sm.net > 0 and (sm.profit_factor or 0) > 1
+    if proven_gain:
+        lines.append("   ✅ Komisyon sonrası beklenti pozitif ve bu dönemde tutarlı: bu ayarlarla işlem sayısı arttıkça "
+                     "toplam kârın da artması beklenir (aynı risk sınırlarıyla). Yine de farklı bir dönemle doğrulayın.")
+    elif sm.mean_move_pct <= 0:
+        lines.append("   ❗ Fiyat hareketi komisyon ÖNCESİNDE bile ortalamada aleyhte: bu haliyle işlem sayısını artırmak "
+                     "zararı büyütür, komisyon indirimi de kurtarmaz. Önce giriş/çıkış kuralları düzelmeli."
+                     + ("" if significant else " (Kanıt henüz kesin değil.)"))
+    elif sm.mean_net_pct <= 0 or sm.net <= 0:
         lines.append("   ⚠️ Fiyat hareketi lehte ama komisyon + spread'i karşılamıyor: daha seçici giriş "
                      "(daha az ama daha iyi işlem) veya daha düşük maliyet gerekir.")
     else:
-        lines.append("   ✅ Komisyon sonrası beklenti pozitif: bu ayarlarla işlem sayısı arttıkça toplam kâr da "
-                     "artar (aynı risk sınırlarıyla).")
+        lines.append("   ➖ Ortalama sonuç pozitif görünüyor ama kanıt yetersiz (az işlem / güven aralığı sıfırı "
+                     "içeriyor / kâr faktörü 1'e yakın). İşlem sayısını artırmadan önce daha uzun ve farklı "
+                     "bir dönemle doğrulayın.")
 
     tp, sl = cfg.take_profit_pct, cfg.stop_loss_pct
     ups = sorted({x for x in (0.5, 1.0, 2.0, 3.0) if x < tp} | {tp})
@@ -1202,6 +1238,8 @@ def diagnostics_lines(result: BacktestResult, cfg) -> List[str]:
                  f"2. yarısı: {b.count} işlem, net {fmt_signed(b.net, 4)} {q}")
     lines.append(f"   💡 Farklı Kâr Al / Zarar Kes / süre ayarlarını aynı veriyle karşılaştırmak için: "
                  f"python main.py --backtest --gun {result.days:g} --tara")
+    lines.append(f"   💡 Bağımsız doğrulama (bu dönemle çakışmayan, daha önceki {result.days:g} gün): "
+                 f"python main.py --backtest --gun {result.days:g} --bitis {_fmt_date(result.start_ms)}")
     return lines
 
 
@@ -1232,7 +1270,7 @@ def format_backtest_report(result: BacktestResult, cfg) -> str:
         f"🪙 Sembol sayısı: {len(result.symbols_used)}",
         f"⚙️ Kâr Al +%{cfg.take_profit_pct:g} | Zarar Kes -%{cfg.stop_loss_pct:g} | İzleyen stop {trailing}{hold}",
         f"   Başabaş: {breakeven}",
-        f"   Komisyon %{cfg.fee_rate * 100:.2f} | Spread %{result.spread_pct:g} | "
+        f"   Komisyon {fmt_rate(cfg.fee_rate)} | Spread %{result.spread_pct:g} | "
         f"Kill-switch -%{cfg.loss_pct(result.start_capital):.4g} "
         f"(-{fmt_usdt(cfg.loss_limit(result.start_capital))} {q}) | "
         f"En fazla {cfg.max_open_positions} pozisyon",
