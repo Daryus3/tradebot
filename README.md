@@ -297,6 +297,8 @@ Kâr ettikçe pozisyon sayısı artar, zarar ettikçe azalır. Her zaman tek poz
 - Bot Binance'teki bu ayarı **değiştirmez** ve **otomatik BNB almaz**: en küçük emir ~5 USDT olduğu için
   11 USDT'lik hesapta paranın yarısına yakını oynak bir coine bağlanırdı; kazanç ise taraf başına yalnızca
   %0.025 (11 USDT'lik bir al-satta ≈0.0055 USDT). BNB'yi isterseniz kendiniz, az miktarda alın.
+- BNB'yi botun sermayesinden değil **ayrı bir parayla** alın (bot onu sermayesi saymaz). BNB ile komisyon
+  ödeme açıkken bot **BNBUSDT paritesinde işlem açmaz**; yoksa komisyonlar pozisyonun kendisinden düşer.
 
 ### ☠️ Kill-switch
 Toplam (gerçekleşen + tüm açık pozisyonlardaki) zarar, botun sermayesinin `MAX_TOTAL_LOSS_PCT` yüzdesine

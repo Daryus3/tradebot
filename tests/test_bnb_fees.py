@@ -328,3 +328,21 @@ def test_bnb_config(cfg, monkeypatch, tmp_path):
     monkeypatch.setenv("BNB_MIN_TRADES", "-1")
     with pytest.raises(ConfigError):
         load_config(env_file=str(tmp_path / "yok.env"), mode_override="paper")
+
+
+def test_bot_does_not_trade_bnb_while_fees_are_paid_in_bnb(cfg, tmp_path):
+    fake = make_fake(bnb=5.0)
+    fake.prices["BNBUSDT"] = 1.0          # Ucuz fiyat: toz filtresi değil, BNB dışlaması test edilsin
+    bot, _ = live_bot(cfg, tmp_path, fake)
+    bot.strategy = OneShotStrategy(fake, ["BNBUSDT", "ABCUSDT"])
+    bot.next_scan_at = 0
+    bot.tick()
+    assert "BNBUSDT" not in bot.state.positions and "ABCUSDT" in bot.state.positions
+
+    off = make_fake(bnb=5.0, enabled=False)
+    off.prices["BNBUSDT"] = 1.0
+    bot2, _ = live_bot(cfg, tmp_path / "off", off)
+    bot2.strategy = OneShotStrategy(off, ["BNBUSDT"])
+    bot2.next_scan_at = 0
+    bot2.tick()
+    assert "BNBUSDT" in bot2.state.positions       # İndirim kapalıyken BNB normal bir coin

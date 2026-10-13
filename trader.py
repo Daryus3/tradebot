@@ -343,6 +343,10 @@ class TradingBot:
         capital = state.capital
         target = capital / slots  # Sermaye pozisyonlara eşit bölünür
         excluded = set(state.cooldowns) | set(state.positions) | {p["symbol"] for p in state.pending_orders.values()}
+        if self.fee_info is not None and self.fee_info.bnb_enabled:
+            # Komisyon BNB'den kesilirken BNB'nin kendisini almak, pozisyon miktarının komisyonlarla
+            # erimesine ve komisyon için ayrılan BNB'nin satılmasına yol açar
+            excluded.add(f"BNB{cfg.quote_asset}")
         result = self.strategy.scan(self.exchange.rules, excluded, target)
         self._record_scan(result, now)
         log.info("%s | pozisyon %d/%d", result.summary(), len(state.positions), slots)
