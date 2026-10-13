@@ -29,6 +29,8 @@ if TYPE_CHECKING:  # pragma: no cover
 log = get_logger()
 
 CONFIRM_TIMEOUT_SEC = 60
+STRATEGY_LABELS = {"rebound": "rebound (düşen coinde dip)", "trend": "trend (yükselişte geri çekilme)",
+                   "breakout": "breakout (zirve kırılımı)"}
 
 # Telegram'ın "/" menüsünde görünecek komutlar
 COMMAND_MENU = [
@@ -395,6 +397,7 @@ class CommandProcessor:
         self.reply(
             "⚙️ <b>Geçerli Ayarlar</b>\n"
             f"Mod: {'🧪 TEST' if cfg.is_paper else '💵 CANLI'}\n"
+            f"🧭 Strateji: {STRATEGY_LABELS.get(cfg.strategy, cfg.strategy)}\n"
             f"🎯 Kâr Al +%{cfg.take_profit_pct:g} | 🛑 Zarar Kes -%{cfg.stop_loss_pct:g}\n"
             f"📈 İzleyen stop: +%{cfg.trailing_activation_pct:g} → +%{cfg.trailing_floor_pct:g}\n"
             f"☠️ Kill-switch: sermayenin %{self.bot.loss_pct:.4g}'i "

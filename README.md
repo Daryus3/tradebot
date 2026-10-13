@@ -247,6 +247,28 @@ belirlerseniz onay `/evet 1234` şeklinde olur. Elle satıştaki zarar da kill-s
 **Pozisyon açıkken:** Her pozisyonun net kâr/zararı ayrı ayrı hesaplanır; kâr al, zarar kes ve
 izleyen stop her coin için bağımsız çalışır. Kill-switch tüm pozisyonların toplamına bakar.
 
+### 🧭 Alternatif stratejiler (`STRATEGY`)
+Yukarıdaki "düşüş sonrası toparlanma" (`rebound`) stratejisi, kullanıcı backtestlerinde iki ayrı 90 günlük
+dönemde (Nisan–Temmuz ve Temmuz–Ekim 2026) hiçbir giriş/çıkış ayarıyla kâra geçmedi. Bu yüzden trendin
+yönünde işlem yapan iki strateji daha eklendi. Tarama altyapısı, güvenlik filtreleri, piyasa rejimi ve çıkış
+kuralları (kâr al, zarar kes, izleyen stop, başabaş, kill-switch) aynıdır; değişen, hangi coinlere bakıldığı
+ve alım sinyalidir:
+
+| `STRATEGY` | Hangi coinler? | Alım sinyali (5 dk mumlar, ~25 saatlik geçmiş) |
+|---|---|---|
+| `rebound` (varsayılan) | 24 saatte −%2…−%30 düşmüş | Dip + toparlanma başlangıcı (yukarıda) |
+| `trend` | 24 saatte +%2…+%25 yükselmiş | EMA50 > EMA200 ve EMA200 yükseliyor; fiyat son 3 saatin zirvesinden %1–5 geri çekilip EMA20'ye değmiş; son mum yeşil, fiyat yükselen EMA9 üstünde, RSI 45–68 ve yükseliyor, hacim artmış; fiyat EMA50'den en fazla %3 uzakta |
+| `breakout` | 24 saatte +%2…+%25 yükselmiş | EMA50 > EMA200; son kapanan mum son 4 saatin zirvesinin üstünde (taze kırılım), kırılım mumunun hacmi ortalamanın ≥2 katı; RSI ≤ 75 ve fiyat EMA20'den en fazla %3 uzakta (kovalamaz) |
+
+**Önce backtest edin, sonra seçin:**
+```bash
+python main.py --backtest --gun 90 --strateji-karsilastir          # Üçünü aynı veriyle karşılaştırır
+python main.py --backtest --gun 90 --strateji trend --tara          # Seçtiğinizin çıkış ayarlarını tarar
+python main.py --backtest --gun 90 --strateji trend --tara-giris    # ...ve giriş filtrelerini
+python main.py --backtest --gun 90 --strateji trend --bitis 2026-07-15   # Önceki dönemde doğrular
+```
+`--strateji` yalnızca o backtest için geçerlidir; botun kullanacağı strateji `.env`'deki `STRATEGY` ayarıdır.
+
 ### 🧷 Binance'teki yedek zarar-kes emri
 Bot normalde zarar kesi kendisi yapar (−%10). Ama bilgisayar kapanır, uykuya geçer veya internet
 kesilirse bot satış yapamaz. Bu yüzden her alımdan hemen sonra Binance'e, biraz daha aşağıda
@@ -387,6 +409,7 @@ iddialı bir hedeftir; bazı işlemler 60 dakikadan uzun sürebilir. İsterseniz
 | `BNB_FEE_CHECK` / `BNB_MIN_TRADES` | `true` / `20` | BNB bakiyesi bildirimleri (yalnızca bilgi verir, BNB almaz). Yanlış `FEE_RATE` uyarısı her zaman açıktır |
 | `BACKUP_STOP_ENABLED` / `BACKUP_STOP_PCT` | `true` / `12` | Binance'teki yedek zarar-kes emri |
 | `BREAKEVEN_ENABLED` / `BREAKEVEN_TRIGGER_PCT` | `true` / `5` | Başabaş koruması (TRIGGER, izleyen stop başlangıcından küçük olmalı) |
+| `STRATEGY` | `rebound` | Giriş stratejisi: `rebound` / `trend` / `breakout` (yukarıdaki tablo) |
 | `MIN_ROOM_RATIO` | `0` | Hedef alanı filtresi: düşüş öncesi zirveye kalan alan Kâr Al için yetmiyorsa alma (0 = kapalı) |
 | `BTC_CRASH_EXIT` | `false` | BTC çöküşünde erken çıkış |
 | `USE_WEBSOCKET` | `true` | Anlık fiyat akışı |

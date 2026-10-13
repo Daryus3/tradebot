@@ -195,6 +195,14 @@ class Config:
     min_signal_score: float = 0.0          # 0 = kapalı
     # Hedef alanı: düşüş öncesi zirveye kalan alan ≥ Kâr Al için gereken hareket × bu oran (0 = kapalı)
     min_room_ratio: float = 0.0
+    # Giriş stratejisi: rebound (düşenlerde dip) | trend (yükselen trendde geri çekilme) | breakout (kırılım)
+    strategy: str = "rebound"
+    min_24h_gain_pct: float = 2.0          # trend / breakout: son 24 saatte en az bu kadar yükselmiş
+    max_24h_gain_pct: float = 25.0         # ...ama bundan fazla değil (aşırı pompalanmış coinler hariç)
+    trend_pullback_min_pct: float = 1.0    # trend: zirveden geri çekilme en az
+    trend_pullback_max_pct: float = 5.0    # trend: ...en fazla (daha derini trend bozulması sayılır)
+    breakout_lookback_bars: int = 48       # breakout: kırılacak zirvenin bakıldığı mum sayısı (48 × 5 dk = 4 saat)
+    breakout_volume_ratio: float = 2.0     # breakout: kırılım mumunun hacmi ortalamanın en az bu katı
     signal_confirm_scans: int = 1          # 1 = kapalı (2 = sinyal art arda 2 taramada görülmeli)
     # 31) Oynaklık (ATR) filtresi — 5 dk ATR(14) / fiyat (%)
     min_atr_pct: float = 0.25
@@ -293,6 +301,16 @@ class Config:
             errors.append("BREAKEVEN_FLOOR_PCT, BREAKEVEN_TRIGGER_PCT'den küçük olmalı")
         if self.min_room_ratio < 0:
             errors.append("MIN_ROOM_RATIO negatif olamaz (0 = kapalı)")
+        if self.strategy not in ("rebound", "trend", "breakout"):
+            errors.append("STRATEGY rebound, trend veya breakout olmalı")
+        if not 0 <= self.min_24h_gain_pct < self.max_24h_gain_pct:
+            errors.append("MIN_24H_GAIN_PCT, MAX_24H_GAIN_PCT'den küçük olmalı (ikisi de 0 veya pozitif)")
+        if not 0 < self.trend_pullback_min_pct < self.trend_pullback_max_pct:
+            errors.append("TREND_PULLBACK_MIN_PCT, TREND_PULLBACK_MAX_PCT'den küçük ve sıfırdan büyük olmalı")
+        if not 12 <= self.breakout_lookback_bars <= 200:
+            errors.append("BREAKOUT_LOOKBACK_BARS 12 ile 200 arasında olmalı")
+        if self.breakout_volume_ratio <= 0:
+            errors.append("BREAKOUT_VOLUME_RATIO sıfırdan büyük olmalı")
         if self.signal_confirm_scans < 1:
             errors.append("SIGNAL_CONFIRM_SCANS en az 1 olmalı")
         if self.min_atr_pct >= self.max_atr_pct:
@@ -391,6 +409,13 @@ def load_config(env_file: Optional[str] = None, mode_override: Optional[str] = N
         pump_lookback_days=_env_int("PUMP_LOOKBACK_DAYS", 3),
         min_signal_score=_env_float("MIN_SIGNAL_SCORE", 0.0),
         min_room_ratio=_env_float("MIN_ROOM_RATIO", 0.0),
+        strategy=_env_str("STRATEGY", "rebound").lower(),
+        min_24h_gain_pct=_env_float("MIN_24H_GAIN_PCT", 2.0),
+        max_24h_gain_pct=_env_float("MAX_24H_GAIN_PCT", 25.0),
+        trend_pullback_min_pct=_env_float("TREND_PULLBACK_MIN_PCT", 1.0),
+        trend_pullback_max_pct=_env_float("TREND_PULLBACK_MAX_PCT", 5.0),
+        breakout_lookback_bars=_env_int("BREAKOUT_LOOKBACK_BARS", 48),
+        breakout_volume_ratio=_env_float("BREAKOUT_VOLUME_RATIO", 2.0),
         signal_confirm_scans=_env_int("SIGNAL_CONFIRM_SCANS", 1),
         min_atr_pct=_env_float("MIN_ATR_PCT", 0.25),
         max_atr_pct=_env_float("MAX_ATR_PCT", 4.0),

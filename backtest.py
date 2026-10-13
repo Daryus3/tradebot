@@ -2,7 +2,7 @@
 Geriye dönük test (backtest): stratejiyi geçmiş 5 dakikalık mumlarla dener.
 
 Canlı botla AYNI karar fonksiyonları kullanılır:
-  - Giriş sinyali : strategy.ReboundStrategy.analyze
+  - Giriş sinyali : strategy.make_strategy(cfg).analyze (STRATEGY: rebound / trend / breakout)
   - Boyutlandırma : risk.position_slots + risk.plan_entry (son slot kalan sermayenin tamamını kullanır)
   - Çıkışlar      : risk.evaluate_exit / update_trailing / update_breakeven / price_for_pnl / net_exit_value
   - Kill-switch   : risk.kill_switch_hit
@@ -39,7 +39,7 @@ from market_regime import COKUS, KLINE_1D_LIMIT, KLINE_4H_LIMIT, ZAYIF, classify
 from risk import (ExitReason, Position, breakeven_effective, evaluate_exit, kill_switch_hit, net_exit_value,
                   plan_entry, pnl_pct, position_slots, price_for_pnl, trailing_floor_pct, update_breakeven,
                   update_trailing)
-from strategy import KLINE_LIMIT, ReboundStrategy, Signal, required_move_pct, room_ok
+from strategy import KLINE_LIMIT, STRATEGIES, Signal, make_strategy, required_move_pct, room_ok
 from telegram_bot import LINE, fmt_duration, fmt_price, fmt_rate, fmt_signed, fmt_usdt
 
 INTERVAL = "5m"
@@ -362,9 +362,9 @@ class _Series:
             self._raw[j] = row
         return row
 
-    def window(self, k: int) -> List[list]:
-        """k. mum kapandığı anda canlı botun göreceği veri: son 99 kapanmış mum + sentetik açık mum."""
-        rows = [self._row(j) for j in range(k - (KLINE_LIMIT - 1) + 1, k + 1)]
+    def window(self, k: int, limit: int = KLINE_LIMIT) -> List[list]:
+        """k. mum kapandığı anda canlı botun göreceği veri: son (limit-1) kapanmış mum + sentetik açık mum."""
+        rows = [self._row(j) for j in range(max(0, k - (limit - 1) + 1), k + 1)]
         t_next = self.t0 + (k + 1) * INTERVAL_MS
         p = self.c[k]
         rows.append([t_next, p, p, p, p, "0", t_next + INTERVAL_MS - 1, "0", 0, "0", "0", "0"])
@@ -454,14 +454,14 @@ class _Simulator:
         self.series = series
         self.btc = btc
         self.regime = regime if cfg.regime_filter else None
-        # (sembol, mum, sıkı_mod) → Signal | None. Giriş analizi çıkış ayarlarına bağlı değildir; --tara'da
+        # (strateji, sembol, mum, sıkı_mod) → Signal | None. Giriş analizi çıkış ayarlarına bağlı değildir; --tara'da
         # aynı veriyle denenen tüm kombinasyonlar bu önbelleği paylaşır (analiz bir kez yapılır).
         self.signal_cache = signal_cache if signal_cache is not None else {}
         self.min_notional = min_notional
         self.entry_factor = 1 + spread_pct / 200   # Alış ask'tan
         self.exit_factor = 1 - spread_pct / 200    # Satış bid'den
         self.progress = progress
-        self.strategy = ReboundStrategy(None, cfg)
+        self.strategy = make_strategy(None, cfg)
 
         self.cash = cfg.start_capital
         self.realized = 0.0
@@ -632,14 +632,14 @@ class _Simulator:
             if not s.has(k):
                 continue
             change = s.change24[k]
-            if change is None or not -cfg.max_24h_drop_pct <= change <= -cfg.min_24h_drop_pct:
+            if change is None or not self.strategy.change_ok(change):
                 continue
             if target > 0 and s.rules.step_value(s.c[k]) / target * 100 > cfg.max_dust_pct:
                 continue
-            candidates.append((change, symbol))
+            candidates.append((self.strategy.candidate_key(change), symbol))
         if not candidates:
             return
-        candidates.sort()  # En çok düşen önce
+        candidates.sort()  # Canlı ön elemeyle aynı sıra (rebound: en çok düşen, trend: en çok yükselen önce)
 
         signals = []
         for _, symbol in candidates[: cfg.max_candidates]:
@@ -682,10 +682,11 @@ class _Simulator:
                 opened += 1
 
     def _analyze(self, symbol: str, k: int, strict: bool) -> Optional[Signal]:
-        key = (symbol, k, strict)
+        key = (self.strategy.name, symbol, k, strict)
         if key in self.signal_cache:
             return self.signal_cache[key]
-        signal, _reason = self.strategy.analyze(symbol, self.series[symbol].window(k), strict=strict)
+        window = self.series[symbol].window(k, self.strategy.kline_limit)
+        signal, _reason = self.strategy.analyze(symbol, window, strict=strict)
         self.signal_cache[key] = signal
         return signal
 
@@ -953,15 +954,25 @@ SWEEP_FIELDS: Dict[str, Tuple[str, type, Optional[str]]] = {
     "TRAILING_FLOOR_PCT": ("trailing_floor_pct", float, None),
     "MAX_HOLD_MINUTES": ("max_hold_minutes", int, "Süre"),
     "REGIME_SKIP_WEAK": ("regime_skip_weak", bool, "Zayıf"),
+    "STRATEGY": ("strategy", str, "Strateji"),
     "MAX_24H_DROP_PCT": ("max_24h_drop_pct", float, "MaxDüş"),
+    "MAX_24H_GAIN_PCT": ("max_24h_gain_pct", float, "MaxYük"),
     "MIN_SIGNAL_SCORE": ("min_signal_score", float, "Puan"),
     "MIN_ROOM_RATIO": ("min_room_ratio", float, "Alan"),
 }
 EXIT_KEYS = ("TAKE_PROFIT_PCT", "STOP_LOSS_PCT", "TRAILING_ACTIVATION_PCT", "TRAILING_FLOOR_PCT",
              "MAX_HOLD_MINUTES", "MIN_ROOM_RATIO")
 ENTRY_KEYS = ("REGIME_SKIP_WEAK", "MAX_24H_DROP_PCT", "MIN_SIGNAL_SCORE", "MIN_ROOM_RATIO")
+SWEEP_MAX_GAIN = (12.0, 6.0)          # trend / breakout: + .env'deki MAX_24H_GAIN_PCT
 
-Settings = Dict[str, Union[float, int, bool]]
+
+def entry_keys(cfg) -> Tuple[str, ...]:
+    """Giriş taramasının değiştirdiği ayarlar: rebound düşüş aralığını, trend/breakout yükseliş aralığını."""
+    if cfg.strategy == "rebound":
+        return ENTRY_KEYS
+    return tuple("MAX_24H_GAIN_PCT" if k == "MAX_24H_DROP_PCT" else k for k in ENTRY_KEYS)
+
+Settings = Dict[str, Union[float, int, bool, str]]
 Combo = Tuple[Settings, bool]          # (ayarlar, .env'deki mevcut ayar mı)
 
 
@@ -1071,19 +1082,34 @@ def entry_combos(cfg, scores: Sequence[float], max_drops: Sequence[float] = SWEE
     Piyasa rejimi filtresi kapalıysa (veya BTC verisi yoksa) REGIME_SKIP_WEAK hiçbir şeyi değiştirmez;
     o durumda aynı satırları iki kez denememek için yalnızca mevcut değeri kullanılır.
     """
-    base = _current(cfg, ENTRY_KEYS)
-    drops = sorted({cfg.max_24h_drop_pct, *(d for d in max_drops if d > cfg.min_24h_drop_pct)}, reverse=True)
+    keys = entry_keys(cfg)
+    base = _current(cfg, keys)
+    if cfg.strategy == "rebound":
+        range_key = "MAX_24H_DROP_PCT"
+        ranges = sorted({cfg.max_24h_drop_pct, *(d for d in max_drops if d > cfg.min_24h_drop_pct)}, reverse=True)
+    else:
+        range_key = "MAX_24H_GAIN_PCT"
+        ranges = sorted({cfg.max_24h_gain_pct, *(g for g in SWEEP_MAX_GAIN if g > cfg.min_24h_gain_pct)},
+                        reverse=True)
     skips = (False, True) if cfg.regime_filter and regime_available else (bool(cfg.regime_skip_weak),)
+    if cfg.strategy == "breakout":   # Kırılımda "eski zirveye alan" ölçülmez; filtre hiçbir şeyi değiştirmez
+        rooms = (cfg.min_room_ratio,)
     combos: List[Combo] = [(base, True)]
     for skip in skips:
-        for drop in drops:
+        for rng in ranges:
             for score in scores:
                 for room in rooms:
-                    st = {"REGIME_SKIP_WEAK": skip, "MAX_24H_DROP_PCT": drop, "MIN_SIGNAL_SCORE": score,
+                    st = {"REGIME_SKIP_WEAK": skip, range_key: rng, "MIN_SIGNAL_SCORE": score,
                           "MIN_ROOM_RATIO": room}
                     if st != base:
                         combos.append((st, False))
     return combos
+
+
+def strategy_combos(cfg) -> List[Combo]:
+    """Strateji karşılaştırması: her strateji .env'deki çıkış ve filtre ayarlarıyla; ilk satır mevcut strateji."""
+    order = [cfg.strategy] + [s for s in STRATEGIES if s != cfg.strategy]
+    return [({"STRATEGY": s}, s == cfg.strategy) for s in order]
 
 
 def run_sweep(cfg, data: BacktestData, spread_pct: float = 0.05, progress: Progress = None,
@@ -1111,7 +1137,7 @@ def run_entry_sweep(cfg, data: BacktestData, spread_pct: float = 0.05, progress:
     bir --tara'nın önbelleği eşikleri değiştirmez), sonra diğerleri."""
     cache = signal_cache if signal_cache is not None else {}
     own: dict = {}
-    base = run_sweep(cfg, data, spread_pct, None, [(_current(cfg, ENTRY_KEYS), True)], own)
+    base = run_sweep(cfg, data, spread_pct, None, [(_current(cfg, entry_keys(cfg)), True)], own)
     thresholds = score_thresholds(own)
     cache.update(own)
     combos = entry_combos(cfg, thresholds, regime_available=data.regime is not None)[1:]
@@ -1119,6 +1145,8 @@ def run_entry_sweep(cfg, data: BacktestData, spread_pct: float = 0.05, progress:
 
 
 def _fmt_setting(key: str, value) -> str:
+    if SWEEP_FIELDS[key][1] is str:
+        return str(value)
     if SWEEP_FIELDS[key][1] is bool:
         return "true" if value else "false"
     if SWEEP_FIELDS[key][1] is int:
@@ -1177,7 +1205,7 @@ def _rank(rows: Sequence[SweepRow]) -> List[SweepRow]:
 def format_sweep_report(rows: Sequence[SweepRow], cfg, data: BacktestData, spread_pct: float = 0.05,
                         kind: str = "cikis") -> str:
     q = cfg.quote_asset
-    entry = kind == "giris"
+    entry, compare = kind == "giris", kind == "strateji"
     ranked = _rank(rows)
     shown = ranked[:SWEEP_SHOW]
     base = next((r for r in rows if r.baseline), None)
@@ -1189,10 +1217,14 @@ def format_sweep_report(rows: Sequence[SweepRow], cfg, data: BacktestData, sprea
     lucky = [r for r in ranked if r.profitable and r.consistent and r.enough_trades and not r.proven(len(rows))]
     columns = [k for k in dict.fromkeys(k for r in rows for k in r.settings) if SWEEP_FIELDS[k][2]]
 
-    title = ("🧪 GİRİŞ TARAMASI (aynı veriyle farklı giriş filtreleri; çıkışlar .env'deki gibi)" if entry
-             else "🧪 PARAMETRE TARAMASI (aynı veriyle farklı çıkış ayarları)")
+    titles = {"giris": "🧪 GİRİŞ TARAMASI (aynı veriyle farklı giriş filtreleri; çıkışlar .env'deki gibi)",
+              "strateji": "🧪 STRATEJİ KARŞILAŞTIRMASI (aynı veri, .env'deki çıkış ve filtre ayarları)",
+              "cikis": "🧪 PARAMETRE TARAMASI (aynı veriyle farklı çıkış ayarları)"}
+    # .env'e yazılacak satırlara strateji de eklenir (--strateji ile seçildiyse .env'de olmayabilir)
+    strategy_line = [] if compare or cfg.strategy == "rebound" else [f"STRATEGY={cfg.strategy}"]
+    strat_flag = "" if compare or cfg.strategy == "rebound" else f" --strateji {cfg.strategy}"
     lines = [
-        title,
+        titles.get(kind, titles["cikis"]) + ("" if compare else f" — strateji: {cfg.strategy}"),
         LINE,
         f"🗓️ Dönem: {_fmt_time(data.sim_start_ms)} → {_fmt_time(data.end_ms)} ({data.days:g} gün) | "
         f"{len(data.series)} sembol | sermaye {fmt_usdt(cfg.start_capital)} {q} | komisyon {fmt_rate(cfg.fee_rate)} "
@@ -1221,9 +1253,12 @@ def format_sweep_report(rows: Sequence[SweepRow], cfg, data: BacktestData, sprea
             f"{r.max_dd_pct:>6.1f}% | {r.first_net:>+7.3f} {r.second_net:>+7.3f}")
     legend = [f"   ⭐ = .env'deki mevcut ayarlarınız | ✅ = aday (iki yarıda kârlı ve şans eleğinden geçti) |",
               f"   ≈ = iki yarıda kârlı ama şans olabilir | · = {MIN_TRADES_FOR_EVIDENCE}'dan az işlem (güvenilmez)"]
-    if entry:
+    if compare:
+        legend += ["   rebound = düşen coinde dip alımı | trend = yükselen trendde EMA20'ye geri çekilmede alım |",
+                   "   breakout = yükselen trendde 4 saatlik zirvenin hacimle kırılmasında alım"]
+    elif entry:
         legend += ["   Zayıf = REGIME_SKIP_WEAK (true: piyasa zayıfken alım yok), MaxDüş = MAX_24H_DROP_PCT,",
-                   "   Puan = MIN_SIGNAL_SCORE, Alan = MIN_ROOM_RATIO (0 = kapalı)"]
+                   "   MaxYük = MAX_24H_GAIN_PCT, Puan = MIN_SIGNAL_SCORE, Alan = MIN_ROOM_RATIO (0 = kapalı)"]
     else:
         legend += ["   TP/SL/İz. = Kâr Al / Zarar Kes / izleyen stop başlangıcı (%), Süre = maks. tutma (dk),",
                    "   Alan = MIN_ROOM_RATIO (0 = kapalı)"]
@@ -1231,19 +1266,27 @@ def format_sweep_report(rows: Sequence[SweepRow], cfg, data: BacktestData, sprea
 
     best = next((r for r in ranked if r.enough_trades), None)
     if not profitable:
-        where = ("Giriş filtreleriyle de" if entry else "Çıkış ayarlarıyla")
-        lines += [
-            f"❗ Denenen ayarların HİÇBİRİ kârlı değil. {where} kâra geçilemiyor: bu dönemde strateji",
-            "   fiyatın yükseleceği anları yakalayamıyor. Canlıda gerçek parayla ÇALIŞTIRMAYIN.",
-        ]
+        if compare:
+            lines += ["❗ Stratejilerin HİÇBİRİ bu ayarlarla kârlı değil. Canlıda gerçek parayla ÇALIŞTIRMAYIN.",
+                      "   İşlem başı sonucu en iyi olan stratejiyi --strateji ile seçip --tara ve --tara-giris ile",
+                      "   ayarlarını deneyin (çıkış ayarları stratejiye göre çok farklı olabilir)."]
+        else:
+            where = ("Giriş filtreleriyle de" if entry else "Çıkış ayarlarıyla")
+            lines += [
+                f"❗ Denenen ayarların HİÇBİRİ kârlı değil. {where} kâra geçilemiyor: bu dönemde strateji",
+                "   fiyatın yükseleceği anları yakalayamıyor. Canlıda gerçek parayla ÇALIŞTIRMAYIN.",
+            ]
         if best is not None:
             lines.append(f"   En iyi işlem başı sonuç (≥{MIN_TRADES_FOR_EVIDENCE} işlem): "
                          f"{fmt_signed(best.mean_net_pct)}% — kâra geçmek için işlem başına bu kadarlık iyileşme gerekir.")
         lines.append("   Daha önceki bir dönemi de deneyin (aşağıdaki --bitis komutu); orada da kârlı ayar çıkmazsa")
         lines.append("   strateji bu piyasa koşullarında işe yaramıyor demektir.")
-        if not entry:
+        if kind == "cikis":
             lines.append("   Giriş filtrelerini denemek için: python main.py --backtest --gun "
-                         f"{data.days:g} --tara-giris")
+                         f"{data.days:g} --tara-giris{strat_flag}")
+        if not compare and cfg.strategy == "rebound":
+            lines.append("   Trendin yönünde işlem yapan diğer stratejileri karşılaştırmak için: python main.py "
+                         f"--backtest --gun {data.days:g} --strateji-karsilastir")
     elif not robust:
         top = max(profitable, key=lambda r: r.net)
         lines += [
@@ -1253,21 +1296,21 @@ def format_sweep_report(rows: Sequence[SweepRow], cfg, data: BacktestData, sprea
         ]
         if lucky:
             lines.append(f"   ≈ işaretli {len(lucky)} ayardan en iyisini yine de daha önceki bir dönemde sınayabilirsiniz:")
-            lines += [f"      {line}" for line in _env_lines(lucky[0])]
+            lines += [f"      {line}" for line in strategy_line + _env_lines(lucky[0])]
             lines += _validation_lines(data)
     else:
         cand = robust[0]
         lines += [
             f"✅ En tutarlı aday ({cand.trades} işlem, net {fmt_signed(cand.net, 4)} {q}, iki yarıda da kârlı).",
             "   .env dosyanızdaki şu satırları DEĞİŞTİRİN (aynı isimli eski satırları silin):",
-        ] + [f"      {line}" for line in _env_lines(cand)] + [
+        ] + [f"      {line}" for line in strategy_line + _env_lines(cand)] + [
             f"   (İşlem başı sonucun alt sınırı, {len(rows)} ayar denendiği hesaba katılarak sıfırın üstünde.)",
             "   Yine de: çok ayar denendiği için en iyi sonuç iyimserdir.",
         ] + _validation_lines(data) + [
             "   Orada da kârlıysa birkaç gün TEST modunda izleyin. --gun 30 / 60 aynı dönemin parçasıdır,",
             "   bağımsız kanıt sayılmaz.",
         ]
-    flag = "--tara-giris" if entry else "--tara"
+    flag = {"giris": "--tara-giris", "strateji": "--strateji-karsilastir"}.get(kind, "--tara") + strat_flag
     note = " (puan eşikleri o dönemin verisinden yeniden hesaplanır)" if entry else ""
     lines.append(f"🔁 Aynı taramayı önceki {data.days:g} günde yapmak için{note}: python main.py --backtest --gun "
                  f"{data.days:g} {flag} --bitis {_fmt_date(data.sim_start_ms)}")
@@ -1430,10 +1473,11 @@ def diagnostics_lines(result: BacktestResult, cfg) -> List[str]:
     a, b = summarize(first), summarize(second)
     lines.append(f"   Dönemin 1. yarısı: {a.count} işlem, net {fmt_signed(a.net, 4)} {q} | "
                  f"2. yarısı: {b.count} işlem, net {fmt_signed(b.net, 4)} {q}")
+    flag = "" if cfg.strategy == "rebound" else f" --strateji {cfg.strategy}"
     lines.append(f"   💡 Farklı Kâr Al / Zarar Kes / süre ayarlarını aynı veriyle karşılaştırmak için: "
-                 f"python main.py --backtest --gun {result.days:g} --tara")
+                 f"python main.py --backtest --gun {result.days:g} --tara{flag}")
     lines.append(f"   💡 Bağımsız doğrulama (bu dönemle çakışmayan, daha önceki {result.days:g} gün): "
-                 f"python main.py --backtest --gun {result.days:g} --bitis {_fmt_date(result.start_ms)}")
+                 f"python main.py --backtest --gun {result.days:g}{flag} --bitis {_fmt_date(result.start_ms)}")
     return lines
 
 
@@ -1462,6 +1506,7 @@ def format_backtest_report(result: BacktestResult, cfg) -> str:
         LINE,
         f"🗓️ Dönem: {_fmt_time(result.start_ms)} → {_fmt_time(result.end_ms)} ({result.days:g} gün, 5 dk mumlar)",
         f"🪙 Sembol sayısı: {len(result.symbols_used)}",
+        f"🧭 Strateji: {cfg.strategy}",
         f"⚙️ Kâr Al +%{cfg.take_profit_pct:g} | Zarar Kes -%{cfg.stop_loss_pct:g} | İzleyen stop {trailing}{hold}",
         f"   Başabaş: {breakeven}",
         f"   Komisyon {fmt_rate(cfg.fee_rate)} | Spread %{result.spread_pct:g} | "

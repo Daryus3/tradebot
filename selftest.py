@@ -25,7 +25,7 @@ from exchange import LiveExchange, PaperExchange, SymbolRules, parse_symbol_rule
 from logger import get_logger
 from risk import (ExitReason, Position, evaluate_exit, kill_switch_hit, min_position_usdt, net_exit_value,
                   plan_entry, pnl_pct, position_slots, price_for_pnl, update_breakeven, update_trailing)
-from strategy import ReboundStrategy
+from strategy import make_strategy
 from telegram_bot import LINE, Messages, TelegramNotifier, esc, fmt_price, fmt_rate, fmt_usdt
 
 log = get_logger()
@@ -176,9 +176,9 @@ def run_selftest(cfg) -> int:
     # 4) Strateji deneme taraması
     if rules:
         try:
-            strategy = ReboundStrategy(client, cfg)
+            strategy = make_strategy(client, cfg)
             scan = strategy.scan(rules, set(), cfg.start_capital)
-            detail = scan.summary()
+            detail = f"[{cfg.strategy}] " + scan.summary()
             results.append((OK, "Strateji taraması (alım yapılmadı)", detail))
         except Exception as exc:  # noqa: BLE001
             results.append((FAIL, "Strateji taraması", str(exc)))
