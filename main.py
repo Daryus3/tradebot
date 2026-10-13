@@ -9,6 +9,8 @@ Kullanım:
     python main.py --kurulum           # Türkçe kurulum sihirbazı (.env dosyasını hazırlar)
     python main.py --istatistik        # İşlem geçmişinden performans istatistikleri
     python main.py --backtest --gun 30 # Stratejiyi geçmiş verilerle dener
+    python main.py --backtest --gun 90 --tara       # Aynı veriyle farklı TP/SL/süre ayarlarını karşılaştırır
+    python main.py --backtest --gun 90 --sermaye 25 # Farklı bir başlangıç sermayesiyle dener
     python main.py --telegram-chat-id  # Telegram chat ID'nizi bulur
     python main.py --reset-state       # Kayıtlı durumu (K/Z, kill-switch) sıfırlar
 
@@ -46,6 +48,15 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--backtest", action="store_true", help="Stratejiyi geçmiş verilerle dener")
     parser.add_argument("--gun", type=int, default=30, help="Backtest gün sayısı (varsayılan 30)")
     parser.add_argument("--coin-sayisi", type=int, default=40, help="Backtest'te kullanılacak coin sayısı")
+    parser.add_argument("--sermaye", type=float, default=None,
+                        help="Backtest başlangıç sermayesi (.env'deki START_CAPITAL_USDT yerine)")
+    parser.add_argument("--tara", action="store_true",
+                        help="Backtest: aynı veriyle farklı Kâr Al / Zarar Kes / süre ayarlarını karşılaştırır")
+    parser.add_argument("--tp", default=None, help="--tara için Kâr Al değerleri, örn. 2,3,5")
+    parser.add_argument("--sl", default=None, help="--tara için Zarar Kes değerleri, örn. 2,3.5")
+    parser.add_argument("--iz", default=None, help="--tara için izleyen stop başlangıçları, örn. 1,2")
+    parser.add_argument("--sure", default=None, help="--tara için maks. tutma süreleri (dk), örn. 60,120,240")
+    parser.add_argument("--alan", default=None, help="--tara için MIN_ROOM_RATIO değerleri, örn. 0,1")
     parser.add_argument("--reset-state", action="store_true", help="Kayıtlı durumu sıfırlar (kill-switch dahil)")
     parser.add_argument("--telegram-chat-id", action="store_true", help="Telegram chat ID'nizi bulmanıza yardım eder")
     parser.add_argument("--yes", action="store_true", help="Onay sorularını atlar")
@@ -114,7 +125,7 @@ def main(argv=None) -> int:
         return show_stats(cfg)
 
     if args.backtest:
-        return run_backtest_cli(cfg, args.gun, args.coin_sayisi)
+        return run_backtest_cli(cfg, args)
 
     from state import StateStore
 
@@ -170,18 +181,58 @@ def show_stats(cfg) -> int:
     return EXIT_OK
 
 
-def run_backtest_cli(cfg, days: int, max_symbols: int) -> int:
-    from backtest import format_backtest_report, run_backtest
+def _number_list(text, name: str, cast=float, allow_zero: bool = False):
+    """'2,3.5,5' → [2.0, 3.5, 5.0]; boşsa None."""
+    if not text:
+        return None
+    try:
+        values = [cast(float(x.strip())) for x in text.split(",") if x.strip()]
+    except ValueError:
+        raise ValueError(f"--{name} virgülle ayrılmış sayılar olmalı, örn. 2,3.5 (girilen: {text!r})") from None
+    if not values or any(v < 0 or (v == 0 and not allow_zero) or v != v for v in values):
+        raise ValueError(f"--{name} sıfırdan büyük sayılar içermeli (girilen: {text!r})")
+    return values
+
+
+def run_backtest_cli(cfg, args) -> int:
+    from dataclasses import replace
+
+    import backtest
     from binance_client import BinanceClient
+
+    days = args.gun
+    if days <= 0:
+        print("❌ --gun sıfırdan büyük olmalı")
+        return EXIT_CONFIG
+    if args.sermaye is not None:
+        if args.sermaye <= 0:
+            print("❌ --sermaye sıfırdan büyük olmalı")
+            return EXIT_CONFIG
+        cfg = replace(cfg, start_capital=args.sermaye)
+    try:
+        grid = {"tps": _number_list(args.tp, "tp"), "sls": _number_list(args.sl, "sl"),
+                "trails": _number_list(args.iz, "iz"),
+                "holds": _number_list(args.sure, "sure", int, allow_zero=True),   # 0 = süre sınırı yok
+                "rooms": _number_list(args.alan, "alan", allow_zero=True)}        # 0 = filtre kapalı
+    except ValueError as exc:
+        print(f"❌ {exc}")
+        return EXIT_CONFIG
 
     print(f"⏳ Son {days} günün verisi indiriliyor ve strateji deneniyor (ilk seferde birkaç dakika sürebilir)...")
     client = BinanceClient(cfg.binance_api_key, cfg.binance_api_secret, cfg.binance_base_url)
     try:
-        result = run_backtest(cfg, client, days=days, max_symbols=max_symbols)
+        if not args.tara:
+            result = backtest.run_backtest(cfg, client, days=days, max_symbols=args.coin_sayisi)
+            print(backtest.format_backtest_report(result, cfg))
+            return EXIT_OK
+        data = backtest.prepare_backtest(cfg, client, days=days, max_symbols=args.coin_sayisi)
+        combos = backtest.sweep_combos(cfg, **{k: v for k, v in grid.items() if v is not None})
+        print(f"🧪 {len(combos)} ayar aynı veriyle denenecek (giriş analizleri bir kez yapılır, sonra hızlanır)...")
+        rows = backtest.run_sweep(cfg, data, progress=print, combos=combos)
     except Exception as exc:  # noqa: BLE001
         print(f"❌ Backtest çalıştırılamadı: {exc}")
         return EXIT_CONFIG
-    print(format_backtest_report(result, cfg))
+    print(backtest.format_sweep_report(rows, cfg, data))
     return EXIT_OK
 
 

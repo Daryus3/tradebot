@@ -185,7 +185,8 @@ Birkaç gün test modunda çalıştırıp sonuçları izlemenizi öneririz (`/is
 | `python main.py --kurulum` | Türkçe kurulum sihirbazı |
 | `python main.py --selftest` | Tüm sistemi test eder |
 | `python main.py --istatistik` | Performans istatistikleri |
-| `python main.py --backtest --gun 30` | Stratejiyi geçmiş verilerle dener (`--coin-sayisi 40`) |
+| `python main.py --backtest --gun 30` | Stratejiyi geçmiş verilerle dener (`--coin-sayisi 40`, `--sermaye 25`) |
+| `python main.py --backtest --gun 90 --tara` | Aynı veriyle onlarca Kâr Al / Zarar Kes / süre ayarını karşılaştırır |
 | `python main.py --telegram-chat-id` | Telegram chat ID'nizi bulur |
 | `python main.py --reset-state` | Kayıtlı durumu sıfırlar (kill-switch kilidi dahil) |
 | `python watchdog.py --install-autostart --mode paper` | Windows açılışında otomatik başlatmayı kurar |
@@ -341,6 +342,17 @@ iddialı bir hedeftir; bazı işlemler 60 dakikadan uzun sürebilir. İsterseniz
   veri indirdiği için birkaç dakika sürebilir; veriler `data/backtest_cache` klasörüne kaydedilir.
   **Geçmiş geleceği garanti etmez**: listeden çıkarılmış coinler eksik olduğu için sonuç iyimser
   çıkabilir; 5 dakikalık mumlarla çalışır ve aynı mumda hem hedef hem stop varsa kötümser varsayar.
+  Başabaş, piyasa rejimi (yaklaşık), ATR ve hedef alanı filtreleri canlıdaki gibi uygulanır.
+- **Teşhis bölümü** (backtest raporunun sonunda): işlem başına fiyat hareketi ile komisyon + spread
+  maliyetini ayırır (sinyal mi kötü, komisyon mu yiyor?), işlemlerin yüzde kaçının +%1 / +%2 / Kâr Al
+  seviyesine ulaştığını, süre dolan işlemlerin durumunu, hedef alanı geniş/dar sinyallerin sonucunu ve
+  dönemin iki yarısının ayrı sonuçlarını gösterir.
+- **Parametre taraması** (`--tara`): veri bir kez indirilir, giriş analizleri bir kez yapılır; sonra
+  Kâr Al (2/3/5), Zarar Kes (2/3.5), izleyen stop (1/2), süre (60/120/240 dk) ve hedef alanı filtresi
+  (kapalı/1) kombinasyonları aynı veriyle denenir. Değerleri değiştirmek için `--tp 2,3 --sl 2
+  --iz 1 --sure 90,180 --alan 0,1`. Karşılaştırma adil olsun diye taramada kill-switch kapalıdır.
+  **Çok ayar denendiğinde birkaçı tesadüfen kârlı çıkar**: yalnızca dönemin iki yarısında da kârlı
+  (✅) ve yeterli işlemi olan ayarları ciddiye alın, sonra farklı bir dönemle tekrar deneyin.
 
 ---
 
@@ -359,6 +371,7 @@ iddialı bir hedeftir; bazı işlemler 60 dakikadan uzun sürebilir. İsterseniz
 | `BNB_FEE_CHECK` / `BNB_MIN_TRADES` | `true` / `20` | Komisyon ve BNB bakiyesi takibi (yalnızca uyarır, BNB almaz) |
 | `BACKUP_STOP_ENABLED` / `BACKUP_STOP_PCT` | `true` / `12` | Binance'teki yedek zarar-kes emri |
 | `BREAKEVEN_ENABLED` / `BREAKEVEN_TRIGGER_PCT` | `true` / `5` | Başabaş koruması (TRIGGER, izleyen stop başlangıcından küçük olmalı) |
+| `MIN_ROOM_RATIO` | `0` | Hedef alanı filtresi: düşüş öncesi zirveye kalan alan Kâr Al için yetmiyorsa alma (0 = kapalı) |
 | `BTC_CRASH_EXIT` | `false` | BTC çöküşünde erken çıkış |
 | `USE_WEBSOCKET` | `true` | Anlık fiyat akışı |
 | `TELEGRAM_COMMANDS` / `COMMAND_PIN` | `true` / boş | Telegram komutları / onay PIN'i |

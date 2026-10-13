@@ -68,6 +68,20 @@ def scenario(after_bounce):
     return to_raw(bars)
 
 
+def aggregate(rows, step_ms):
+    """Ham 5 dk mumları daha uzun aralıklı mumlara birleştirir (açılış zamanı step_ms'e hizalı)."""
+    buckets = {}
+    for r in rows:
+        buckets.setdefault(r[0] // step_ms * step_ms, []).append(r)
+    out = []
+    for t in sorted(buckets):
+        b = buckets[t]
+        out.append([t, b[0][1], str(max(float(x[2]) for x in b)), str(min(float(x[3]) for x in b)), b[-1][4], "0",
+                    t + step_ms - 1, str(sum(float(x[7]) for x in b)), 0, "0", str(sum(float(x[10]) for x in b)),
+                    "0"])
+    return out
+
+
 def btc_flat():
     return to_raw(flat(N_BARS, 30_000.0, vol=50_000_000.0))
 
@@ -94,6 +108,8 @@ def make_client(fake_client):
             assert method == "GET" and path == "/api/v3/klines"
             self.kline_calls += 1
             rows = self.series[params["symbol"]]
+            if params["interval"] != "5m":   # 4s / 1g: 5 dk mumlardan birleştir (piyasa rejimi için)
+                rows = aggregate(rows, {"4h": 4 * HOUR_MS, "1d": 24 * HOUR_MS}[params["interval"]])
             out = [r for r in rows if params["startTime"] <= r[0] <= params["endTime"]]
             return out[: params["limit"]]
 
@@ -238,7 +254,7 @@ def test_second_run_uses_cache(cfg, make_client, tmp_path):
     series = {"ABCUSDT": scenario(lambda p: trend(p, 1.03, 8)), "BTCUSDT": btc_flat()}
     first = make_client(series)
     r1 = run(cfg, first, tmp_path)
-    assert first.kline_calls == 4  # 1008 mum → sembol başına 2 sayfa (1000 + 8)
+    assert first.kline_calls == 6  # 1008 mum → sembol başına 2 sayfa (1000 + 8) + BTC 4s ve 1g (rejim)
     assert cache_path(tmp_path / "cache", "ABCUSDT", START_MS, END_MS).exists()
 
     second = make_client(series)
@@ -278,7 +294,7 @@ def test_auto_symbol_selection_includes_btc_for_filter(cfg, make_client, tmp_pat
                          volumes={"ABCUSDT": 5_000_000, "BTCUSDT": 9_000_000_000})
     result = run(cfg, client, tmp_path, symbols=None, max_symbols=1)
     assert result.symbols_used == ["BTCUSDT"]  # En hacimli tek parite
-    assert client.kline_calls == 2             # BTC filtre için ayrıca indirilmedi
+    assert client.kline_calls == 4             # BTC 5 dk ayrıca indirilmedi (+ rejim için BTC 4s ve 1g)
     assert result.trades == []
 
 
@@ -341,3 +357,135 @@ def test_breakeven_simulated_like_live(cfg, make_client, tmp_path):
     result_off = run(off, client, tmp_path)
     assert result_off.trades[0].reason != ExitReason.BREAKEVEN.value
     assert result_off.trades[0].pnl < t.pnl
+
+
+# ---------------------------------------------------------------- teşhis / rejim / tarama
+def _btc_slow_crash():
+    """BTC 20 saatte ~%8 düşüyor (1 saatlik düşüş küçük → BTC 1s filtresi değil, rejim 'çöküş' engeller)."""
+    bars = flat(300, 30_000.0, vol=50_000_000.0)
+    down, p = trend(30_000.0, 0.99965, 240, vol=50_000_000.0)
+    bars += down
+    bars += flat(N_BARS - len(bars), p, vol=50_000_000.0)
+    return to_raw(bars)
+
+
+def test_trades_carry_diagnostics_and_report_explains(cfg, make_client, tmp_path):
+    client = make_client({"ABCUSDT": scenario(lambda p: trend(p, 1.03, 8)), "BTCUSDT": btc_flat()})
+    result = run(cfg, client, tmp_path)
+    t = result.trades[0]
+    assert t.peak_pct >= cfg.take_profit_pct - 0.01 and t.trough_pct < 0      # Girişte -(komisyon+spread)
+    assert t.move_pct > t.pnl_pct > 0                                         # Maliyet hareketten düşülür
+    assert t.fee_usdt == pytest.approx(result.total_fees)
+    assert t.room_pct is not None and t.room_pct > 0
+    report = format_backtest_report(result, cfg)
+    assert "🔬 TEŞHİS" in report and "komisyon+spread" in report and "1. yarısı" in report
+    assert "--tara" in report
+
+
+def test_summarize_and_halves():
+    from backtest import BacktestTrade, split_halves, summarize
+
+    def tr(pnl, move, t):
+        return BacktestTrade("X", t, t + 1, 1, 1, 10, 10 + pnl, pnl, pnl * 10, "R", 0, move_pct=move)
+    trades = [tr(1.0, 11.0, 0), tr(-0.5, -4.0, 10), tr(0.2, 2.5, 60)]
+    sm = summarize(trades)
+    assert sm.count == 3 and sm.net == pytest.approx(0.7) and sm.profit_factor == pytest.approx(2.4)
+    assert sm.mean_net_pct == pytest.approx((10 - 5 + 2) / 3)
+    assert sm.cost_pct == pytest.approx((11 - 4 + 2.5) / 3 - (10 - 5 + 2) / 3)
+    first, second = split_halves(trades, 0, 100)
+    assert [t.open_time_ms for t in first] == [0, 10] and [t.open_time_ms for t in second] == [60]
+    assert summarize([]).count == 0
+
+
+def test_regime_crash_blocks_entries_like_live(cfg, make_client, tmp_path):
+    series = {"ABCUSDT": scenario(lambda p: trend(p, 1.03, 8)), "BTCUSDT": _btc_slow_crash()}
+    blocked = run(cfg, make_client(series), tmp_path)
+    assert blocked.trades == [] and blocked.stats.get("rejim_cokus", 0) > 0
+    assert blocked.stats.get("btc_engel", 0) == 0
+    assert "çöküş nedeniyle" in format_backtest_report(blocked, cfg)
+    allowed = run(replace(cfg, regime_filter=False), make_client(series), tmp_path)
+    assert allowed.trades
+
+
+def test_regime_sim_matches_live_classify():
+    from backtest import _RegimeSim, _Series
+    from market_regime import COKUS, NORMAL, ZAYIF, classify
+    rows = [[START_MS + k * INTERVAL_MS] + list(map(float, r[1:5])) + [5e7, 2e7]
+            for k, r in enumerate(_btc_slow_crash())]
+    btc = _Series("BTCUSDT", rows, START_MS, N_BARS)
+    flat_4h = [[START_MS - (60 - i) * 4 * HOUR_MS, 30_000, 30_000, 30_000, 30_000, 0, 0] for i in range(60)]
+    flat_1d = [[START_MS - (30 - i) * 24 * HOUR_MS, 30_000, 30_000, 30_000, 30_000, 0, 0] for i in range(30)]
+    sim = _RegimeSim(type("C", (), {"min_quote_volume_24h": 1})(), btc, {}, flat_4h, flat_1d)
+    k = 560                                            # BTC 24 saatte ~%8 aşağıda
+    t_close = START_MS + (k + 1) * INTERVAL_MS
+    btc_24h = (btc.c[k] - btc.o[k - 287]) / btc.o[k - 287] * 100
+    assert btc_24h < -6
+    assert sim.at(k, t_close) == COKUS == classify(btc.c[k], [30_000] * 59 + [btc.c[k]],
+                                                   [30_000] * 29 + [btc.c[k]], btc_24h, None).regime
+    assert sim.at(100, START_MS + 101 * INTERVAL_MS) == NORMAL
+    assert sim.cache[k] == COKUS and ZAYIF != COKUS
+
+
+def test_room_filter_applied_in_backtest(cfg, make_client, tmp_path):
+    client = make_client({"ABCUSDT": scenario(lambda p: trend(p, 1.03, 8)), "BTCUSDT": btc_flat()})
+    result = run(replace(cfg, min_room_ratio=50), client, tmp_path)   # İmkânsız derecede geniş alan iste
+    assert result.trades == [] and result.stats.get("alan_dar", 0) > 0
+
+
+def test_signal_cache_reused_and_results_identical(cfg, make_client, tmp_path):
+    from backtest import prepare_backtest, simulate
+    client = make_client({"ABCUSDT": scenario(lambda p: trend(p, 1.03, 8)), "BTCUSDT": btc_flat()})
+    data = prepare_backtest(cfg, client, days=DAYS, cache_dir=tmp_path / "c", progress=None,
+                            symbols=["ABCUSDT"], end_time_ms=END_TIME_MS)
+    cache = {}
+    a = simulate(cfg, data, signal_cache=cache)
+    filled = len(cache)
+    b = simulate(cfg, data, signal_cache=cache)
+    assert filled > 0 and len(cache) == filled
+    assert [(t.open_time_ms, t.reason, t.pnl) for t in a.trades] == [(t.open_time_ms, t.reason, t.pnl) for t in b.trades]
+
+
+def test_sweep_compares_settings_on_same_data(cfg, make_client, tmp_path):
+    from backtest import format_sweep_report, prepare_backtest, run_sweep, sweep_combos
+    combos = sweep_combos(cfg, tps=(3.0, 15.0), sls=(2.0,), trails=(2.0, 10.0), holds=(120,), rooms=(0.0,))
+    assert combos[0][-1] is True                                       # İlk satır mevcut ayarlar
+    assert all(c[2] < c[0] for c in combos[1:])                         # İzleyen stop < Kâr Al
+    assert len(combos) == 1 + 3                                         # (3,2,2) (15,2,2) (15,2,10)
+    client = make_client({"ABCUSDT": scenario(lambda p: trend(p, 1.03, 8)), "BTCUSDT": btc_flat()})
+    data = prepare_backtest(cfg, client, days=DAYS, cache_dir=tmp_path / "c", progress=None,
+                            symbols=["ABCUSDT"], end_time_ms=END_TIME_MS)
+    rows = run_sweep(cfg, data, combos=combos)
+    assert len(rows) == 4 and rows[0].baseline
+    assert all(r.trades == 1 for r in rows)
+    tp3 = next(r for r in rows if r.tp == 3.0)
+    assert tp3.net < next(r for r in rows if r.baseline).net          # Daha küçük hedef → daha az kâr (bu veride)
+    text = format_sweep_report(rows, cfg, data)
+    assert "PARAMETRE TARAMASI" in text and "⭐" in text and "kill-switch kapalıdır" in text
+
+
+def test_cli_sweep_and_capital_override(cfg, make_client, tmp_path, monkeypatch, capsys):
+    import binance_client
+    import main
+    client = make_client({"ABCUSDT": scenario(lambda p: trend(p, 1.03, 8)), "BTCUSDT": btc_flat()},
+                         volumes={"ABCUSDT": 9_000_000_000, "BTCUSDT": 1})
+    monkeypatch.setattr(binance_client, "BinanceClient", lambda *a, **k: client)
+    real_prepare = backtest.prepare_backtest
+    seen = {}
+
+    def prepare(c, cl, days, max_symbols):
+        seen["capital"] = c.start_capital
+        return real_prepare(c, cl, days, max_symbols, cache_dir=tmp_path / "c", progress=None,
+                            symbols=["ABCUSDT"], end_time_ms=END_TIME_MS)
+    monkeypatch.setattr(backtest, "prepare_backtest", prepare)
+    args = main.parse_args(["--backtest", "--gun", "2", "--tara", "--sermaye", "25", "--tp", "3,15",
+                            "--sl", "2", "--iz", "2", "--sure", "0,120", "--alan", "0"])
+    assert main.run_backtest_cli(cfg, args) == main.EXIT_OK
+    out = capsys.readouterr().out
+    assert seen["capital"] == 25 and "PARAMETRE TARAMASI" in out and "sermaye 25.00" in out
+    bad = main.parse_args(["--backtest", "--tara", "--tp", "abc"])
+    assert main.run_backtest_cli(cfg, bad) == main.EXIT_CONFIG
+    assert main.run_backtest_cli(cfg, main.parse_args(["--backtest", "--sermaye", "0"])) == main.EXIT_CONFIG
+    assert main._number_list("0,120", "sure", int, allow_zero=True) == [0, 120]
+    import pytest as _pytest
+    with _pytest.raises(ValueError):
+        main._number_list("0", "tp")

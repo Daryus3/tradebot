@@ -23,10 +23,11 @@ from __future__ import annotations
 
 import json
 import math
+from bisect import bisect_right
 import os
 import time
 from collections import Counter, deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
@@ -34,16 +35,20 @@ from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Un
 from binance_client import RateLimitError
 from config import DATA_DIR
 from exchange import SymbolRules, parse_symbol_rules, to_dec
+from market_regime import COKUS, KLINE_1D_LIMIT, KLINE_4H_LIMIT, ZAYIF, classify
 from risk import (ExitReason, Position, breakeven_effective, evaluate_exit, kill_switch_hit, net_exit_value,
                   plan_entry, pnl_pct, position_slots, price_for_pnl, trailing_floor_pct, update_breakeven,
                   update_trailing)
-from strategy import KLINE_LIMIT, ReboundStrategy
+from strategy import KLINE_LIMIT, ReboundStrategy, Signal, required_move_pct, room_ok
 from telegram_bot import LINE, fmt_duration, fmt_price, fmt_signed, fmt_usdt
 
 INTERVAL = "5m"
 INTERVAL_MS = 300_000
 HOUR_MS = 3_600_000
 DAY_MS = 86_400_000
+INTERVAL_MS_BY_NAME = {"5m": INTERVAL_MS, "4h": 4 * HOUR_MS, "1d": DAY_MS}
+REGIME_HISTORY_DAYS = 31               # Rejim için BTC 4s EMA50 (~9 gün) ve günlük EMA20 (20 gün) geçmişi
+MIN_BREADTH_PAIRS_SIM = 20             # market_regime.MIN_BREADTH_PAIRS ile aynı
 BARS_PER_DAY = DAY_MS // INTERVAL_MS   # 288
 BARS_24H = BARS_PER_DAY                # Ön eleme için 24 saatlik kayan pencere
 BTC_BARS_1H = 12                       # BTC filtresi: son 12 kapanmış mum (1 saat)
@@ -87,6 +92,13 @@ class BacktestTrade:
     pnl_pct: float
     reason: str           # ExitReason değeri veya BACKTEST_END
     score: float          # Giriş sinyalinin puanı
+    # Teşhis bilgileri (rapordaki "Teşhis" bölümü ve --tara için)
+    peak_pct: float = 0.0          # İşlem açıkken görülen en iyi net K/Z % (mum yükseklerinden)
+    trough_pct: float = 0.0        # İşlem açıkken görülen en kötü net K/Z % (mum diplerinden)
+    move_pct: float = 0.0          # Piyasa fiyatının girişten çıkışa değişimi % (komisyon ve spread öncesi)
+    fee_usdt: float = 0.0          # Alış + satış komisyonu
+    peak_after_sec: float = 0.0    # Girişten en iyi ana kadar geçen süre
+    room_pct: Optional[float] = None  # Girişte düşüş öncesi zirveye kalan alan % (sinyal ölçümü)
 
     @property
     def duration_sec(self) -> float:
@@ -183,11 +195,12 @@ def _read_cache(path: Path, symbol: str) -> Optional[List[list]]:
         return None
 
 
-def _write_cache(path: Path, symbol: str, start_ms: int, end_ms: int, rows: List[list]) -> None:
+def _write_cache(path: Path, symbol: str, start_ms: int, end_ms: int, rows: List[list],
+                 interval: str = INTERVAL) -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".tmp")
-        payload = {"v": CACHE_VERSION, "symbol": symbol, "interval": INTERVAL,
+        payload = {"v": CACHE_VERSION, "symbol": symbol, "interval": interval,
                    "start": start_ms, "end": end_ms, "rows": rows}
         with tmp.open("w", encoding="utf-8") as fh:
             json.dump(payload, fh, separators=(",", ":"))
@@ -196,8 +209,9 @@ def _write_cache(path: Path, symbol: str, start_ms: int, end_ms: int, rows: List
         pass  # Önbellek yazılamazsa test yine de çalışsın
 
 
-def _request_klines(client, symbol: str, start_ms: int, end_ms: int, progress: Progress) -> list:
-    params = {"symbol": symbol, "interval": INTERVAL, "startTime": start_ms,
+def _request_klines(client, symbol: str, start_ms: int, end_ms: int, progress: Progress,
+                    interval: str = INTERVAL) -> list:
+    params = {"symbol": symbol, "interval": interval, "startTime": start_ms,
               "endTime": end_ms - 1, "limit": PAGE_LIMIT}
     for attempt in range(RATE_LIMIT_RETRIES + 1):
         try:
@@ -214,12 +228,13 @@ def _request_klines(client, symbol: str, start_ms: int, end_ms: int, progress: P
 
 def load_klines(client, symbol: str, start_ms: int, end_ms: int,
                 cache_dir: Optional[Union[str, Path]] = None,
-                progress: Progress = None) -> Tuple[List[list], bool]:
-    """[start_ms, end_ms) aralığındaki 5 dk mumlar (sıkıştırılmış biçimde) ve önbellekten mi geldiği.
+                progress: Progress = None, interval: str = INTERVAL) -> Tuple[List[list], bool]:
+    """[start_ms, end_ms) aralığındaki mumlar (varsayılan 5 dk, sıkıştırılmış biçimde) ve önbellekten mi geldiği.
 
     Satır biçimi: [açılış_zamanı_ms, open, high, low, close, quote_hacim, taker_alış_quote]
     """
-    path = cache_path(cache_dir, symbol, start_ms, end_ms) if cache_dir else None
+    step_ms = INTERVAL_MS_BY_NAME[interval]
+    path = cache_path(cache_dir, symbol, start_ms, end_ms, interval) if cache_dir else None
     if path is not None and path.exists():
         rows = _read_cache(path, symbol)
         if rows is not None:
@@ -228,7 +243,7 @@ def load_klines(client, symbol: str, start_ms: int, end_ms: int,
     by_time: Dict[int, list] = {}
     cursor = start_ms
     while cursor < end_ms:
-        batch = _request_klines(client, symbol, cursor, end_ms, progress)
+        batch = _request_klines(client, symbol, cursor, end_ms, progress, interval)
         if REQUEST_PAUSE_SEC > 0:
             time.sleep(REQUEST_PAUSE_SEC)  # Her istekten sonra (semboller arası da) kısa bekleme
         if not batch:
@@ -237,14 +252,14 @@ def load_klines(client, symbol: str, start_ms: int, end_ms: int,
             row = _compact(raw)
             if start_ms <= row[0] < end_ms:
                 by_time[row[0]] = row
-        next_cursor = int(batch[-1][0]) + INTERVAL_MS
+        next_cursor = int(batch[-1][0]) + step_ms
         if len(batch) < PAGE_LIMIT or next_cursor <= cursor:
             break
         cursor = next_cursor
 
     rows = [by_time[t] for t in sorted(by_time)]
     if path is not None and rows:
-        _write_cache(path, symbol, start_ms, end_ms, rows)
+        _write_cache(path, symbol, start_ms, end_ms, rows, interval)
     return rows, False
 
 
@@ -357,6 +372,63 @@ class _Series:
         return rows
 
 
+# ================================================================ piyasa rejimi (canlı market_regime ile aynı)
+class _RegimeSim:
+    """Canlı `MarketRegime`'in backtest karşılığı: her mumda NORMAL / ZAYIF / COKUS.
+
+    BTC 24s değişimi ve fiyatı 5 dk seriden, 4s/1g EMA'lar ayrıca indirilen BTC 4s ve 1g mumlarından
+    hesaplanır. Düşen coin oranı (genişlik) canlıda tüm likit paritelerden, burada yalnızca test edilen
+    sembollerden hesaplanır (yaklaşık).
+    """
+
+    def __init__(self, cfg, btc: _Series, series: Dict[str, "_Series"], rows_4h: Sequence[Sequence[float]],
+                 rows_1d: Sequence[Sequence[float]]):
+        self.btc = btc
+        # (kapanış zamanları, kapanış fiyatları) — zamana göre sıralı
+        self.k4 = ([int(r[0]) + 4 * HOUR_MS for r in rows_4h], [float(r[4]) for r in rows_4h])
+        self.k1 = ([int(r[0]) + DAY_MS for r in rows_1d], [float(r[4]) for r in rows_1d])
+        self.cache: Dict[int, str] = {}
+        n = btc.n
+        self.total = [0] * n
+        self.down = [0] * n
+        for s in series.values():
+            if s.first < 0:
+                continue
+            prefix = [0.0] * (s.n + 1)
+            for k in range(s.n):
+                prefix[k + 1] = prefix[k] + s.qv[k]
+            for k in range(max(s.first + BARS_24H - 1, 0), s.last + 1):
+                j = k - BARS_24H + 1
+                if s.o[j] <= 0 or prefix[k + 1] - prefix[j] < cfg.min_quote_volume_24h:
+                    continue
+                self.total[k] += 1
+                if s.c[k] < s.o[j]:
+                    self.down[k] += 1
+
+    @staticmethod
+    def _closes(rows: Tuple[List[int], List[float]], t_ms: int, limit: int, price: float) -> List[float]:
+        """Canlıdaki gibi: son tamamlanmış (limit-1) mum + şu anki fiyat (oluşmakta olan mum)."""
+        times, closes = rows
+        i = bisect_right(times, t_ms)
+        return closes[max(0, i - (limit - 1)):i] + [price]
+
+    def at(self, k: int, t_close: int) -> str:
+        regime = self.cache.get(k)
+        if regime is not None:
+            return regime
+        btc = self.btc
+        price = btc.c[k] if btc.has(k) else None
+        j = k - BARS_24H + 1
+        btc_24h = ((btc.c[k] - btc.o[j]) / btc.o[j] * 100
+                   if price is not None and btc.has(j) and btc.o[j] > 0 else None)
+        breadth = self.down[k] / self.total[k] * 100 if self.total[k] >= MIN_BREADTH_PAIRS_SIM else None
+        closes_4h = self._closes(self.k4, t_close, KLINE_4H_LIMIT, price) if price else []
+        closes_1d = self._closes(self.k1, t_close, KLINE_1D_LIMIT, price) if price else []
+        regime = classify(price, closes_4h, closes_1d, btc_24h, breadth).regime
+        self.cache[k] = regime
+        return regime
+
+
 # ================================================================ simülasyon
 @dataclass
 class _OpenPos:
@@ -367,14 +439,25 @@ class _OpenPos:
     open_ms: int
     tp_price: float       # Kâr Al'ın tetiklendiği PİYASA fiyatı (spread öncesi)
     sl_price: float       # Zarar Kes'in tetiklendiği PİYASA fiyatı
+    market_entry: float = 0.0   # Spread öncesi giriş fiyatı
+    buy_fee: float = 0.0        # Alış komisyonu (USDT)
+    peak: float = 0.0           # Görülen en iyi / en kötü net K/Z % (teşhis)
+    trough: float = 0.0
+    peak_ms: int = 0
+    room: Optional[float] = None
 
 
 class _Simulator:
     def __init__(self, cfg, series: Dict[str, _Series], btc: Optional[_Series],
-                 min_notional: float, spread_pct: float, progress: Progress):
+                 min_notional: float, spread_pct: float, progress: Progress,
+                 regime: Optional[_RegimeSim] = None, signal_cache: Optional[dict] = None):
         self.cfg = cfg
         self.series = series
         self.btc = btc
+        self.regime = regime if cfg.regime_filter else None
+        # (sembol, mum, sıkı_mod) → Signal | None. Giriş analizi çıkış ayarlarına bağlı değildir; --tara'da
+        # aynı veriyle denenen tüm kombinasyonlar bu önbelleği paylaşır (analiz bir kez yapılır).
+        self.signal_cache = signal_cache if signal_cache is not None else {}
         self.min_notional = min_notional
         self.entry_factor = 1 + spread_pct / 200   # Alış ask'tan
         self.exit_factor = 1 - spread_pct / 200    # Satış bid'den
@@ -434,6 +517,11 @@ class _Simulator:
                   now_sec: float) -> Optional[Tuple[float, str]]:
         """KÖTÜMSER mum içi sıralama: önce düşük taraf (SL / izleyen stop tabanı), sonra TP."""
         cfg, pos = self.cfg, op.pos
+        # Teşhis: işlemin gördüğü en iyi / en kötü an (çıkış mumu dahil; karar mantığını etkilemez)
+        hi_pct, lo_pct = self._pnl_at(op, h), self._pnl_at(op, low)
+        if hi_pct > op.peak:
+            op.peak, op.peak_ms = hi_pct, int(now_sec * 1000)
+        op.trough = min(op.trough, lo_pct)
         # a) Düşük taraf: en yüksek koruma seviyesi (SL / izleyen stop tabanı / başabaş tabanı)
         level, reason, level_pct = op.sl_price, ExitReason.STOP_LOSS, -cfg.stop_loss_pct
         if pos.trailing_active:
@@ -481,10 +569,15 @@ class _Simulator:
         self.cash += proceeds
         self.realized += pnl
         self.fees += fee
+        exit_pct = pnl_pct(proceeds, cost)
         self.trades.append(BacktestTrade(
             symbol=symbol, open_time_ms=op.open_ms, close_time_ms=t_ms, entry_price=op.pos.entry_price,
-            exit_price=bid, cost=cost, proceeds=proceeds, pnl=pnl, pnl_pct=pnl_pct(proceeds, cost),
-            reason=reason, score=op.score))
+            exit_price=bid, cost=cost, proceeds=proceeds, pnl=pnl, pnl_pct=exit_pct,
+            reason=reason, score=op.score,
+            peak_pct=max(op.peak, exit_pct), trough_pct=min(op.trough, exit_pct),
+            move_pct=(market_price / op.market_entry - 1) * 100 if op.market_entry > 0 else 0.0,
+            fee_usdt=op.buy_fee + fee, peak_after_sec=max(0, op.peak_ms - op.open_ms) / 1000,
+            room_pct=op.room))
         self.cooldown[symbol] = t_ms + self.cfg.symbol_cooldown_minutes * 60_000
 
     # ------------------------------------------------------------ 2) kill-switch
@@ -522,6 +615,13 @@ class _Simulator:
         if not self._btc_ok(k):
             self.stats["btc_engel"] += 1
             return
+        regime = self.regime.at(k, t_close) if self.regime is not None else "NORMAL"
+        if regime == COKUS:                  # Canlıda da çöküş modunda yeni alım yapılmaz
+            self.stats["rejim_cokus"] += 1
+            return
+        strict = regime == ZAYIF
+        if strict:
+            self.stats["rejim_zayif"] += 1
 
         target = capital / slots
         candidates: List[Tuple[float, str]] = []
@@ -543,9 +643,12 @@ class _Simulator:
         signals = []
         for _, symbol in candidates[: cfg.max_candidates]:
             self.stats["analiz"] += 1
-            signal, _reason = self.strategy.analyze(symbol, self.series[symbol].window(k))
+            signal = self._analyze(symbol, k, strict)
             if signal and cfg.min_signal_score > 0 and signal.score < cfg.min_signal_score:
                 self.stats["puan_dusuk"] += 1  # Canlı bot da MIN_SIGNAL_SCORE altını almaz
+                continue
+            if signal and not room_ok(signal, cfg):
+                self.stats["alan_dar"] += 1    # Canlı tarama da hedef alanı dar sinyali almaz
                 continue
             if signal:
                 signals.append(signal)
@@ -553,6 +656,10 @@ class _Simulator:
             return
         self.stats["sinyal"] += len(signals)
         signals.sort(key=lambda x: x.score, reverse=True)
+        if strict:  # Canlıda da zayıf piyasada aynı anda en fazla 1 pozisyon
+            free_slots = min(free_slots, max(0, 1 - len(self.open)))
+            if free_slots <= 0:
+                return
 
         opened = 0
         for signal in signals[: free_slots + 2]:
@@ -572,6 +679,14 @@ class _Simulator:
                 continue
             if self._open(signal, rules, plan.quote_amount, entry_price, t_close):
                 opened += 1
+
+    def _analyze(self, symbol: str, k: int, strict: bool) -> Optional[Signal]:
+        key = (symbol, k, strict)
+        if key in self.signal_cache:
+            return self.signal_cache[key]
+        signal, _reason = self.strategy.analyze(symbol, self.series[symbol].window(k), strict=strict)
+        self.signal_cache[key] = signal
+        return signal
 
     def _open(self, signal, rules: SymbolRules, quote_amount: float, ask: float, t_close: int) -> bool:
         """PaperExchange.market_buy ile aynı hesap: komisyon alınan coinden kesilir."""
@@ -595,9 +710,12 @@ class _Simulator:
                        cost_usdt=notional, opened_at=t_close / 1000, buy_fee_usdt=fee_base * ask,
                        signal_note=signal.note())
         op = _OpenPos(pos=pos, rules=rules, sellable=sellable, score=signal.score, open_ms=t_close,
-                      tp_price=0.0, sl_price=0.0)
+                      tp_price=0.0, sl_price=0.0, market_entry=ask / self.entry_factor, buy_fee=fee_base * ask,
+                      room=signal.metrics.get("room_pct"))
         op.tp_price = self._market_level(cfg.take_profit_pct, op)
         op.sl_price = self._market_level(-cfg.stop_loss_pct, op)
+        op.peak = op.trough = self._pnl_at(op, op.market_entry)   # Girişte: -(komisyon + spread)
+        op.peak_ms = t_close
         self.open[signal.symbol] = op
         self.cash -= notional
         self.fees += fee_base * ask
@@ -635,27 +753,46 @@ def _base_notes(spread_pct: float) -> List[str]:
         "varsayıldı; zirve (izleyen stop) güncellemesi düşük taraf kontrolünden sonra yapıldı.",
         f"Sabit %{spread_pct:g} spread varsayıldı (alış +%{spread_pct / 2:g}, satış -%{spread_pct / 2:g}); "
         "kayma (slippage) ve emir defteri derinliği hesaba katılmadı.",
-        "Spread, delist, piyasa rejimi ve pompa filtreleri; başabaş koruması, BTC çöküş çıkışı ve "
-        "sinyal teyidi simüle edilmedi (ATR filtresi ve minimum sinyal puanı uygulandı).",
+        "Spread, delist ve pompa filtreleri, BTC çöküş çıkışı ve sinyal teyidi simüle edilmedi. Başabaş, "
+        "ATR filtresi, minimum sinyal puanı ve hedef alanı filtresi canlıdaki gibi uygulandı.",
+        "Piyasa rejimi filtresi yaklaşık simüle edildi: 'düşen coin oranı' canlıda tüm likit paritelerden, "
+        "burada yalnızca test edilen sembollerden hesaplanır.",
         "Geçmiş performans gelecekteki sonuçları garanti etmez.",
     ]
 
 
-def run_backtest(cfg, client, days: float = 30, max_symbols: int = 40,
-                 cache_dir: Optional[Union[str, Path]] = DATA_DIR / "backtest_cache",
-                 progress: Progress = print, symbols: Optional[Sequence[str]] = None,
-                 end_time_ms: Optional[int] = None, spread_pct: float = 0.05) -> BacktestResult:
-    """Son `days` günü 5 dk mumlarla simüle eder. Ağ hatası exchange_info/tickers_24h'den yükselebilir."""
+@dataclass
+class BacktestData:
+    """İndirilmiş ve hizalanmış veri: aynı veriyle farklı ayarlar (--tara) denenebilir."""
+    series: Dict[str, _Series]
+    btc: Optional[_Series]
+    regime: Optional[_RegimeSim]
+    min_notional: float
+    start_ms: int          # Verinin (ısınma dahil) başladığı an
+    end_ms: int
+    n: int                 # Toplam mum sayısı
+    k_start: int           # Simülasyonun başladığı mum
+    days: float
+    notes: List[str]
+
+    @property
+    def sim_start_ms(self) -> int:
+        return self.start_ms + self.k_start * INTERVAL_MS
+
+
+def prepare_backtest(cfg, client, days: float = 30, max_symbols: int = 40,
+                     cache_dir: Optional[Union[str, Path]] = DATA_DIR / "backtest_cache",
+                     progress: Progress = print, symbols: Optional[Sequence[str]] = None,
+                     end_time_ms: Optional[int] = None) -> BacktestData:
+    """Sembolleri seçer, mumları indirir (önbellekli) ve simülasyona hazırlar."""
     say = progress or (lambda _msg: None)
     if days <= 0:
         raise ValueError("days sıfırdan büyük olmalı")
-    if spread_pct < 0:
-        raise ValueError("spread_pct negatif olamaz")
 
     rules = parse_symbol_rules(client.exchange_info(), cfg.quote_asset)
     if not rules:
         raise BacktestError(f"Hiç {cfg.quote_asset} paritesi bulunamadı (exchangeInfo boş)")
-    notes = _base_notes(spread_pct)
+    notes: List[str] = []
 
     # --- semboller
     if symbols is None:
@@ -669,7 +806,8 @@ def run_backtest(cfg, client, days: float = 30, max_symbols: int = 40,
             notes.append(f"İşlem kuralı olmayan / filtrelenen semboller atlandı: {', '.join(skipped)}")
     if not trade_symbols:
         raise BacktestError("Test edilecek uygun sembol bulunamadı")
-    btc_symbol = "BTCUSDT" if cfg.btc_filter and cfg.quote_asset == "USDT" else None
+    usdt = cfg.quote_asset == "USDT"
+    btc_symbol = "BTCUSDT" if (cfg.btc_filter or cfg.regime_filter) and usdt else None
 
     # --- zaman aralığı (saate yuvarlanmış → önbellek anahtarı sabit kalır)
     now_ms = int(time.time() * 1000) if end_time_ms is None else int(end_time_ms)
@@ -721,13 +859,37 @@ def run_backtest(cfg, client, days: float = 30, max_symbols: int = 40,
         if btc is None and btc_symbol in data:
             btc = _Series(btc_symbol, data[btc_symbol], start_ms, n)
         if btc is None:
-            notes.append("BTC verisi alınamadı: BTC filtresi uygulanmadı.")
+            notes.append("BTC verisi alınamadı: BTC filtresi ve piyasa rejimi uygulanmadı.")
 
-    # --- simülasyon
-    say(f"⚙️ Simülasyon: {len(series)} sembol, {sim_bars} mum ({days:g} gün)")
-    sim = _Simulator(cfg, series, btc, typical_min_notional(rules), spread_pct, progress)
-    sim.run(start_ms, k_start, n)
+    # --- piyasa rejimi için BTC 4s / 1g mumları (canlıda MarketRegime ile aynı EMA'lar)
+    regime: Optional[_RegimeSim] = None
+    if cfg.regime_filter and btc is not None:
+        hist_start = start_ms - REGIME_HISTORY_DAYS * DAY_MS
+        try:
+            rows_4h, _ = load_klines(client, btc_symbol, hist_start // DAY_MS * DAY_MS, end_ms, cache_dir, say,
+                                     interval="4h")
+            rows_1d, _ = load_klines(client, btc_symbol, hist_start // DAY_MS * DAY_MS, end_ms, cache_dir, say,
+                                     interval="1d")
+            regime = _RegimeSim(cfg, btc, series, rows_4h, rows_1d)
+        except Exception as exc:  # noqa: BLE001
+            notes.append(f"BTC 4s/1g mumları alınamadı ({exc}); piyasa rejimi filtresi uygulanmadı.")
 
+    return BacktestData(series=series, btc=btc, regime=regime, min_notional=typical_min_notional(rules),
+                        start_ms=start_ms, end_ms=end_ms, n=n, k_start=k_start, days=float(days), notes=notes)
+
+
+def simulate(cfg, data: BacktestData, spread_pct: float = 0.05, progress: Progress = None,
+             signal_cache: Optional[dict] = None) -> BacktestResult:
+    """Hazırlanmış veri üzerinde bir ayar setini simüle eder."""
+    if spread_pct < 0:
+        raise ValueError("spread_pct negatif olamaz")
+    sim = _Simulator(cfg, data.series, data.btc if cfg.btc_filter else None, data.min_notional, spread_pct,
+                     progress, regime=data.regime, signal_cache=signal_cache)
+    sim.run(data.start_ms, data.k_start, data.n)
+
+    notes = _base_notes(spread_pct) + list(data.notes)
+    if not cfg.regime_filter:
+        notes.append("Piyasa rejimi filtresi ayarlarda kapalı (REGIME_FILTER=false).")
     if any(t.reason == END_REASON for t in sim.trades):
         notes.append("Dönem sonunda (veya sembolün verisi bittiğinde) açık kalan pozisyonlar son kapanış "
                      "fiyatından kapatılmış sayıldı.")
@@ -744,15 +906,174 @@ def run_backtest(cfg, client, days: float = 30, max_symbols: int = 40,
         max_drawdown_pct=sim.max_dd_pct,
         killed=sim.killed,
         killed_at_ms=sim.killed_at,
-        symbols_used=list(series),
-        days=float(days),
+        symbols_used=list(data.series),
+        days=data.days,
         notes=notes,
         equity_curve=sim.equity_curve,
-        start_ms=start_ms + k_start * INTERVAL_MS,
-        end_ms=end_ms,
+        start_ms=data.sim_start_ms,
+        end_ms=data.end_ms,
         spread_pct=spread_pct,
         stats=dict(sim.stats),
     )
+
+
+def run_backtest(cfg, client, days: float = 30, max_symbols: int = 40,
+                 cache_dir: Optional[Union[str, Path]] = DATA_DIR / "backtest_cache",
+                 progress: Progress = print, symbols: Optional[Sequence[str]] = None,
+                 end_time_ms: Optional[int] = None, spread_pct: float = 0.05) -> BacktestResult:
+    """Son `days` günü 5 dk mumlarla simüle eder. Ağ hatası exchange_info/tickers_24h'den yükselebilir."""
+    if spread_pct < 0:
+        raise ValueError("spread_pct negatif olamaz")
+    data = prepare_backtest(cfg, client, days, max_symbols, cache_dir, progress, symbols, end_time_ms)
+    say = progress or (lambda _msg: None)
+    say(f"⚙️ Simülasyon: {len(data.series)} sembol, {data.n - data.k_start} mum ({days:g} gün)")
+    return simulate(cfg, data, spread_pct, progress)
+
+
+# ================================================================ parametre taraması (--tara)
+# Aynı veriyle denenecek çıkış ayarları. İzleyen stop tabanı = başlangıcın yarısı (TRAILING_DYNAMIC ayarı korunur).
+SWEEP_TP = (2.0, 3.0, 5.0)
+SWEEP_SL = (2.0, 3.5)
+SWEEP_TRAIL = (1.0, 2.0)
+SWEEP_HOLD = (60, 120, 240)
+SWEEP_ROOM = (0.0, 1.0)
+SWEEP_KILL_PCT = 99.0      # Taramada kill-switch fiilen kapalı: her ayar tüm dönem boyunca karşılaştırılır
+SWEEP_SHOW = 12
+
+
+@dataclass
+class SweepRow:
+    tp: float
+    sl: float
+    trail: float
+    floor: float            # İzleyen stop tabanı
+    hold: int
+    room: float
+    baseline: bool          # .env'deki mevcut ayarlar
+    trades: int
+    win_rate: float
+    net: float
+    mean_net_pct: float
+    max_dd_pct: float
+    first_net: float
+    second_net: float
+    profit_factor: Optional[float]
+
+    @property
+    def consistent(self) -> bool:
+        """Dönemin iki yarısında da kârlı mı? (tek bir şanslı dönemin sonucu olmadığına dair işaret)"""
+        return self.first_net > 0 and self.second_net > 0
+
+
+def _sweep_cfg(cfg, tp: float, sl: float, trail: float, hold: int, room: float, floor: float):
+    return replace(cfg, take_profit_pct=tp, stop_loss_pct=sl, trailing_activation_pct=trail,
+                   trailing_floor_pct=floor, max_hold_minutes=int(hold), min_room_ratio=room,
+                   max_total_loss_pct=SWEEP_KILL_PCT, legacy_loss_usdt=None)
+
+
+def sweep_combos(cfg, tps: Sequence[float] = SWEEP_TP, sls: Sequence[float] = SWEEP_SL,
+                 trails: Sequence[float] = SWEEP_TRAIL, holds: Sequence[int] = SWEEP_HOLD,
+                 rooms: Sequence[float] = SWEEP_ROOM) -> List[Tuple[float, float, float, int, float, bool]]:
+    """(tp, sl, izleyen_başlangıç, süre, alan, mevcut_mu) listesi; ilk satır .env'deki mevcut ayarlardır."""
+    base = (cfg.take_profit_pct, cfg.stop_loss_pct, cfg.trailing_activation_pct, cfg.max_hold_minutes,
+            cfg.min_room_ratio, True)
+    combos = [base]
+    for tp in tps:
+        for sl in sls:
+            for trail in trails:
+                if trail >= tp:      # İzleyen stop Kâr Al'dan önce başlamalı
+                    continue
+                for hold in holds:
+                    for room in rooms:
+                        key = (tp, sl, trail, int(hold), room)
+                        if key != base[:5]:
+                            combos.append(key + (False,))
+    return combos
+
+
+def run_sweep(cfg, data: BacktestData, spread_pct: float = 0.05, progress: Progress = None,
+              combos: Optional[Sequence[Tuple[float, float, float, int, float, bool]]] = None) -> List[SweepRow]:
+    """Her kombinasyonu aynı veriyle simüle eder. Giriş analizleri ortak önbellekten gelir (hızlı)."""
+    say = progress or (lambda _msg: None)
+    combos = list(combos) if combos is not None else sweep_combos(cfg)
+    cache: dict = {}
+    rows: List[SweepRow] = []
+    for i, (tp, sl, trail, hold, room, is_base) in enumerate(combos, 1):
+        floor = cfg.trailing_floor_pct if is_base else trail / 2
+        c = _sweep_cfg(cfg, tp, sl, trail, hold, room, floor)
+        res = simulate(c, data, spread_pct, None, signal_cache=cache)
+        sm = summarize(res.trades)
+        first, second = split_halves(res.trades, res.start_ms, res.end_ms)
+        rows.append(SweepRow(tp, sl, trail, floor, int(hold), room, is_base, sm.count, sm.win_rate, sm.net,
+                             sm.mean_net_pct, res.max_drawdown_pct, sum(t.pnl for t in first),
+                             sum(t.pnl for t in second), sm.profit_factor))
+        if i == 1 or i % 10 == 0 or i == len(combos):
+            say(f"   ⏳ Tarama {i}/{len(combos)} ayar denendi")
+    return rows
+
+
+def _env_lines(r: SweepRow) -> str:
+    return (f"TAKE_PROFIT_PCT={r.tp:g} STOP_LOSS_PCT={r.sl:g} TRAILING_ACTIVATION_PCT={r.trail:g} "
+            f"TRAILING_FLOOR_PCT={r.floor:g} MAX_HOLD_MINUTES={r.hold} MIN_ROOM_RATIO={r.room:g}")
+
+
+def format_sweep_report(rows: Sequence[SweepRow], cfg, data: BacktestData, spread_pct: float = 0.05) -> str:
+    q = cfg.quote_asset
+    ranked = sorted(rows, key=lambda r: r.net, reverse=True)
+    shown = ranked[:SWEEP_SHOW]
+    base = next((r for r in rows if r.baseline), None)
+    if base is not None and base not in shown:
+        shown = shown + [base]
+    profitable = [r for r in rows if r.net > 0]
+    robust = [r for r in ranked if r.net > 0 and r.consistent and r.trades >= 30]
+
+    lines = [
+        "🧪 PARAMETRE TARAMASI (aynı veriyle farklı çıkış ayarları)",
+        LINE,
+        f"🗓️ Dönem: {_fmt_time(data.sim_start_ms)} → {_fmt_time(data.end_ms)} ({data.days:g} gün) | "
+        f"{len(data.series)} sembol | sermaye {fmt_usdt(cfg.start_capital)} {q} | komisyon %{cfg.fee_rate * 100:.3g} "
+        f"| spread %{spread_pct:g}",
+        f"🔢 Denenen ayar: {len(rows)} | kârlı: {len(profitable)} | iki yarıda da kârlı ve ≥30 işlem: {len(robust)}",
+        "   (Karşılaştırma adil olsun diye taramada kill-switch kapalıdır; maks. düşüşe bakın.)",
+        LINE,
+        "    TP   SL   İz.  Süre  Alan | İşlem  Kaz%   Net USDT  İşl.başı  MaksDD |  1.yarı  2.yarı",
+    ]
+    for r in shown:
+        mark = "⭐" if r.baseline else ("✅" if r.consistent and r.net > 0 else "  ")
+        lines.append(
+            f"{mark} {r.tp:>4g} {r.sl:>4g} {r.trail:>4g} {r.hold:>5d} {r.room:>5g} | {r.trades:>5d} "
+            f"{r.win_rate:>5.1f} {r.net:>+10.4f} {r.mean_net_pct:>+8.2f}% {r.max_dd_pct:>6.1f}% | "
+            f"{r.first_net:>+7.3f} {r.second_net:>+7.3f}")
+    lines += [
+        "   ⭐ = .env'deki mevcut ayarlarınız | ✅ = dönemin iki yarısında da kârlı",
+        "   TP/SL/İz. = Kâr Al / Zarar Kes / izleyen stop başlangıcı (%), Süre = maks. tutma (dk),",
+        "   Alan = MIN_ROOM_RATIO (0 = kapalı), İşl.başı = işlem başına ortalama net K/Z",
+        LINE,
+    ]
+    if not profitable:
+        lines += [
+            "❗ Denenen ayarların HİÇBİRİ kârlı değil. Sorun çıkış ayarlarında değil, giriş sinyalinde:",
+            "   bu dönemde strateji fiyatın yükseleceği anları yakalayamıyor. Canlıda gerçek parayla",
+            "   ÇALIŞTIRMAYIN; farklı dönemleri (--gun 30 / 60) ve giriş ayarlarını deneyin.",
+        ]
+    elif not robust:
+        best = ranked[0]
+        lines += [
+            f"⚠️ Kârlı görünen ayarlar var (en iyisi {fmt_signed(best.net, 4)} {q}) ama hiçbiri hem iki yarıda da",
+            "   kârlı hem yeterli işlem sayısına sahip değil. Bu sonuçlar büyük olasılıkla şans: çok sayıda ayar",
+            "   denendiğinde birkaçı tesadüfen kârlı çıkar. Canlıya geçmek için yeterli kanıt yok.",
+        ]
+    else:
+        best = robust[0]
+        lines += [
+            f"✅ En tutarlı aday: {_env_lines(best)}",
+            f"   ({best.trades} işlem, net {fmt_signed(best.net, 4)} {q}, iki yarıda da kârlı)",
+            "   Yine de: çok ayar denendiği için en iyi sonuç iyimserdir. Bu ayarı .env'e yazıp önce FARKLI bir",
+            "   dönemle (örn. --gun 30 ve --gun 60) tekrar backtest edin, sonra birkaç gün TEST modunda izleyin.",
+        ]
+    lines.append("📝 Kayma (slippage) yok, 5 dk mum çözünürlüğü, bugünün en hacimli coinleri (hayatta kalma "
+                 "yanlılığı). Geçmiş sonuçlar geleceği garanti etmez.")
+    return "\n".join(lines)
 
 
 # ================================================================ rapor
@@ -767,6 +1088,121 @@ def _trade_line(i: int, t: BacktestTrade, quote: str) -> str:
     return (f"   {i}) {t.symbol} {fmt_signed(t.pnl, 4)} {quote} ({fmt_signed(t.pnl_pct)}%) | "
             f"{fmt_price(t.entry_price)} → {fmt_price(t.exit_price)} | {_fmt_time(t.open_time_ms)} | "
             f"{fmt_duration(t.duration_sec)} | {label}")
+
+
+# ---------------------------------------------------------------- teşhis
+@dataclass
+class TradeSummary:
+    count: int
+    net: float             # Toplam net K/Z (USDT)
+    win_rate: float        # %
+    mean_net_pct: float    # İşlem başı net K/Z (maliyete göre %)
+    mean_move_pct: float   # İşlem başı fiyat hareketi (komisyon + spread öncesi %)
+    se_net_pct: float      # mean_net_pct'nin standart hatası
+    profit_factor: Optional[float]
+
+    @property
+    def cost_pct(self) -> float:
+        """İşlem başı ortalama maliyet: fiyat hareketiyle net sonuç arasındaki fark (komisyon + spread + toz)."""
+        return self.mean_move_pct - self.mean_net_pct
+
+
+def summarize(trades: Sequence[BacktestTrade]) -> TradeSummary:
+    n = len(trades)
+    if n == 0:
+        return TradeSummary(0, 0.0, 0.0, 0.0, 0.0, 0.0, None)
+    pcts = [t.pnl_pct for t in trades]
+    mean = sum(pcts) / n
+    var = sum((x - mean) ** 2 for x in pcts) / (n - 1) if n > 1 else 0.0
+    gains = sum(t.pnl for t in trades if t.pnl > 0)
+    pains = -sum(t.pnl for t in trades if t.pnl < 0)
+    return TradeSummary(
+        count=n, net=sum(t.pnl for t in trades), win_rate=sum(1 for t in trades if t.pnl >= 0) / n * 100,
+        mean_net_pct=mean, mean_move_pct=sum(t.move_pct for t in trades) / n, se_net_pct=math.sqrt(var / n),
+        profit_factor=gains / pains if pains > 0 else (math.inf if gains > 0 else None))
+
+
+def split_halves(trades: Sequence[BacktestTrade], start_ms: int, end_ms: int
+                 ) -> Tuple[List[BacktestTrade], List[BacktestTrade]]:
+    """İşlemleri açılış zamanına göre dönemin ilk ve ikinci yarısına böler (tutarlılık kontrolü)."""
+    mid = start_ms + (end_ms - start_ms) // 2
+    return [t for t in trades if t.open_time_ms < mid], [t for t in trades if t.open_time_ms >= mid]
+
+
+def _share(trades: Sequence[BacktestTrade], pred) -> str:
+    return f"%{sum(1 for t in trades if pred(t)) / len(trades) * 100:.0f}" if trades else "-"
+
+
+def _pf_text(pf: Optional[float]) -> str:
+    if pf is None:
+        return "-"
+    return "∞" if math.isinf(pf) else f"{pf:.2f}"
+
+
+def diagnostics_lines(result: BacktestResult, cfg) -> List[str]:
+    """Neden kazanıp kaybettiğini gösteren teşhis satırları (işlem yoksa boş)."""
+    trades = result.trades
+    if not trades:
+        return []
+    q = cfg.quote_asset
+    sm = summarize(trades)
+    lines = ["🔬 TEŞHİS (strateji nerede kazanıyor / kaybediyor?)",
+             f"   İşlem başına ortalama: fiyat hareketi {fmt_signed(sm.mean_move_pct)}% | komisyon+spread+toz "
+             f"-{sm.cost_pct:.2f}% | net {fmt_signed(sm.mean_net_pct)}%",
+             f"   Kâr faktörü: {_pf_text(sm.profit_factor)} (toplam kazanç / toplam kayıp; 1'in altı zarar demek)"]
+    lo, hi = sm.mean_net_pct - 1.96 * sm.se_net_pct, sm.mean_net_pct + 1.96 * sm.se_net_pct
+    significant = sm.count >= 2 and (lo > 0 or hi < 0)
+    lines.append(f"   İşlem başı net sonucun %95 güven aralığı: {fmt_signed(lo)}% … {fmt_signed(hi)}% "
+                 + ("(şans eseri olma ihtimali düşük)" if significant
+                    else "(sıfırdan ayırt edilemiyor; daha uzun dönemle doğrulayın)"))
+    if sm.mean_move_pct <= 0:
+        lines.append("   ❗ Sinyal komisyon ÖNCESİNDE bile kaybettiriyor: işlem sayısını artırmak zararı büyütür, "
+                     "komisyon indirimi de kurtarmaz. Önce giriş/çıkış kuralları düzelmeli.")
+    elif sm.mean_net_pct <= 0:
+        lines.append("   ⚠️ Fiyat hareketi lehte ama komisyon + spread'i karşılamıyor: daha seçici giriş "
+                     "(daha az ama daha iyi işlem) veya daha düşük maliyet gerekir.")
+    else:
+        lines.append("   ✅ Komisyon sonrası beklenti pozitif: bu ayarlarla işlem sayısı arttıkça toplam kâr da "
+                     "artar (aynı risk sınırlarıyla).")
+
+    tp, sl = cfg.take_profit_pct, cfg.stop_loss_pct
+    ups = sorted({x for x in (0.5, 1.0, 2.0, 3.0) if x < tp} | {tp})
+    downs = sorted({x for x in (1.0, 2.0) if x < sl} | {sl})
+    lines.append("   İşlem açıkken en iyi anı şu kâra ulaşanlar: " + " | ".join(
+        f"+%{x:g}{' (Kâr Al)' if x == tp else ''}: {_share(trades, lambda t, x=x: t.peak_pct >= x)}" for x in ups))
+    lines.append("   En kötü anı şu zarara düşenler: " + " | ".join(
+        f"-%{x:g}{' (Zarar Kes)' if x == sl else ''}: {_share(trades, lambda t, x=x: t.trough_pct <= -x)}"
+        for x in downs))
+    reached = sorted(t.peak_after_sec / 60 for t in trades if t.peak_pct >= 1.0)
+    if reached:
+        lines.append(f"   +%1 ve üstünü görenlerde en iyi ana varış süresi (ortanca): {reached[len(reached) // 2]:.0f} dk")
+    timeouts = [t for t in trades if t.reason == ExitReason.MAX_HOLD.value]
+    if timeouts:
+        lines.append(f"   Süre dolan {len(timeouts)} işlem: ortalama en iyi an {fmt_signed(sum(t.peak_pct for t in timeouts) / len(timeouts))}%, "
+                     f"ortalama sonuç {fmt_signed(sum(t.pnl_pct for t in timeouts) / len(timeouts))}% "
+                     f"(komisyon {fmt_usdt(sum(t.fee_usdt for t in timeouts))} {q})")
+
+    need = required_move_pct(cfg)
+    with_room = [t for t in trades if t.room_pct is not None]
+    if with_room:
+        wide = [t for t in with_room if t.room_pct >= need]
+        narrow = [t for t in with_room if t.room_pct < need]
+
+        def part(ts: Sequence[BacktestTrade]) -> str:
+            if not ts:
+                return "0 işlem"
+            m = summarize(ts)
+            return f"{m.count} işlem, kazanma %{m.win_rate:.0f}, işlem başı net {fmt_signed(m.mean_net_pct)}%"
+        lines.append(f"   Hedef alanı (düşüş öncesi zirveye mesafe) Kâr Al için gereken ~%{need:.1f}'den büyük: "
+                     f"{part(wide)} | küçük: {part(narrow)}")
+
+    first, second = split_halves(trades, result.start_ms, result.end_ms)
+    a, b = summarize(first), summarize(second)
+    lines.append(f"   Dönemin 1. yarısı: {a.count} işlem, net {fmt_signed(a.net, 4)} {q} | "
+                 f"2. yarısı: {b.count} işlem, net {fmt_signed(b.net, 4)} {q}")
+    lines.append(f"   💡 Farklı Kâr Al / Zarar Kes / süre ayarlarını aynı veriyle karşılaştırmak için: "
+                 f"python main.py --backtest --gun {result.days:g} --tara")
+    return lines
 
 
 def format_backtest_report(result: BacktestResult, cfg) -> str:
@@ -814,6 +1250,11 @@ def format_backtest_report(result: BacktestResult, cfg) -> str:
     if st:
         lines.append(f"🔎 Analiz: {st.get('analiz', 0)} | Sinyal: {st.get('sinyal', 0)} | "
                      f"BTC filtresi engeli: {st.get('btc_engel', 0)} mum")
+        if st.get("rejim_cokus") or st.get("rejim_zayif"):
+            lines.append(f"🌡️ Piyasa rejimi: çöküş nedeniyle alım yapılmayan {st.get('rejim_cokus', 0)} mum, "
+                         f"zayıf piyasada sıkı kurallı {st.get('rejim_zayif', 0)} mum")
+        if st.get("alan_dar"):
+            lines.append(f"📏 Hedef alanı dar olduğu için alınmayan sinyal: {st['alan_dar']}")
 
     lines.append(LINE)
     if trades:
@@ -835,6 +1276,11 @@ def format_backtest_report(result: BacktestResult, cfg) -> str:
             lines.append("   (kaybeden işlem yok)")
     else:
         lines.append("ℹ️ Bu dönemde strateji hiç işlem açmadı.")
+
+    diag = diagnostics_lines(result, cfg)
+    if diag:
+        lines.append(LINE)
+        lines.extend(diag)
 
     lines.append(LINE)
     if result.killed:

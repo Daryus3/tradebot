@@ -193,6 +193,8 @@ class Config:
     pump_lookback_days: int = 3
     # 30) Sinyal kalitesi
     min_signal_score: float = 0.0          # 0 = kapalı
+    # Hedef alanı: düşüş öncesi zirveye kalan alan ≥ Kâr Al için gereken hareket × bu oran (0 = kapalı)
+    min_room_ratio: float = 0.0
     signal_confirm_scans: int = 1          # 1 = kapalı (2 = sinyal art arda 2 taramada görülmeli)
     # 31) Oynaklık (ATR) filtresi — 5 dk ATR(14) / fiyat (%)
     min_atr_pct: float = 0.25
@@ -288,6 +290,8 @@ class Config:
             errors.append("BACKUP_STOP_PCT, STOP_LOSS_PCT'den büyük olmalı (yedek emir botun zarar kesinin altında beklemeli)")
         if self.breakeven_enabled and not 0 <= self.breakeven_floor_pct < self.breakeven_trigger_pct:
             errors.append("BREAKEVEN_FLOOR_PCT, BREAKEVEN_TRIGGER_PCT'den küçük olmalı")
+        if self.min_room_ratio < 0:
+            errors.append("MIN_ROOM_RATIO negatif olamaz (0 = kapalı)")
         if self.signal_confirm_scans < 1:
             errors.append("SIGNAL_CONFIRM_SCANS en az 1 olmalı")
         if self.min_atr_pct >= self.max_atr_pct:
@@ -385,6 +389,7 @@ def load_config(env_file: Optional[str] = None, mode_override: Optional[str] = N
         pump_filter_pct=_env_float("PUMP_FILTER_PCT", 50.0),
         pump_lookback_days=_env_int("PUMP_LOOKBACK_DAYS", 3),
         min_signal_score=_env_float("MIN_SIGNAL_SCORE", 0.0),
+        min_room_ratio=_env_float("MIN_ROOM_RATIO", 0.0),
         signal_confirm_scans=_env_int("SIGNAL_CONFIRM_SCANS", 1),
         min_atr_pct=_env_float("MIN_ATR_PCT", 0.25),
         max_atr_pct=_env_float("MAX_ATR_PCT", 4.0),

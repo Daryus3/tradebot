@@ -469,3 +469,19 @@ def test_main_stats_cli_without_trades(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(main, "DATA_DIR", tmp_path)
     assert main.main(["--env", str(tmp_path / "yok.env"), "--istatistik"]) == main.EXIT_OK
     assert "Henüz kapanmış işlem yok" in capsys.readouterr().out
+
+
+def test_room_filter_rejects_signals_without_room_to_target(cfg, fake_client):
+    from strategy import required_move_pct, room_ok
+    signal, _ = ReboundStrategy(None, cfg).analyze("ABCUSDT", build_dip_and_bounce())
+    room = signal.metrics["room_pct"]
+    assert 0 < room < 10                                   # ~%6.5 düşüş, kısmen toparlanmış
+    assert room_ok(signal, cfg)                            # Varsayılan: filtre kapalı
+    need = required_move_pct(replace(cfg, take_profit_pct=2))
+    assert 2.19 < need < 2.21                              # Net %2 için ~%2.2 fiyat hareketi (komisyon dahil)
+    assert room_ok(signal, replace(cfg, take_profit_pct=room / 3, min_room_ratio=1))
+    assert not room_ok(signal, replace(cfg, take_profit_pct=room, min_room_ratio=1))
+    strict = replace(cfg, take_profit_pct=15, min_room_ratio=1)
+    result = ReboundStrategy(ScanClient(scaled_rows()), strict).scan(scan_rules(fake_client), set(), 11)
+    assert not result.signals and result.rejects["hedef alanı dar"] == 1
+    assert any("hedef alanı dar" in why for _, why in result.near_misses)

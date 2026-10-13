@@ -13,6 +13,9 @@ Her taramada (varsayılan 30 sn):
      - Fiyat EMA(9) üzerinde ve EMA(9) yukarı dönmüş; son kapanan mum yeşil.
      - Toparlanma mumlarında hacim ortalamanın üzerinde.
   3. Puanlama: düşüş derinliği, kalan toparlanma alanı, hacim, RSI ivmesi ve oynaklık.
+  4. (İsteğe bağlı, MIN_ROOM_RATIO) Hedef alanı: fiyatın düşüş öncesi zirveye kadar olan mesafesi
+     Kâr Al hedefine yetmiyorsa alım yapılmaz. Toparlanma çoğu zaman eski zirvede durur; hedef o
+     zirvenin üstündeyse işlem genelde ya süre dolunca ya da zarar kesle kapanır.
 
 Amaç: 15-60 dakika içinde sonuçlanabilecek kısa vadeli toparlanma hareketlerini yakalamak.
 Ek güvenlik: BTC son 1 saatte sert düşüyorsa (piyasa geneli çöküyorsa) alım yapılmaz.
@@ -86,6 +89,21 @@ class ScanResult:
         rej = ", ".join(f"{k}:{v}" for k, v in self.rejects.most_common(4))
         return (f"Tarama: {self.candidates} aday, {self.analyzed} analiz, {len(self.signals)} sinyal "
                 f"[{top}]" + (f" | elenme: {rej}" if rej else ""))
+
+
+def required_move_pct(cfg) -> float:
+    """Net Kâr Al hedefine ulaşmak için gereken yaklaşık FİYAT artışı (%): hedef + alış/satış komisyonu."""
+    return ((1 + cfg.take_profit_pct / 100) / (1 - cfg.fee_rate) ** 2 - 1) * 100
+
+
+def room_ok(signal: Signal, cfg) -> bool:
+    """Hedef alanı filtresi (MIN_ROOM_RATIO > 0 ise): düşüş öncesi zirveye kadar olan alan, Kâr Al için
+    gereken fiyat hareketinin en az MIN_ROOM_RATIO katı olmalı. Canlı tarama ve backtest aynı fonksiyonu kullanır.
+    """
+    ratio = getattr(cfg, "min_room_ratio", 0.0)
+    if ratio <= 0:
+        return True
+    return signal.metrics.get("room_pct", 0.0) >= ratio * required_move_pct(cfg)
 
 
 class ReboundStrategy:
@@ -250,6 +268,8 @@ class ReboundStrategy:
             "dip_pct": dip_pct, "retrace": retrace, "rsi": rsi_now, "rsi_min": rsi_min,
             "vol_ratio": vol_ratio, "avg_range_pct": avg_range_pct, "taker_ratio": taker_ratio,
             "bars_since_low": float(bars_since_low), "atr_pct": atr_pct,
+            # Düşüş öncesi zirveye kadar kalan fiyat alanı (%): tam toparlanmada en fazla bu kadar yükselir
+            "room_pct": (high - price) / price * 100 if price > 0 else 0.0,
         }
         return Signal(symbol, price, score, metrics), ""
 
@@ -311,6 +331,10 @@ class ReboundStrategy:
             if cfg.min_signal_score > 0 and signal.score < cfg.min_signal_score:
                 result.rejects["puan düşük"] += 1
                 result.near_misses.append((symbol, f"puan düşük ({signal.score:.1f})"))
+                continue
+            if not room_ok(signal, cfg):
+                result.rejects["hedef alanı dar"] += 1
+                result.near_misses.append((symbol, f"hedef alanı dar (%{signal.metrics['room_pct']:.1f})"))
                 continue
             found[symbol] = signal
 
