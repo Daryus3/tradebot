@@ -88,11 +88,12 @@ def run_risk_scenarios(cfg) -> List[Tuple[str, bool, str]]:
 
     rules = _fake_rules()
     plan_ok = plan_entry(cfg.start_capital, rules, 1.0, cfg)
-    plan_small = plan_entry(5.5, rules, 1.0, cfg)
+    min_pos = min_position_usdt(5.0, cfg)
+    small = round(min_pos - 0.05, 2)   # Stop-loss'ta min. emrin altına düşecek kadar küçük tutar
+    plan_small = plan_entry(small, rules, 1.0, cfg)
     checks.append(("Min. emir tutarı optimizasyonu", plan_ok.ok and not plan_small.ok,
                    f"{cfg.start_capital:g} USDT ile {plan_ok.quote_amount:.2f} USDT'lik işlem; "
-                   f"5.50 USDT reddedildi (stop-loss'ta 5 USDT altına düşer)"))
-    min_pos = min_position_usdt(5.0, cfg)
+                   f"{small:.2f} USDT reddedildi (stop-loss'ta 5 USDT altına düşer)"))
     slots = {c: position_slots(c, 5.0, cfg) for c in (cfg.start_capital, 12.0, 25.0)}
     safe = all(1 <= n <= cfg.max_open_positions and (n == 1 or c / n >= min_pos) for c, n in slots.items())
     checks.append(("Pozisyon sayısı bakiyeye göre", safe,
@@ -100,7 +101,10 @@ def run_risk_scenarios(cfg) -> List[Tuple[str, bool, str]]:
                    + f" (pozisyon başı en az {min_pos:.2f} USDT)"))
 
     # Başabaş koruması (ayar kapalı olsa da mantığı doğrulanır)
-    be_cfg = replace(cfg, breakeven_enabled=True)
+    # Kâr Al / izleyen stop başabaştan önce devreye girmesin diye bu testte uzaklaştırılır
+    be_cfg = replace(cfg, breakeven_enabled=True,
+                     take_profit_pct=max(cfg.take_profit_pct, cfg.breakeven_trigger_pct + 5),
+                     trailing_activation_pct=max(cfg.trailing_activation_pct, cfg.breakeven_trigger_pct + 5))
     pos = Position("TESTUSDT", "TEST", qty, 1.0, cost, time.time())
     for target in (be_cfg.breakeven_trigger_pct + 0.5, be_cfg.breakeven_floor_pct - 0.1):
         pct = pnl_pct(net_exit_value(qty, p(target), cfg.fee_rate), cost)
@@ -142,8 +146,10 @@ def run_selftest(cfg) -> int:
     passed = sum(1 for _, ok, _ in checks if ok)
     for name, ok, detail in checks:
         log.info("  %s %s: %s", OK if ok else FAIL, name, detail)
-    results.append((OK if passed == len(checks) else FAIL, f"Risk motoru ({passed}/{len(checks)})",
-                    _example_levels(cfg)))
+    failed = [name for _, ok, _ in checks if not ok]
+    results.append((OK if not failed else FAIL, f"Risk motoru ({passed}/{len(checks)})",
+                    _example_levels(cfg) + "".join(
+                        f"\n     ❌ {name}: {detail}" for name, ok, detail in checks if not ok)))
 
     # 3) Binance bağlantısı
     rules = {}
