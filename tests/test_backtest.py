@@ -519,7 +519,7 @@ def test_sweep_suggestion_is_pasteable_env_lines(cfg, tmp_path, monkeypatch):
     def st(tp, sl, trail, floor, hold, room):
         return {"TAKE_PROFIT_PCT": tp, "STOP_LOSS_PCT": sl, "TRAILING_ACTIVATION_PCT": trail,
                 "TRAILING_FLOOR_PCT": floor, "MAX_HOLD_MINUTES": hold, "MIN_ROOM_RATIO": room}
-    row = SweepRow(st(3, 2, 2, 1, 120, 1), False, 40, 60, 2.5, 0.3, 5, 1.0, 1.5, 1.4)
+    row = SweepRow(st(3, 2, 2, 1, 120, 1), False, 40, 60, 2.5, 0.3, 5, 1.0, 1.5, 1.4, se_net_pct=0.05)
     base = SweepRow(st(5, 3.5, 2, 1, 240, 0), True, 40, 40, -1.0, -0.2, 9, -0.5, -0.5, 0.8)
     data = BacktestData(series={}, btc=None, regime=None, min_notional=5, start_ms=0, end_ms=10 * 86_400_000,
                         n=2880, k_start=288, days=9, notes=[])
@@ -602,3 +602,24 @@ def test_regime_skip_weak_blocks_entries(cfg, make_client, tmp_path):
     assert skipped.trades == [] and skipped.stats.get("rejim_zayif", 0) > 0
     assert "alım yapılmayan" in format_backtest_report(skipped, replace(cfg, regime_skip_weak=True))
     assert strict.stats.get("rejim_zayif", 0) > 0
+
+
+def test_sweep_candidate_needs_multiple_testing_significance(cfg):
+    from backtest import BacktestData, SweepRow, format_sweep_report, sweep_z
+    assert sweep_z(1) == pytest.approx(1.96, abs=0.01) and sweep_z(60) > 3
+    data = BacktestData(series={}, btc=None, regime=None, min_notional=5, start_ms=0, end_ms=10 * 86_400_000,
+                        n=2880, k_start=288, days=9, notes=[])
+    st = {"REGIME_SKIP_WEAK": False, "MAX_24H_DROP_PCT": 15.0, "MIN_SIGNAL_SCORE": 0.0, "MIN_ROOM_RATIO": 1.0}
+    # Rastgele veride görülen türden: 43 işlem, iki yarıda da kârlı ama işlem başı +%0.14 ± 0.15
+    lucky = SweepRow(st, False, 43, 72, 0.5, 0.14, 6.7, 0.1, 0.4, 1.2, se_net_pct=0.15)
+    base = SweepRow({**st, "MIN_ROOM_RATIO": 0.0}, True, 111, 58, -5.6, -0.65, 51, -5.6, 0.0, 0.6, se_net_pct=0.2)
+    fillers = [SweepRow({**st, "MIN_SIGNAL_SCORE": float(i)}, False, 40, 50, -1.0, -0.3, 10, -0.5, -0.5, 0.8,
+                        se_net_pct=0.2) for i in range(1, 53)]
+    rows = [base, lucky] + fillers
+    assert not lucky.proven(len(rows))
+    text = format_sweep_report(rows, cfg, data, kind="giris")
+    assert "✅ En tutarlı aday" not in text and "şans eleğinden" in text and "≈ işaretli 1 ayar" in text
+    strong = SweepRow(st, False, 120, 70, 6.0, 0.9, 5, 3.0, 3.0, 2.0, se_net_pct=0.1)
+    assert strong.proven(len(rows))
+    text2 = format_sweep_report([base, strong] + fillers, cfg, data, kind="giris")
+    assert "✅ En tutarlı aday" in text2 and "MIN_ROOM_RATIO=1" in text2

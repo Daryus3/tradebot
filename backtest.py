@@ -977,6 +977,7 @@ class SweepRow:
     first_net: float
     second_net: float
     profit_factor: Optional[float]
+    se_net_pct: float = 0.0  # mean_net_pct'nin standart hatası
 
     @property
     def consistent(self) -> bool:
@@ -986,6 +987,23 @@ class SweepRow:
     @property
     def enough_trades(self) -> bool:
         return self.trades >= MIN_TRADES_FOR_EVIDENCE
+
+    def proven(self, tested: int) -> bool:
+        """Aday sayılır mı? Yeterli işlem + iki yarıda kâr + çoklu denemeye göre düzeltilmiş anlamlılık.
+
+        Çok sayıda ayar denendiğinde (örn. 54) birkaçı tamamen şans eseri "iki yarıda da kârlı" çıkar
+        (rastgele fiyat verisiyle bile). Bu yüzden işlem başı sonucun alt güven sınırı, denenen ayar
+        sayısına göre sıkılaştırılmış (Bonferroni) eşikle sıfırın üstünde olmalı.
+        """
+        if not (self.enough_trades and self.net > 0 and self.consistent and self.se_net_pct > 0):
+            return False
+        return self.mean_net_pct - sweep_z(tested) * self.se_net_pct > 0
+
+
+def sweep_z(tested: int) -> float:
+    """Denenen ayar sayısına göre (Bonferroni, iki yönlü %5) gereken z değeri: 1 ayar → 1.96, 60 → ~3.1."""
+    from statistics import NormalDist
+    return NormalDist().inv_cdf(1 - 0.05 / (2 * max(1, tested)))
 
 
 def _current(cfg, keys: Sequence[str]) -> Settings:
@@ -1061,7 +1079,7 @@ def run_sweep(cfg, data: BacktestData, spread_pct: float = 0.05, progress: Progr
         first, second = split_halves(res.trades, res.start_ms, res.end_ms)
         rows.append(SweepRow(dict(settings), is_base, sm.count, sm.win_rate, sm.net, sm.mean_net_pct,
                              res.max_drawdown_pct, sum(t.pnl for t in first), sum(t.pnl for t in second),
-                             sm.profit_factor))
+                             sm.profit_factor, sm.se_net_pct))
         if i == 1 or i % 10 == 0 or i == len(combos):
             say(f"   ⏳ Tarama {i}/{len(combos)} ayar denendi")
     return rows
@@ -1098,12 +1116,14 @@ def save_sweep_csv(rows: Sequence[SweepRow], path: Union[str, Path]) -> Path:
     with path.open("w", newline="", encoding="utf-8-sig") as fh:
         writer = csv.writer(fh, delimiter=";")
         writer.writerow(keys + ["mevcut", "islem", "kazanma_yuzde", "net_usdt", "islem_basi_net_yuzde",
-                                "maks_dusus_yuzde", "ilk_yari_usdt", "ikinci_yari_usdt", "kar_faktoru"])
+                                "maks_dusus_yuzde", "ilk_yari_usdt", "ikinci_yari_usdt", "kar_faktoru",
+                                "standart_hata", "aday"])
         for r in rows:
             pf = "" if r.profit_factor is None or math.isinf(r.profit_factor) else f"{r.profit_factor:.3f}"
             writer.writerow([_fmt_setting(k, r.settings[k]) if k in r.settings else "" for k in keys] + [
                 "evet" if r.baseline else "", r.trades, f"{r.win_rate:.1f}", f"{r.net:.4f}",
-                f"{r.mean_net_pct:.3f}", f"{r.max_dd_pct:.2f}", f"{r.first_net:.4f}", f"{r.second_net:.4f}", pf])
+                f"{r.mean_net_pct:.3f}", f"{r.max_dd_pct:.2f}", f"{r.first_net:.4f}", f"{r.second_net:.4f}", pf,
+                f"{r.se_net_pct:.4f}", "evet" if r.proven(len(rows)) else ""])
     return path
 
 
@@ -1128,7 +1148,8 @@ def format_sweep_report(rows: Sequence[SweepRow], cfg, data: BacktestData, sprea
         shown = shown + [base]
     few = [r for r in rows if not r.enough_trades]
     profitable = [r for r in rows if r.net > 0]
-    robust = [r for r in ranked if r.net > 0 and r.consistent and r.enough_trades]
+    robust = [r for r in ranked if r.proven(len(rows))]
+    lucky = [r for r in ranked if r.net > 0 and r.consistent and r.enough_trades and not r.proven(len(rows))]
     columns = [k for k in dict.fromkeys(k for r in rows for k in r.settings) if SWEEP_FIELDS[k][2]]
 
     title = ("🧪 GİRİŞ TARAMASI (aynı veriyle farklı giriş filtreleri; çıkışlar .env'deki gibi)" if entry
@@ -1140,7 +1161,7 @@ def format_sweep_report(rows: Sequence[SweepRow], cfg, data: BacktestData, sprea
         f"{len(data.series)} sembol | sermaye {fmt_usdt(cfg.start_capital)} {q} | komisyon {fmt_rate(cfg.fee_rate)} "
         f"| spread %{spread_pct:g}",
         f"🔢 Denenen ayar: {len(rows)} | kârlı: {len(profitable)} | iki yarıda da kârlı ve "
-        f"≥{MIN_TRADES_FOR_EVIDENCE} işlem: {len(robust)}",
+        f"≥{MIN_TRADES_FOR_EVIDENCE} işlem: {len(robust) + len(lucky)} | şans eleğinden de geçen: {len(robust)}",
         "   (Karşılaştırma adil olsun diye taramada kill-switch kapalıdır; maks. düşüşe bakın.)",
         f"   Sıralama: işlem başına net sonuca göre; {MIN_TRADES_FOR_EVIDENCE}'dan az işlem açan {len(few)} ayar "
         f"(sonuçları şans) en alta alındı.",
@@ -1149,14 +1170,20 @@ def format_sweep_report(rows: Sequence[SweepRow], cfg, data: BacktestData, sprea
         + " | İşlem  Kaz%   Net USDT  İşl.başı  MaksDD |  1.yarı  2.yarı",
     ]
     for r in shown:
-        mark = "⭐" if r.baseline else ("✅" if r.consistent and r.net > 0 and r.enough_trades
-                                       else ("· " if not r.enough_trades else "  "))
+        if r.baseline:
+            mark = "⭐"
+        elif r in robust:
+            mark = "✅"
+        elif r in lucky:
+            mark = "≈ "
+        else:
+            mark = "· " if not r.enough_trades else "  "
         cells = " ".join(f"{_fmt_setting(k, r.settings.get(k, 0)):>6}" for k in columns)
         lines.append(
             f"{mark} {cells} | {r.trades:>5d} {r.win_rate:>5.1f} {r.net:>+10.4f} {r.mean_net_pct:>+8.2f}% "
             f"{r.max_dd_pct:>6.1f}% | {r.first_net:>+7.3f} {r.second_net:>+7.3f}")
-    legend = [f"   ⭐ = .env'deki mevcut ayarlarınız | ✅ = iki yarıda da kârlı | · = {MIN_TRADES_FOR_EVIDENCE}'dan "
-              f"az işlem (güvenilmez)"]
+    legend = [f"   ⭐ = .env'deki mevcut ayarlarınız | ✅ = aday (iki yarıda kârlı ve şans eleğinden geçti) |",
+              f"   ≈ = iki yarıda kârlı ama şans olabilir | · = {MIN_TRADES_FOR_EVIDENCE}'dan az işlem (güvenilmez)"]
     if entry:
         legend += ["   Zayıf = REGIME_SKIP_WEAK (true: piyasa zayıfken alım yok), MaxDüş = MAX_24H_DROP_PCT,",
                    "   Puan = MIN_SIGNAL_SCORE, Alan = MIN_ROOM_RATIO (0 = kapalı)"]
@@ -1183,16 +1210,20 @@ def format_sweep_report(rows: Sequence[SweepRow], cfg, data: BacktestData, sprea
     elif not robust:
         top = max(profitable, key=lambda r: r.net)
         lines += [
-            f"⚠️ Kârlı görünen ayarlar var (en iyisi {fmt_signed(top.net, 4)} {q}) ama hiçbiri hem iki yarıda da",
-            "   kârlı hem yeterli işlem sayısına sahip değil. Bu sonuçlar büyük olasılıkla şans: çok sayıda ayar",
-            "   denendiğinde birkaçı tesadüfen kârlı çıkar. Canlıya geçmek için yeterli kanıt yok.",
+            f"⚠️ Kârlı görünen ayarlar var (en iyisi {fmt_signed(top.net, 4)} {q}) ama hiçbiri şans eleğinden",
+            f"   geçmiyor: {len(rows)} ayar denendiğinde birkaçının tesadüfen kârlı (hatta iki yarıda da kârlı)",
+            "   çıkması beklenir — tamamen rastgele fiyat verisinde bile. Canlıya geçmek için yeterli kanıt yok.",
         ]
+        if lucky:
+            lines.append(f"   ≈ işaretli {len(lucky)} ayarı yine de daha önceki bir dönemde deneyebilirsiniz (aşağıdaki "
+                         f"--bitis komutu); orada da kârlı çıkan ayar ciddiye alınabilir.")
     else:
         cand = robust[0]
         lines += [
             f"✅ En tutarlı aday ({cand.trades} işlem, net {fmt_signed(cand.net, 4)} {q}, iki yarıda da kârlı).",
             "   .env dosyanızdaki şu satırları DEĞİŞTİRİN (aynı isimli eski satırları silin):",
         ] + [f"      {line}" for line in _env_lines(cand)] + [
+            f"   (İşlem başı sonucun alt sınırı, {len(rows)} ayar denendiği hesaba katılarak sıfırın üstünde.)",
             "   Yine de: çok ayar denendiği için en iyi sonuç iyimserdir. Önce bu ayarı test edilen dönemle",
             "   ÇAKIŞMAYAN daha önceki bir dönemde deneyin (aşağıdaki --bitis komutu); orada da kârlıysa",
             "   birkaç gün TEST modunda izleyin. --gun 30 / 60 aynı dönemin parçasıdır, bağımsız kanıt sayılmaz.",
