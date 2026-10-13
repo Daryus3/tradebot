@@ -575,7 +575,7 @@ def test_entry_sweep_varies_filters_and_reuses_cache(cfg, make_client, tmp_path)
     roomy = [r for r in rows if r.settings["MIN_ROOM_RATIO"] == 1.0]
     assert roomy and all(r.trades == 0 for r in roomy)        # TP %15 için eski zirveye alan yetmez
     text = format_sweep_report(rows, cfg, data, kind="giris")
-    assert "GİRİŞ TARAMASI" in text and "MaxDüş" in text and "--tara-giris --bitis" in text
+    assert "GİRİŞ TARAMASI" in text and "MaxDüş" in text and "--tara-giris --strateji rebound --bitis" in text
     path = save_sweep_csv(rows, tmp_path / "t.csv")
     content = path.read_text(encoding="utf-8-sig").splitlines()
     assert content[0].startswith("REGIME_SKIP_WEAK;MAX_24H_DROP_PCT") and len(content) == len(rows) + 1

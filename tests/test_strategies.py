@@ -270,3 +270,37 @@ def test_cli_strategy_override_and_comparison(cfg, make_client, tmp_path, monkey
     assert seen["strategy"] == "trend" and "STRATEJİ KARŞILAŞTIRMASI" in out
     assert list(tmp_path.glob("tarama_strateji_*.csv"))
     assert main.parse_args(["--backtest"]).strateji is None
+
+
+def test_strategy_comparison_disables_strategy_specific_filters(cfg):
+    from backtest import strategy_combos
+    combos = strategy_combos(replace(cfg, min_room_ratio=1.0, min_signal_score=17.2))
+    assert all(st["MIN_ROOM_RATIO"] == 0 and st["MIN_SIGNAL_SCORE"] == 0 for st, _ in combos)
+
+
+def test_breakout_exit_sweep_does_not_duplicate_room_rows(cfg):
+    from backtest import sweep_combos
+    combos = sweep_combos(replace(cfg, strategy="breakout"), tps=(3.0,), sls=(2.0,), trails=(1.0,), holds=(120,),
+                          rooms=(0.0, 1.0))
+    assert len(combos) == 2 and {st["MIN_ROOM_RATIO"] for st, _ in combos} == {0.0}
+    assert len(sweep_combos(cfg, tps=(3.0,), sls=(2.0,), trails=(1.0,), holds=(120,), rooms=(0.0, 1.0))) == 3
+
+
+def test_reports_always_name_the_strategy(cfg):
+    from backtest import BacktestData, BacktestResult, BacktestTrade, SweepRow, diagnostics_lines, format_sweep_report
+    from risk import ExitReason
+    data = BacktestData(series={}, btc=None, regime=None, min_notional=5, start_ms=0, end_ms=10 * 86_400_000,
+                        n=2880, k_start=288, days=9, notes=[])
+    st = {"TAKE_PROFIT_PCT": 3.0, "STOP_LOSS_PCT": 2.0, "TRAILING_ACTIVATION_PCT": 2.0, "TRAILING_FLOOR_PCT": 1.0,
+          "MAX_HOLD_MINUTES": 120, "MIN_ROOM_RATIO": 0.0}
+    strong = SweepRow(st, False, 150, 70, 8.0, 0.9, 5, 4.0, 4.0, 2.0, se_net_pct=0.1)
+    base = SweepRow({**st, "TAKE_PROFIT_PCT": 5.0}, True, 100, 50, -1, -0.2, 9, -0.5, -0.5, 0.8, se_net_pct=0.2)
+    text = format_sweep_report([base, strong], cfg, data)            # rebound: .env'de trend olabilir
+    lines = [ln.strip() for ln in text.splitlines()]
+    assert "STRATEGY=rebound" in lines and "--strateji rebound --bitis" in text
+    trade = BacktestTrade("X", 0, 1, 1, 1.01, 10, 10.1, 0.1, 1.0, ExitReason.MAX_HOLD.value, 0)
+    res = BacktestResult(trades=[trade], start_capital=11, end_capital=11.1, realized_pnl=0.1, total_fees=0.02,
+                         max_drawdown_usdt=0, max_drawdown_pct=0, killed=False, killed_at_ms=None, symbols_used=["X"],
+                         days=9, notes=[], equity_curve=[], start_ms=0, end_ms=100)
+    diag = "\n".join(diagnostics_lines(res, cfg))
+    assert "--tara --strateji rebound" in diag and "--strateji rebound --bitis" in diag

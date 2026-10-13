@@ -1047,6 +1047,8 @@ def sweep_combos(cfg, tps: Sequence[float] = SWEEP_TP, sls: Sequence[float] = SW
                  rooms: Sequence[float] = SWEEP_ROOM) -> List[Combo]:
     """Çıkış taraması kombinasyonları; ilk satır .env'deki mevcut ayarlardır."""
     base = _current(cfg, EXIT_KEYS)
+    # Kırılımda "eski zirveye alan" ölçülmez; alan filtresi hiçbir şeyi değiştirmez (aynı satırlar iki kez denenmesin)
+    rooms_for_strategy = (cfg.min_room_ratio,) if cfg.strategy == "breakout" else tuple(rooms)
     combos: List[Combo] = [(base, True)]
     for tp in tps:
         for sl in sls:
@@ -1054,7 +1056,7 @@ def sweep_combos(cfg, tps: Sequence[float] = SWEEP_TP, sls: Sequence[float] = SW
                 if trail >= tp:      # İzleyen stop Kâr Al'dan önce başlamalı
                     continue
                 for hold in holds:
-                    for room in rooms:
+                    for room in rooms_for_strategy:
                         st = {"TAKE_PROFIT_PCT": tp, "STOP_LOSS_PCT": sl, "TRAILING_ACTIVATION_PCT": trail,
                               "TRAILING_FLOOR_PCT": trail / 2, "MAX_HOLD_MINUTES": int(hold), "MIN_ROOM_RATIO": room}
                         same = all(st[k] == base[k] for k in EXIT_KEYS if k != "TRAILING_FLOOR_PCT")
@@ -1107,9 +1109,14 @@ def entry_combos(cfg, scores: Sequence[float], max_drops: Sequence[float] = SWEE
 
 
 def strategy_combos(cfg) -> List[Combo]:
-    """Strateji karşılaştırması: her strateji .env'deki çıkış ve filtre ayarlarıyla; ilk satır mevcut strateji."""
+    """Strateji karşılaştırması: her strateji .env'deki çıkış ayarlarıyla; ilk satır mevcut strateji.
+
+    MIN_SIGNAL_SCORE ve MIN_ROOM_RATIO stratejiye özeldir (puan ölçekleri ve "alan" tanımı farklıdır;
+    örn. trend'de alan en fazla geri çekilme kadar olabilir). Rebound için seçilmiş bir değer diğer
+    stratejileri haksız yere eleyebileceği için karşılaştırmada ikisi de kapalıdır (0).
+    """
     order = [cfg.strategy] + [s for s in STRATEGIES if s != cfg.strategy]
-    return [({"STRATEGY": s}, s == cfg.strategy) for s in order]
+    return [({"STRATEGY": s, "MIN_SIGNAL_SCORE": 0.0, "MIN_ROOM_RATIO": 0.0}, s == cfg.strategy) for s in order]
 
 
 def run_sweep(cfg, data: BacktestData, spread_pct: float = 0.05, progress: Progress = None,
@@ -1185,10 +1192,10 @@ def save_sweep_csv(rows: Sequence[SweepRow], path: Union[str, Path]) -> Path:
     return path
 
 
-def _validation_lines(data: BacktestData) -> List[str]:
+def _validation_lines(data: BacktestData, strat_flag: str = "") -> List[str]:
     """Bir satırı bağımsız (çakışmayan, daha önceki) dönemde sınama talimatı."""
     return ["   Bu satırları .env'e yazın (aynı isimli eski satırları silin) ve test edilen dönemle ÇAKIŞMAYAN",
-            f"   önceki dönemde deneyin: python main.py --backtest --gun {data.days:g} --bitis "
+            f"   önceki dönemde deneyin: python main.py --backtest --gun {data.days:g}{strat_flag} --bitis "
             f"{_fmt_date(data.sim_start_ms)}"]
 
 
@@ -1218,11 +1225,12 @@ def format_sweep_report(rows: Sequence[SweepRow], cfg, data: BacktestData, sprea
     columns = [k for k in dict.fromkeys(k for r in rows for k in r.settings) if SWEEP_FIELDS[k][2]]
 
     titles = {"giris": "🧪 GİRİŞ TARAMASI (aynı veriyle farklı giriş filtreleri; çıkışlar .env'deki gibi)",
-              "strateji": "🧪 STRATEJİ KARŞILAŞTIRMASI (aynı veri, .env'deki çıkış ve filtre ayarları)",
+              "strateji": "🧪 STRATEJİ KARŞILAŞTIRMASI (aynı veri, .env'deki çıkış ayarları; puan ve alan filtresi kapalı)",
               "cikis": "🧪 PARAMETRE TARAMASI (aynı veriyle farklı çıkış ayarları)"}
-    # .env'e yazılacak satırlara strateji de eklenir (--strateji ile seçildiyse .env'de olmayabilir)
-    strategy_line = [] if compare or cfg.strategy == "rebound" else [f"STRATEGY={cfg.strategy}"]
-    strat_flag = "" if compare or cfg.strategy == "rebound" else f" --strateji {cfg.strategy}"
+    # .env'e yazılacak satırlara ve önerilen komutlara strateji HER ZAMAN eklenir: --strateji ile seçildiyse
+    # .env'dekinden farklı olabilir (rebound dahil)
+    strategy_line = [] if compare else [f"STRATEGY={cfg.strategy}"]
+    strat_flag = "" if compare else f" --strateji {cfg.strategy}"
     lines = [
         titles.get(kind, titles["cikis"]) + ("" if compare else f" — strateji: {cfg.strategy}"),
         LINE,
@@ -1284,7 +1292,7 @@ def format_sweep_report(rows: Sequence[SweepRow], cfg, data: BacktestData, sprea
         if kind == "cikis":
             lines.append("   Giriş filtrelerini denemek için: python main.py --backtest --gun "
                          f"{data.days:g} --tara-giris{strat_flag}")
-        if not compare and cfg.strategy == "rebound":
+        if kind != "strateji" and cfg.strategy == "rebound":
             lines.append("   Trendin yönünde işlem yapan diğer stratejileri karşılaştırmak için: python main.py "
                          f"--backtest --gun {data.days:g} --strateji-karsilastir")
     elif not robust:
@@ -1297,7 +1305,7 @@ def format_sweep_report(rows: Sequence[SweepRow], cfg, data: BacktestData, sprea
         if lucky:
             lines.append(f"   ≈ işaretli {len(lucky)} ayardan en iyisini yine de daha önceki bir dönemde sınayabilirsiniz:")
             lines += [f"      {line}" for line in strategy_line + _env_lines(lucky[0])]
-            lines += _validation_lines(data)
+            lines += _validation_lines(data, strat_flag)
     else:
         cand = robust[0]
         lines += [
@@ -1306,7 +1314,7 @@ def format_sweep_report(rows: Sequence[SweepRow], cfg, data: BacktestData, sprea
         ] + [f"      {line}" for line in strategy_line + _env_lines(cand)] + [
             f"   (İşlem başı sonucun alt sınırı, {len(rows)} ayar denendiği hesaba katılarak sıfırın üstünde.)",
             "   Yine de: çok ayar denendiği için en iyi sonuç iyimserdir.",
-        ] + _validation_lines(data) + [
+        ] + _validation_lines(data, strat_flag) + [
             "   Orada da kârlıysa birkaç gün TEST modunda izleyin. --gun 30 / 60 aynı dönemin parçasıdır,",
             "   bağımsız kanıt sayılmaz.",
         ]
@@ -1473,7 +1481,7 @@ def diagnostics_lines(result: BacktestResult, cfg) -> List[str]:
     a, b = summarize(first), summarize(second)
     lines.append(f"   Dönemin 1. yarısı: {a.count} işlem, net {fmt_signed(a.net, 4)} {q} | "
                  f"2. yarısı: {b.count} işlem, net {fmt_signed(b.net, 4)} {q}")
-    flag = "" if cfg.strategy == "rebound" else f" --strateji {cfg.strategy}"
+    flag = f" --strateji {cfg.strategy}"   # .env'deki stratejiden farklı olabilir (--strateji)
     lines.append(f"   💡 Farklı Kâr Al / Zarar Kes / süre ayarlarını aynı veriyle karşılaştırmak için: "
                  f"python main.py --backtest --gun {result.days:g} --tara{flag}")
     lines.append(f"   💡 Bağımsız doğrulama (bu dönemle çakışmayan, daha önceki {result.days:g} gün): "
