@@ -298,7 +298,9 @@ class _Series:
                 else:
                     o[k] = h[k] = lo[k] = c[k] = prev
         self.o, self.h, self.l, self.c, self.qv, self.tbq = o, h, lo, c, qv, tbq
-        self.change24: List[Optional[float]] = [None] * n  # Ön elemeyi geçen mumlarda 24s değişim %
+        # Hacim / oynaklık / fiyat adımı ön elemesini geçen mumlarda 24s değişim %. Değişim aralığı
+        # (MIN/MAX_24H_DROP_PCT) simülasyonda uygulanır ki giriş taraması onu da değiştirebilsin.
+        self.change24: List[Optional[float]] = [None] * n
         self._raw: Dict[int, list] = {}
 
     def has(self, k: int) -> bool:
@@ -322,7 +324,6 @@ class _Series:
             prefix[k + 1] = prefix[k] + self.qv[k]
         tick = float(self.rules.tick_size)
         min_vol, min_range = cfg.min_quote_volume_24h, cfg.min_24h_range_pct
-        lo_change, hi_change = -cfg.max_24h_drop_pct, -cfg.min_24h_drop_pct
         dq_hi: deque = deque()
         dq_lo: deque = deque()
         for k in range(self.first, self.last + 1):
@@ -346,8 +347,6 @@ class _Series:
             if prefix[k + 1] - prefix[j] < min_vol:
                 continue
             change = (last - open24) / open24 * 100
-            if not lo_change <= change <= hi_change:
-                continue
             if (high24 - low24) / low24 * 100 < min_range:
                 continue
             if tick > 0 and tick / last > 0.002:  # Fiyat adımı çok kaba
@@ -622,6 +621,8 @@ class _Simulator:
         strict = regime == ZAYIF
         if strict:
             self.stats["rejim_zayif"] += 1
+            if cfg.regime_skip_weak:         # Canlıda da zayıf piyasada hiç alım yapılmaz
+                return
 
         target = capital / slots
         candidates: List[Tuple[float, str]] = []
@@ -631,7 +632,7 @@ class _Simulator:
             if not s.has(k):
                 continue
             change = s.change24[k]
-            if change is None:
+            if change is None or not -cfg.max_24h_drop_pct <= change <= -cfg.min_24h_drop_pct:
                 continue
             if target > 0 and s.rules.step_value(s.c[k]) / target * 100 > cfg.max_dust_pct:
                 continue
@@ -930,25 +931,43 @@ def run_backtest(cfg, client, days: float = 30, max_symbols: int = 40,
     return simulate(cfg, data, spread_pct, progress)
 
 
-# ================================================================ parametre taraması (--tara)
-# Aynı veriyle denenecek çıkış ayarları. İzleyen stop tabanı = başlangıcın yarısı (TRAILING_DYNAMIC ayarı korunur).
+# ================================================================ parametre taraması (--tara / --tara-giris)
+# Çıkış taraması: aynı veriyle denenecek çıkış ayarları. İzleyen stop tabanı = başlangıcın yarısı.
 SWEEP_TP = (2.0, 3.0, 5.0)
 SWEEP_SL = (2.0, 3.5)
 SWEEP_TRAIL = (1.0, 2.0)
 SWEEP_HOLD = (60, 120, 240)
 SWEEP_ROOM = (0.0, 1.0)
+# Giriş taraması: çıkışlar .env'deki gibi kalır, hangi sinyallerin alınacağı değişir
+SWEEP_MAX_DROP = (15.0, 8.0)          # + .env'deki MAX_24H_DROP_PCT
+SWEEP_ENTRY_ROOM = (0.0, 0.5, 1.0)
+SWEEP_SCORE_QUANTILES = (0.5, 0.75)   # Sinyal puanı eşikleri: verideki sinyallerin ortanca ve üst çeyrek puanı
 SWEEP_KILL_PCT = 99.0      # Taramada kill-switch fiilen kapalı: her ayar tüm dönem boyunca karşılaştırılır
 SWEEP_SHOW = 12
+
+# .env anahtarı → (Config alanı, tür, tablo başlığı; None = tabloda gösterilmez)
+SWEEP_FIELDS: Dict[str, Tuple[str, type, Optional[str]]] = {
+    "TAKE_PROFIT_PCT": ("take_profit_pct", float, "TP"),
+    "STOP_LOSS_PCT": ("stop_loss_pct", float, "SL"),
+    "TRAILING_ACTIVATION_PCT": ("trailing_activation_pct", float, "İz."),
+    "TRAILING_FLOOR_PCT": ("trailing_floor_pct", float, None),
+    "MAX_HOLD_MINUTES": ("max_hold_minutes", int, "Süre"),
+    "REGIME_SKIP_WEAK": ("regime_skip_weak", bool, "Zayıf"),
+    "MAX_24H_DROP_PCT": ("max_24h_drop_pct", float, "MaxDüş"),
+    "MIN_SIGNAL_SCORE": ("min_signal_score", float, "Puan"),
+    "MIN_ROOM_RATIO": ("min_room_ratio", float, "Alan"),
+}
+EXIT_KEYS = ("TAKE_PROFIT_PCT", "STOP_LOSS_PCT", "TRAILING_ACTIVATION_PCT", "TRAILING_FLOOR_PCT",
+             "MAX_HOLD_MINUTES", "MIN_ROOM_RATIO")
+ENTRY_KEYS = ("REGIME_SKIP_WEAK", "MAX_24H_DROP_PCT", "MIN_SIGNAL_SCORE", "MIN_ROOM_RATIO")
+
+Settings = Dict[str, Union[float, int, bool]]
+Combo = Tuple[Settings, bool]          # (ayarlar, .env'deki mevcut ayar mı)
 
 
 @dataclass
 class SweepRow:
-    tp: float
-    sl: float
-    trail: float
-    floor: float            # İzleyen stop tabanı
-    hold: int
-    room: float
+    settings: Settings      # .env anahtarı → değer
     baseline: bool          # .env'deki mevcut ayarlar
     trades: int
     win_rate: float
@@ -964,20 +983,27 @@ class SweepRow:
         """Dönemin iki yarısında da kârlı mı? (tek bir şanslı dönemin sonucu olmadığına dair işaret)"""
         return self.first_net > 0 and self.second_net > 0
 
+    @property
+    def enough_trades(self) -> bool:
+        return self.trades >= MIN_TRADES_FOR_EVIDENCE
 
-def _sweep_cfg(cfg, tp: float, sl: float, trail: float, hold: int, room: float, floor: float):
-    return replace(cfg, take_profit_pct=tp, stop_loss_pct=sl, trailing_activation_pct=trail,
-                   trailing_floor_pct=floor, max_hold_minutes=int(hold), min_room_ratio=room,
-                   max_total_loss_pct=SWEEP_KILL_PCT, legacy_loss_usdt=None)
+
+def _current(cfg, keys: Sequence[str]) -> Settings:
+    return {k: getattr(cfg, SWEEP_FIELDS[k][0]) for k in keys}
+
+
+def _apply(cfg, settings: Settings):
+    """Ayarları Config'e uygular; taramada kill-switch kapalıdır (eski USDT ayarı dahil)."""
+    changes = {SWEEP_FIELDS[k][0]: SWEEP_FIELDS[k][1](v) for k, v in settings.items()}
+    return replace(cfg, max_total_loss_pct=SWEEP_KILL_PCT, legacy_loss_usdt=None, **changes)
 
 
 def sweep_combos(cfg, tps: Sequence[float] = SWEEP_TP, sls: Sequence[float] = SWEEP_SL,
                  trails: Sequence[float] = SWEEP_TRAIL, holds: Sequence[int] = SWEEP_HOLD,
-                 rooms: Sequence[float] = SWEEP_ROOM) -> List[Tuple[float, float, float, int, float, bool]]:
-    """(tp, sl, izleyen_başlangıç, süre, alan, mevcut_mu) listesi; ilk satır .env'deki mevcut ayarlardır."""
-    base = (cfg.take_profit_pct, cfg.stop_loss_pct, cfg.trailing_activation_pct, cfg.max_hold_minutes,
-            cfg.min_room_ratio, True)
-    combos = [base]
+                 rooms: Sequence[float] = SWEEP_ROOM) -> List[Combo]:
+    """Çıkış taraması kombinasyonları; ilk satır .env'deki mevcut ayarlardır."""
+    base = _current(cfg, EXIT_KEYS)
+    combos: List[Combo] = [(base, True)]
     for tp in tps:
         for sl in sls:
             for trail in trails:
@@ -985,98 +1011,195 @@ def sweep_combos(cfg, tps: Sequence[float] = SWEEP_TP, sls: Sequence[float] = SW
                     continue
                 for hold in holds:
                     for room in rooms:
-                        key = (tp, sl, trail, int(hold), room)
-                        if key != base[:5]:
-                            combos.append(key + (False,))
+                        st = {"TAKE_PROFIT_PCT": tp, "STOP_LOSS_PCT": sl, "TRAILING_ACTIVATION_PCT": trail,
+                              "TRAILING_FLOOR_PCT": trail / 2, "MAX_HOLD_MINUTES": int(hold), "MIN_ROOM_RATIO": room}
+                        same = all(st[k] == base[k] for k in EXIT_KEYS if k != "TRAILING_FLOOR_PCT")
+                        if not same:
+                            combos.append((st, False))
+    return combos
+
+
+def score_thresholds(signal_cache: dict) -> List[float]:
+    """Önbellekteki sinyal puanlarından eşikler: 0 (filtre yok) + ortanca + üst çeyrek."""
+    scores = sorted(sig.score for sig in signal_cache.values() if sig is not None)
+    out = [0.0]
+    if len(scores) >= 20:
+        for q in SWEEP_SCORE_QUANTILES:
+            value = round(scores[min(len(scores) - 1, int(q * len(scores)))], 1)
+            if value > out[-1]:
+                out.append(value)
+    return out
+
+
+def entry_combos(cfg, scores: Sequence[float], max_drops: Sequence[float] = SWEEP_MAX_DROP,
+                 rooms: Sequence[float] = SWEEP_ENTRY_ROOM) -> List[Combo]:
+    """Giriş taraması kombinasyonları (çıkışlar .env'deki gibi); ilk satır mevcut ayarlardır."""
+    base = _current(cfg, ENTRY_KEYS)
+    drops = sorted({cfg.max_24h_drop_pct, *(d for d in max_drops if d > cfg.min_24h_drop_pct)}, reverse=True)
+    combos: List[Combo] = [(base, True)]
+    for skip in (False, True):
+        for drop in drops:
+            for score in scores:
+                for room in rooms:
+                    st = {"REGIME_SKIP_WEAK": skip, "MAX_24H_DROP_PCT": drop, "MIN_SIGNAL_SCORE": score,
+                          "MIN_ROOM_RATIO": room}
+                    if st != base:
+                        combos.append((st, False))
     return combos
 
 
 def run_sweep(cfg, data: BacktestData, spread_pct: float = 0.05, progress: Progress = None,
-              combos: Optional[Sequence[Tuple[float, float, float, int, float, bool]]] = None) -> List[SweepRow]:
+              combos: Optional[Sequence[Combo]] = None, signal_cache: Optional[dict] = None) -> List[SweepRow]:
     """Her kombinasyonu aynı veriyle simüle eder. Giriş analizleri ortak önbellekten gelir (hızlı)."""
     say = progress or (lambda _msg: None)
     combos = list(combos) if combos is not None else sweep_combos(cfg)
-    cache: dict = {}
+    cache = signal_cache if signal_cache is not None else {}
     rows: List[SweepRow] = []
-    for i, (tp, sl, trail, hold, room, is_base) in enumerate(combos, 1):
-        floor = cfg.trailing_floor_pct if is_base else trail / 2
-        c = _sweep_cfg(cfg, tp, sl, trail, hold, room, floor)
-        res = simulate(c, data, spread_pct, None, signal_cache=cache)
+    for i, (settings, is_base) in enumerate(combos, 1):
+        res = simulate(_apply(cfg, settings), data, spread_pct, None, signal_cache=cache)
         sm = summarize(res.trades)
         first, second = split_halves(res.trades, res.start_ms, res.end_ms)
-        rows.append(SweepRow(tp, sl, trail, floor, int(hold), room, is_base, sm.count, sm.win_rate, sm.net,
-                             sm.mean_net_pct, res.max_drawdown_pct, sum(t.pnl for t in first),
-                             sum(t.pnl for t in second), sm.profit_factor))
+        rows.append(SweepRow(dict(settings), is_base, sm.count, sm.win_rate, sm.net, sm.mean_net_pct,
+                             res.max_drawdown_pct, sum(t.pnl for t in first), sum(t.pnl for t in second),
+                             sm.profit_factor))
         if i == 1 or i % 10 == 0 or i == len(combos):
             say(f"   ⏳ Tarama {i}/{len(combos)} ayar denendi")
     return rows
 
 
+def run_entry_sweep(cfg, data: BacktestData, spread_pct: float = 0.05, progress: Progress = None,
+                    signal_cache: Optional[dict] = None) -> List[SweepRow]:
+    """Giriş taraması: önce mevcut ayarlar çalışır (puan eşikleri onun sinyallerinden çıkar), sonra diğerleri."""
+    cache = signal_cache if signal_cache is not None else {}
+    base = run_sweep(cfg, data, spread_pct, None, [(_current(cfg, ENTRY_KEYS), True)], cache)
+    combos = entry_combos(cfg, score_thresholds(cache))[1:]
+    return base + run_sweep(cfg, data, spread_pct, progress, combos, cache)
+
+
+def _fmt_setting(key: str, value) -> str:
+    if SWEEP_FIELDS[key][1] is bool:
+        return "true" if value else "false"
+    if SWEEP_FIELDS[key][1] is int:
+        return str(int(value))
+    return f"{float(value):g}"
+
+
 def _env_lines(r: SweepRow) -> List[str]:
     """.env'e yapıştırılabilir satırlar (her ayar ayrı satırda)."""
-    return [f"TAKE_PROFIT_PCT={r.tp:g}", f"STOP_LOSS_PCT={r.sl:g}", f"TRAILING_ACTIVATION_PCT={r.trail:g}",
-            f"TRAILING_FLOOR_PCT={r.floor:g}", f"MAX_HOLD_MINUTES={r.hold}", f"MIN_ROOM_RATIO={r.room:g}"]
+    return [f"{k}={_fmt_setting(k, v)}" for k, v in r.settings.items()]
 
 
-def format_sweep_report(rows: Sequence[SweepRow], cfg, data: BacktestData, spread_pct: float = 0.05) -> str:
+def save_sweep_csv(rows: Sequence[SweepRow], path: Union[str, Path]) -> Path:
+    """Tüm tarama satırlarını Excel ile açılabilir CSV'ye yazar."""
+    import csv
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    keys = list(dict.fromkeys(k for r in rows for k in r.settings))
+    with path.open("w", newline="", encoding="utf-8-sig") as fh:
+        writer = csv.writer(fh, delimiter=";")
+        writer.writerow(keys + ["mevcut", "islem", "kazanma_yuzde", "net_usdt", "islem_basi_net_yuzde",
+                                "maks_dusus_yuzde", "ilk_yari_usdt", "ikinci_yari_usdt", "kar_faktoru"])
+        for r in rows:
+            pf = "" if r.profit_factor is None or math.isinf(r.profit_factor) else f"{r.profit_factor:.3f}"
+            writer.writerow([_fmt_setting(k, r.settings[k]) if k in r.settings else "" for k in keys] + [
+                "evet" if r.baseline else "", r.trades, f"{r.win_rate:.1f}", f"{r.net:.4f}",
+                f"{r.mean_net_pct:.3f}", f"{r.max_dd_pct:.2f}", f"{r.first_net:.4f}", f"{r.second_net:.4f}", pf])
+    return path
+
+
+def _rank(rows: Sequence[SweepRow]) -> List[SweepRow]:
+    """Önce yeterli işlemi olanlar (işlem başı sonuca göre), sonra az işlemliler.
+
+    Toplam USDT'ye göre sıralamak, hiç kârlı ayar yokken "az işlem açan = az kaybeden" ayarları öne çıkarır.
+    """
+    def key(r: SweepRow):
+        return (r.enough_trades, r.mean_net_pct, r.net)
+    return sorted(rows, key=key, reverse=True)
+
+
+def format_sweep_report(rows: Sequence[SweepRow], cfg, data: BacktestData, spread_pct: float = 0.05,
+                        kind: str = "cikis") -> str:
     q = cfg.quote_asset
-    ranked = sorted(rows, key=lambda r: r.net, reverse=True)
+    entry = kind == "giris"
+    ranked = _rank(rows)
     shown = ranked[:SWEEP_SHOW]
     base = next((r for r in rows if r.baseline), None)
     if base is not None and base not in shown:
         shown = shown + [base]
+    few = [r for r in rows if not r.enough_trades]
     profitable = [r for r in rows if r.net > 0]
-    robust = [r for r in ranked if r.net > 0 and r.consistent and r.trades >= 30]
+    robust = [r for r in ranked if r.net > 0 and r.consistent and r.enough_trades]
+    columns = [k for k in dict.fromkeys(k for r in rows for k in r.settings) if SWEEP_FIELDS[k][2]]
 
+    title = ("🧪 GİRİŞ TARAMASI (aynı veriyle farklı giriş filtreleri; çıkışlar .env'deki gibi)" if entry
+             else "🧪 PARAMETRE TARAMASI (aynı veriyle farklı çıkış ayarları)")
     lines = [
-        "🧪 PARAMETRE TARAMASI (aynı veriyle farklı çıkış ayarları)",
+        title,
         LINE,
         f"🗓️ Dönem: {_fmt_time(data.sim_start_ms)} → {_fmt_time(data.end_ms)} ({data.days:g} gün) | "
         f"{len(data.series)} sembol | sermaye {fmt_usdt(cfg.start_capital)} {q} | komisyon {fmt_rate(cfg.fee_rate)} "
         f"| spread %{spread_pct:g}",
-        f"🔢 Denenen ayar: {len(rows)} | kârlı: {len(profitable)} | iki yarıda da kârlı ve ≥30 işlem: {len(robust)}",
+        f"🔢 Denenen ayar: {len(rows)} | kârlı: {len(profitable)} | iki yarıda da kârlı ve "
+        f"≥{MIN_TRADES_FOR_EVIDENCE} işlem: {len(robust)}",
         "   (Karşılaştırma adil olsun diye taramada kill-switch kapalıdır; maks. düşüşe bakın.)",
+        f"   Sıralama: işlem başına net sonuca göre; {MIN_TRADES_FOR_EVIDENCE}'dan az işlem açan {len(few)} ayar "
+        f"(sonuçları şans) en alta alındı.",
         LINE,
-        "    TP   SL   İz.  Süre  Alan | İşlem  Kaz%   Net USDT  İşl.başı  MaksDD |  1.yarı  2.yarı",
+        "   " + " ".join(f"{SWEEP_FIELDS[k][2]:>6}" for k in columns)
+        + " | İşlem  Kaz%   Net USDT  İşl.başı  MaksDD |  1.yarı  2.yarı",
     ]
     for r in shown:
-        mark = "⭐" if r.baseline else ("✅" if r.consistent and r.net > 0 else "  ")
+        mark = "⭐" if r.baseline else ("✅" if r.consistent and r.net > 0 and r.enough_trades
+                                       else ("· " if not r.enough_trades else "  "))
+        cells = " ".join(f"{_fmt_setting(k, r.settings.get(k, 0)):>6}" for k in columns)
         lines.append(
-            f"{mark} {r.tp:>4g} {r.sl:>4g} {r.trail:>4g} {r.hold:>5d} {r.room:>5g} | {r.trades:>5d} "
-            f"{r.win_rate:>5.1f} {r.net:>+10.4f} {r.mean_net_pct:>+8.2f}% {r.max_dd_pct:>6.1f}% | "
-            f"{r.first_net:>+7.3f} {r.second_net:>+7.3f}")
-    lines += [
-        "   ⭐ = .env'deki mevcut ayarlarınız | ✅ = dönemin iki yarısında da kârlı",
-        "   TP/SL/İz. = Kâr Al / Zarar Kes / izleyen stop başlangıcı (%), Süre = maks. tutma (dk),",
-        "   Alan = MIN_ROOM_RATIO (0 = kapalı), İşl.başı = işlem başına ortalama net K/Z",
-        LINE,
-    ]
+            f"{mark} {cells} | {r.trades:>5d} {r.win_rate:>5.1f} {r.net:>+10.4f} {r.mean_net_pct:>+8.2f}% "
+            f"{r.max_dd_pct:>6.1f}% | {r.first_net:>+7.3f} {r.second_net:>+7.3f}")
+    legend = [f"   ⭐ = .env'deki mevcut ayarlarınız | ✅ = iki yarıda da kârlı | · = {MIN_TRADES_FOR_EVIDENCE}'dan "
+              f"az işlem (güvenilmez)"]
+    if entry:
+        legend += ["   Zayıf = REGIME_SKIP_WEAK (true: piyasa zayıfken alım yok), MaxDüş = MAX_24H_DROP_PCT,",
+                   "   Puan = MIN_SIGNAL_SCORE, Alan = MIN_ROOM_RATIO (0 = kapalı)"]
+    else:
+        legend += ["   TP/SL/İz. = Kâr Al / Zarar Kes / izleyen stop başlangıcı (%), Süre = maks. tutma (dk),",
+                   "   Alan = MIN_ROOM_RATIO (0 = kapalı)"]
+    lines += legend + ["   İşl.başı = işlem başına ortalama net K/Z", LINE]
+
+    best = next((r for r in ranked if r.enough_trades), None)
     if not profitable:
+        where = ("Giriş filtreleriyle de" if entry else "Çıkış ayarlarıyla")
         lines += [
-            "❗ Denenen ayarların HİÇBİRİ kârlı değil. Sorun çıkış ayarlarında değil, giriş sinyalinde:",
-            "   bu dönemde strateji fiyatın yükseleceği anları yakalayamıyor. Canlıda gerçek parayla",
-            "   ÇALIŞTIRMAYIN. Daha önceki bir dönemi de deneyin (aşağıdaki --bitis komutu); orada da kârlı",
-            "   ayar çıkmazsa strateji bu piyasa koşullarında işe yaramıyor demektir.",
+            f"❗ Denenen ayarların HİÇBİRİ kârlı değil. {where} kâra geçilemiyor: bu dönemde strateji",
+            "   fiyatın yükseleceği anları yakalayamıyor. Canlıda gerçek parayla ÇALIŞTIRMAYIN.",
         ]
+        if best is not None:
+            lines.append(f"   En iyi işlem başı sonuç (≥{MIN_TRADES_FOR_EVIDENCE} işlem): "
+                         f"{fmt_signed(best.mean_net_pct)}% — kâra geçmek için işlem başına bu kadarlık iyileşme gerekir.")
+        lines.append("   Daha önceki bir dönemi de deneyin (aşağıdaki --bitis komutu); orada da kârlı ayar çıkmazsa")
+        lines.append("   strateji bu piyasa koşullarında işe yaramıyor demektir.")
+        if not entry:
+            lines.append("   Giriş filtrelerini denemek için: python main.py --backtest --gun "
+                         f"{data.days:g} --tara-giris")
     elif not robust:
-        best = ranked[0]
+        top = max(profitable, key=lambda r: r.net)
         lines += [
-            f"⚠️ Kârlı görünen ayarlar var (en iyisi {fmt_signed(best.net, 4)} {q}) ama hiçbiri hem iki yarıda da",
+            f"⚠️ Kârlı görünen ayarlar var (en iyisi {fmt_signed(top.net, 4)} {q}) ama hiçbiri hem iki yarıda da",
             "   kârlı hem yeterli işlem sayısına sahip değil. Bu sonuçlar büyük olasılıkla şans: çok sayıda ayar",
             "   denendiğinde birkaçı tesadüfen kârlı çıkar. Canlıya geçmek için yeterli kanıt yok.",
         ]
     else:
-        best = robust[0]
+        cand = robust[0]
         lines += [
-            f"✅ En tutarlı aday ({best.trades} işlem, net {fmt_signed(best.net, 4)} {q}, iki yarıda da kârlı).",
+            f"✅ En tutarlı aday ({cand.trades} işlem, net {fmt_signed(cand.net, 4)} {q}, iki yarıda da kârlı).",
             "   .env dosyanızdaki şu satırları DEĞİŞTİRİN (aynı isimli eski satırları silin):",
-        ] + [f"      {line}" for line in _env_lines(best)] + [
+        ] + [f"      {line}" for line in _env_lines(cand)] + [
             "   Yine de: çok ayar denendiği için en iyi sonuç iyimserdir. Önce bu ayarı test edilen dönemle",
             "   ÇAKIŞMAYAN daha önceki bir dönemde deneyin (aşağıdaki --bitis komutu); orada da kârlıysa",
             "   birkaç gün TEST modunda izleyin. --gun 30 / 60 aynı dönemin parçasıdır, bağımsız kanıt sayılmaz.",
         ]
+    flag = "--tara-giris" if entry else "--tara"
     lines.append(f"🔁 Bağımsız dönem (bu testten önceki {data.days:g} gün): python main.py --backtest --gun "
-                 f"{data.days:g} --tara --bitis {_fmt_date(data.sim_start_ms)}")
+                 f"{data.days:g} {flag} --bitis {_fmt_date(data.sim_start_ms)}")
     lines.append("📝 Kayma (slippage) yok, 5 dk mum çözünürlüğü, bugünün en hacimli coinleri (hayatta kalma "
                  "yanlılığı). Geçmiş sonuçlar geleceği garanti etmez.")
     return "\n".join(lines)
@@ -1289,8 +1412,9 @@ def format_backtest_report(result: BacktestResult, cfg) -> str:
         lines.append(f"🔎 Analiz: {st.get('analiz', 0)} | Sinyal: {st.get('sinyal', 0)} | "
                      f"BTC filtresi engeli: {st.get('btc_engel', 0)} mum")
         if st.get("rejim_cokus") or st.get("rejim_zayif"):
+            weak = "alım yapılmayan" if cfg.regime_skip_weak else "sıkı kurallı"
             lines.append(f"🌡️ Piyasa rejimi: çöküş nedeniyle alım yapılmayan {st.get('rejim_cokus', 0)} mum, "
-                         f"zayıf piyasada sıkı kurallı {st.get('rejim_zayif', 0)} mum")
+                         f"zayıf piyasada {weak} {st.get('rejim_zayif', 0)} mum")
         if st.get("alan_dar"):
             lines.append(f"📏 Hedef alanı dar olduğu için alınmayan sinyal: {st['alan_dar']}")
 

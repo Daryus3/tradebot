@@ -201,6 +201,7 @@ class Config:
     max_atr_pct: float = 4.0
     # 33) Piyasa rejimi
     regime_filter: bool = True
+    regime_skip_weak: bool = False         # true: piyasa ZAYIF iken hiç alım yapma (yalnızca sıkılaştırmak yerine)
     # 37) Ayrıntılı kayıt
     equity_log_minutes: int = 15           # 0 = kapalı
     # 38) BNB ile komisyon indirimi takibi: yalnızca izler ve uyarır (BNB ALMAZ, Binance ayarını değiştirmez)
@@ -394,6 +395,7 @@ def load_config(env_file: Optional[str] = None, mode_override: Optional[str] = N
         min_atr_pct=_env_float("MIN_ATR_PCT", 0.25),
         max_atr_pct=_env_float("MAX_ATR_PCT", 4.0),
         regime_filter=_env_bool("REGIME_FILTER", True),
+        regime_skip_weak=_env_bool("REGIME_SKIP_WEAK", False),
         equity_log_minutes=_env_int("EQUITY_LOG_MINUTES", 15),
         bnb_fee_check=_env_bool("BNB_FEE_CHECK", True),
         bnb_min_trades=_env_int("BNB_MIN_TRADES", 20),

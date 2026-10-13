@@ -10,6 +10,7 @@ Kullanım:
     python main.py --istatistik        # İşlem geçmişinden performans istatistikleri
     python main.py --backtest --gun 30 # Stratejiyi geçmiş verilerle dener
     python main.py --backtest --gun 90 --tara       # Aynı veriyle farklı TP/SL/süre ayarlarını karşılaştırır
+    python main.py --backtest --gun 90 --tara-giris # Aynı veriyle farklı giriş filtrelerini karşılaştırır
     python main.py --backtest --gun 90 --sermaye 25 # Farklı bir başlangıç sermayesiyle dener
     python main.py --backtest --gun 90 --bitis 2026-07-01  # Bu tarihte biten (daha eski) bir dönemi dener
     python main.py --telegram-chat-id  # Telegram chat ID'nizi bulur
@@ -58,6 +59,9 @@ def parse_args(argv=None) -> argparse.Namespace:
                              "test edilen dönemle çakışmayan daha eski bir dönemde doğrulamak için")
     parser.add_argument("--tara", action="store_true",
                         help="Backtest: aynı veriyle farklı Kâr Al / Zarar Kes / süre ayarlarını karşılaştırır")
+    parser.add_argument("--tara-giris", action="store_true",
+                        help="Backtest: aynı veriyle farklı giriş filtrelerini (piyasa rejimi, 24s düşüş, sinyal "
+                             "puanı, hedef alanı) karşılaştırır; çıkış ayarları .env'deki gibi kalır")
     parser.add_argument("--tp", default=None, help="--tara için Kâr Al değerleri, örn. 2,3,5")
     parser.add_argument("--sl", default=None, help="--tara için Zarar Kes değerleri, örn. 2,3.5")
     parser.add_argument("--iz", default=None, help="--tara için izleyen stop başlangıçları, örn. 1,2")
@@ -242,18 +246,34 @@ def run_backtest_cli(cfg, args) -> int:
     print(f"⏳ {period} verisi indiriliyor ve strateji deneniyor (ilk seferde birkaç dakika sürebilir)...")
     client = BinanceClient(cfg.binance_api_key, cfg.binance_api_secret, cfg.binance_base_url)
     try:
-        if not args.tara:
+        if not (args.tara or args.tara_giris):
             result = backtest.run_backtest(cfg, client, days=days, max_symbols=args.coin_sayisi, end_time_ms=end_ms)
             print(backtest.format_backtest_report(result, cfg))
             return EXIT_OK
         data = backtest.prepare_backtest(cfg, client, days=days, max_symbols=args.coin_sayisi, end_time_ms=end_ms)
-        combos = backtest.sweep_combos(cfg, **{k: v for k, v in grid.items() if v is not None})
-        print(f"🧪 {len(combos)} ayar aynı veriyle denenecek (giriş analizleri bir kez yapılır, sonra hızlanır)...")
-        rows = backtest.run_sweep(cfg, data, progress=print, combos=combos)
+        cache: dict = {}   # Giriş analizleri iki tarama arasında da paylaşılır
+        reports = []
+        if args.tara:
+            combos = backtest.sweep_combos(cfg, **{k: v for k, v in grid.items() if v is not None})
+            print(f"🧪 Çıkış taraması: {len(combos)} ayar aynı veriyle denenecek (giriş analizleri bir kez "
+                  f"yapılır, sonra hızlanır)...")
+            reports.append(("cikis", backtest.run_sweep(cfg, data, progress=print, combos=combos,
+                                                        signal_cache=cache)))
+        if args.tara_giris:
+            print("🧪 Giriş taraması: piyasa rejimi / 24s düşüş / sinyal puanı / hedef alanı filtreleri deneniyor...")
+            reports.append(("giris", backtest.run_entry_sweep(cfg, data, progress=print, signal_cache=cache)))
     except Exception as exc:  # noqa: BLE001
         print(f"❌ Backtest çalıştırılamadı: {exc}")
         return EXIT_CONFIG
-    print(backtest.format_sweep_report(rows, cfg, data))
+    stamp = datetime.now().strftime("%Y%m%d-%H%M")
+    for kind, rows in reports:
+        print(backtest.format_sweep_report(rows, cfg, data, kind=kind))
+        try:
+            path = backtest.save_sweep_csv(rows, DATA_DIR / f"tarama_{kind}_{stamp}.csv")
+            print(f"📄 Tüm {len(rows)} satır Excel ile açılabilir dosyada: {path}")
+        except OSError as exc:
+            print(f"⚠️ Tarama dosyası yazılamadı: {exc}")
+        print()
     return EXIT_OK
 
 

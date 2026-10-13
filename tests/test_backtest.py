@@ -448,8 +448,9 @@ def test_signal_cache_reused_and_results_identical(cfg, make_client, tmp_path):
 def test_sweep_compares_settings_on_same_data(cfg, make_client, tmp_path):
     from backtest import format_sweep_report, prepare_backtest, run_sweep, sweep_combos
     combos = sweep_combos(cfg, tps=(3.0, 15.0), sls=(2.0,), trails=(2.0, 10.0), holds=(120,), rooms=(0.0,))
-    assert combos[0][-1] is True                                       # İlk satır mevcut ayarlar
-    assert all(c[2] < c[0] for c in combos[1:])                         # İzleyen stop < Kâr Al
+    assert combos[0][1] is True                                        # İlk satır mevcut ayarlar
+    assert all(st["TRAILING_ACTIVATION_PCT"] < st["TAKE_PROFIT_PCT"] for st, _ in combos[1:])
+    assert all(st["TRAILING_FLOOR_PCT"] == st["TRAILING_ACTIVATION_PCT"] / 2 for st, _ in combos[1:])
     assert len(combos) == 1 + 3                                         # (3,2,2) (15,2,2) (15,2,10)
     client = make_client({"ABCUSDT": scenario(lambda p: trend(p, 1.03, 8)), "BTCUSDT": btc_flat()})
     data = prepare_backtest(cfg, client, days=DAYS, cache_dir=tmp_path / "c", progress=None,
@@ -457,7 +458,7 @@ def test_sweep_compares_settings_on_same_data(cfg, make_client, tmp_path):
     rows = run_sweep(cfg, data, combos=combos)
     assert len(rows) == 4 and rows[0].baseline
     assert all(r.trades == 1 for r in rows)
-    tp3 = next(r for r in rows if r.tp == 3.0)
+    tp3 = next(r for r in rows if r.settings["TAKE_PROFIT_PCT"] == 3.0)
     assert tp3.net < next(r for r in rows if r.baseline).net          # Daha küçük hedef → daha az kâr (bu veride)
     text = format_sweep_report(rows, cfg, data)
     assert "PARAMETRE TARAMASI" in text and "⭐" in text and "kill-switch kapalıdır" in text
@@ -469,6 +470,7 @@ def test_cli_sweep_and_capital_override(cfg, make_client, tmp_path, monkeypatch,
     client = make_client({"ABCUSDT": scenario(lambda p: trend(p, 1.03, 8)), "BTCUSDT": btc_flat()},
                          volumes={"ABCUSDT": 9_000_000_000, "BTCUSDT": 1})
     monkeypatch.setattr(binance_client, "BinanceClient", lambda *a, **k: client)
+    monkeypatch.setattr(main, "DATA_DIR", tmp_path)               # Tarama CSV'si proje klasörüne yazılmasın
     real_prepare = backtest.prepare_backtest
     seen = {}
 
@@ -514,8 +516,11 @@ def test_few_identical_trades_are_not_called_evidence(cfg):
 
 def test_sweep_suggestion_is_pasteable_env_lines(cfg, tmp_path, monkeypatch):
     from backtest import BacktestData, SweepRow, format_sweep_report
-    row = SweepRow(3, 2, 2, 1, 120, 1, False, 40, 60, 2.5, 0.3, 5, 1.0, 1.5, 1.4)
-    base = SweepRow(5, 3.5, 2, 1, 240, 0, True, 40, 40, -1.0, -0.2, 9, -0.5, -0.5, 0.8)
+    def st(tp, sl, trail, floor, hold, room):
+        return {"TAKE_PROFIT_PCT": tp, "STOP_LOSS_PCT": sl, "TRAILING_ACTIVATION_PCT": trail,
+                "TRAILING_FLOOR_PCT": floor, "MAX_HOLD_MINUTES": hold, "MIN_ROOM_RATIO": room}
+    row = SweepRow(st(3, 2, 2, 1, 120, 1), False, 40, 60, 2.5, 0.3, 5, 1.0, 1.5, 1.4)
+    base = SweepRow(st(5, 3.5, 2, 1, 240, 0), True, 40, 40, -1.0, -0.2, 9, -0.5, -0.5, 0.8)
     data = BacktestData(series={}, btc=None, regime=None, min_notional=5, start_ms=0, end_ms=10 * 86_400_000,
                         n=2880, k_start=288, days=9, notes=[])
     text = format_sweep_report([base, row], cfg, data)
@@ -529,3 +534,71 @@ def test_sweep_suggestion_is_pasteable_env_lines(cfg, tmp_path, monkeypatch):
     assert values["TAKE_PROFIT_PCT"] == "3" and values["MAX_HOLD_MINUTES"] == "120"
     assert values["MIN_ROOM_RATIO"] == "1" and values["TRAILING_FLOOR_PCT"] == "1"
     assert "--bitis" in text and "bağımsız kanıt sayılmaz" in text
+
+
+def _row(settings, baseline=False, trades=40, net=0.0, per=0.0, first=0.0, second=0.0):
+    from backtest import SweepRow
+    return SweepRow(settings, baseline, trades, 50.0, net, per, 5.0, first, second, 1.0)
+
+
+def test_sweep_ranking_puts_few_trade_rows_last(cfg):
+    from backtest import BacktestData, format_sweep_report
+    data = BacktestData(series={}, btc=None, regime=None, min_notional=5, start_ms=0, end_ms=10 * 86_400_000,
+                        n=2880, k_start=288, days=9, notes=[])
+    st = {"TAKE_PROFIT_PCT": 5, "STOP_LOSS_PCT": 3.5, "TRAILING_ACTIVATION_PCT": 2, "TRAILING_FLOOR_PCT": 1,
+          "MAX_HOLD_MINUTES": 240}
+    rows = [_row({**st, "MIN_ROOM_RATIO": 0}, True, trades=108, net=-2.45, per=-0.32),
+            _row({**st, "MIN_ROOM_RATIO": 1}, trades=5, net=-0.35, per=-0.99),       # Az kaybeden ama 5 işlem
+            _row({**st, "TAKE_PROFIT_PCT": 3, "MIN_ROOM_RATIO": 0}, trades=150, net=-2.9, per=-0.20)]
+    text = format_sweep_report(rows, cfg, data)
+    lines = text.splitlines()
+    start = next(i for i, ln in enumerate(lines) if "İşl.başı" in ln) + 1
+    table = lines[start:start + len(rows)]
+    assert "-0.20%" in table[0]                    # En iyi işlem başı sonuç, yeterli işlemle
+    assert table[-1].startswith("· ")             # 5 işlemlik satır en altta, işaretli
+    assert "en alta alındı" in text and "En iyi işlem başı sonuç" in text and "--tara-giris" in text
+
+
+def test_entry_sweep_varies_filters_and_reuses_cache(cfg, make_client, tmp_path):
+    from backtest import entry_combos, format_sweep_report, prepare_backtest, run_entry_sweep, save_sweep_csv
+    combos = entry_combos(cfg, [0.0, 20.0])
+    assert combos[0][1] is True and len({tuple(sorted(c.items())) for c, _ in combos}) == len(combos)
+    assert {c["REGIME_SKIP_WEAK"] for c, _ in combos} == {False, True}
+    assert {c["MAX_24H_DROP_PCT"] for c, _ in combos} == {cfg.max_24h_drop_pct, 15.0, 8.0}
+    client = make_client({"ABCUSDT": scenario(lambda p: trend(p, 1.03, 8)), "BTCUSDT": btc_flat()})
+    data = prepare_backtest(cfg, client, days=DAYS, cache_dir=tmp_path / "c", progress=None,
+                            symbols=["ABCUSDT"], end_time_ms=END_TIME_MS)
+    rows = run_entry_sweep(cfg, data)
+    assert rows[0].baseline and rows[0].trades == 1
+    narrow = [r for r in rows if r.settings["MAX_24H_DROP_PCT"] == 8.0 and r.settings["MIN_ROOM_RATIO"] == 0]
+    assert narrow and all(r.trades == 1 for r in narrow)      # 24s düşüş ~%4.6, 8'in içinde: yine alınır
+    roomy = [r for r in rows if r.settings["MIN_ROOM_RATIO"] == 1.0]
+    assert roomy and all(r.trades == 0 for r in roomy)        # TP %15 için eski zirveye alan yetmez
+    text = format_sweep_report(rows, cfg, data, kind="giris")
+    assert "GİRİŞ TARAMASI" in text and "MaxDüş" in text and "--tara-giris --bitis" in text
+    path = save_sweep_csv(rows, tmp_path / "t.csv")
+    content = path.read_text(encoding="utf-8-sig").splitlines()
+    assert content[0].startswith("REGIME_SKIP_WEAK;MAX_24H_DROP_PCT") and len(content) == len(rows) + 1
+
+
+def test_max_24h_drop_applied_at_simulation_time(cfg, make_client, tmp_path):
+    client = make_client({"ABCUSDT": scenario(lambda p: trend(p, 1.03, 8)), "BTCUSDT": btc_flat()})
+    assert run(cfg, client, tmp_path).trades
+    tight = replace(cfg, min_24h_drop_pct=1.0, max_24h_drop_pct=2.0)          # ~%6.5 düşüş aralık dışı
+    assert run(tight, make_client({"ABCUSDT": scenario(lambda p: trend(p, 1.03, 8)), "BTCUSDT": btc_flat()}),
+               tmp_path).trades == []
+
+
+def test_regime_skip_weak_blocks_entries(cfg, make_client, tmp_path):
+    from backtest import _RegimeSim
+    series = {"ABCUSDT": scenario(lambda p: trend(p, 1.03, 8)), "BTCUSDT": btc_flat()}
+    original = _RegimeSim.at
+    try:
+        _RegimeSim.at = lambda self, k, t: "ZAYIF"
+        strict = run(cfg, make_client(series), tmp_path)
+        skipped = run(replace(cfg, regime_skip_weak=True), make_client(series), tmp_path)
+    finally:
+        _RegimeSim.at = original
+    assert skipped.trades == [] and skipped.stats.get("rejim_zayif", 0) > 0
+    assert "alım yapılmayan" in format_backtest_report(skipped, replace(cfg, regime_skip_weak=True))
+    assert strict.stats.get("rejim_zayif", 0) > 0

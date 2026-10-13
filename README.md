@@ -187,6 +187,7 @@ Birkaç gün test modunda çalıştırıp sonuçları izlemenizi öneririz (`/is
 | `python main.py --istatistik` | Performans istatistikleri |
 | `python main.py --backtest --gun 30` | Stratejiyi geçmiş verilerle dener (`--coin-sayisi 40`, `--sermaye 25`) |
 | `python main.py --backtest --gun 90 --tara` | Aynı veriyle onlarca Kâr Al / Zarar Kes / süre ayarını karşılaştırır |
+| `python main.py --backtest --gun 90 --tara-giris` | Aynı veriyle giriş filtrelerini (piyasa rejimi, 24s düşüş, sinyal puanı, hedef alanı) karşılaştırır |
 | `python main.py --backtest --gun 90 --bitis 2026-07-01` | O tarihte biten (daha eski) bir dönemi dener: bulunan ayarı bağımsız dönemde doğrulamak için |
 | `python main.py --telegram-chat-id` | Telegram chat ID'nizi bulur |
 | `python main.py --reset-state` | Kayıtlı durumu sıfırlar (kill-switch kilidi dahil) |
@@ -357,9 +358,14 @@ iddialı bir hedeftir; bazı işlemler 60 dakikadan uzun sürebilir. İsterseniz
   (kapalı/1) kombinasyonları aynı veriyle denenir. Değerleri değiştirmek için `--tp 2,3 --sl 2
   --iz 1 --sure 90,180 --alan 0,1`. Karşılaştırma adil olsun diye taramada kill-switch kapalıdır.
   **Çok ayar denendiğinde birkaçı tesadüfen kârlı çıkar**: yalnızca dönemin iki yarısında da kârlı
-  (✅) ve yeterli işlemi olan ayarları ciddiye alın, sonra test edilen dönemle **çakışmayan** daha eski
+  (✅) ve yeterli işlemi olan ayarları ciddiye alın (30'dan az işlem açan ayarlar tablonun en altına
+  alınır), sonra test edilen dönemle **çakışmayan** daha eski
   bir dönemde deneyin (`--bitis`; rapor tam komutu yazar). `--gun 30` / `--gun 60` aynı dönemin
-  parçasıdır, bağımsız kanıt sayılmaz.
+  parçasıdır, bağımsız kanıt sayılmaz. Tüm satırlar `data/tarama_*.csv` dosyasına da yazılır.
+- **Giriş taraması** (`--tara-giris`): çıkış ayarlarınız sabit kalır; zayıf piyasada hiç almama
+  (`REGIME_SKIP_WEAK`), en fazla 24s düşüş (`MAX_24H_DROP_PCT` .env değeri / 15 / 8), sinyal puanı eşiği
+  (0 / verideki sinyallerin ortancası / üst çeyreği) ve hedef alanı (0 / 0.5 / 1) birlikte denenir.
+  `--tara --tara-giris` ikisini aynı veriyle art arda çalıştırır.
 
 ---
 
@@ -387,6 +393,7 @@ iddialı bir hedeftir; bazı işlemler 60 dakikadan uzun sürebilir. İsterseniz
 | `MAX_SPREAD_PCT` | `0.3` | Spread filtresi |
 | `DELIST_FILTER` | `true` | Tehlikeli coin filtresi |
 | `REGIME_FILTER` | `true` | Piyasa rejimi filtresi |
+| `REGIME_SKIP_WEAK` | `false` | `true`: piyasa zayıfken hiç alım yapma (yalnızca kuralları sıkılaştırmak yerine) |
 | `MIN_SIGNAL_SCORE` / `SIGNAL_CONFIRM_SCANS` | `0` / `1` | Sinyal puanı alt sınırı / tarama teyidi (kapalı) |
 | `MIN_ATR_PCT` / `MAX_ATR_PCT` | `0.25` / `4` | Oynaklık filtresi |
 | `MAX_HOLD_MINUTES` | `0` | Maks. pozisyon süresi (0 = sınırsız) |

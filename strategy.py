@@ -294,6 +294,11 @@ class ReboundStrategy:
                 result.market_note = f"Piyasa çöküş modunda: {reg.note}"
                 self._seen.clear()
                 return result
+            if reg.regime == "ZAYIF" and getattr(cfg, "regime_skip_weak", False):
+                result.market_ok = False
+                result.market_note = f"Piyasa zayıf, REGIME_SKIP_WEAK açık: {reg.note}"
+                self._seen.clear()
+                return result
         strict = result.regime == "ZAYIF"
         if self.coin_filter is not None:
             try:

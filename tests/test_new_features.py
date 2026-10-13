@@ -485,3 +485,12 @@ def test_room_filter_rejects_signals_without_room_to_target(cfg, fake_client):
     result = ReboundStrategy(ScanClient(scaled_rows()), strict).scan(scan_rules(fake_client), set(), 11)
     assert not result.signals and result.rejects["hedef alanı dar"] == 1
     assert any("hedef alanı dar" in why for _, why in result.near_misses)
+
+
+def test_live_scan_skips_weak_market_when_configured(cfg, fake_client):
+    weak = ReboundStrategy(ScanClient(scaled_rows()), cfg, regime=FixedRegime("ZAYIF")).scan(
+        scan_rules(fake_client), set(), 11)
+    assert weak.market_ok                                    # Varsayılan: zayıfta sıkı kurallarla devam
+    skip = ReboundStrategy(ScanClient(scaled_rows()), replace(cfg, regime_skip_weak=True),
+                           regime=FixedRegime("ZAYIF")).scan(scan_rules(fake_client), set(), 11)
+    assert not skip.market_ok and not skip.signals and "REGIME_SKIP_WEAK" in skip.market_note
