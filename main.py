@@ -250,8 +250,10 @@ def run_backtest_cli(cfg, args) -> int:
             print("   " + " ".join(f"{k}={getattr(cfg, PROFILE_ATTRS[k]):g}" for k in SWING_EXIT_PROFILE))
             print(f"   Kendi çıkış ayarlarınızla denemek için .env'de STRATEGY={cfg.strategy} yazıp çıkışları "
                   f"değiştirin.")
-        if is_long_horizon(cfg.strategy) and short_entry_filters(cfg):
-            print("⚠️ Bu test şu giriş filtreleriyle yapılıyor: " + "; ".join(short_entry_filters(cfg)))
+        # Karşılaştırma puan / alan filtresini kapatır: orada yalnızca diğer engeller geçerlidir
+        blocking = short_entry_filters(replace(cfg, min_room_ratio=0.0) if args.strateji_karsilastir else cfg)
+        if is_long_horizon(cfg.strategy) and blocking:
+            print("⚠️ Bu test şu giriş filtreleriyle yapılıyor: " + "; ".join(blocking))
         if is_long_horizon(env_strategy) and not is_long_horizon(cfg.strategy):
             print(f"⚠️ .env'deki çıkış ayarları uzun vadeli strateji ({env_strategy}) içindir; {cfg.strategy} "
                   f"(5 dk) bu çıkışlarla deneniyor.")

@@ -291,6 +291,8 @@ def listing_times(client, symbols: Sequence[str], end_ms: int, cache_dir: Option
             continue
         try:
             rows = _request_klines(client, sym, 0, end_ms, progress, interval="1d", limit=1)
+        except RateLimitError:
+            break  # İstek limiti / IP yasağı: ısrar etmek yasağı uzatır; kalan semboller için filtre uygulanmaz
         except Exception:  # noqa: BLE001 - listelenme günü alınamazsa filtre uygulanmaz (fail-open)
             rows = []
         if REQUEST_PAUSE_SEC > 0:

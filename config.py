@@ -518,7 +518,9 @@ def _setting_notes(cfg: Config) -> List[str]:
         if short:
             notes.append(f"STRATEGY={cfg.strategy} 1 saatlik mumlarla 1-5 gün süren işlemler içindir ama çıkış "
                          f"ayarlarınız kısa vadeli: {', '.join(short)}. Bu ayarlar işlemleri hareket başlamadan "
-                         f"kapatır. Önerilen: " + " ".join(f"{k}={v:g}" for k, v in SWING_EXIT_PROFILE.items()))
+                         f"kapatır. Önerilen: " + " ".join(
+                             f"{k}={max(v, cfg.max_24h_gain_pct) if k == 'MAX_24H_GAIN_PCT' else v:g}"
+                             for k, v in SWING_EXIT_PROFILE.items()))
         filters = short_entry_filters(cfg)
         if filters:
             notes.append(f"STRATEGY={cfg.strategy} ile şu giriş filtreleri sinyalleri gereksiz yere eleyebilir: "

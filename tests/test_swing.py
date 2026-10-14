@@ -474,3 +474,36 @@ def test_rebound_suggestion_keeps_strategy_family(cfg):
     text = format_sweep_report(rows, replace(cfg, strategy="rebound"), data)
     assert "--strateji-karsilastir --strateji rebound" in text
     assert "--strateji swing --strateji-karsilastir" in text      # 5 dk başarısızsa uzun vade önerilir
+
+
+def test_listing_lookup_stops_on_rate_limit(fake_client):
+    from backtest import listing_times
+    from binance_client import RateLimitError
+
+    class Banned(fake_client):
+        calls = 0
+
+        def _request(self, method, path, params=None, signed=False):
+            Banned.calls += 1
+            raise RateLimitError(418, 0, "banned")
+
+    import backtest
+    saved = backtest.RATE_LIMIT_RETRIES
+    backtest.RATE_LIMIT_RETRIES = 0
+    try:
+        out = listing_times(Banned({}), [f"S{i}USDT" for i in range(40)], END_MS)
+    finally:
+        backtest.RATE_LIMIT_RETRIES = saved
+    assert Banned.calls == 1 and out == {}       # İlk yasakta durur, kalanlar için istek atmaz
+
+
+def test_compare_warning_ignores_room_filter(cfg, capsys, monkeypatch):
+    import binance_client
+    import main
+    monkeypatch.setattr(binance_client, "BinanceClient", lambda *a, **k: object())
+    monkeypatch.setattr(backtest, "prepare_backtest", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("dur")))
+    env = replace(cfg, strategy="swing", take_profit_pct=12.0, min_room_ratio=2.0)
+    main.run_backtest_cli(env, main.parse_args(["--backtest", "--strateji", "swing_pullback", "--strateji-karsilastir"]))
+    assert "MIN_ROOM_RATIO" not in capsys.readouterr().out
+    main.run_backtest_cli(env, main.parse_args(["--backtest", "--strateji", "swing_pullback", "--tara"]))
+    assert "MIN_ROOM_RATIO=2" in capsys.readouterr().out
