@@ -367,8 +367,12 @@ class _Series:
         return row
 
     def window(self, k: int, limit: int = KLINE_LIMIT) -> List[list]:
-        """k. mum kapandığı anda canlı botun göreceği veri: son (limit-1) kapanmış mum + sentetik açık mum."""
-        rows = [self._row(j) for j in range(max(0, k - (limit - 1) + 1), k + 1)]
+        """k. mum kapandığı anda canlı botun göreceği veri: son (limit-1) kapanmış mum + sentetik açık mum.
+
+        Binance gibi yalnızca var olan mumları verir: dönem içinde listelenen coinde ilk gerçek mumdan önceki
+        boş (sıfır fiyatlı) satırlar pencereye girmez, strateji canlıdaki gibi "veri az" der.
+        """
+        rows = [self._row(j) for j in range(max(0, self.first, k - (limit - 1) + 1), k + 1)]
         t_next = self.t0 + (k + 1) * self.step_ms
         p = self.c[k]
         rows.append([t_next, p, p, p, p, "0", t_next + self.step_ms - 1, "0", 0, "0", "0", "0"])
@@ -612,6 +616,18 @@ class _Simulator:
         change = (btc.c[k] - btc.o[j]) / btc.o[j] * 100
         return change > -cfg.btc_max_1h_drop_pct
 
+    def _listing_ok(self, s: _Series, t_close: int) -> bool:
+        """Canlı coin filtresi (DELIST_FILTER): MIN_LISTING_DAYS günlük mumu olmayan yeni coin alınmaz.
+
+        Yalnızca dönem içinde listelenen coinlerde (verisi dönem başından sonra başlayan) uygulanabilir; günlük mum
+        sayısı canlıdaki gibi listelendiği gün dahil sayılır.
+        """
+        cfg = self.cfg
+        if not cfg.delist_filter or cfg.min_listing_days <= 0 or s.first <= 0:
+            return True
+        listed_day = (s.t0 + s.first * s.step_ms) // DAY_MS
+        return t_close // DAY_MS - listed_day + 1 >= cfg.min_listing_days
+
     def _scan_and_enter(self, k: int, t_close: int) -> None:
         cfg = self.cfg
         capital = cfg.start_capital + self.realized
@@ -651,6 +667,9 @@ class _Simulator:
 
         signals = []
         for _, symbol in candidates[: self.strategy.candidate_limit]:
+            if not self._listing_ok(self.series[symbol], t_close):   # Canlıda da ön elemeden sonra elenir
+                self.stats["yeni_coin"] += 1
+                continue
             self.stats["analiz"] += 1
             signal = self._analyze(symbol, k, strict)
             if signal and cfg.min_signal_score > 0 and signal.score < cfg.min_signal_score:
@@ -764,15 +783,16 @@ def _base_notes(spread_pct: float, interval: str = INTERVAL) -> List[str]:
         "varsayıldı; zirve (izleyen stop) güncellemesi düşük taraf kontrolünden sonra yapıldı.",
         f"Sabit %{spread_pct:g} spread varsayıldı (alış +%{spread_pct / 2:g}, satış -%{spread_pct / 2:g}); "
         "kayma (slippage) ve emir defteri derinliği hesaba katılmadı.",
-        "Spread, delist ve pompa filtreleri, BTC çöküş çıkışı ve sinyal teyidi simüle edilmedi. Başabaş, "
-        "ATR filtresi, minimum sinyal puanı ve hedef alanı filtresi canlıdaki gibi uygulandı.",
+        "Spread, delist takvimi ve pompa filtreleri, BTC çöküş çıkışı ve sinyal teyidi simüle edilmedi. Başabaş, "
+        "ATR filtresi, minimum sinyal puanı, hedef alanı ve yeni listelenen coin filtresi (MIN_LISTING_DAYS) "
+        "canlıdaki gibi uygulandı.",
         "Piyasa rejimi filtresi yaklaşık simüle edildi: 'düşen coin oranı' canlıda tüm likit paritelerden, "
         "burada yalnızca test edilen sembollerden hesaplanır.",
         "Geçmiş performans gelecekteki sonuçları garanti etmez.",
     ]
     if interval != INTERVAL:
-        notes.insert(1, "Uzun dönem: bugünün en hacimli coinlerinden dönem başında henüz listelenmemiş olanlar, "
-                        "verileri başladığı andan itibaren teste girer.")
+        notes.insert(1, "Uzun dönem: bugünün en hacimli coinlerinden dönem içinde listelenenler, canlıdaki gibi "
+                        "yeterli geçmişleri oluşunca (swing için ~11 gün saatlik mum, MIN_LISTING_DAYS) teste girer.")
     return notes
 
 
@@ -1269,7 +1289,7 @@ def _strategy_flag(cfg, r: Optional[SweepRow] = None) -> str:
 
 
 def _exit_summary(cfg) -> str:
-    hold = fmt_duration(cfg.max_hold_minutes * 60) if cfg.max_hold_minutes > 0 else "sınırsız"
+    hold = fmt_duration(cfg.max_hold_minutes * 60, exact=True) if cfg.max_hold_minutes > 0 else "sınırsız"
     breakeven = (f"+%{cfg.breakeven_trigger_pct:g} → +%{cfg.breakeven_floor_pct:g}" if breakeven_effective(cfg)
                  else "kapalı/etkisiz")
     return (f"Kâr Al +%{cfg.take_profit_pct:g} | Zarar Kes -%{cfg.stop_loss_pct:g} | İzleyen stop "
@@ -1393,7 +1413,7 @@ def format_sweep_report(rows: Sequence[SweepRow], cfg, data: BacktestData, sprea
                          f"{data.days:g} --tara-giris{strat_flag}")
         if kind != "strateji" and cfg.strategy == "rebound":
             lines.append("   Trendin yönünde işlem yapan diğer stratejileri karşılaştırmak için: python main.py "
-                         f"--backtest --gun {data.days:g} --strateji-karsilastir")
+                         f"--backtest --gun {data.days:g} --strateji-karsilastir{strat_flag}")
         if not swing:
             lines.append("   Uzun vadeli (1 saatlik mum, 1-5 gün, %8-15 hedef) stratejileri 1 yıllık veriyle denemek için: "
                          "python main.py --backtest --gun 365 --strateji swing --strateji-karsilastir")
@@ -1605,7 +1625,7 @@ def format_backtest_report(result: BacktestResult, cfg) -> str:
     trailing = (f"+%{cfg.trailing_activation_pct:g} → zirvenin yarısı (en az +%{cfg.trailing_floor_pct:g})"
                 if cfg.trailing_dynamic else
                 f"+%{cfg.trailing_activation_pct:g} → +%{cfg.trailing_floor_pct:g}")
-    hold = f" | Maks. süre {fmt_duration(cfg.max_hold_minutes * 60)}" if cfg.max_hold_minutes > 0 else ""
+    hold = f" | Maks. süre {fmt_duration(cfg.max_hold_minutes * 60, exact=True)}" if cfg.max_hold_minutes > 0 else ""
     if not cfg.breakeven_enabled:
         breakeven = "kapalı"
     elif breakeven_effective(cfg):
@@ -1647,6 +1667,8 @@ def format_backtest_report(result: BacktestResult, cfg) -> str:
                          f"zayıf piyasada {weak} {st.get('rejim_zayif', 0)} mum")
         if st.get("alan_dar"):
             lines.append(f"📏 Hedef alanı dar olduğu için alınmayan sinyal: {st['alan_dar']}")
+        if st.get("yeni_coin"):
+            lines.append(f"🆕 Yeni listelendiği için (MIN_LISTING_DAYS) incelenmeyen aday: {st['yeni_coin']}")
 
     lines.append(LINE)
     if trades:

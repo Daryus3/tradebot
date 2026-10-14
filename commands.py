@@ -410,7 +410,7 @@ class CommandProcessor:
             f"↔️ Maks. spread: %{cfg.max_spread_pct:g} | 🌡️ Piyasa rejimi filtresi: {on(cfg.regime_filter)}\n"
             f"{esc(self.bot.fee_status_line())}\n"
             f"⏱️ Tarama: {cfg.scan_interval_sec} sn | Maks. tutma: "
-            f"{fmt_duration(cfg.max_hold_minutes * 60) if cfg.max_hold_minutes else 'sınırsız'}\n"
+            f"{fmt_duration(cfg.max_hold_minutes * 60, exact=True) if cfg.max_hold_minutes else 'sınırsız'}\n"
             "<i>Ayarlar bilgisayardaki .env dosyasından değiştirilir.</i>")
 
     # ------------------------------------------------------------ kontrol komutları

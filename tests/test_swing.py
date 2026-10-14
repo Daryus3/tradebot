@@ -346,3 +346,89 @@ def test_profile_keys_are_known_settings():
     from config import PROFILE_ATTRS
     assert set(SWING_EXIT_PROFILE) == set(PROFILE_ATTRS) and set(SWING_EXIT_PROFILE) <= set(SWEEP_FIELDS)
     assert all(SWEEP_FIELDS[k][0] == PROFILE_ATTRS[k] for k in SWING_EXIT_PROFILE)
+
+
+# ---------------------------------------------------------------- inceleme düzeltmeleri
+def test_live_does_not_chase_price_after_hourly_close(cfg):
+    rows = breakout_rows()
+    p = float(rows[-2][4])
+    chased = rows[:-1] + [k(rows[-1][0], p, p * 1.03, p, p * 1.02, vol=30_000)]   # Açık mum kapanıştan %2 yukarıda
+    assert SwingBreakoutStrategy(None, cfg).analyze("X", chased[-400:])[1] == "fiyat kaçtı"
+    rows = pullback_rows()
+    p = float(rows[-2][4])
+    chased = rows[:-1] + [k(rows[-1][0], p, p * 1.03, p, p * 1.02, vol=30_000)]
+    assert SwingPullbackStrategy(None, cfg).analyze("X", chased[-400:])[1] == "fiyat kaçtı"
+
+
+def _late_listing_series(listed_at):
+    """Coin dönemin ortasında listelenir (öncesinde mum yok); listelendikten ~200 saat sonra kırılım."""
+    rows = breakout_rows(n=128, t=START_MS + listed_at * H, p0=1.0)[:-1]
+    t, p = rows[-1][0] + H, float(rows[-1][4])
+    for _ in range(16):
+        o = p
+        p *= 1.01
+        rows.append(k(t, o, p * 1.002, o * 0.999, p))
+        t += H
+    while t < END_MS:
+        rows.append(k(t, p, p * 1.003, p * 0.997, p))
+        t += H
+    series = _swing_series()
+    series["ABCUSDT"] = rows
+    return series
+
+
+def test_backtest_never_feeds_pre_listing_bars_to_strategy(cfg, fake_client, tmp_path):
+    swing, _ = with_strategy(replace(cfg, delist_filter=False), "swing")
+    listed_at = 440                                    # Simülasyon 432'de başlar
+    data = _prepare(swing, HourClient(fake_client, _late_listing_series(listed_at)).client, tmp_path)
+    s = data.series["ABCUSDT"]
+    assert s.first == listed_at
+    window = s.window(listed_at + 30, 400)
+    assert len(window) == 32 and float(window[0][4]) > 0       # Yalnızca gerçek mumlar + açık mum
+    # Kırılım listelendikten ~200 saat sonra: canlıda 260 saatlik geçmiş olmadığı için "veri az" → işlem yok
+    assert simulate(swing, data).trades == []
+
+
+def test_backtest_applies_listing_age_filter(cfg, fake_client, tmp_path):
+    from backtest import _Simulator
+    swing, _ = with_strategy(cfg, "swing")
+    data = _prepare(swing, HourClient(fake_client, _late_listing_series(440)).client, tmp_path)
+    sim = _Simulator(swing, data.series, data.btc, data.min_notional, 0.05, None)
+    s = data.series["ABCUSDT"]
+    listed = s.t0 + s.first * H
+    day = 24 * H
+    assert not sim._listing_ok(s, listed // day * day + 12 * day)             # 13. gün: 13 günlük mum
+    assert sim._listing_ok(s, listed // day * day + 13 * day)                 # 14. gün
+    assert _Simulator(replace(swing, delist_filter=False), data.series, data.btc, 5, 0.05, None)._listing_ok(s, listed)
+    result = simulate(swing, data)
+    assert result.stats.get("yeni_coin", 0) > 0
+
+
+def test_notes_flag_short_term_entry_filters_for_swing(cfg):
+    from config import short_entry_filters
+    pb = replace(cfg, strategy="swing_pullback", min_room_ratio=1.0, min_signal_score=25.0, max_24h_gain_pct=6.0)
+    found = " ".join(short_entry_filters(pb))
+    assert "MIN_SIGNAL_SCORE=25" in found and "MIN_ROOM_RATIO=1" in found and "MAX_24H_GAIN_PCT=6" in found
+    assert any("giriş filtreleri" in n for n in _setting_notes(pb))
+    assert short_entry_filters(replace(pb, strategy="swing", min_signal_score=0, max_24h_gain_pct=25)) == []
+    assert not any("giriş filtreleri" in n for n in _setting_notes(replace(pb, strategy="rebound")))
+    full = next(n for n in _setting_notes(replace(cfg, strategy="swing", take_profit_pct=5)) if "Önerilen" in n)
+    assert "MIN_SIGNAL_SCORE=0" in full and "MIN_ROOM_RATIO=0" in full
+
+
+def test_configured_hold_is_shown_exactly():
+    assert fmt_duration(1530 * 60, exact=True) == "1 gün 1 sa 30 dk"
+    assert fmt_duration(7200 * 60, exact=True) == "5 gün"
+    assert fmt_duration(90 * 60, exact=True) == "1 sa 30 dk"
+
+
+def test_rebound_suggestion_keeps_strategy_family(cfg):
+    from backtest import BacktestData, SweepRow, format_sweep_report
+    data = BacktestData(series={}, btc=None, regime=None, min_notional=5, start_ms=0, end_ms=10 * 86_400_000,
+                        n=2880, k_start=288, days=9, notes=[])
+    st = {"TAKE_PROFIT_PCT": 3.0, "STOP_LOSS_PCT": 2.0, "TRAILING_ACTIVATION_PCT": 2.0, "TRAILING_FLOOR_PCT": 1.0,
+          "MAX_HOLD_MINUTES": 120, "MIN_ROOM_RATIO": 0.0}
+    rows = [SweepRow(st, True, 100, 40, -2, -0.3, 9, -1, -1, 0.7, se_net_pct=0.1)]
+    text = format_sweep_report(rows, replace(cfg, strategy="rebound"), data)
+    assert "--strateji-karsilastir --strateji rebound" in text
+    assert "--strateji swing --strateji-karsilastir" in text      # 5 dk başarısızsa uzun vade önerilir

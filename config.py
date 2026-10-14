@@ -517,8 +517,12 @@ def _setting_notes(cfg: Config) -> List[str]:
         if short:
             notes.append(f"STRATEGY={cfg.strategy} 1 saatlik mumlarla 1-5 gün süren işlemler içindir ama çıkış "
                          f"ayarlarınız kısa vadeli: {', '.join(short)}. Bu ayarlar işlemleri hareket başlamadan "
-                         f"kapatır. Önerilen: " + " ".join(f"{k}={v:g}" for k, v in SWING_EXIT_PROFILE.items()
-                                                          if k not in ("MIN_SIGNAL_SCORE", "MIN_ROOM_RATIO")))
+                         f"kapatır. Önerilen: " + " ".join(f"{k}={v:g}" for k, v in SWING_EXIT_PROFILE.items()))
+        filters = short_entry_filters(cfg)
+        if filters:
+            notes.append(f"STRATEGY={cfg.strategy} ile şu giriş filtreleri büyük olasılıkla 5 dk stratejisi için "
+                         f"ayarlanmış: {'; '.join(filters)}. Backtest'teki --strateji {cfg.strategy} testi "
+                         f"MIN_SIGNAL_SCORE=0 ve MIN_ROOM_RATIO=0 ile yapılır.")
     if cfg.regime_skip_weak and not cfg.regime_filter:
         notes.append("REGIME_SKIP_WEAK=true yalnızca REGIME_FILTER=true iken çalışır; şu an etkisi yok.")
     if cfg.breakeven_enabled:
@@ -543,6 +547,20 @@ def short_exit_settings(cfg) -> List[str]:
         out.append(f"TRAILING_ACTIVATION_PCT={cfg.trailing_activation_pct:g}")
     if cfg.breakeven_enabled and cfg.breakeven_trigger_pct < 3:
         out.append(f"BREAKEVEN_TRIGGER_PCT={cfg.breakeven_trigger_pct:g}")
+    return out
+
+
+def short_entry_filters(cfg) -> List[str]:
+    """Uzun vadeli stratejide 5 dk stratejisinden kalmış görünen giriş filtreleri (boş liste = sorun yok)."""
+    out: List[str] = []
+    if cfg.min_signal_score > 0:
+        out.append(f"MIN_SIGNAL_SCORE={cfg.min_signal_score:g} (puan ölçeği stratejiye özeldir)")
+    if cfg.strategy == "swing_pullback" and cfg.min_room_ratio > 0:
+        out.append(f"MIN_ROOM_RATIO={cfg.min_room_ratio:g} (zirveye kalan alan en fazla geri çekilme kadardır, "
+                   f"SWING_PULLBACK_MAX_PCT={cfg.swing_pullback_max_pct:g}; Kâr Al'a göre dar kalır ve sinyallerin "
+                   f"çoğu elenir)")
+    if cfg.max_24h_gain_pct < 15:
+        out.append(f"MAX_24H_GAIN_PCT={cfg.max_24h_gain_pct:g} (24 saatte bundan fazla yükselen kırılımlar alınmaz)")
     return out
 
 

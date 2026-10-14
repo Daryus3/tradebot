@@ -84,6 +84,9 @@ SWING_MAX_RSI = 78.0
 SWING_MAX_BARS_SINCE_LOW = 12    # swing_pullback: dönüş en fazla 12 saat önceki dipten başlamış olmalı
 SWING_MAX_RETRACE = 0.6          # swing_pullback: geri çekilmenin en fazla %60'ı geri alınmış olmalı (yukarıda yer kalsın)
 SWING_DIP_RSI = 45.0             # swing_pullback: geri çekilmede RSI bunun altını görmüş olmalı
+# Canlı bot saatlik mum kapandıktan sonraki bir saat boyunca her taramada aynı sinyali görür; fiyat kapanıştan bu
+# kadar yükseldiyse kovalamaz (backtest kapanış fiyatından alır, canlı giriş de ona yakın olsun)
+SWING_MAX_CHASE_PCT = 1.0
 SWING_CANDIDATE_FACTOR = 3       # Saatlik mumda sinyal yavaş değişir: her taramada MAX_CANDIDATES'in 3 katı aday incelenir
 # MIN_ATR_PCT / MAX_ATR_PCT 5 dk mum içindir. Oynaklık sürenin kareköküyle büyüdüğünden saatlik muma √12 ile
 # ölçeklenir (örn. %0.25 → %0.87, %4 → %13.9).
@@ -662,6 +665,10 @@ class _SwingBase(_TrendBase):
         return self.cfg.max_candidates * SWING_CANDIDATE_FACTOR
 
     @staticmethod
+    def _chased(last: Kline, price: float) -> bool:
+        return last.close > 0 and price > last.close * (1 + SWING_MAX_CHASE_PCT / 100)
+
+    @staticmethod
     def _uptrend(closes: List[float], price: float):
         """Çok günlük yükseliş trendi: (ema50, ema200, elenme_nedeni_veya_boş)."""
         e50, e200 = ema(closes, 50), ema(closes, 200)
@@ -703,6 +710,8 @@ class SwingBreakoutStrategy(_SwingBase):
             return None, "son mum kırmızı"
         if price < prior_high * 0.995:
             return None, "kırılım geri döndü"
+        if self._chased(last, price):
+            return None, "fiyat kaçtı"
         breakout_pct = (last.close / prior_high - 1) * 100
 
         # 2) Çok günlük yükseliş trendi ve 7 günlük momentum
@@ -781,6 +790,8 @@ class SwingPullbackStrategy(_SwingBase):
             return None, "geri çekilme sürüyor"
         if bars_since_low > SWING_MAX_BARS_SINCE_LOW:
             return None, "dip eski"
+        if self._chased(last, price):
+            return None, "fiyat kaçtı"
         retrace = (price - pull_low) / (recent_high - pull_low)
         if retrace > SWING_MAX_RETRACE:
             return None, "toparlanma bitmiş"
