@@ -220,6 +220,9 @@ class HourClient:
 
             def _request(inner, method, path, params=None, signed=False):
                 inner.intervals.append(params["interval"])
+                if params["startTime"] == 0:   # Listelenme günü: series'in ilk mumu (yoksa çok eski)
+                    first = inner.listed.get(params["symbol"], 1_500_000_000_000)
+                    return [[first, "1", "1", "1", "1", "0", first + 24 * H - 1, "0", 0, "0", "0", "0"]]
                 rows = series[params["symbol"]]
                 if params["interval"] != "1h":
                     rows = aggregate(rows, {"4h": 4 * H, "1d": 24 * H}[params["interval"]])
@@ -227,6 +230,7 @@ class HourClient:
                 return out[: params["limit"]]
         self.client = C({s: 1.0 for s in series})
         self.client.intervals = []
+        self.client.listed = {}
 
 
 def _swing_series():
@@ -390,30 +394,68 @@ def test_backtest_never_feeds_pre_listing_bars_to_strategy(cfg, fake_client, tmp
 
 
 def test_backtest_applies_listing_age_filter(cfg, fake_client, tmp_path):
-    from backtest import _Simulator
+    from backtest import LISTING_CACHE_FILE, _Simulator, listing_times
     swing, _ = with_strategy(cfg, "swing")
-    data = _prepare(swing, HourClient(fake_client, _late_listing_series(440)).client, tmp_path)
-    sim = _Simulator(swing, data.series, data.btc, data.min_notional, 0.05, None)
+    hc = HourClient(fake_client, _late_listing_series(440))
+    listed = START_MS + 440 * H
+    hc.client.listed = {"ABCUSDT": listed}
+    data = _prepare(swing, hc.client, tmp_path)
     s = data.series["ABCUSDT"]
-    listed = s.t0 + s.first * H
+    assert s.listed_ms == listed
+    sim = _Simulator(swing, data.series, data.btc, data.min_notional, 0.05, None)
     day = 24 * H
     assert not sim._listing_ok(s, listed // day * day + 12 * day)             # 13. gün: 13 günlük mum
     assert sim._listing_ok(s, listed // day * day + 13 * day)                 # 14. gün
     assert _Simulator(replace(swing, delist_filter=False), data.series, data.btc, 5, 0.05, None)._listing_ok(s, listed)
+    assert simulate(swing, data).stats.get("yeni_coin", 0) > 0
+    # Listelenme günü kalıcı önbellekte: ikinci hazırlıkta yeniden sorulmaz
+    assert (tmp_path / "c" / LISTING_CACHE_FILE).exists()
+    hc.client.listed = {}
+    assert listing_times(hc.client, ["ABCUSDT"], END_MS, tmp_path / "c") == {"ABCUSDT": listed}
+
+
+def test_listing_filter_uses_real_listing_day_not_data_gaps(cfg, fake_client, tmp_path):
+    """Eski bir coinin verisi dönem başında eksikse (işlem durması) yeni coin sayılmaz; dönemden kısa süre önce
+    listelenen coin ise verisi dönem başından başlasa da canlıdaki gibi elenir."""
+    swing, _ = with_strategy(cfg, "swing")
+    series = _swing_series()
+    series["ABCUSDT"] = series["ABCUSDT"][5:]          # İlk 5 saat yok (durma), ama coin yıllardır listede
+    hc = HourClient(fake_client, series)
+    data = _prepare(swing, hc.client, tmp_path)
+    assert data.series["ABCUSDT"].first == 5
     result = simulate(swing, data)
-    assert result.stats.get("yeni_coin", 0) > 0
+    assert result.trades and not result.stats.get("yeni_coin")
+
+    fresh = HourClient(fake_client, _swing_series())
+    fresh.client.listed = {"ABCUSDT": END_MS - (DAYS + 2) * 24 * H}   # Simülasyon başlamadan ~2 gün önce
+    data = _prepare(swing, fresh.client, tmp_path / "x")
+    assert data.series["ABCUSDT"].first == 0
+    assert simulate(swing, data).stats.get("yeni_coin", 0) > 0
 
 
-def test_notes_flag_short_term_entry_filters_for_swing(cfg):
+def test_notes_flag_only_entry_filters_that_block_swing(cfg):
     from config import short_entry_filters
-    pb = replace(cfg, strategy="swing_pullback", min_room_ratio=1.0, min_signal_score=25.0, max_24h_gain_pct=6.0)
+    pb = replace(cfg, strategy="swing_pullback", take_profit_pct=12.0, min_room_ratio=1.2, max_24h_gain_pct=6.0,
+                 min_signal_score=25.0)
     found = " ".join(short_entry_filters(pb))
-    assert "MIN_SIGNAL_SCORE=25" in found and "MIN_ROOM_RATIO=1" in found and "MAX_24H_GAIN_PCT=6" in found
-    assert any("giriş filtreleri" in n for n in _setting_notes(pb))
-    assert short_entry_filters(replace(pb, strategy="swing", min_signal_score=0, max_24h_gain_pct=25)) == []
-    assert not any("giriş filtreleri" in n for n in _setting_notes(replace(pb, strategy="rebound")))
+    assert "MIN_ROOM_RATIO=1.2" in found and "hiç alım yapamaz" in found and "MAX_24H_GAIN_PCT=6" in found
+    assert "MIN_SIGNAL_SCORE" not in found               # Swing --tara-giris de önerebilir: uyarılmaz
+    assert any("gereksiz yere eleyebilir" in n for n in _setting_notes(pb))
+    # swing --tara-giris'in önerebileceği değerler (alan 0.5 / 1, puan eşiği) uyarı üretmez
+    assert short_entry_filters(replace(pb, min_room_ratio=1.0, max_24h_gain_pct=25.0)) == []
+    assert short_entry_filters(replace(pb, strategy="swing", max_24h_gain_pct=25.0)) == []
+    assert not any("eleyebilir" in n for n in _setting_notes(replace(pb, strategy="rebound")))
     full = next(n for n in _setting_notes(replace(cfg, strategy="swing", take_profit_pct=5)) if "Önerilen" in n)
-    assert "MIN_SIGNAL_SCORE=0" in full and "MIN_ROOM_RATIO=0" in full
+    assert "MIN_SIGNAL_SCORE=0" in full and "MIN_ROOM_RATIO=0" in full and "MAX_24H_GAIN_PCT=25" in full
+
+
+def test_profile_widens_5m_gain_cap_but_keeps_wider_one(cfg):
+    narrow, _ = with_strategy(replace(cfg, strategy="trend", max_24h_gain_pct=6.0), "swing")
+    wide, _ = with_strategy(replace(cfg, strategy="trend", max_24h_gain_pct=40.0), "swing")
+    assert narrow.max_24h_gain_pct == 25.0 and wide.max_24h_gain_pct == 40.0
+    from backtest import SweepRow, _advice_lines
+    row = SweepRow({"STRATEGY": "swing", "MIN_SIGNAL_SCORE": 0.0, "MIN_ROOM_RATIO": 0.0}, True, 50, 50, 1, 1, 1, 1, 1, 1)
+    assert "MAX_24H_GAIN_PCT=25" in _advice_lines(narrow, row)
 
 
 def test_configured_hold_is_shown_exactly():

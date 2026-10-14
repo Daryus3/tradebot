@@ -210,9 +210,9 @@ def _write_cache(path: Path, symbol: str, start_ms: int, end_ms: int, rows: List
 
 
 def _request_klines(client, symbol: str, start_ms: int, end_ms: int, progress: Progress,
-                    interval: str = INTERVAL) -> list:
+                    interval: str = INTERVAL, limit: int = PAGE_LIMIT) -> list:
     params = {"symbol": symbol, "interval": interval, "startTime": start_ms,
-              "endTime": end_ms - 1, "limit": PAGE_LIMIT}
+              "endTime": end_ms - 1, "limit": limit}
     for attempt in range(RATE_LIMIT_RETRIES + 1):
         try:
             return client._request("GET", "/api/v3/klines", params) or []
@@ -263,6 +263,54 @@ def load_klines(client, symbol: str, start_ms: int, end_ms: int,
     return rows, False
 
 
+LISTING_CACHE_FILE = "listing_times.json"
+
+
+def listing_times(client, symbols: Sequence[str], end_ms: int, cache_dir: Optional[Union[str, Path]] = None,
+                  progress: Progress = None) -> Dict[str, Optional[int]]:
+    """Her sembolün Binance'teki ilk günlük mumunun açılış zamanı (≈ listelenme günü, ms).
+
+    Canlı coin filtresi (MIN_LISTING_DAYS) listelenmeden bu yana geçen günlük mum sayısına bakar; backtest'te de
+    aynısı için gerekir. İndirilen dönemin başından bağımsızdır (dönemden kısa süre önce listelenen veya dönem başında
+    işlemi kısa süre durmuş coinler de doğru değerlendirilir). Değişmediği için kalıcı olarak önbelleklenir; alınamazsa
+    None (canlıdaki gibi filtre o coin için uygulanmaz).
+    """
+    path = Path(cache_dir) / LISTING_CACHE_FILE if cache_dir else None
+    known: Dict[str, int] = {}
+    if path is not None and path.exists():
+        try:
+            with path.open("r", encoding="utf-8") as fh:
+                known = {str(k): int(v) for k, v in json.load(fh).items()}
+        except (OSError, ValueError, TypeError, AttributeError):
+            known = {}
+    out: Dict[str, Optional[int]] = {}
+    fetched = False
+    for sym in symbols:
+        if sym in known:
+            out[sym] = known[sym]
+            continue
+        try:
+            rows = _request_klines(client, sym, 0, end_ms, progress, interval="1d", limit=1)
+        except Exception:  # noqa: BLE001 - listelenme günü alınamazsa filtre uygulanmaz (fail-open)
+            rows = []
+        if REQUEST_PAUSE_SEC > 0:
+            time.sleep(REQUEST_PAUSE_SEC)
+        out[sym] = int(rows[0][0]) if rows else None
+        if rows:
+            known[sym] = out[sym]
+            fetched = True
+    if fetched and path is not None:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            with tmp.open("w", encoding="utf-8") as fh:
+                json.dump(known, fh)
+            os.replace(tmp, path)
+        except OSError:
+            pass
+    return out
+
+
 # ================================================================ hizalanmış seri
 class _Series:
     """Bir sembolün ortak zaman çizelgesine (5 dk veya 1 saat) hizalanmış mumları.
@@ -304,6 +352,7 @@ class _Series:
         # (MIN/MAX_24H_DROP_PCT) simülasyonda uygulanır ki giriş taraması onu da değiştirebilsin.
         self.change24: List[Optional[float]] = [None] * n
         self._raw: Dict[int, list] = {}
+        self.listed_ms: Optional[int] = None   # Binance'teki ilk günlük mum (yeni coin filtresi için)
 
     def has(self, k: int) -> bool:
         return self.first >= 0 and self.first <= k <= self.last
@@ -619,14 +668,13 @@ class _Simulator:
     def _listing_ok(self, s: _Series, t_close: int) -> bool:
         """Canlı coin filtresi (DELIST_FILTER): MIN_LISTING_DAYS günlük mumu olmayan yeni coin alınmaz.
 
-        Yalnızca dönem içinde listelenen coinlerde (verisi dönem başından sonra başlayan) uygulanabilir; günlük mum
-        sayısı canlıdaki gibi listelendiği gün dahil sayılır.
+        Günlük mum sayısı canlıdaki gibi listelendiği gün (ve bugün) dahil sayılır. Listelenme günü bilinmiyorsa
+        (alınamadı) canlıdaki gibi filtre uygulanmaz.
         """
         cfg = self.cfg
-        if not cfg.delist_filter or cfg.min_listing_days <= 0 or s.first <= 0:
+        if not cfg.delist_filter or cfg.min_listing_days <= 0 or s.listed_ms is None:
             return True
-        listed_day = (s.t0 + s.first * s.step_ms) // DAY_MS
-        return t_close // DAY_MS - listed_day + 1 >= cfg.min_listing_days
+        return t_close // DAY_MS - s.listed_ms // DAY_MS + 1 >= cfg.min_listing_days
 
     def _scan_and_enter(self, k: int, t_close: int) -> None:
         cfg = self.cfg
@@ -784,8 +832,8 @@ def _base_notes(spread_pct: float, interval: str = INTERVAL) -> List[str]:
         f"Sabit %{spread_pct:g} spread varsayıldı (alış +%{spread_pct / 2:g}, satış -%{spread_pct / 2:g}); "
         "kayma (slippage) ve emir defteri derinliği hesaba katılmadı.",
         "Spread, delist takvimi ve pompa filtreleri, BTC çöküş çıkışı ve sinyal teyidi simüle edilmedi. Başabaş, "
-        "ATR filtresi, minimum sinyal puanı, hedef alanı ve yeni listelenen coin filtresi (MIN_LISTING_DAYS) "
-        "canlıdaki gibi uygulandı.",
+        "ATR filtresi, minimum sinyal puanı, hedef alanı ve yeni listelenen coin filtresi (MIN_LISTING_DAYS, "
+        "listelenme günü Binance'in ilk günlük mumundan) canlıdaki gibi uygulandı.",
         "Piyasa rejimi filtresi yaklaşık simüle edildi: 'düşen coin oranı' canlıda tüm likit paritelerden, "
         "burada yalnızca test edilen sembollerden hesaplanır.",
         "Geçmiş performans gelecekteki sonuçları garanti etmez.",
@@ -896,6 +944,13 @@ def prepare_backtest(cfg, client, days: float = 30, max_symbols: int = 40,
             series[sym] = s
     if not series:
         raise BacktestError("Hiç mum verisi indirilemedi (internet bağlantısını kontrol edin)")
+    if cfg.delist_filter and cfg.min_listing_days > 0:   # Yeni coin filtresi için listelenme günleri
+        listed = listing_times(client, list(series), end_ms, cache_dir, say)
+        for sym, s in series.items():
+            s.listed_ms = listed.get(sym)
+        unknown = [sym for sym in series if listed.get(sym) is None]
+        if unknown:
+            notes.append(f"Listelenme günü alınamayan sembollerde yeni coin filtresi uygulanmadı: {', '.join(unknown)}")
     btc: Optional[_Series] = None
     if btc_symbol:
         btc = series.get(btc_symbol)

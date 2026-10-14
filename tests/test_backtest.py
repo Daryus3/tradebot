@@ -16,6 +16,7 @@ START_MS = END_MS - 84 * HOUR_MS          # (2 + 1.5 gün ısınma) × 24 saat
 N_BARS = (END_MS - START_MS) // INTERVAL_MS
 SIM_START = N_BARS - DAYS * 288           # Simülasyonun başladığı mum
 DIP_AT = 600                              # Düşüşün başladığı mum (simülasyon içinde)
+LONG_AGO_MS = 1_500_000_000_000           # Sahte istemcide coinlerin listelenme anı (yeni coin filtresine takılmaz)
 
 
 # ---------------------------------------------------------------- sentetik veri
@@ -100,6 +101,7 @@ def make_client(fake_client):
             self.series = series
             self.volumes = volumes or {}
             self.kline_calls = 0
+            self.listed = {}          # sembol → listelenme anı (ms); yoksa LONG_AGO_MS
 
         def tickers_24h(self):
             return [{"symbol": s, "quoteVolume": str(self.volumes.get(s, 5_000_000))} for s in self.prices]
@@ -107,6 +109,9 @@ def make_client(fake_client):
         def _request(self, method, path, params=None, signed=False):
             assert method == "GET" and path == "/api/v3/klines"
             self.kline_calls += 1
+            if params["startTime"] == 0:   # Listelenme günü sorgusu: varsayılan olarak çok eski coin
+                listed = self.listed.get(params["symbol"], LONG_AGO_MS)
+                return [[listed, "1", "1", "1", "1", "0", listed + 86_399_999, "0", 0, "0", "0", "0"]]
             rows = self.series[params["symbol"]]
             if params["interval"] != "5m":   # 4s / 1g: 5 dk mumlardan birleştir (piyasa rejimi için)
                 rows = aggregate(rows, {"4h": 4 * HOUR_MS, "1d": 24 * HOUR_MS}[params["interval"]])
@@ -254,7 +259,7 @@ def test_second_run_uses_cache(cfg, make_client, tmp_path):
     series = {"ABCUSDT": scenario(lambda p: trend(p, 1.03, 8)), "BTCUSDT": btc_flat()}
     first = make_client(series)
     r1 = run(cfg, first, tmp_path)
-    assert first.kline_calls == 6  # 1008 mum → sembol başına 2 sayfa (1000 + 8) + BTC 4s ve 1g (rejim)
+    assert first.kline_calls == 7  # 1008 mum → sembol başına 2 sayfa (1000 + 8) + BTC 4s ve 1g (rejim) + listelenme günü
     assert cache_path(tmp_path / "cache", "ABCUSDT", START_MS, END_MS).exists()
 
     second = make_client(series)
@@ -294,7 +299,7 @@ def test_auto_symbol_selection_includes_btc_for_filter(cfg, make_client, tmp_pat
                          volumes={"ABCUSDT": 5_000_000, "BTCUSDT": 9_000_000_000})
     result = run(cfg, client, tmp_path, symbols=None, max_symbols=1)
     assert result.symbols_used == ["BTCUSDT"]  # En hacimli tek parite
-    assert client.kline_calls == 4             # BTC 5 dk ayrıca indirilmedi (+ rejim için BTC 4s ve 1g)
+    assert client.kline_calls == 5             # BTC 5 dk ayrıca indirilmedi (+ rejim için BTC 4s ve 1g + listelenme günü)
     assert result.trades == []
 
 

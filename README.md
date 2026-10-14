@@ -302,9 +302,11 @@ BREAKEVEN_TRIGGER_PCT=5
 BREAKEVEN_FLOOR_PCT=1
 MIN_SIGNAL_SCORE=0
 MIN_ROOM_RATIO=0
+MAX_24H_GAIN_PCT=25
 ```
 (`BACKUP_STOP_PCT`, `STOP_LOSS_PCT`'den büyük olmalı; varsayılan 12 uygundur.) Bot `swing` ile kısa vadeli
-çıkışları veya 5 dk'ya göre ayarlanmış puan / alan / `MAX_24H_GAIN_PCT` filtrelerini birlikte görürse açılışta uyarır. Backtest'te `.env`'de hâlâ 5 dk
+çıkışları veya alımı engelleyen filtreleri (5 dk taramasından kalma `MAX_24H_GAIN_PCT=6/12`, `swing_pullback`'te
+ulaşılamaz `MIN_ROOM_RATIO`) birlikte görürse açılışta uyarır. Backtest'te `.env`'de hâlâ 5 dk
 stratejisi varken `--strateji swing` yazarsanız test bu önerilen çıkışlarla yapılır (ekranda yazar).
 
 **Önce 1 yıllık veriyle backtest edin** (5 dk testlerinin aksine birkaç dakikada biter; ~40 coin × 9.000 saatlik mum):
@@ -315,8 +317,9 @@ python main.py --backtest --strateji swing --tara                   # TP 8/12/15
 python main.py --backtest --strateji swing --tara-giris             # Zirve penceresi 48/72/168 saat, rejim, puan
 python main.py --backtest --strateji swing --bitis 2025-10-14       # Önceki (çakışmayan) 1 yılda doğrulama
 ```
-Swing stratejilerinde `--gun` verilmezse 365 gün kullanılır. Dönem içinde listelenen coinler canlıdaki gibi
-yeterli geçmişleri (~11 gün saatlik mum ve `MIN_LISTING_DAYS`) oluşunca teste girer. 30'dan az işlem
+Swing stratejilerinde `--gun` verilmezse 365 gün kullanılır. Yeni listelenen coinler canlıdaki gibi yeterli
+geçmişleri (~11 gün saatlik mum) oluşunca ve `MIN_LISTING_DAYS` (listelenme günü Binance'in ilk günlük mumundan
+alınır) dolunca teste girer. 30'dan az işlem
 çıkan sonuç şanstan ayırt edilemez. 5 dk ve 1 saatlik stratejiler farklı veriyle çalıştığından
 `--strateji-karsilastir` yalnızca aynı vadedekileri karşılaştırır.
 

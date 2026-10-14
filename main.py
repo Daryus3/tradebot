@@ -234,7 +234,7 @@ def run_backtest_cli(cfg, args) -> int:
 
     import backtest
     from binance_client import BinanceClient
-    from config import SWING_EXIT_PROFILE, with_strategy
+    from config import PROFILE_ATTRS, SWING_EXIT_PROFILE, short_entry_filters, with_strategy
 
     if args.sermaye is not None:
         if args.sermaye <= 0:
@@ -247,10 +247,12 @@ def run_backtest_cli(cfg, args) -> int:
         if profile:
             print(f"ℹ️ .env'deki çıkış ayarları 5 dk stratejisi ({env_strategy}) içindir; {cfg.strategy} 1-5 gün "
                   f"süren işlemler için önerilen çıkışlarla deneniyor:")
-            print("   " + " ".join(f"{k}={v:g}" for k, v in SWING_EXIT_PROFILE.items()))
+            print("   " + " ".join(f"{k}={getattr(cfg, PROFILE_ATTRS[k]):g}" for k in SWING_EXIT_PROFILE))
             print(f"   Kendi çıkış ayarlarınızla denemek için .env'de STRATEGY={cfg.strategy} yazıp çıkışları "
                   f"değiştirin.")
-        elif is_long_horizon(env_strategy) and not is_long_horizon(cfg.strategy):
+        if is_long_horizon(cfg.strategy) and short_entry_filters(cfg):
+            print("⚠️ Bu test şu giriş filtreleriyle yapılıyor: " + "; ".join(short_entry_filters(cfg)))
+        if is_long_horizon(env_strategy) and not is_long_horizon(cfg.strategy):
             print(f"⚠️ .env'deki çıkış ayarları uzun vadeli strateji ({env_strategy}) içindir; {cfg.strategy} "
                   f"(5 dk) bu çıkışlarla deneniyor.")
     days = args.gun if args.gun is not None else (365 if is_long_horizon(cfg.strategy) else 30)

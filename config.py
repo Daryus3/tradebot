@@ -66,9 +66,9 @@ class ConfigError(Exception):
 STRATEGY_NAMES = ("rebound", "trend", "breakout", "swing", "swing_pullback")
 LONG_HORIZON_STRATEGIES = frozenset({"swing", "swing_pullback"})
 
-# Uzun vadeli (swing) stratejiler için önerilen çıkış ayarları (.env anahtarı → değer). 5 dk stratejilerine göre
-# ayarlanmış çıkışlar (örn. 4 saatlik maks. süre, +%1 başabaş) swing işlemlerini daha başlamadan kapatır.
-# Backtest'te .env'deki 5 dk stratejisinden --strateji ile swing'e geçilince bunlar kullanılır.
+# Uzun vadeli (swing) stratejiler için önerilen çıkış ayarları ve stratejiye özel giriş eşikleri (.env anahtarı →
+# değer). 5 dk stratejilerine göre ayarlanmış çıkışlar (örn. 4 saatlik maks. süre, +%1 başabaş) swing işlemlerini
+# daha başlamadan kapatır. Backtest'te .env'deki 5 dk stratejisinden --strateji ile swing'e geçilince bunlar kullanılır.
 SWING_EXIT_PROFILE = {
     "TAKE_PROFIT_PCT": 12.0,
     "STOP_LOSS_PCT": 6.0,
@@ -79,13 +79,14 @@ SWING_EXIT_PROFILE = {
     "BREAKEVEN_FLOOR_PCT": 1.0,
     "MIN_SIGNAL_SCORE": 0.0,           # Puan ölçeği stratejiye özeldir: 5 dk stratejisi için seçilen eşik uymaz
     "MIN_ROOM_RATIO": 0.0,
+    "MAX_24H_GAIN_PCT": 25.0,          # En az bu (5 dk trend/breakout taraması 12 / 6 önerebilir; kırılımları eler)
 }
 PROFILE_ATTRS = {
     "TAKE_PROFIT_PCT": "take_profit_pct", "STOP_LOSS_PCT": "stop_loss_pct",
     "TRAILING_ACTIVATION_PCT": "trailing_activation_pct", "TRAILING_FLOOR_PCT": "trailing_floor_pct",
     "MAX_HOLD_MINUTES": "max_hold_minutes", "BREAKEVEN_TRIGGER_PCT": "breakeven_trigger_pct",
     "BREAKEVEN_FLOOR_PCT": "breakeven_floor_pct", "MIN_SIGNAL_SCORE": "min_signal_score",
-    "MIN_ROOM_RATIO": "min_room_ratio",
+    "MIN_ROOM_RATIO": "min_room_ratio", "MAX_24H_GAIN_PCT": "max_24h_gain_pct",
 }
 
 
@@ -520,9 +521,8 @@ def _setting_notes(cfg: Config) -> List[str]:
                          f"kapatır. Önerilen: " + " ".join(f"{k}={v:g}" for k, v in SWING_EXIT_PROFILE.items()))
         filters = short_entry_filters(cfg)
         if filters:
-            notes.append(f"STRATEGY={cfg.strategy} ile şu giriş filtreleri büyük olasılıkla 5 dk stratejisi için "
-                         f"ayarlanmış: {'; '.join(filters)}. Backtest'teki --strateji {cfg.strategy} testi "
-                         f"MIN_SIGNAL_SCORE=0 ve MIN_ROOM_RATIO=0 ile yapılır.")
+            notes.append(f"STRATEGY={cfg.strategy} ile şu giriş filtreleri sinyalleri gereksiz yere eleyebilir: "
+                         f"{'; '.join(filters)}.")
     if cfg.regime_skip_weak and not cfg.regime_filter:
         notes.append("REGIME_SKIP_WEAK=true yalnızca REGIME_FILTER=true iken çalışır; şu an etkisi yok.")
     if cfg.breakeven_enabled:
@@ -551,16 +551,20 @@ def short_exit_settings(cfg) -> List[str]:
 
 
 def short_entry_filters(cfg) -> List[str]:
-    """Uzun vadeli stratejide 5 dk stratejisinden kalmış görünen giriş filtreleri (boş liste = sorun yok)."""
+    """Uzun vadeli stratejide sinyalleri gereksiz yere eleyen (çoğu zaman 5 dk stratejisinden kalmış) giriş filtreleri.
+
+    Yalnızca kesin sorunlar: MIN_SIGNAL_SCORE gibi swing taramasının da önerebileceği değerler uyarılmaz.
+    """
     out: List[str] = []
-    if cfg.min_signal_score > 0:
-        out.append(f"MIN_SIGNAL_SCORE={cfg.min_signal_score:g} (puan ölçeği stratejiye özeldir)")
     if cfg.strategy == "swing_pullback" and cfg.min_room_ratio > 0:
-        out.append(f"MIN_ROOM_RATIO={cfg.min_room_ratio:g} (zirveye kalan alan en fazla geri çekilme kadardır, "
-                   f"SWING_PULLBACK_MAX_PCT={cfg.swing_pullback_max_pct:g}; Kâr Al'a göre dar kalır ve sinyallerin "
-                   f"çoğu elenir)")
+        need = ((1 + cfg.take_profit_pct / 100) / (1 - cfg.fee_rate) ** 2 - 1) * 100   # strategy.required_move_pct
+        max_room = cfg.swing_pullback_max_pct / (100 - cfg.swing_pullback_max_pct) * 100
+        if cfg.min_room_ratio * need > max_room:
+            out.append(f"MIN_ROOM_RATIO={cfg.min_room_ratio:g} (en derin geri çekilmede bile zirveye kalan alan "
+                       f"~%{max_room:.1f}, gereken %{cfg.min_room_ratio * need:.1f}: swing_pullback hiç alım yapamaz)")
     if cfg.max_24h_gain_pct < 15:
-        out.append(f"MAX_24H_GAIN_PCT={cfg.max_24h_gain_pct:g} (24 saatte bundan fazla yükselen kırılımlar alınmaz)")
+        out.append(f"MAX_24H_GAIN_PCT={cfg.max_24h_gain_pct:g} (24 saatte bundan fazla yükselen coinler alınmaz; "
+                   f"5 dk stratejisi için seçildiyse 25 yapın)")
     return out
 
 
@@ -578,4 +582,6 @@ def with_strategy(cfg: Config, strategy: str) -> Tuple[Config, bool]:
     if profile:
         changes.update({PROFILE_ATTRS[k]: type(getattr(cfg, PROFILE_ATTRS[k]))(v)
                         for k, v in SWING_EXIT_PROFILE.items()})
+        # Üst sınır: .env'deki daha geniş değer korunur (yalnızca 5 dk için daraltılmışsa genişletilir)
+        changes["max_24h_gain_pct"] = max(cfg.max_24h_gain_pct, SWING_EXIT_PROFILE["MAX_24H_GAIN_PCT"])
     return replace(cfg, **changes), profile
