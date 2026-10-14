@@ -414,7 +414,7 @@ BAT_COMMANDS = {
     "CANLI_BASLAT.bat": "python watchdog.py --mode live",
     "KURULUM.bat": "python main.py --kurulum",
     "ISTATISTIK.bat": "python main.py --istatistik",
-    "BACKTEST.bat": "python main.py --backtest --gun 30",
+    "BACKTEST.bat": "python main.py --backtest",
 }
 ALL_BATS = ["_hazirla.bat", *BAT_COMMANDS]
 CALL_LINE = 'call "%~dp0_hazirla.bat" || exit /b 1'

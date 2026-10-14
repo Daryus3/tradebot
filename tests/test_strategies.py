@@ -222,7 +222,7 @@ def test_backtest_runs_trend_strategy_and_comparison(cfg, make_client, tmp_path)
     assert by["trend"].trades >= 1 and by["rebound"].trades == 0
     assert {k[0] for k in cache} <= {"rebound", "trend", "breakout"}   # Önbellek stratejiye göre ayrı
     text = format_sweep_report(rows, cfg, data, kind="strateji")
-    assert "STRATEJİ KARŞILAŞTIRMASI" in text and "Strateji" in text and "--strateji-karsilastir --bitis" in text
+    assert "STRATEJİ KARŞILAŞTIRMASI" in text and "Strateji" in text and "--strateji-karsilastir --strateji rebound --bitis" in text
 
 
 def test_entry_sweep_uses_gain_range_for_trend(cfg):

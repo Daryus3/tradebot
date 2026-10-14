@@ -61,6 +61,39 @@ class ConfigError(Exception):
     """Ayar dosyasındaki hatalı/eksik değerler için."""
 
 
+# Giriş stratejileri. İlk üçü 5 dakikalık mumlarla dakikalar-saatler süren işlemler içindir; swing stratejileri
+# 1 saatlik mumlarla 1-5 gün süren işlemler içindir (bkz. strategy.py).
+STRATEGY_NAMES = ("rebound", "trend", "breakout", "swing", "swing_pullback")
+LONG_HORIZON_STRATEGIES = frozenset({"swing", "swing_pullback"})
+
+# Uzun vadeli (swing) stratejiler için önerilen çıkış ayarları (.env anahtarı → değer). 5 dk stratejilerine göre
+# ayarlanmış çıkışlar (örn. 4 saatlik maks. süre, +%1 başabaş) swing işlemlerini daha başlamadan kapatır.
+# Backtest'te .env'deki 5 dk stratejisinden --strateji ile swing'e geçilince bunlar kullanılır.
+SWING_EXIT_PROFILE = {
+    "TAKE_PROFIT_PCT": 12.0,
+    "STOP_LOSS_PCT": 6.0,
+    "TRAILING_ACTIVATION_PCT": 8.0,
+    "TRAILING_FLOOR_PCT": 4.0,
+    "MAX_HOLD_MINUTES": 7200,          # 5 gün
+    "BREAKEVEN_TRIGGER_PCT": 5.0,
+    "BREAKEVEN_FLOOR_PCT": 1.0,
+    "MIN_SIGNAL_SCORE": 0.0,           # Puan ölçeği stratejiye özeldir: 5 dk stratejisi için seçilen eşik uymaz
+    "MIN_ROOM_RATIO": 0.0,
+}
+PROFILE_ATTRS = {
+    "TAKE_PROFIT_PCT": "take_profit_pct", "STOP_LOSS_PCT": "stop_loss_pct",
+    "TRAILING_ACTIVATION_PCT": "trailing_activation_pct", "TRAILING_FLOOR_PCT": "trailing_floor_pct",
+    "MAX_HOLD_MINUTES": "max_hold_minutes", "BREAKEVEN_TRIGGER_PCT": "breakeven_trigger_pct",
+    "BREAKEVEN_FLOOR_PCT": "breakeven_floor_pct", "MIN_SIGNAL_SCORE": "min_signal_score",
+    "MIN_ROOM_RATIO": "min_room_ratio",
+}
+
+
+def is_long_horizon(strategy: str) -> bool:
+    """1 saatlik mumlarla günlerce tutulan (swing) bir strateji mi?"""
+    return strategy in LONG_HORIZON_STRATEGIES
+
+
 def _env_str(name: str, default: str = "") -> str:
     value = os.getenv(name)
     return default if value is None else value.strip()
@@ -203,6 +236,11 @@ class Config:
     trend_pullback_max_pct: float = 5.0    # trend: ...en fazla (daha derini trend bozulması sayılır)
     breakout_lookback_bars: int = 48       # breakout: kırılacak zirvenin bakıldığı mum sayısı (48 × 5 dk = 4 saat)
     breakout_volume_ratio: float = 2.0     # breakout: kırılım mumunun hacmi ortalamanın en az bu katı
+    # Uzun vadeli stratejiler (1 saatlik mumlar, 1-5 gün)
+    swing_lookback_hours: int = 72         # swing: kırılacak zirvenin bakıldığı süre / swing_pullback: zirve penceresi
+    swing_volume_ratio: float = 1.5        # swing: kırılım mumunun hacmi son 24 saatin ortalamasının en az bu katı
+    swing_pullback_min_pct: float = 4.0    # swing_pullback: zirveden geri çekilme en az
+    swing_pullback_max_pct: float = 12.0   # swing_pullback: ...en fazla
     signal_confirm_scans: int = 1          # 1 = kapalı (2 = sinyal art arda 2 taramada görülmeli)
     # 31) Oynaklık (ATR) filtresi — 5 dk ATR(14) / fiyat (%)
     min_atr_pct: float = 0.25
@@ -301,8 +339,8 @@ class Config:
             errors.append("BREAKEVEN_FLOOR_PCT, BREAKEVEN_TRIGGER_PCT'den küçük olmalı")
         if self.min_room_ratio < 0:
             errors.append("MIN_ROOM_RATIO negatif olamaz (0 = kapalı)")
-        if self.strategy not in ("rebound", "trend", "breakout"):
-            errors.append("STRATEGY rebound, trend veya breakout olmalı")
+        if self.strategy not in STRATEGY_NAMES:
+            errors.append("STRATEGY şunlardan biri olmalı: " + ", ".join(STRATEGY_NAMES))
         if not 0 <= self.min_24h_gain_pct < self.max_24h_gain_pct:
             errors.append("MIN_24H_GAIN_PCT, MAX_24H_GAIN_PCT'den küçük olmalı (ikisi de 0 veya pozitif)")
         if not 0 < self.trend_pullback_min_pct < self.trend_pullback_max_pct:
@@ -311,6 +349,12 @@ class Config:
             errors.append("BREAKOUT_LOOKBACK_BARS 12 ile 200 arasında olmalı")
         if self.breakout_volume_ratio <= 0:
             errors.append("BREAKOUT_VOLUME_RATIO sıfırdan büyük olmalı")
+        if not 24 <= self.swing_lookback_hours <= 240:
+            errors.append("SWING_LOOKBACK_HOURS 24 ile 240 (10 gün) arasında olmalı")
+        if self.swing_volume_ratio <= 0:
+            errors.append("SWING_VOLUME_RATIO sıfırdan büyük olmalı")
+        if not 0 < self.swing_pullback_min_pct < self.swing_pullback_max_pct < 50:
+            errors.append("SWING_PULLBACK_MIN_PCT, SWING_PULLBACK_MAX_PCT'den küçük olmalı (ikisi de 0-50 arası)")
         if self.signal_confirm_scans < 1:
             errors.append("SIGNAL_CONFIRM_SCANS en az 1 olmalı")
         if self.min_atr_pct >= self.max_atr_pct:
@@ -416,6 +460,10 @@ def load_config(env_file: Optional[str] = None, mode_override: Optional[str] = N
         trend_pullback_max_pct=_env_float("TREND_PULLBACK_MAX_PCT", 5.0),
         breakout_lookback_bars=_env_int("BREAKOUT_LOOKBACK_BARS", 48),
         breakout_volume_ratio=_env_float("BREAKOUT_VOLUME_RATIO", 2.0),
+        swing_lookback_hours=_env_int("SWING_LOOKBACK_HOURS", 72),
+        swing_volume_ratio=_env_float("SWING_VOLUME_RATIO", 1.5),
+        swing_pullback_min_pct=_env_float("SWING_PULLBACK_MIN_PCT", 4.0),
+        swing_pullback_max_pct=_env_float("SWING_PULLBACK_MAX_PCT", 12.0),
         signal_confirm_scans=_env_int("SIGNAL_CONFIRM_SCANS", 1),
         min_atr_pct=_env_float("MIN_ATR_PCT", 0.25),
         max_atr_pct=_env_float("MAX_ATR_PCT", 4.0),
@@ -464,6 +512,13 @@ def _setting_notes(cfg: Config) -> List[str]:
     """Hata sayılmayan ama işe yaramayan ayar birleşimleri için uyarılar."""
     notes: List[str] = []
     from risk import breakeven_effective  # risk config'i içe aktarmaz; döngüsel bağımlılık yok
+    if is_long_horizon(cfg.strategy):
+        short = short_exit_settings(cfg)
+        if short:
+            notes.append(f"STRATEGY={cfg.strategy} 1 saatlik mumlarla 1-5 gün süren işlemler içindir ama çıkış "
+                         f"ayarlarınız kısa vadeli: {', '.join(short)}. Bu ayarlar işlemleri hareket başlamadan "
+                         f"kapatır. Önerilen: " + " ".join(f"{k}={v:g}" for k, v in SWING_EXIT_PROFILE.items()
+                                                          if k not in ("MIN_SIGNAL_SCORE", "MIN_ROOM_RATIO")))
     if cfg.regime_skip_weak and not cfg.regime_filter:
         notes.append("REGIME_SKIP_WEAK=true yalnızca REGIME_FILTER=true iken çalışır; şu an etkisi yok.")
     if cfg.breakeven_enabled:
@@ -475,3 +530,34 @@ def _setting_notes(cfg: Config) -> List[str]:
                          f"izleyen stop / kâr al seviyesinden (+%{first_exit:g}) küçük olmadığı için hiç "
                          f"devreye girmez.{tip}")
     return notes
+
+
+def short_exit_settings(cfg) -> List[str]:
+    """Uzun vadeli strateji için fazla kısa vadeli görünen çıkış ayarları (boş liste = sorun yok)."""
+    out: List[str] = []
+    if 0 < cfg.max_hold_minutes < 1440:
+        out.append(f"MAX_HOLD_MINUTES={cfg.max_hold_minutes} (1 günden kısa)")
+    if cfg.take_profit_pct < 6:
+        out.append(f"TAKE_PROFIT_PCT={cfg.take_profit_pct:g}")
+    if cfg.trailing_activation_pct < 3:
+        out.append(f"TRAILING_ACTIVATION_PCT={cfg.trailing_activation_pct:g}")
+    if cfg.breakeven_enabled and cfg.breakeven_trigger_pct < 3:
+        out.append(f"BREAKEVEN_TRIGGER_PCT={cfg.breakeven_trigger_pct:g}")
+    return out
+
+
+def with_strategy(cfg: Config, strategy: str) -> Tuple[Config, bool]:
+    """Backtest'te --strateji: stratejiyi değiştirir. (yeni ayarlar, çıkış profili uygulandı mı)
+
+    .env'deki strateji 5 dk stratejisiyken uzun vadeli bir strateji seçilirse .env'deki çıkış ayarları kısa vadeye
+    göredir; onların yerine SWING_EXIT_PROFILE kullanılır. .env'de zaten uzun vadeli bir strateji varsa (çıkışlar da
+    ona göre ayarlanmış sayılır) yalnızca strateji değişir.
+    """
+    if strategy == cfg.strategy:
+        return cfg, False
+    changes = {"strategy": strategy}
+    profile = is_long_horizon(strategy) and not is_long_horizon(cfg.strategy)
+    if profile:
+        changes.update({PROFILE_ATTRS[k]: type(getattr(cfg, PROFILE_ATTRS[k]))(v)
+                        for k, v in SWING_EXIT_PROFILE.items()})
+    return replace(cfg, **changes), profile

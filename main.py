@@ -15,6 +15,8 @@ Kullanım:
     python main.py --backtest --gun 90 --strateji trend --tara # .env'yi değiştirmeden başka stratejiyle dener
     python main.py --backtest --gun 90 --sermaye 25 # Farklı bir başlangıç sermayesiyle dener
     python main.py --backtest --gun 90 --bitis 2026-07-01  # Bu tarihte biten (daha eski) bir dönemi dener
+    python main.py --backtest --gun 365 --strateji swing   # Uzun vadeli strateji: 1 saatlik mumlar, 1 yıllık veri
+    python main.py --backtest --strateji swing --strateji-karsilastir  # swing / swing_pullback karşılaştırması
     python main.py --telegram-chat-id  # Telegram chat ID'nizi bulur
     python main.py --reset-state       # Kayıtlı durumu (K/Z, kill-switch) sıfırlar
 
@@ -32,7 +34,7 @@ import time
 from datetime import datetime
 from typing import Optional
 
-from config import BASE_DIR, DATA_DIR, ConfigError, load_config
+from config import BASE_DIR, DATA_DIR, STRATEGY_NAMES, ConfigError, is_long_horizon, load_config
 from logger import redact, register_secrets, setup_logging
 
 EXIT_OK, EXIT_CONFIG, EXIT_KILLED, EXIT_CRASH = 0, 1, 2, 3
@@ -52,7 +54,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--kurulum", action="store_true", help="Türkçe kurulum sihirbazı (.env hazırlar)")
     parser.add_argument("--istatistik", action="store_true", help="Performans istatistiklerini gösterir")
     parser.add_argument("--backtest", action="store_true", help="Stratejiyi geçmiş verilerle dener")
-    parser.add_argument("--gun", type=int, default=30, help="Backtest gün sayısı (varsayılan 30)")
+    parser.add_argument("--gun", type=int, default=None,
+                        help="Backtest gün sayısı (varsayılan: 5 dk stratejilerinde 30, swing stratejilerinde 365)")
     parser.add_argument("--coin-sayisi", type=int, default=40, help="Backtest'te kullanılacak coin sayısı")
     parser.add_argument("--sermaye", type=float, default=None,
                         help="Backtest başlangıç sermayesi (.env'deki START_CAPITAL_USDT yerine)")
@@ -64,14 +67,17 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--tara-giris", action="store_true",
                         help="Backtest: aynı veriyle farklı giriş filtrelerini (piyasa rejimi, 24s düşüş, sinyal "
                              "puanı, hedef alanı) karşılaştırır; çıkış ayarları .env'deki gibi kalır")
-    parser.add_argument("--strateji", choices=["rebound", "trend", "breakout"], default=None,
-                        help="Backtest için strateji (.env'deki STRATEGY yerine)")
+    parser.add_argument("--strateji", choices=list(STRATEGY_NAMES), default=None,
+                        help="Backtest için strateji (.env'deki STRATEGY yerine). .env'deki 5 dk stratejisinden "
+                             "swing / swing_pullback'e geçilirse çıkışlar uzun vadeye göre önerilen değerlerle denenir")
     parser.add_argument("--strateji-karsilastir", action="store_true",
-                        help="Backtest: rebound / trend / breakout stratejilerini aynı veriyle karşılaştırır")
+                        help="Backtest: aynı mum aralığındaki stratejileri aynı veriyle karşılaştırır "
+                             "(5 dk: rebound / trend / breakout, 1 saat: swing / swing_pullback)")
     parser.add_argument("--tp", default=None, help="--tara için Kâr Al değerleri, örn. 2,3,5")
     parser.add_argument("--sl", default=None, help="--tara için Zarar Kes değerleri, örn. 2,3.5")
     parser.add_argument("--iz", default=None, help="--tara için izleyen stop başlangıçları, örn. 1,2")
-    parser.add_argument("--sure", default=None, help="--tara için maks. tutma süreleri (dk), örn. 60,120,240")
+    parser.add_argument("--sure", default=None,
+                        help="--tara için maks. tutma süreleri (dk), örn. 60,120,240 (swing: 1440,4320,7200)")
     parser.add_argument("--alan", default=None, help="--tara için MIN_ROOM_RATIO değerleri, örn. 0,1")
     parser.add_argument("--reset-state", action="store_true", help="Kayıtlı durumu sıfırlar (kill-switch dahil)")
     parser.add_argument("--telegram-chat-id", action="store_true", help="Telegram chat ID'nizi bulmanıza yardım eder")
@@ -228,18 +234,29 @@ def run_backtest_cli(cfg, args) -> int:
 
     import backtest
     from binance_client import BinanceClient
+    from config import SWING_EXIT_PROFILE, with_strategy
 
-    days = args.gun
-    if days <= 0:
-        print("❌ --gun sıfırdan büyük olmalı")
-        return EXIT_CONFIG
     if args.sermaye is not None:
         if args.sermaye <= 0:
             print("❌ --sermaye sıfırdan büyük olmalı")
             return EXIT_CONFIG
         cfg = replace(cfg, start_capital=args.sermaye)
     if args.strateji:
-        cfg = replace(cfg, strategy=args.strateji)
+        env_strategy = cfg.strategy
+        cfg, profile = with_strategy(cfg, args.strateji)
+        if profile:
+            print(f"ℹ️ .env'deki çıkış ayarları 5 dk stratejisi ({env_strategy}) içindir; {cfg.strategy} 1-5 gün "
+                  f"süren işlemler için önerilen çıkışlarla deneniyor:")
+            print("   " + " ".join(f"{k}={v:g}" for k, v in SWING_EXIT_PROFILE.items()))
+            print(f"   Kendi çıkış ayarlarınızla denemek için .env'de STRATEGY={cfg.strategy} yazıp çıkışları "
+                  f"değiştirin.")
+        elif is_long_horizon(env_strategy) and not is_long_horizon(cfg.strategy):
+            print(f"⚠️ .env'deki çıkış ayarları uzun vadeli strateji ({env_strategy}) içindir; {cfg.strategy} "
+                  f"(5 dk) bu çıkışlarla deneniyor.")
+    days = args.gun if args.gun is not None else (365 if is_long_horizon(cfg.strategy) else 30)
+    if days <= 0:
+        print("❌ --gun sıfırdan büyük olmalı")
+        return EXIT_CONFIG
     try:
         grid = {"tps": _number_list(args.tp, "tp"), "sls": _number_list(args.sl, "sl"),
                 "trails": _number_list(args.iz, "iz"),
@@ -274,7 +291,9 @@ def run_backtest_cli(cfg, args) -> int:
             reports.append(("cikis", backtest.run_sweep(cfg, data, progress=print, combos=combos,
                                                         signal_cache=cache)))
         if args.tara_giris:
-            print("🧪 Giriş taraması: piyasa rejimi / 24s düşüş / sinyal puanı / hedef alanı filtreleri deneniyor...")
+            what = ("zirve penceresi" if is_long_horizon(cfg.strategy)
+                    else "24s düşüş" if cfg.strategy == "rebound" else "24s yükseliş")
+            print(f"🧪 Giriş taraması: piyasa rejimi / {what} / sinyal puanı / hedef alanı filtreleri deneniyor...")
             reports.append(("giris", backtest.run_entry_sweep(cfg, data, progress=print, signal_cache=cache)))
     except Exception as exc:  # noqa: BLE001
         print(f"❌ Backtest çalıştırılamadı: {exc}")

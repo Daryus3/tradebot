@@ -30,7 +30,9 @@ log = get_logger()
 
 CONFIRM_TIMEOUT_SEC = 60
 STRATEGY_LABELS = {"rebound": "rebound (düşen coinde dip)", "trend": "trend (yükselişte geri çekilme)",
-                   "breakout": "breakout (zirve kırılımı)"}
+                   "breakout": "breakout (zirve kırılımı)",
+                   "swing": "swing (uzun vade: çok günlük zirve kırılımı, 1 saatlik mumlar)",
+                   "swing_pullback": "swing_pullback (uzun vade: trendde geri çekilme, 1 saatlik mumlar)"}
 
 # Telegram'ın "/" menüsünde görünecek komutlar
 COMMAND_MENU = [
@@ -408,7 +410,7 @@ class CommandProcessor:
             f"↔️ Maks. spread: %{cfg.max_spread_pct:g} | 🌡️ Piyasa rejimi filtresi: {on(cfg.regime_filter)}\n"
             f"{esc(self.bot.fee_status_line())}\n"
             f"⏱️ Tarama: {cfg.scan_interval_sec} sn | Maks. tutma: "
-            f"{str(cfg.max_hold_minutes) + ' dk' if cfg.max_hold_minutes else 'sınırsız'}\n"
+            f"{fmt_duration(cfg.max_hold_minutes * 60) if cfg.max_hold_minutes else 'sınırsız'}\n"
             "<i>Ayarlar bilgisayardaki .env dosyasından değiştirilir.</i>")
 
     # ------------------------------------------------------------ kontrol komutları

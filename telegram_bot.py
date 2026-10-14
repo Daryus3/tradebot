@@ -66,7 +66,9 @@ def fmt_duration(seconds: float) -> str:
     minutes = int(seconds // 60)
     if minutes < 60:
         return f"{minutes} dk"
-    return f"{minutes // 60} sa {minutes % 60} dk"
+    if minutes < 1440:
+        return f"{minutes // 60} sa {minutes % 60} dk"
+    return f"{minutes // 1440} gün {minutes % 1440 // 60} sa"
 
 
 def _strip_html(text: str) -> str:
@@ -311,7 +313,7 @@ class Messages:
         trailing = (f"+%{cfg.trailing_activation_pct:g} sonrası zirve kârın yarısı (en az +%{cfg.trailing_floor_pct:g})"
                     if cfg.trailing_dynamic else
                     f"+%{cfg.trailing_activation_pct:g} görülünce, +%{cfg.trailing_floor_pct:g}'e düşerse sat")
-        hold = f"\n⏱️ Maks. tutma süresi: {cfg.max_hold_minutes} dk" if cfg.max_hold_minutes > 0 else ""
+        hold = f"\n⏱️ Maks. tutma süresi: {fmt_duration(cfg.max_hold_minutes * 60)}" if cfg.max_hold_minutes > 0 else ""
         return (
             f"🤖 <b>Kripto Al-Sat Botu Başlatıldı</b>\n{LINE}\n"
             f"⚙️ Mod: {mode}\n"

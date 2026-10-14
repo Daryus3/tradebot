@@ -30,15 +30,28 @@ aynıdır; yalnızca hangi coinlere bakılacağı ve alım sinyali değişir):
 Düşen coinlerde dip avlayan "rebound" stratejisi backtestlerde iki ayrı 90 günlük dönemde de kaybettirdi;
 diğer ikisi trendin yönünde işlem yapar. Hangisinin işe yaradığını backtest gösterir:
     python main.py --backtest --gun 90 --strateji-karsilastir
+
+Uzun vadeli (swing) stratejiler — 1 SAATLİK mumlar, 1-5 gün tutulan, %8-15 hedefli işlemler:
+  - "swing"         : Çok günlük zirve kırılımı (trend takibi). 1 saatlik EMA50 > EMA200 (≈ 2 gün / 8 gün),
+                      EMA200 yükseliyor ve fiyat 7 gün öncesinin üstündeyken, son kapanan saatlik mum son
+                      SWING_LOOKBACK_HOURS (varsayılan 72 = 3 gün) saatin zirvesini yüksek hacimle kırınca alır.
+  - "swing_pullback": Aynı çok günlük yükseliş trendinde fiyat zirveden %4-12 geri çekilip EMA50'ye inince ve
+                      saatlik mumda yukarı dönünce alır.
+5 dk stratejilerinde 5 dakikalık hareketler komisyon + spread'i (~%0.25) karşılamadı; günlerce süren %8-15'lik
+hareketlerde aynı maliyet hedefin küçük bir parçasıdır. Çıkış ayarları da buna göre olmalıdır (bkz.
+config.SWING_EXIT_PROFILE). Backtest 1 yıllık saatlik veriyle yapılır:
+    python main.py --backtest --gun 365 --strateji swing
 """
 from __future__ import annotations
 
+import math
 import time
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 
 from binance_client import BinanceClient, RateLimitError
+from config import STRATEGY_NAMES
 from exchange import SymbolRules
 from indicators import atr, ema, mean, rsi
 from logger import get_logger
@@ -57,7 +70,25 @@ TREND_HIGH_WINDOW = 36       # Geri çekilmenin başladığı zirve son 3 saat i
 TREND_SLOPE_BARS = 24        # EMA200 son 2 saatte yükselmiş olmalı
 TREND_MAX_EXTENSION_PCT = 3.0  # Fiyat EMA50'nin / EMA20'nin bu kadar üstündeyse "fazla uzamış", kovalanmaz
 BREAKOUT_MAX_RSI = 75.0
-STRATEGIES = ("rebound", "trend", "breakout")
+STRATEGIES = STRATEGY_NAMES
+BACKTEST_WARMUP_DAYS = 1.5   # 5 dk stratejileri: 24 saatlik ön eleme penceresi + 300 mumluk (25 saat) analiz geçmişi
+
+# Uzun vadeli (swing) stratejiler: 1 saatlik mumlar
+SWING_INTERVAL = "1h"
+SWING_KLINE_LIMIT = 400          # ~16.7 gün: EMA200 (≈ 8 gün) ve 7 günlük momentum için yeterli geçmiş
+SWING_MIN_BARS = 260
+SWING_SLOPE_BARS = 24            # EMA200 son 24 saatte yükselmiş olmalı
+SWING_MOMENTUM_BARS = 168        # swing: fiyat 7 gün (168 saat) öncesinin üstünde olmalı
+SWING_MAX_EXTENSION_PCT = 8.0    # Fiyat EMA50'nin bu kadar üstündeyse "fazla uzamış", kovalanmaz
+SWING_MAX_RSI = 78.0
+SWING_MAX_BARS_SINCE_LOW = 12    # swing_pullback: dönüş en fazla 12 saat önceki dipten başlamış olmalı
+SWING_MAX_RETRACE = 0.6          # swing_pullback: geri çekilmenin en fazla %60'ı geri alınmış olmalı (yukarıda yer kalsın)
+SWING_DIP_RSI = 45.0             # swing_pullback: geri çekilmede RSI bunun altını görmüş olmalı
+SWING_CANDIDATE_FACTOR = 3       # Saatlik mumda sinyal yavaş değişir: her taramada MAX_CANDIDATES'in 3 katı aday incelenir
+# MIN_ATR_PCT / MAX_ATR_PCT 5 dk mum içindir. Oynaklık sürenin kareköküyle büyüdüğünden saatlik muma √12 ile
+# ölçeklenir (örn. %0.25 → %0.87, %4 → %13.9).
+SWING_ATR_SCALE = math.sqrt(12)
+SWING_WARMUP_DAYS = 18.0         # Backtest ısınması: 400 saatlik analiz geçmişi (16.7 gün) + pay
 
 
 @dataclass
@@ -92,6 +123,14 @@ class Signal:
         if kind == "breakout":
             return (f"Kırılım %{m.get('breakout_pct', 0):.2f} ({int(m.get('lookback_bars', 0)) * 5} dk zirvesi) | "
                     f"Trend %{m.get('trend_pct', 0):+.2f} | RSI {m.get('rsi', 0):.0f} | Hacim x{m.get('vol_ratio', 0):.1f}")
+        if kind == "swing":
+            return (f"{int(m.get('lookback_hours', 0))} saatlik zirve kırılımı %{m.get('breakout_pct', 0):.2f} | "
+                    f"Trend %{m.get('trend_pct', 0):+.1f} (1s EMA50/200) | 7 gün %{m.get('momentum_pct', 0):+.1f} | "
+                    f"RSI {m.get('rsi', 0):.0f} | Hacim x{m.get('vol_ratio', 0):.1f}")
+        if kind == "swing_pullback":
+            return (f"Trend %{m.get('trend_pct', 0):+.1f} (1s EMA50/200) | Zirveden geri çekilme "
+                    f"%{m.get('pullback_pct', 0):.1f} | RSI {m.get('rsi_min', 0):.0f}→{m.get('rsi', 0):.0f} | "
+                    f"Hacim x{m.get('vol_ratio', 0):.1f}")
         return (f"Düşüş %{m.get('dip_pct', 0):.1f} | Toparlanma %{m.get('retrace', 0) * 100:.0f} | "
                 f"RSI {m.get('rsi_min', 0):.0f}→{m.get('rsi', 0):.0f} | Hacim x{m.get('vol_ratio', 0):.1f}")
 
@@ -136,7 +175,16 @@ def room_ok(signal: Signal, cfg) -> bool:
 
 class ReboundStrategy:
     name = "rebound"
+    interval = "5m"                # Backtest'in simülasyon aralığı (canlıda KLINE_INTERVAL, varsayılan 5m)
     kline_limit = KLINE_LIMIT
+    warmup_days = BACKTEST_WARMUP_DAYS
+    uses_room = True               # Sinyal "eski zirveye kalan alan" (room_pct) ölçer mi? (MIN_ROOM_RATIO etkili mi)
+    uses_24h_range = True          # Ön elemede MIN_24H_RANGE_PCT (24 saatlik fiyat aralığı) uygulanır mı?
+    # Analiz sonucunu değiştiren ayarlar: backtest'in sinyal önbelleği bunlara göre ayrılır (giriş taraması
+    # bunlardan birini değiştirirse önbellekteki eski sinyaller kullanılmaz)
+    analysis_fields: Tuple[str, ...] = ("min_dip_pct", "min_retrace", "max_retrace", "rsi_period", "rsi_oversold",
+                                        "rsi_entry_min", "rsi_entry_max", "min_volume_ratio", "min_atr_pct",
+                                        "max_atr_pct")
 
     def __init__(self, client: BinanceClient, cfg, coin_filter=None, regime=None):
         self.client = client
@@ -146,6 +194,19 @@ class ReboundStrategy:
         self._seen: Dict[str, int] = {}  # Art arda kaç taramada sinyal verdi (teyit için)
         self._last_scan_at = 0.0
         self.last_btc_1h_pct: Optional[float] = None
+
+    @property
+    def bar_interval(self) -> str:
+        """Canlı taramada istenen mum aralığı."""
+        return self.cfg.kline_interval
+
+    @property
+    def candidate_limit(self) -> int:
+        """Her taramada ayrıntılı analiz edilecek en fazla aday."""
+        return self.cfg.max_candidates
+
+    def analysis_key(self) -> tuple:
+        return tuple(getattr(self.cfg, f) for f in self.analysis_fields)
 
     # ------------------------------------------------------------ piyasa filtresi
     def market_ok(self) -> Tuple[bool, str]:
@@ -196,7 +257,7 @@ class ReboundStrategy:
                 continue
             if not self.change_ok(change):
                 continue
-            if (high - low) / low * 100 < cfg.min_24h_range_pct:
+            if self.uses_24h_range and (high - low) / low * 100 < cfg.min_24h_range_pct:
                 continue
             # Fiyat adımı çok kabaysa (düşük fiyatlı coinler) hedefler hassas yakalanamaz
             if r.tick_size > 0 and float(r.tick_size) / last > 0.002:
@@ -206,7 +267,7 @@ class ReboundStrategy:
                 continue
             out.append(t)
         out.sort(key=lambda x: self.candidate_key(float(x["priceChangePercent"])))
-        return out[: cfg.max_candidates]
+        return out[: self.candidate_limit]
 
     # ------------------------------------------------------------ ayrıntılı analiz
     def analyze(self, symbol: str, raw_klines: List[list], strict: bool = False) -> Tuple[Optional[Signal], str]:
@@ -361,7 +422,7 @@ class ReboundStrategy:
                     result.near_misses.append((symbol, why))
                     continue
             try:
-                raw = self.client.klines(symbol, cfg.kline_interval, self.kline_limit)
+                raw = self.client.klines(symbol, self.bar_interval, self.kline_limit)
             except RateLimitError:
                 raise  # Binance istek limiti: tarama durmalı, döngü beklesin
             except Exception as exc:  # noqa: BLE001 - tek coin hatası taramayı durdurmasın
@@ -402,14 +463,17 @@ class ReboundStrategy:
 
 
 # ================================================================ alternatif stratejiler
-def _volatility_reject(cfg, closed: List[Kline], highs, lows, closes, price: float):
-    """Ortak ATR filtresi; (atr_pct, ortalama_mum_aralığı_pct, elenme_nedeni_veya_boş)."""
+def _volatility_reject(cfg, closed: List[Kline], highs, lows, closes, price: float, scale: float = 1.0):
+    """Ortak ATR filtresi; (atr_pct, ortalama_mum_aralığı_pct, elenme_nedeni_veya_boş).
+
+    MIN/MAX_ATR_PCT 5 dk mum içindir; `scale` daha uzun mumlar için eşikleri büyütür (1 saat: √12).
+    """
     avg_range_pct = mean([(k.high - k.low) / k.close * 100 for k in closed[-24:] if k.close > 0])
     atr_vals = atr(highs, lows, closes, 14)
     atr_pct = atr_vals[-1] / price * 100 if atr_vals[-1] and price > 0 else 0.0
-    if atr_pct < cfg.min_atr_pct:
+    if atr_pct < cfg.min_atr_pct * scale:
         return atr_pct, avg_range_pct, "oynaklık düşük"
-    if atr_pct > cfg.max_atr_pct:
+    if atr_pct > cfg.max_atr_pct * scale:
         return atr_pct, avg_range_pct, "aşırı oynak"
     return atr_pct, avg_range_pct, ""
 
@@ -435,6 +499,8 @@ class _TrendBase(ReboundStrategy):
 class TrendPullbackStrategy(_TrendBase):
     """Yükselen trendde EMA20'ye geri çekilip tekrar yukarı dönünce al."""
     name = "trend"
+    analysis_fields = ("trend_pullback_min_pct", "trend_pullback_max_pct", "rsi_period", "min_volume_ratio",
+                       "min_atr_pct", "max_atr_pct")
 
     def analyze(self, symbol: str, raw_klines: List[list], strict: bool = False) -> Tuple[Optional[Signal], str]:
         cfg = self.cfg
@@ -514,6 +580,8 @@ class TrendPullbackStrategy(_TrendBase):
 class BreakoutStrategy(_TrendBase):
     """Yükselen trendde son BREAKOUT_LOOKBACK_BARS mumun zirvesini yüksek hacimle kıranı al."""
     name = "breakout"
+    uses_room = False   # Kırılımda üstte "eski zirve" yoktur
+    analysis_fields = ("breakout_lookback_bars", "breakout_volume_ratio", "rsi_period", "min_atr_pct", "max_atr_pct")
 
     def analyze(self, symbol: str, raw_klines: List[list], strict: bool = False) -> Tuple[Optional[Signal], str]:
         cfg = self.cfg
@@ -575,7 +643,217 @@ class BreakoutStrategy(_TrendBase):
         return Signal(symbol, price, score, metrics), ""
 
 
+# ================================================================ uzun vadeli (swing) stratejiler
+class _SwingBase(_TrendBase):
+    """1 saatlik mumlar, çok günlük trend. Kısa vadeli stratejilerle aynı tarama altyapısını kullanır."""
+    interval = SWING_INTERVAL
+    kline_limit = SWING_KLINE_LIMIT
+    warmup_days = SWING_WARMUP_DAYS
+    # Günlerce süren işlemde son 24 saatin oynaklığı belirleyici değil (sıkışma sonrası kırılım dar aralıktan
+    # başlar); oynaklık saatlik ATR filtresiyle ölçülür
+    uses_24h_range = False
+
+    @property
+    def bar_interval(self) -> str:
+        return SWING_INTERVAL      # KLINE_INTERVAL yalnızca 5 dk stratejileri içindir
+
+    @property
+    def candidate_limit(self) -> int:
+        return self.cfg.max_candidates * SWING_CANDIDATE_FACTOR
+
+    @staticmethod
+    def _uptrend(closes: List[float], price: float):
+        """Çok günlük yükseliş trendi: (ema50, ema200, elenme_nedeni_veya_boş)."""
+        e50, e200 = ema(closes, 50), ema(closes, 200)
+        if None in (e50[-1], e200[-1], e200[-1 - SWING_SLOPE_BARS]):
+            return e50, e200, "veri az"
+        if e50[-1] <= e200[-1] or price <= e200[-1]:
+            return e50, e200, "trend yok"
+        if e200[-1] <= e200[-1 - SWING_SLOPE_BARS]:
+            return e50, e200, "trend zayıf"
+        return e50, e200, ""
+
+
+class SwingBreakoutStrategy(_SwingBase):
+    """Çok günlük yükseliş trendinde son SWING_LOOKBACK_HOURS saatin zirvesini yüksek hacimle kıranı al."""
+    name = "swing"
+    uses_room = False   # Kırılımda üstte "eski zirve" yoktur
+    analysis_fields = ("swing_lookback_hours", "swing_volume_ratio", "rsi_period", "min_atr_pct", "max_atr_pct")
+
+    def change_ok(self, change_24h_pct: float) -> bool:
+        # Taze kırılımda fiyat son günlerin zirvesindedir, 24 saat öncesinin altında olamaz
+        return 0 <= change_24h_pct <= self.cfg.max_24h_gain_pct
+
+    def analyze(self, symbol: str, raw_klines: List[list], strict: bool = False) -> Tuple[Optional[Signal], str]:
+        cfg = self.cfg
+        lookback = cfg.swing_lookback_hours
+        if len(raw_klines) < max(SWING_MIN_BARS, lookback + 30, SWING_MOMENTUM_BARS + 2):
+            return None, "veri az"
+        current, closed, closes, highs, lows, vols = self._series(raw_klines)
+        price, last = current.close, closed[-1]
+
+        # 1) Kırılım (en seçici kontrol önce): son kapanan saatlik mum önceki `lookback` saatin zirvesinin üstünde
+        #    kapandı, bir önceki mum henüz kırmamıştı (taze kırılım) ve fiyat hâlâ kırılım seviyesinde
+        prior_high = max(highs[-lookback - 1:-1])
+        if last.close <= prior_high:
+            return None, "kırılım yok"
+        if closes[-2] > max(highs[-lookback - 2:-2]):
+            return None, "kırılım eski"
+        if last.close <= last.open:
+            return None, "son mum kırmızı"
+        if price < prior_high * 0.995:
+            return None, "kırılım geri döndü"
+        breakout_pct = (last.close / prior_high - 1) * 100
+
+        # 2) Çok günlük yükseliş trendi ve 7 günlük momentum
+        e50, e200, why = self._uptrend(closes, price)
+        if why:
+            return None, why
+        momentum_pct = (price / closes[-SWING_MOMENTUM_BARS] - 1) * 100 if closes[-SWING_MOMENTUM_BARS] > 0 else 0.0
+        if momentum_pct <= 0:
+            return None, "momentum yok"
+
+        # 3) Hacim: kırılım mumu son 24 saatin ortalamasının belirgin üstünde
+        base_vol = mean(vols[-25:-1])
+        vol_ratio = vols[-1] / base_vol if base_vol > 0 else 0.0
+        if vol_ratio < cfg.swing_volume_ratio * (1.3 if strict else 1.0):
+            return None, "hacim zayıf"
+
+        # 4) Kovalamama: aşırı alım / EMA50'den çok uzak değil
+        rsi_now = rsi(closes, cfg.rsi_period)[-1]
+        if rsi_now is None:
+            return None, "veri az"
+        if rsi_now > SWING_MAX_RSI:
+            return None, "aşırı alım"
+        if (price - e50[-1]) / e50[-1] * 100 > SWING_MAX_EXTENSION_PCT:
+            return None, "fazla uzamış"
+
+        atr_pct, avg_range_pct, why = _volatility_reject(cfg, closed, highs, lows, closes, price, SWING_ATR_SCALE)
+        if why:
+            return None, why
+        taker_ratio = last.taker_buy_quote / last.quote_volume if last.quote_volume > 0 else 0.5
+
+        trend_pct = (e50[-1] / e200[-1] - 1) * 100
+        score = (min(vol_ratio, 5) * 2 + min(breakout_pct, 4) * 2 + min(trend_pct, 10) * 1.5
+                 + min(momentum_pct, 30) / 3 + min(avg_range_pct, 5) * 2 + (taker_ratio - 0.5) * 10)
+        metrics = {
+            "kind": "swing", "breakout_pct": breakout_pct, "trend_pct": trend_pct, "momentum_pct": momentum_pct,
+            "rsi": rsi_now, "vol_ratio": vol_ratio, "avg_range_pct": avg_range_pct, "taker_ratio": taker_ratio,
+            "atr_pct": atr_pct, "lookback_hours": float(lookback),
+        }
+        return Signal(symbol, price, score, metrics), ""
+
+
+class SwingPullbackStrategy(_SwingBase):
+    """Çok günlük yükseliş trendinde zirveden %4-12 geri çekilip EMA50'ye inen ve yukarı dönen coini al."""
+    name = "swing_pullback"
+    analysis_fields = ("swing_lookback_hours", "swing_pullback_min_pct", "swing_pullback_max_pct", "rsi_period",
+                       "min_volume_ratio", "min_atr_pct", "max_atr_pct")
+
+    def change_ok(self, change_24h_pct: float) -> bool:
+        return -self.cfg.swing_pullback_max_pct <= change_24h_pct <= self.cfg.max_24h_gain_pct
+
+    def candidate_key(self, change_24h_pct: float) -> float:
+        return change_24h_pct   # En çok geri çekilen önce
+
+    def analyze(self, symbol: str, raw_klines: List[list], strict: bool = False) -> Tuple[Optional[Signal], str]:
+        cfg = self.cfg
+        lookback = cfg.swing_lookback_hours
+        if len(raw_klines) < max(SWING_MIN_BARS, lookback + 30):
+            return None, "veri az"
+        current, closed, closes, highs, lows, vols = self._series(raw_klines)
+        price, n, last = current.close, len(closed), closed[-1]
+
+        # 1) Geri çekilme (ucuz kontrol önce): son `lookback` saatin zirvesinden sonraki dip
+        start = n - lookback
+        hi_idx = max(range(start, n), key=lambda i: highs[i])
+        lo_idx = min(range(hi_idx, n), key=lambda i: lows[i])
+        recent_high, pull_low = highs[hi_idx], lows[lo_idx]
+        if recent_high <= 0 or pull_low <= 0:
+            return None, "veri hatalı"
+        pullback = (recent_high - pull_low) / recent_high * 100
+        if pullback < cfg.swing_pullback_min_pct * (1.25 if strict else 1.0):
+            return None, "geri çekilme az"
+        if pullback > cfg.swing_pullback_max_pct:
+            return None, "geri çekilme derin"
+        bars_since_low = n - 1 - lo_idx
+        if bars_since_low < 1 or current.low < pull_low:
+            return None, "geri çekilme sürüyor"
+        if bars_since_low > SWING_MAX_BARS_SINCE_LOW:
+            return None, "dip eski"
+        retrace = (price - pull_low) / (recent_high - pull_low)
+        if retrace > SWING_MAX_RETRACE:
+            return None, "toparlanma bitmiş"
+
+        # 2) Dönüş: son saatlik mum yeşil ve bir öncekinin zirvesinin üstünde kapandı
+        if last.close <= last.open:
+            return None, "son mum kırmızı"
+        if last.close <= closed[-2].high:
+            return None, "dönüş teyidi yok"
+
+        # 3) Trend sağlam: dip EMA50 civarına inmiş ama EMA200'ün altında kapanmamış
+        e50, e200, why = self._uptrend(closes, price)
+        if why:
+            return None, why
+        if e50[lo_idx] is None or e200[lo_idx] is None:
+            return None, "veri az"
+        if pull_low > e50[lo_idx] * 1.01:
+            return None, "EMA50'ye inmedi"
+        if closes[lo_idx] < e200[lo_idx]:
+            return None, "trend kırıldı"
+        e9 = ema(closes, 9)
+        if e9[-1] is None or price <= e9[-1]:
+            return None, "momentum yok"
+
+        # 4) RSI: geri çekilmede soğumuş, şimdi yükseliyor
+        rsi_vals = rsi(closes, cfg.rsi_period)
+        rsi_now, rsi_prev = rsi_vals[-1], rsi_vals[-2]
+        dip_rsis = [v for v in rsi_vals[max(lo_idx - 2, 0):] if v is not None]
+        if rsi_now is None or rsi_prev is None or not dip_rsis:
+            return None, "veri az"
+        rsi_min = min(dip_rsis)
+        if rsi_min > SWING_DIP_RSI:
+            return None, "RSI soğumadı"
+        if not 40 <= rsi_now <= 65:
+            return None, "RSI aralık dışı"
+        if rsi_now <= rsi_prev:
+            return None, "RSI yükselmiyor"
+
+        # 5) Hacim: dönüş mumlarında hacim son 24 saatin ortalamasının üstünde
+        base_vol = mean(vols[-27:-3])
+        vol_ratio = mean(vols[-3:]) / base_vol if base_vol > 0 else 0.0
+        if vol_ratio < cfg.min_volume_ratio * (1.3 if strict else 1.0):
+            return None, "hacim zayıf"
+        recent_quote = sum(vols[-3:])
+        taker_ratio = sum(k.taker_buy_quote for k in closed[-3:]) / recent_quote if recent_quote > 0 else 0.5
+
+        atr_pct, avg_range_pct, why = _volatility_reject(cfg, closed, highs, lows, closes, price, SWING_ATR_SCALE)
+        if why:
+            return None, why
+
+        trend_pct = (e50[-1] / e200[-1] - 1) * 100
+        score = (min(trend_pct, 10) * 1.5 + pullback + (1 - retrace) * 5 + min(vol_ratio, 4) * 2
+                 + (rsi_now - rsi_min) / 5 + min(avg_range_pct, 5) * 2 + (taker_ratio - 0.5) * 10)
+        metrics = {
+            "kind": "swing_pullback", "trend_pct": trend_pct, "pullback_pct": pullback, "retrace": retrace,
+            "rsi": rsi_now, "rsi_min": rsi_min, "vol_ratio": vol_ratio, "avg_range_pct": avg_range_pct,
+            "taker_ratio": taker_ratio, "atr_pct": atr_pct, "bars_since_low": float(bars_since_low),
+            # Geri çekilme öncesi zirveye kalan alan
+            "room_pct": (recent_high - price) / price * 100 if price > 0 else 0.0,
+        }
+        return Signal(symbol, price, score, metrics), ""
+
+
+STRATEGY_CLASSES = {"rebound": ReboundStrategy, "trend": TrendPullbackStrategy, "breakout": BreakoutStrategy,
+                    "swing": SwingBreakoutStrategy, "swing_pullback": SwingPullbackStrategy}
+assert tuple(STRATEGY_CLASSES) == STRATEGIES
+
+
+def strategy_class(name: str):
+    """Strateji sınıfı (interval, uses_room gibi sınıf bilgilerine nesne oluşturmadan erişmek için)."""
+    return STRATEGY_CLASSES[name]
+
+
 def make_strategy(client, cfg, coin_filter=None, regime=None) -> ReboundStrategy:
     """STRATEGY ayarına göre strateji nesnesi (canlı bot, self-test ve backtest aynı fabrikayı kullanır)."""
-    classes = {"rebound": ReboundStrategy, "trend": TrendPullbackStrategy, "breakout": BreakoutStrategy}
-    return classes[getattr(cfg, "strategy", "rebound")](client, cfg, coin_filter=coin_filter, regime=regime)
+    return strategy_class(getattr(cfg, "strategy", "rebound"))(client, cfg, coin_filter=coin_filter, regime=regime)

@@ -674,7 +674,7 @@ def test_entry_sweep_regime_variants_and_own_thresholds(cfg, make_client, tmp_pa
     client = make_client({"ABCUSDT": scenario(lambda p: trend(p, 1.03, 8)), "BTCUSDT": btc_flat()})
     data = prepare_backtest(cfg, client, days=DAYS, cache_dir=tmp_path / "c", progress=None,
                             symbols=["ABCUSDT"], end_time_ms=END_TIME_MS)
-    shared = {("rebound", "ZZZUSDT", i, False): Signal("ZZZUSDT", 1.0, 99.0, {}) for i in range(50)}  # Önceki --tara
+    shared = {("rebound", (), "ZZZUSDT", i, False): Signal("ZZZUSDT", 1.0, 99.0, {}) for i in range(50)}  # Önceki --tara
     seen = {}
     real = bt.score_thresholds
 
@@ -683,5 +683,5 @@ def test_entry_sweep_regime_variants_and_own_thresholds(cfg, make_client, tmp_pa
         return real(cache)
     monkeypatch.setattr(bt, "score_thresholds", spy)
     run_entry_sweep(cfg, data, signal_cache=shared)
-    assert seen["keys"] and not any(k[1] == "ZZZUSDT" for k in seen["keys"])   # Eşikler yalnızca kendi sinyallerinden
-    assert any(k[1] == "ABCUSDT" for k in shared)                              # Ortak önbelleğe de eklendi
+    assert seen["keys"] and not any(k[2] == "ZZZUSDT" for k in seen["keys"])   # Eşikler yalnızca kendi sinyallerinden
+    assert any(k[2] == "ABCUSDT" for k in shared)                              # Ortak önbelleğe de eklendi

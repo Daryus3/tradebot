@@ -1,5 +1,6 @@
 """
-Geriye dönük test (backtest): stratejiyi geçmiş 5 dakikalık mumlarla dener.
+Geriye dönük test (backtest): stratejiyi geçmiş mumlarla dener (5 dk stratejileri 5 dakikalık, uzun vadeli
+swing stratejileri 1 saatlik mumlarla).
 
 Canlı botla AYNI karar fonksiyonları kullanılır:
   - Giriş sinyali : strategy.make_strategy(cfg).analyze (STRATEGY: rebound / trend / breakout)
@@ -9,9 +10,9 @@ Canlı botla AYNI karar fonksiyonları kullanılır:
 
 Akış:
   1. Semboller: güncel 24 saatlik hacme göre en hacimli USDT pariteleri (+ BTC filtresi için BTCUSDT).
-  2. Veri: 5 dk mumlar Binance'ten sayfalanarak indirilir ve data/backtest_cache/ altına kaydedilir;
-     aynı dönem tekrar test edilirken Binance'e istek atılmaz.
-  3. Simülasyon: tüm semboller ortak zaman çizelgesinde, her 5 dk mum kapanışında
+  2. Veri: stratejinin mum aralığındaki (5m / 1h) mumlar Binance'ten sayfalanarak indirilir ve
+     data/backtest_cache/ altına kaydedilir; aynı dönem tekrar test edilirken Binance'e istek atılmaz.
+  3. Simülasyon: tüm semboller ortak zaman çizelgesinde, her mum kapanışında
      pozisyon takibi → kill-switch → yeni giriş taraması.
 
 Örnek:
@@ -39,20 +40,18 @@ from market_regime import COKUS, KLINE_1D_LIMIT, KLINE_4H_LIMIT, ZAYIF, classify
 from risk import (ExitReason, Position, breakeven_effective, evaluate_exit, kill_switch_hit, net_exit_value,
                   plan_entry, pnl_pct, position_slots, price_for_pnl, trailing_floor_pct, update_breakeven,
                   update_trailing)
-from strategy import KLINE_LIMIT, STRATEGIES, Signal, make_strategy, required_move_pct, room_ok
+from config import PROFILE_ATTRS, SWING_EXIT_PROFILE, is_long_horizon
+from strategy import KLINE_LIMIT, STRATEGIES, Signal, make_strategy, required_move_pct, room_ok, strategy_class
 from telegram_bot import LINE, fmt_duration, fmt_price, fmt_rate, fmt_signed, fmt_usdt
 
 INTERVAL = "5m"
 INTERVAL_MS = 300_000
 HOUR_MS = 3_600_000
 DAY_MS = 86_400_000
-INTERVAL_MS_BY_NAME = {"5m": INTERVAL_MS, "4h": 4 * HOUR_MS, "1d": DAY_MS}
+INTERVAL_MS_BY_NAME = {"5m": INTERVAL_MS, "1h": HOUR_MS, "4h": 4 * HOUR_MS, "1d": DAY_MS}
+INTERVAL_LABELS = {"5m": "5 dk", "1h": "1 saatlik", "4h": "4 saatlik", "1d": "günlük"}
 REGIME_HISTORY_DAYS = 31               # Rejim için BTC 4s EMA50 (~9 gün) ve günlük EMA20 (20 gün) geçmişi
 MIN_BREADTH_PAIRS_SIM = 20             # market_regime.MIN_BREADTH_PAIRS ile aynı
-BARS_PER_DAY = DAY_MS // INTERVAL_MS   # 288
-BARS_24H = BARS_PER_DAY                # Ön eleme için 24 saatlik kayan pencere
-BTC_BARS_1H = 12                       # BTC filtresi: son 12 kapanmış mum (1 saat)
-WARMUP_DAYS = 1.5                      # 24s pencere + 99 mumluk analiz için ısınma süresi
 PAGE_LIMIT = 1000                      # Binance klines tek istekte en fazla 1000 mum
 REQUEST_PAUSE_SEC = 0.1                # İstekler arası bekleme (istek limitine saygı)
 RATE_LIMIT_RETRIES = 3
@@ -125,6 +124,7 @@ class BacktestResult:
     end_ms: int = 0                      # Verinin bittiği an (saate yuvarlanmış)
     spread_pct: float = 0.0
     stats: Dict[str, int] = field(default_factory=dict)  # analiz/sinyal/BTC engeli sayıları
+    interval: str = INTERVAL                             # Mum aralığı (5m / 1h)
 
     @property
     def wins(self) -> int:
@@ -265,17 +265,19 @@ def load_klines(client, symbol: str, start_ms: int, end_ms: int,
 
 # ================================================================ hizalanmış seri
 class _Series:
-    """Bir sembolün ortak 5 dk zaman çizelgesine hizalanmış mumları.
+    """Bir sembolün ortak zaman çizelgesine (5 dk veya 1 saat) hizalanmış mumları.
 
     İlk ve son gerçek mum arasındaki boşluklar (işlem durması) hacimsiz düz mumla doldurulur.
     """
 
     def __init__(self, symbol: str, rows: Sequence[Sequence[float]], t0: int, n: int,
-                 rules: Optional[SymbolRules] = None):
+                 rules: Optional[SymbolRules] = None, step_ms: int = INTERVAL_MS):
         self.symbol = symbol
         self.rules = rules
         self.t0 = t0
         self.n = n
+        self.step_ms = step_ms
+        self.bars_24h = DAY_MS // step_ms    # 24 saatlik pencere (5 dk: 288, 1 saat: 24)
         o = [0.0] * n
         h = [0.0] * n
         lo = [0.0] * n
@@ -284,7 +286,7 @@ class _Series:
         tbq = [0.0] * n
         real = [False] * n
         for r in rows:
-            k = (int(r[0]) - t0) // INTERVAL_MS
+            k = (int(r[0]) - t0) // step_ms
             if 0 <= k < n:
                 o[k], h[k], lo[k], c[k], qv[k], tbq[k] = r[1], r[2], r[3], r[4], r[5], r[6]
                 real[k] = True
@@ -323,7 +325,9 @@ class _Series:
         for k in range(self.n):
             prefix[k + 1] = prefix[k] + self.qv[k]
         tick = float(self.rules.tick_size)
-        min_vol, min_range = cfg.min_quote_volume_24h, cfg.min_24h_range_pct
+        min_vol = cfg.min_quote_volume_24h
+        # Aynı veriyle denenen stratejiler aynı aileden (aynı mum aralığı) olduğu için bu ayrım veriyle sabittir
+        min_range = cfg.min_24h_range_pct if strategy_class(cfg.strategy).uses_24h_range else 0.0
         dq_hi: deque = deque()
         dq_lo: deque = deque()
         for k in range(self.first, self.last + 1):
@@ -333,7 +337,7 @@ class _Series:
             while dq_lo and lo[dq_lo[-1]] >= lo[k]:
                 dq_lo.pop()
             dq_lo.append(k)
-            j = k - BARS_24H + 1  # 24s penceresinin ilk mumu
+            j = k - self.bars_24h + 1  # 24s penceresinin ilk mumu
             if j < self.first:
                 continue
             while dq_hi[0] < j:
@@ -356,8 +360,8 @@ class _Series:
     def _row(self, j: int) -> list:
         row = self._raw.get(j)
         if row is None:
-            t = self.t0 + j * INTERVAL_MS
-            row = [t, self.o[j], self.h[j], self.l[j], self.c[j], 0.0, t + INTERVAL_MS - 1,
+            t = self.t0 + j * self.step_ms
+            row = [t, self.o[j], self.h[j], self.l[j], self.c[j], 0.0, t + self.step_ms - 1,
                    self.qv[j], 0, 0.0, self.tbq[j], 0.0]
             self._raw[j] = row
         return row
@@ -365,9 +369,9 @@ class _Series:
     def window(self, k: int, limit: int = KLINE_LIMIT) -> List[list]:
         """k. mum kapandığı anda canlı botun göreceği veri: son (limit-1) kapanmış mum + sentetik açık mum."""
         rows = [self._row(j) for j in range(max(0, k - (limit - 1) + 1), k + 1)]
-        t_next = self.t0 + (k + 1) * INTERVAL_MS
+        t_next = self.t0 + (k + 1) * self.step_ms
         p = self.c[k]
-        rows.append([t_next, p, p, p, p, "0", t_next + INTERVAL_MS - 1, "0", 0, "0", "0", "0"])
+        rows.append([t_next, p, p, p, p, "0", t_next + self.step_ms - 1, "0", 0, "0", "0", "0"])
         return rows
 
 
@@ -375,7 +379,7 @@ class _Series:
 class _RegimeSim:
     """Canlı `MarketRegime`'in backtest karşılığı: her mumda NORMAL / ZAYIF / COKUS.
 
-    BTC 24s değişimi ve fiyatı 5 dk seriden, 4s/1g EMA'lar ayrıca indirilen BTC 4s ve 1g mumlarından
+    BTC 24s değişimi ve fiyatı simülasyon serisinden (5 dk / 1 saat), 4s/1g EMA'lar ayrıca indirilen BTC 4s ve 1g mumlarından
     hesaplanır. Düşen coin oranı (genişlik) canlıda tüm likit paritelerden, burada yalnızca test edilen
     sembollerden hesaplanır (yaklaşık).
     """
@@ -388,6 +392,7 @@ class _RegimeSim:
         self.k1 = ([int(r[0]) + DAY_MS for r in rows_1d], [float(r[4]) for r in rows_1d])
         self.cache: Dict[int, str] = {}
         n = btc.n
+        self.bars_24h = bars_24h = btc.bars_24h
         self.total = [0] * n
         self.down = [0] * n
         for s in series.values():
@@ -396,8 +401,8 @@ class _RegimeSim:
             prefix = [0.0] * (s.n + 1)
             for k in range(s.n):
                 prefix[k + 1] = prefix[k] + s.qv[k]
-            for k in range(max(s.first + BARS_24H - 1, 0), s.last + 1):
-                j = k - BARS_24H + 1
+            for k in range(max(s.first + bars_24h - 1, 0), s.last + 1):
+                j = k - bars_24h + 1
                 if s.o[j] <= 0 or prefix[k + 1] - prefix[j] < cfg.min_quote_volume_24h:
                     continue
                 self.total[k] += 1
@@ -417,7 +422,7 @@ class _RegimeSim:
             return regime
         btc = self.btc
         price = btc.c[k] if btc.has(k) else None
-        j = k - BARS_24H + 1
+        j = k - self.bars_24h + 1
         btc_24h = ((btc.c[k] - btc.o[j]) / btc.o[j] * 100
                    if price is not None and btc.has(j) and btc.o[j] > 0 else None)
         breadth = self.down[k] / self.total[k] * 100 if self.total[k] >= MIN_BREADTH_PAIRS_SIM else None
@@ -454,7 +459,7 @@ class _Simulator:
         self.series = series
         self.btc = btc
         self.regime = regime if cfg.regime_filter else None
-        # (strateji, sembol, mum, sıkı_mod) → Signal | None. Giriş analizi çıkış ayarlarına bağlı değildir; --tara'da
+        # (strateji, analiz ayarları, sembol, mum, sıkı_mod) → Signal | None. Giriş analizi çıkış ayarlarına bağlı değildir; --tara'da
         # aynı veriyle denenen tüm kombinasyonlar bu önbelleği paylaşır (analiz bir kez yapılır).
         self.signal_cache = signal_cache if signal_cache is not None else {}
         self.min_notional = min_notional
@@ -462,6 +467,9 @@ class _Simulator:
         self.exit_factor = 1 - spread_pct / 200    # Satış bid'den
         self.progress = progress
         self.strategy = make_strategy(None, cfg)
+        self.step_ms = next(iter(series.values())).step_ms if series else INTERVAL_MS
+        self.btc_bars_1h = max(1, HOUR_MS // self.step_ms)   # BTC filtresi: son 1 saatin mumları
+        self.analysis_key = self.strategy.analysis_key()
 
         self.cash = cfg.start_capital
         self.realized = 0.0
@@ -498,7 +506,7 @@ class _Simulator:
         total = max(1, n - k_start)
         next_report = 0.25
         for k in range(k_start, n):
-            t_close = t0 + (k + 1) * INTERVAL_MS
+            t_close = t0 + (k + 1) * self.step_ms
             self._manage(k, t_close)
             if self._check_kill_switch(k, t_close):
                 break
@@ -552,7 +560,7 @@ class _Simulator:
             s = self.series[symbol]
             if not s.has(k):
                 if k > s.last:  # Veri bitti (işlem durmuş/delist): son kapanıştan kapat, slotu boşalt
-                    self._close(symbol, s.c[s.last], END_REASON, s.t0 + (s.last + 1) * INTERVAL_MS)
+                    self._close(symbol, s.c[s.last], END_REASON, s.t0 + (s.last + 1) * s.step_ms)
                 continue
             hit = self._bar_exit(self.open[symbol], s.o[k], s.h[k], s.l[k], s.c[k], t_close / 1000)
             if hit:
@@ -594,11 +602,11 @@ class _Simulator:
 
     # ------------------------------------------------------------ 3) giriş
     def _btc_ok(self, k: int) -> bool:
-        """BTC son 1 saatte (12 kapanmış mum) sert düştüyse giriş yok (canlı `market_ok` ile aynı)."""
+        """BTC son 1 saatte (5 dk: 12 mum, 1 saat: 1 mum) sert düştüyse giriş yok (canlı `market_ok` ile aynı)."""
         cfg, btc = self.cfg, self.btc
         if not cfg.btc_filter or cfg.quote_asset != "USDT" or btc is None:
             return True
-        j = k - BTC_BARS_1H + 1
+        j = k - self.btc_bars_1h + 1
         if not (btc.has(k) and btc.has(j)) or btc.o[j] <= 0:
             return True  # Veri yoksa canlı bot da filtreyi atlar
         change = (btc.c[k] - btc.o[j]) / btc.o[j] * 100
@@ -642,7 +650,7 @@ class _Simulator:
         candidates.sort()  # Canlı ön elemeyle aynı sıra (rebound: en çok düşen, trend: en çok yükselen önce)
 
         signals = []
-        for _, symbol in candidates[: cfg.max_candidates]:
+        for _, symbol in candidates[: self.strategy.candidate_limit]:
             self.stats["analiz"] += 1
             signal = self._analyze(symbol, k, strict)
             if signal and cfg.min_signal_score > 0 and signal.score < cfg.min_signal_score:
@@ -682,7 +690,7 @@ class _Simulator:
                 opened += 1
 
     def _analyze(self, symbol: str, k: int, strict: bool) -> Optional[Signal]:
-        key = (self.strategy.name, symbol, k, strict)
+        key = (self.strategy.name, self.analysis_key, symbol, k, strict)
         if key in self.signal_cache:
             return self.signal_cache[key]
         window = self.series[symbol].window(k, self.strategy.kline_limit)
@@ -740,17 +748,18 @@ class _Simulator:
             return
         for symbol in list(self.open):
             kk = self.series[symbol].last_index(n - 1)
-            self._close(symbol, self.series[symbol].c[kk], END_REASON, t0 + (kk + 1) * INTERVAL_MS)
-        self._record_equity(n - 1, t0 + n * INTERVAL_MS)
+            self._close(symbol, self.series[symbol].c[kk], END_REASON, t0 + (kk + 1) * self.step_ms)
+        self._record_equity(n - 1, t0 + n * self.step_ms)
 
 
 # ================================================================ ana fonksiyon
-def _base_notes(spread_pct: float) -> List[str]:
-    return [
+def _base_notes(spread_pct: float, interval: str = INTERVAL) -> List[str]:
+    label = INTERVAL_LABELS.get(interval, interval)
+    notes = [
         "Hayatta kalma yanlılığı: semboller BUGÜNÜN en hacimli paritelerinden seçildi; dönem içinde "
         "delist olan veya çöken coinler teste dahil değil (sonuçlar olduğundan iyi görünebilir).",
         "Çözünürlük: canlı bot ~30 sn'de bir tarar ve birkaç saniyede bir fiyat kontrol eder; backtest "
-        "yalnızca 5 dk mum kapanışlarında karar verir.",
+        f"yalnızca {label} mum kapanışlarında karar verir.",
         "Kötümser mum içi sıralama: aynı mumda hem zarar-kes hem kâr-al seviyesi görüldüyse zarar-kes "
         "varsayıldı; zirve (izleyen stop) güncellemesi düşük taraf kontrolünden sonra yapıldı.",
         f"Sabit %{spread_pct:g} spread varsayıldı (alış +%{spread_pct / 2:g}, satış -%{spread_pct / 2:g}); "
@@ -761,6 +770,10 @@ def _base_notes(spread_pct: float) -> List[str]:
         "burada yalnızca test edilen sembollerden hesaplanır.",
         "Geçmiş performans gelecekteki sonuçları garanti etmez.",
     ]
+    if interval != INTERVAL:
+        notes.insert(1, "Uzun dönem: bugünün en hacimli coinlerinden dönem başında henüz listelenmemiş olanlar, "
+                        "verileri başladığı andan itibaren teste girer.")
+    return notes
 
 
 @dataclass
@@ -776,10 +789,15 @@ class BacktestData:
     k_start: int           # Simülasyonun başladığı mum
     days: float
     notes: List[str]
+    interval: str = INTERVAL   # Mum aralığı (stratejiye göre: 5m / 1h)
+
+    @property
+    def step_ms(self) -> int:
+        return INTERVAL_MS_BY_NAME[self.interval]
 
     @property
     def sim_start_ms(self) -> int:
-        return self.start_ms + self.k_start * INTERVAL_MS
+        return self.start_ms + self.k_start * self.step_ms
 
 
 def prepare_backtest(cfg, client, days: float = 30, max_symbols: int = 40,
@@ -810,27 +828,30 @@ def prepare_backtest(cfg, client, days: float = 30, max_symbols: int = 40,
         raise BacktestError("Test edilecek uygun sembol bulunamadı")
     usdt = cfg.quote_asset == "USDT"
     btc_symbol = "BTCUSDT" if (cfg.btc_filter or cfg.regime_filter) and usdt else None
+    strategy = strategy_class(cfg.strategy)
+    interval = strategy.interval
+    step_ms = INTERVAL_MS_BY_NAME[interval]
 
     # --- zaman aralığı (saate yuvarlanmış → önbellek anahtarı sabit kalır)
     now_ms = int(time.time() * 1000) if end_time_ms is None else int(end_time_ms)
     end_ms = now_ms // HOUR_MS * HOUR_MS
-    total_hours = int(math.ceil((days + WARMUP_DAYS) * 24))
+    total_hours = int(math.ceil((days + strategy.warmup_days) * 24))
     start_ms = end_ms - total_hours * HOUR_MS
-    n = (end_ms - start_ms) // INTERVAL_MS
-    sim_bars = min(n, max(1, int(round(days * BARS_PER_DAY))))
+    n = (end_ms - start_ms) // step_ms
+    sim_bars = min(n, max(1, int(round(days * DAY_MS / step_ms))))
     k_start = n - sim_bars
 
     # --- veri
     to_load = list(trade_symbols)
     if btc_symbol and btc_symbol not in to_load:
         to_load.append(btc_symbol)
-    say(f"📥 Mum verileri hazırlanıyor: {len(to_load)} sembol, {total_hours / 24:g} gün ({INTERVAL})")
+    say(f"📥 Mum verileri hazırlanıyor: {len(to_load)} sembol, {total_hours / 24:g} gün ({interval})")
     data: Dict[str, List[list]] = {}
     failed: List[str] = []
     cached = 0
     for i, sym in enumerate(to_load, 1):
         try:
-            rows, from_cache = load_klines(client, sym, start_ms, end_ms, cache_dir, say)
+            rows, from_cache = load_klines(client, sym, start_ms, end_ms, cache_dir, say, interval=interval)
         except Exception as exc:  # noqa: BLE001 - tek sembol hatası testi durdurmasın
             say(f"   ⚠️ [{i}/{len(to_load)}] {sym} indirilemedi: {exc}")
             failed.append(sym)
@@ -850,7 +871,7 @@ def prepare_backtest(cfg, client, days: float = 30, max_symbols: int = 40,
     series: Dict[str, _Series] = {}
     for sym in trade_symbols:
         if sym in data:
-            s = _Series(sym, data[sym], start_ms, n, rules[sym])
+            s = _Series(sym, data[sym], start_ms, n, rules[sym], step_ms)
             s.prepare_prefilter(cfg)
             series[sym] = s
     if not series:
@@ -859,7 +880,7 @@ def prepare_backtest(cfg, client, days: float = 30, max_symbols: int = 40,
     if btc_symbol:
         btc = series.get(btc_symbol)
         if btc is None and btc_symbol in data:
-            btc = _Series(btc_symbol, data[btc_symbol], start_ms, n)
+            btc = _Series(btc_symbol, data[btc_symbol], start_ms, n, step_ms=step_ms)
         if btc is None:
             notes.append("BTC verisi alınamadı: BTC filtresi ve piyasa rejimi uygulanmadı.")
 
@@ -877,7 +898,8 @@ def prepare_backtest(cfg, client, days: float = 30, max_symbols: int = 40,
             notes.append(f"BTC 4s/1g mumları alınamadı ({exc}); piyasa rejimi filtresi uygulanmadı.")
 
     return BacktestData(series=series, btc=btc, regime=regime, min_notional=typical_min_notional(rules),
-                        start_ms=start_ms, end_ms=end_ms, n=n, k_start=k_start, days=float(days), notes=notes)
+                        start_ms=start_ms, end_ms=end_ms, n=n, k_start=k_start, days=float(days), notes=notes,
+                        interval=interval)
 
 
 def simulate(cfg, data: BacktestData, spread_pct: float = 0.05, progress: Progress = None,
@@ -885,11 +907,15 @@ def simulate(cfg, data: BacktestData, spread_pct: float = 0.05, progress: Progre
     """Hazırlanmış veri üzerinde bir ayar setini simüle eder."""
     if spread_pct < 0:
         raise ValueError("spread_pct negatif olamaz")
+    needed = strategy_class(cfg.strategy).interval
+    if needed != data.interval:
+        raise BacktestError(f"{cfg.strategy} stratejisi {needed} mumlarla çalışır ama veri {data.interval} "
+                            f"mumlarla hazırlandı (aynı taramada farklı aralıklı stratejiler karşılaştırılamaz)")
     sim = _Simulator(cfg, data.series, data.btc if cfg.btc_filter else None, data.min_notional, spread_pct,
                      progress, regime=data.regime, signal_cache=signal_cache)
     sim.run(data.start_ms, data.k_start, data.n)
 
-    notes = _base_notes(spread_pct) + list(data.notes)
+    notes = _base_notes(spread_pct, data.interval) + list(data.notes)
     if not cfg.regime_filter:
         notes.append("Piyasa rejimi filtresi ayarlarda kapalı (REGIME_FILTER=false).")
     if any(t.reason == END_REASON for t in sim.trades):
@@ -916,6 +942,7 @@ def simulate(cfg, data: BacktestData, spread_pct: float = 0.05, progress: Progre
         end_ms=data.end_ms,
         spread_pct=spread_pct,
         stats=dict(sim.stats),
+        interval=data.interval,
     )
 
 
@@ -923,7 +950,7 @@ def run_backtest(cfg, client, days: float = 30, max_symbols: int = 40,
                  cache_dir: Optional[Union[str, Path]] = DATA_DIR / "backtest_cache",
                  progress: Progress = print, symbols: Optional[Sequence[str]] = None,
                  end_time_ms: Optional[int] = None, spread_pct: float = 0.05) -> BacktestResult:
-    """Son `days` günü 5 dk mumlarla simüle eder. Ağ hatası exchange_info/tickers_24h'den yükselebilir."""
+    """Son `days` günü stratejinin mum aralığıyla simüle eder. Ağ hatası exchange_info/tickers_24h'den yükselebilir."""
     if spread_pct < 0:
         raise ValueError("spread_pct negatif olamaz")
     data = prepare_backtest(cfg, client, days, max_symbols, cache_dir, progress, symbols, end_time_ms)
@@ -939,6 +966,12 @@ SWEEP_SL = (2.0, 3.5)
 SWEEP_TRAIL = (1.0, 2.0)
 SWEEP_HOLD = (60, 120, 240)
 SWEEP_ROOM = (0.0, 1.0)
+# Uzun vadeli (swing) stratejilerin çıkış taraması: günlerce süren, %8-15 hedefli işlemler (süre dakika: 2 / 5 gün)
+SWING_SWEEP_TP = (8.0, 12.0, 15.0)
+SWING_SWEEP_SL = (4.0, 6.0, 8.0)
+SWING_SWEEP_TRAIL = (6.0, 10.0)
+SWING_SWEEP_HOLD = (2880, 7200)
+SWING_SWEEP_LOOKBACK = (48, 72, 168)  # Giriş taraması: SWING_LOOKBACK_HOURS (2 / 3 / 7 gün)
 # Giriş taraması: çıkışlar .env'deki gibi kalır, hangi sinyallerin alınacağı değişir
 SWEEP_MAX_DROP = (15.0, 8.0)          # + .env'deki MAX_24H_DROP_PCT
 SWEEP_ENTRY_ROOM = (0.0, 0.5, 1.0)
@@ -959,6 +992,10 @@ SWEEP_FIELDS: Dict[str, Tuple[str, type, Optional[str]]] = {
     "MAX_24H_GAIN_PCT": ("max_24h_gain_pct", float, "MaxYük"),
     "MIN_SIGNAL_SCORE": ("min_signal_score", float, "Puan"),
     "MIN_ROOM_RATIO": ("min_room_ratio", float, "Alan"),
+    "SWING_LOOKBACK_HOURS": ("swing_lookback_hours", int, "Zirve"),
+    # Uzun vadeli stratejiye geçerken çıkış profiliyle .env'e yazılacak satırlar (tabloda gösterilmez)
+    "BREAKEVEN_TRIGGER_PCT": ("breakeven_trigger_pct", float, None),
+    "BREAKEVEN_FLOOR_PCT": ("breakeven_floor_pct", float, None),
 }
 EXIT_KEYS = ("TAKE_PROFIT_PCT", "STOP_LOSS_PCT", "TRAILING_ACTIVATION_PCT", "TRAILING_FLOOR_PCT",
              "MAX_HOLD_MINUTES", "MIN_ROOM_RATIO")
@@ -967,10 +1004,12 @@ SWEEP_MAX_GAIN = (12.0, 6.0)          # trend / breakout: + .env'deki MAX_24H_GA
 
 
 def entry_keys(cfg) -> Tuple[str, ...]:
-    """Giriş taramasının değiştirdiği ayarlar: rebound düşüş aralığını, trend/breakout yükseliş aralığını."""
+    """Giriş taramasının değiştirdiği ayarlar: rebound düşüş aralığını, trend/breakout yükseliş aralığını,
+    swing stratejileri zirve penceresini (SWING_LOOKBACK_HOURS)."""
     if cfg.strategy == "rebound":
         return ENTRY_KEYS
-    return tuple("MAX_24H_GAIN_PCT" if k == "MAX_24H_DROP_PCT" else k for k in ENTRY_KEYS)
+    range_key = "SWING_LOOKBACK_HOURS" if is_long_horizon(cfg.strategy) else "MAX_24H_GAIN_PCT"
+    return tuple(range_key if k == "MAX_24H_DROP_PCT" else k for k in ENTRY_KEYS)
 
 Settings = Dict[str, Union[float, int, bool, str]]
 Combo = Tuple[Settings, bool]          # (ayarlar, .env'deki mevcut ayar mı)
@@ -1042,13 +1081,22 @@ def _apply(cfg, settings: Settings):
     return replace(cfg, max_total_loss_pct=SWEEP_KILL_PCT, legacy_loss_usdt=None, **changes)
 
 
-def sweep_combos(cfg, tps: Sequence[float] = SWEEP_TP, sls: Sequence[float] = SWEEP_SL,
-                 trails: Sequence[float] = SWEEP_TRAIL, holds: Sequence[int] = SWEEP_HOLD,
-                 rooms: Sequence[float] = SWEEP_ROOM) -> List[Combo]:
-    """Çıkış taraması kombinasyonları; ilk satır .env'deki mevcut ayarlardır."""
+def sweep_combos(cfg, tps: Optional[Sequence[float]] = None, sls: Optional[Sequence[float]] = None,
+                 trails: Optional[Sequence[float]] = None, holds: Optional[Sequence[int]] = None,
+                 rooms: Optional[Sequence[float]] = None) -> List[Combo]:
+    """Çıkış taraması kombinasyonları; ilk satır .env'deki mevcut ayarlardır.
+
+    Verilmeyen listeler stratejinin vadesine göre seçilir (5 dk: TP %2-5 / süre 1-4 saat, swing: TP %8-15 / 2-5 gün).
+    """
+    swing = is_long_horizon(cfg.strategy)
+    tps = tps or (SWING_SWEEP_TP if swing else SWEEP_TP)
+    sls = sls or (SWING_SWEEP_SL if swing else SWEEP_SL)
+    trails = trails or (SWING_SWEEP_TRAIL if swing else SWEEP_TRAIL)
+    holds = holds or (SWING_SWEEP_HOLD if swing else SWEEP_HOLD)
+    rooms = rooms or SWEEP_ROOM
     base = _current(cfg, EXIT_KEYS)
     # Kırılımda "eski zirveye alan" ölçülmez; alan filtresi hiçbir şeyi değiştirmez (aynı satırlar iki kez denenmesin)
-    rooms_for_strategy = (cfg.min_room_ratio,) if cfg.strategy == "breakout" else tuple(rooms)
+    rooms_for_strategy = tuple(rooms) if strategy_class(cfg.strategy).uses_room else (cfg.min_room_ratio,)
     combos: List[Combo] = [(base, True)]
     for tp in tps:
         for sl in sls:
@@ -1089,12 +1137,15 @@ def entry_combos(cfg, scores: Sequence[float], max_drops: Sequence[float] = SWEE
     if cfg.strategy == "rebound":
         range_key = "MAX_24H_DROP_PCT"
         ranges = sorted({cfg.max_24h_drop_pct, *(d for d in max_drops if d > cfg.min_24h_drop_pct)}, reverse=True)
+    elif is_long_horizon(cfg.strategy):
+        range_key = "SWING_LOOKBACK_HOURS"
+        ranges = sorted({cfg.swing_lookback_hours, *SWING_SWEEP_LOOKBACK})
     else:
         range_key = "MAX_24H_GAIN_PCT"
         ranges = sorted({cfg.max_24h_gain_pct, *(g for g in SWEEP_MAX_GAIN if g > cfg.min_24h_gain_pct)},
                         reverse=True)
     skips = (False, True) if cfg.regime_filter and regime_available else (bool(cfg.regime_skip_weak),)
-    if cfg.strategy == "breakout":   # Kırılımda "eski zirveye alan" ölçülmez; filtre hiçbir şeyi değiştirmez
+    if not strategy_class(cfg.strategy).uses_room:   # Kırılımda "eski zirveye alan" ölçülmez; filtre etkisiz
         rooms = (cfg.min_room_ratio,)
     combos: List[Combo] = [(base, True)]
     for skip in skips:
@@ -1108,14 +1159,21 @@ def entry_combos(cfg, scores: Sequence[float], max_drops: Sequence[float] = SWEE
     return combos
 
 
+def comparable_strategies(strategy: str) -> List[str]:
+    """Aynı mum aralığıyla (aynı veriyle) çalışan stratejiler: 5 dk olanlar ya da uzun vadeli (1 saat) olanlar."""
+    interval = strategy_class(strategy).interval
+    return [s for s in STRATEGIES if strategy_class(s).interval == interval]
+
+
 def strategy_combos(cfg) -> List[Combo]:
-    """Strateji karşılaştırması: her strateji .env'deki çıkış ayarlarıyla; ilk satır mevcut strateji.
+    """Strateji karşılaştırması: aynı mum aralığındaki her strateji .env'deki çıkış ayarlarıyla; ilk satır mevcut strateji.
 
     MIN_SIGNAL_SCORE ve MIN_ROOM_RATIO stratejiye özeldir (puan ölçekleri ve "alan" tanımı farklıdır;
     örn. trend'de alan en fazla geri çekilme kadar olabilir). Rebound için seçilmiş bir değer diğer
     stratejileri haksız yere eleyebileceği için karşılaştırmada ikisi de kapalıdır (0).
+    5 dk ve 1 saatlik stratejiler farklı veriyle çalıştığından birlikte karşılaştırılmaz.
     """
-    order = [cfg.strategy] + [s for s in STRATEGIES if s != cfg.strategy]
+    order = [cfg.strategy] + [s for s in comparable_strategies(cfg.strategy) if s != cfg.strategy]
     return [({"STRATEGY": s, "MIN_SIGNAL_SCORE": 0.0, "MIN_ROOM_RATIO": 0.0}, s == cfg.strategy) for s in order]
 
 
@@ -1161,9 +1219,22 @@ def _fmt_setting(key: str, value) -> str:
     return f"{float(value):g}"
 
 
-def _env_lines(r: SweepRow) -> List[str]:
-    """.env'e yapıştırılabilir satırlar (her ayar ayrı satırda)."""
-    return [f"{k}={_fmt_setting(k, v)}" for k, v in r.settings.items()]
+def _advice_lines(cfg, r: SweepRow) -> List[str]:
+    """Önerilen satırın .env'e yazılacak TÜM satırları: strateji + satırın ayarları.
+
+    Uzun vadeli stratejide çıkış ayarlarının tamamı da yazılır: .env'deki çıkışlar çoğu zaman 5 dk stratejisine
+    göredir (test bunların yerine SWING_EXIT_PROFILE ile yapılmış olabilir).
+    """
+    strategy = str(r.settings.get("STRATEGY", cfg.strategy))
+    settings: Settings = {"STRATEGY": strategy}
+    if is_long_horizon(strategy):
+        settings.update({k: getattr(cfg, PROFILE_ATTRS[k]) for k in SWING_EXIT_PROFILE})
+    settings.update(r.settings)
+    lines = [f"{k}={_fmt_setting(k, v)}" for k, v in settings.items()]
+    stop = float(settings.get("STOP_LOSS_PCT", cfg.stop_loss_pct))
+    if cfg.backup_stop_enabled and cfg.backup_stop_pct <= stop:   # Yedek stop, zarar kesin altında beklemeli
+        lines.append(f"BACKUP_STOP_PCT={max(12.0, stop + 4):g}")
+    return lines
 
 
 def _csv_num(text: str) -> str:
@@ -1190,6 +1261,20 @@ def save_sweep_csv(rows: Sequence[SweepRow], path: Union[str, Path]) -> Path:
                 f"{r.se_net_pct:.4f}", "evet" if r.proven(len(rows)) else ""]
             writer.writerow([_csv_num(v) for v in values])
     return path
+
+
+def _strategy_flag(cfg, r: Optional[SweepRow] = None) -> str:
+    """Önerilen komutlardaki --strateji: satırın stratejisi (karşılaştırmada) veya taranan strateji."""
+    return f" --strateji {r.settings.get('STRATEGY', cfg.strategy) if r is not None else cfg.strategy}"
+
+
+def _exit_summary(cfg) -> str:
+    hold = fmt_duration(cfg.max_hold_minutes * 60) if cfg.max_hold_minutes > 0 else "sınırsız"
+    breakeven = (f"+%{cfg.breakeven_trigger_pct:g} → +%{cfg.breakeven_floor_pct:g}" if breakeven_effective(cfg)
+                 else "kapalı/etkisiz")
+    return (f"Kâr Al +%{cfg.take_profit_pct:g} | Zarar Kes -%{cfg.stop_loss_pct:g} | İzleyen stop "
+            f"+%{cfg.trailing_activation_pct:g} → +%{cfg.trailing_floor_pct:g}"
+            f"{' (dinamik)' if cfg.trailing_dynamic else ''} | Maks. süre {hold} | Başabaş {breakeven}")
 
 
 def _validation_lines(data: BacktestData, strat_flag: str = "") -> List[str]:
@@ -1223,27 +1308,32 @@ def format_sweep_report(rows: Sequence[SweepRow], cfg, data: BacktestData, sprea
     robust = [r for r in ranked if r.proven(len(rows))]
     lucky = [r for r in ranked if r.profitable and r.consistent and r.enough_trades and not r.proven(len(rows))]
     columns = [k for k in dict.fromkeys(k for r in rows for k in r.settings) if SWEEP_FIELDS[k][2]]
+    widths = {k: max([6, len(SWEEP_FIELDS[k][2])] + [len(_fmt_setting(k, r.settings.get(k, 0))) for r in shown])
+              for k in columns}
 
-    titles = {"giris": "🧪 GİRİŞ TARAMASI (aynı veriyle farklı giriş filtreleri; çıkışlar .env'deki gibi)",
-              "strateji": "🧪 STRATEJİ KARŞILAŞTIRMASI (aynı veri, .env'deki çıkış ayarları; puan ve alan filtresi kapalı)",
+    titles = {"giris": "🧪 GİRİŞ TARAMASI (aynı veriyle farklı giriş filtreleri; çıkışlar sabit)",
+              "strateji": "🧪 STRATEJİ KARŞILAŞTIRMASI (aynı veri ve çıkış ayarları; puan ve alan filtresi kapalı)",
               "cikis": "🧪 PARAMETRE TARAMASI (aynı veriyle farklı çıkış ayarları)"}
-    # .env'e yazılacak satırlara ve önerilen komutlara strateji HER ZAMAN eklenir: --strateji ile seçildiyse
-    # .env'dekinden farklı olabilir (rebound dahil)
-    strategy_line = [] if compare else [f"STRATEGY={cfg.strategy}"]
-    strat_flag = "" if compare else f" --strateji {cfg.strategy}"
+    # .env'e yazılacak satırlara (_advice_lines) ve önerilen komutlara strateji HER ZAMAN eklenir: --strateji ile
+    # seçildiyse .env'dekinden farklı olabilir (rebound dahil). Karşılaştırmada doğrulama komutu adayın stratejisini,
+    # taramayı tekrarlama komutu taranan stratejiyi alır (5 dk / 1 saat ayrımı, yani neyle karşılaştırılacağı korunur).
+    swing = is_long_horizon(cfg.strategy)
+    strat_flag = _strategy_flag(cfg)
+    label = INTERVAL_LABELS.get(data.interval, data.interval)
     lines = [
         titles.get(kind, titles["cikis"]) + ("" if compare else f" — strateji: {cfg.strategy}"),
         LINE,
-        f"🗓️ Dönem: {_fmt_time(data.sim_start_ms)} → {_fmt_time(data.end_ms)} ({data.days:g} gün) | "
+        f"🗓️ Dönem: {_fmt_time(data.sim_start_ms)} → {_fmt_time(data.end_ms)} ({data.days:g} gün, {label} mumlar) | "
         f"{len(data.series)} sembol | sermaye {fmt_usdt(cfg.start_capital)} {q} | komisyon {fmt_rate(cfg.fee_rate)} "
         f"| spread %{spread_pct:g}",
         f"🔢 Denenen ayar: {len(rows)} | kârlı: {len(profitable)} | iki yarıda da kârlı ve "
         f"≥{MIN_TRADES_FOR_EVIDENCE} işlem: {len(robust) + len(lucky)} | şans eleğinden de geçen: {len(robust)}",
         "   (Karşılaştırma adil olsun diye taramada kill-switch kapalıdır; maks. düşüşe bakın.)",
+    ] + ([] if kind == "cikis" else [f"⚙️ Çıkışlar (tüm satırlarda): {_exit_summary(cfg)}"]) + [
         f"   Sıralama: işlem başına net sonuca göre; {MIN_TRADES_FOR_EVIDENCE}'dan az işlem açan {len(few)} ayar "
         f"(sonuçları şans) en alta alındı.",
         LINE,
-        "   " + " ".join(f"{SWEEP_FIELDS[k][2]:>6}" for k in columns)
+        "   " + " ".join(f"{SWEEP_FIELDS[k][2]:>{widths[k]}}" for k in columns)
         + " | İşlem  Kaz%   Net USDT  İşl.başı  MaksDD |  1.yarı  2.yarı",
     ]
     for r in shown:
@@ -1255,20 +1345,29 @@ def format_sweep_report(rows: Sequence[SweepRow], cfg, data: BacktestData, sprea
             mark = "≈ "
         else:
             mark = "· " if not r.enough_trades else "  "
-        cells = " ".join(f"{_fmt_setting(k, r.settings.get(k, 0)):>6}" for k in columns)
+        cells = " ".join(f"{_fmt_setting(k, r.settings.get(k, 0)):>{widths[k]}}" for k in columns)
         lines.append(
             f"{mark} {cells} | {r.trades:>5d} {r.win_rate:>5.1f} {r.net:>+10.4f} {r.mean_net_pct:>+8.2f}% "
             f"{r.max_dd_pct:>6.1f}% | {r.first_net:>+7.3f} {r.second_net:>+7.3f}")
-    legend = [f"   ⭐ = .env'deki mevcut ayarlarınız | ✅ = aday (iki yarıda kârlı ve şans eleğinden geçti) |",
+    mine = ("mevcut ayarlar (.env'de 5 dk stratejisi varsa önerilen uzun vade çıkışlarıyla)" if swing
+            else ".env'deki mevcut ayarlarınız")
+    legend = [f"   ⭐ = {mine} | ✅ = aday (iki yarıda kârlı ve şans eleğinden geçti) |",
               f"   ≈ = iki yarıda kârlı ama şans olabilir | · = {MIN_TRADES_FOR_EVIDENCE}'dan az işlem (güvenilmez)"]
-    if compare:
+    if compare and swing:
+        legend += ["   swing = çok günlük yükseliş trendinde son günlerin zirvesinin hacimle kırılmasında alım |",
+                   "   swing_pullback = aynı trendde zirveden geri çekilip EMA50'den dönüşte alım (1 saatlik mumlar)"]
+    elif compare:
         legend += ["   rebound = düşen coinde dip alımı | trend = yükselen trendde EMA20'ye geri çekilmede alım |",
                    "   breakout = yükselen trendde 4 saatlik zirvenin hacimle kırılmasında alım"]
+    elif entry and swing:
+        legend += ["   Zayıf = REGIME_SKIP_WEAK (true: piyasa zayıfken alım yok), Zirve = SWING_LOOKBACK_HOURS (kırılım /",
+                   "   geri çekilme için bakılan son saatler; 72 = 3 gün), Puan = MIN_SIGNAL_SCORE, Alan = MIN_ROOM_RATIO (0 = kapalı)"]
     elif entry:
         legend += ["   Zayıf = REGIME_SKIP_WEAK (true: piyasa zayıfken alım yok), MaxDüş = MAX_24H_DROP_PCT,",
                    "   MaxYük = MAX_24H_GAIN_PCT, Puan = MIN_SIGNAL_SCORE, Alan = MIN_ROOM_RATIO (0 = kapalı)"]
     else:
-        legend += ["   TP/SL/İz. = Kâr Al / Zarar Kes / izleyen stop başlangıcı (%), Süre = maks. tutma (dk),",
+        legend += ["   TP/SL/İz. = Kâr Al / Zarar Kes / izleyen stop başlangıcı (%), Süre = maks. tutma (dk"
+                   + ("; 1440 = 1 gün" if swing else "") + "),",
                    "   Alan = MIN_ROOM_RATIO (0 = kapalı)"]
     lines += legend + ["   İşl.başı = işlem başına ortalama net K/Z", LINE]
 
@@ -1295,6 +1394,9 @@ def format_sweep_report(rows: Sequence[SweepRow], cfg, data: BacktestData, sprea
         if kind != "strateji" and cfg.strategy == "rebound":
             lines.append("   Trendin yönünde işlem yapan diğer stratejileri karşılaştırmak için: python main.py "
                          f"--backtest --gun {data.days:g} --strateji-karsilastir")
+        if not swing:
+            lines.append("   Uzun vadeli (1 saatlik mum, 1-5 gün, %8-15 hedef) stratejileri 1 yıllık veriyle denemek için: "
+                         "python main.py --backtest --gun 365 --strateji swing --strateji-karsilastir")
     elif not robust:
         top = max(profitable, key=lambda r: r.net)
         lines += [
@@ -1304,25 +1406,25 @@ def format_sweep_report(rows: Sequence[SweepRow], cfg, data: BacktestData, sprea
         ]
         if lucky:
             lines.append(f"   ≈ işaretli {len(lucky)} ayardan en iyisini yine de daha önceki bir dönemde sınayabilirsiniz:")
-            lines += [f"      {line}" for line in strategy_line + _env_lines(lucky[0])]
-            lines += _validation_lines(data, strat_flag)
+            lines += [f"      {line}" for line in _advice_lines(cfg, lucky[0])]
+            lines += _validation_lines(data, _strategy_flag(cfg, lucky[0]))
     else:
         cand = robust[0]
         lines += [
             f"✅ En tutarlı aday ({cand.trades} işlem, net {fmt_signed(cand.net, 4)} {q}, iki yarıda da kârlı).",
             "   .env dosyanızdaki şu satırları DEĞİŞTİRİN (aynı isimli eski satırları silin):",
-        ] + [f"      {line}" for line in strategy_line + _env_lines(cand)] + [
+        ] + [f"      {line}" for line in _advice_lines(cfg, cand)] + [
             f"   (İşlem başı sonucun alt sınırı, {len(rows)} ayar denendiği hesaba katılarak sıfırın üstünde.)",
             "   Yine de: çok ayar denendiği için en iyi sonuç iyimserdir.",
-        ] + _validation_lines(data, strat_flag) + [
+        ] + _validation_lines(data, _strategy_flag(cfg, cand)) + [
             "   Orada da kârlıysa birkaç gün TEST modunda izleyin. --gun 30 / 60 aynı dönemin parçasıdır,",
             "   bağımsız kanıt sayılmaz.",
         ]
-    flag = {"giris": "--tara-giris", "strateji": "--strateji-karsilastir"}.get(kind, "--tara") + strat_flag
+    flag = {"giris": "--tara-giris", "strateji": "--strateji-karsilastir"}.get(kind, "--tara")
     note = " (puan eşikleri o dönemin verisinden yeniden hesaplanır)" if entry else ""
     lines.append(f"🔁 Aynı taramayı önceki {data.days:g} günde yapmak için{note}: python main.py --backtest --gun "
-                 f"{data.days:g} {flag} --bitis {_fmt_date(data.sim_start_ms)}")
-    lines.append("📝 Kayma (slippage) yok, 5 dk mum çözünürlüğü, bugünün en hacimli coinleri (hayatta kalma "
+                 f"{data.days:g} {flag}{strat_flag} --bitis {_fmt_date(data.sim_start_ms)}")
+    lines.append(f"📝 Kayma (slippage) yok, {label} mum çözünürlüğü, bugünün en hacimli coinleri (hayatta kalma "
                  "yanlılığı). Geçmiş sonuçlar geleceği garanti etmez.")
     return "\n".join(lines)
 
@@ -1447,16 +1549,18 @@ def diagnostics_lines(result: BacktestResult, cfg) -> List[str]:
                      "bir dönemle doğrulayın.")
 
     tp, sl = cfg.take_profit_pct, cfg.stop_loss_pct
-    ups = sorted({x for x in (0.5, 1.0, 2.0, 3.0) if x < tp} | {tp})
-    downs = sorted({x for x in (1.0, 2.0) if x < sl} | {sl})
+    ups = sorted({x for x in (0.5, 1.0, 2.0, 3.0, 5.0, 8.0, 10.0) if x < tp}, reverse=True)[:4]
+    ups = sorted(set(ups) | {tp})
+    downs = sorted({x for x in ((1.0, 2.0) if sl <= 4 else (2.0, 4.0)) if x < sl} | {sl})
     lines.append("   İşlem açıkken en iyi anı şu kâra ulaşanlar: " + " | ".join(
         f"+%{x:g}{' (Kâr Al)' if x == tp else ''}: {_share(trades, lambda t, x=x: t.peak_pct >= x)}" for x in ups))
     lines.append("   En kötü anı şu zarara düşenler: " + " | ".join(
         f"-%{x:g}{' (Zarar Kes)' if x == sl else ''}: {_share(trades, lambda t, x=x: t.trough_pct <= -x)}"
         for x in downs))
-    reached = sorted(t.peak_after_sec / 60 for t in trades if t.peak_pct >= 1.0)
+    reached = sorted(t.peak_after_sec for t in trades if t.peak_pct >= 1.0)
     if reached:
-        lines.append(f"   +%1 ve üstünü görenlerde en iyi ana varış süresi (ortanca): {reached[len(reached) // 2]:.0f} dk")
+        lines.append(f"   +%1 ve üstünü görenlerde en iyi ana varış süresi (ortanca): "
+                     f"{fmt_duration(reached[len(reached) // 2])}")
     timeouts = [t for t in trades if t.reason == ExitReason.MAX_HOLD.value]
     if timeouts:
         lines.append(f"   Süre dolan {len(timeouts)} işlem: ortalama en iyi an {fmt_signed(sum(t.peak_pct for t in timeouts) / len(timeouts))}%, "
@@ -1501,7 +1605,7 @@ def format_backtest_report(result: BacktestResult, cfg) -> str:
     trailing = (f"+%{cfg.trailing_activation_pct:g} → zirvenin yarısı (en az +%{cfg.trailing_floor_pct:g})"
                 if cfg.trailing_dynamic else
                 f"+%{cfg.trailing_activation_pct:g} → +%{cfg.trailing_floor_pct:g}")
-    hold = f" | Maks. süre {cfg.max_hold_minutes} dk" if cfg.max_hold_minutes > 0 else ""
+    hold = f" | Maks. süre {fmt_duration(cfg.max_hold_minutes * 60)}" if cfg.max_hold_minutes > 0 else ""
     if not cfg.breakeven_enabled:
         breakeven = "kapalı"
     elif breakeven_effective(cfg):
@@ -1512,9 +1616,11 @@ def format_backtest_report(result: BacktestResult, cfg) -> str:
     lines = [
         "📊 BACKTEST RAPORU (geçmiş veriyle strateji testi)",
         LINE,
-        f"🗓️ Dönem: {_fmt_time(result.start_ms)} → {_fmt_time(result.end_ms)} ({result.days:g} gün, 5 dk mumlar)",
+        f"🗓️ Dönem: {_fmt_time(result.start_ms)} → {_fmt_time(result.end_ms)} ({result.days:g} gün, "
+        f"{INTERVAL_LABELS.get(result.interval, result.interval)} mumlar)",
         f"🪙 Sembol sayısı: {len(result.symbols_used)}",
-        f"🧭 Strateji: {cfg.strategy}",
+        f"🧭 Strateji: {cfg.strategy}" + (f" (zirve penceresi {cfg.swing_lookback_hours} saat)"
+                                          if is_long_horizon(cfg.strategy) else ""),
         f"⚙️ Kâr Al +%{cfg.take_profit_pct:g} | Zarar Kes -%{cfg.stop_loss_pct:g} | İzleyen stop {trailing}{hold}",
         f"   Başabaş: {breakeven}",
         f"   Komisyon {fmt_rate(cfg.fee_rate)} | Spread %{result.spread_pct:g} | "

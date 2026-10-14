@@ -189,6 +189,7 @@ Birkaç gün test modunda çalıştırıp sonuçları izlemenizi öneririz (`/is
 | `python main.py --backtest --gun 90 --tara` | Aynı veriyle onlarca Kâr Al / Zarar Kes / süre ayarını karşılaştırır |
 | `python main.py --backtest --gun 90 --tara-giris` | Aynı veriyle giriş filtrelerini (piyasa rejimi, 24s düşüş, sinyal puanı, hedef alanı) karşılaştırır |
 | `python main.py --backtest --gun 90 --bitis 2026-07-01` | O tarihte biten (daha eski) bir dönemi dener: bulunan ayarı bağımsız dönemde doğrulamak için |
+| `python main.py --backtest --strateji swing --strateji-karsilastir` | Uzun vadeli (1 saatlik mum) stratejileri son 1 yılın verisiyle karşılaştırır |
 | `python main.py --telegram-chat-id` | Telegram chat ID'nizi bulur |
 | `python main.py --reset-state` | Kayıtlı durumu sıfırlar (kill-switch kilidi dahil) |
 | `python watchdog.py --install-autostart --mode paper` | Windows açılışında otomatik başlatmayı kurar |
@@ -268,6 +269,47 @@ python main.py --backtest --gun 90 --strateji trend --tara-giris    # ...ve giri
 python main.py --backtest --gun 90 --strateji trend --bitis 2026-07-15   # Önceki dönemde doğrular
 ```
 `--strateji` yalnızca o backtest için geçerlidir; botun kullanacağı strateji `.env`'deki `STRATEGY` ayarıdır.
+
+### ⏳ Uzun vadeli stratejiler (`swing`, `swing_pullback`)
+5 dakikalık üç strateji de kullanıcı backtestlerinde (iki ayrı 90 günlük dönem, ~280 ayar) komisyon + spread
+sonrası zarar etti: 15-240 dakikalık hareketler ~%0.25'lik gidiş-dönüş maliyetini karşılamıyor. Uzun vadeli
+stratejiler **1 saatlik mumlarla** günlerce süren hareketleri hedefler (**1-5 gün, %8-15**); aynı maliyet bu
+hedefin küçük bir parçasıdır. Tarama altyapısı, güvenlik filtreleri, piyasa rejimi, BTC filtresi, kill-switch,
+Telegram ve risk kuralları aynıdır.
+
+| `STRATEGY` | Hangi coinler? | Alım sinyali (1 saatlik mumlar, ~17 günlük geçmiş) |
+|---|---|---|
+| `swing` | 24 saatte %0…+%25 değişmiş | Çok günlük yükseliş: EMA50 > EMA200 (≈ 2 gün / 8 gün), EMA200 son 24 saatte yükselmiş, fiyat 7 gün öncesinin üstünde. Son kapanan saatlik mum son `SWING_LOOKBACK_HOURS` (72 = 3 gün) saatin zirvesinin üstünde kapandı (taze kırılım), hacmi son 24 saatin ortalamasının ≥1.5 katı; RSI ≤ 78 ve fiyat EMA50'den en fazla %8 uzakta (kovalamaz) |
+| `swing_pullback` | 24 saatte −%12…+%25 değişmiş | Aynı çok günlük yükseliş trendinde son 3 günün zirvesinden %4-12 geri çekilme, dip EMA50'ye inmiş ama EMA200'ün altında kapanmamış; son 12 saat içinde dönüş: son mum yeşil ve bir öncekinin zirvesinin üstünde kapandı, fiyat EMA9 üstünde, RSI 45 altını görüp yükseliyor, hacim artmış |
+
+Farklar: swing stratejileri her taramada 3 kat fazla aday inceler, 24 saatlik fiyat aralığı filtresini
+(`MIN_24H_RANGE_PCT`) kullanmaz (sıkışmadan kırılım dar aralıktan başlar) ve ATR filtresini saatlik muma
+ölçekler (`MIN_ATR_PCT=0.25` → %0.87). **Çıkış ayarları da uzun vadeye göre olmalı** — 4 saatlik maks. süre
+veya +%1'de başabaş, işlemi hareket başlamadan kapatır. Önerilen başlangıç:
+```
+STRATEGY=swing
+TAKE_PROFIT_PCT=12
+STOP_LOSS_PCT=6
+TRAILING_ACTIVATION_PCT=8
+TRAILING_FLOOR_PCT=4
+MAX_HOLD_MINUTES=7200
+BREAKEVEN_TRIGGER_PCT=5
+BREAKEVEN_FLOOR_PCT=1
+```
+Bot `swing` ile kısa vadeli çıkışları birlikte görürse açılışta uyarır. Backtest'te `.env`'de hâlâ 5 dk
+stratejisi varken `--strateji swing` yazarsanız test bu önerilen çıkışlarla yapılır (ekranda yazar).
+
+**Önce 1 yıllık veriyle backtest edin** (5 dk testlerinin aksine birkaç dakikada biter; ~40 coin × 9.000 saatlik mum):
+```bash
+python main.py --backtest --strateji swing --strateji-karsilastir   # swing / swing_pullback, son 365 gün
+python main.py --backtest --strateji swing                          # Ayrıntılı rapor ve teşhis
+python main.py --backtest --strateji swing --tara                   # TP 8/12/15, SL 4/6/8, iz. 6/10, süre 2/5 gün
+python main.py --backtest --strateji swing --tara-giris             # Zirve penceresi 48/72/168 saat, rejim, puan
+python main.py --backtest --strateji swing --bitis 2025-10-14       # Önceki (çakışmayan) 1 yılda doğrulama
+```
+Swing stratejilerinde `--gun` verilmezse 365 gün kullanılır. Yılda ~50-150 işlem beklenir; 30'dan az işlem
+çıkan sonuç şanstan ayırt edilemez. 5 dk ve 1 saatlik stratejiler farklı veriyle çalıştığından
+`--strateji-karsilastir` yalnızca aynı vadedekileri karşılaştırır.
 
 ### 🧷 Binance'teki yedek zarar-kes emri
 Bot normalde zarar kesi kendisi yapar (−%10). Ama bilgisayar kapanır, uykuya geçer veya internet
@@ -365,7 +407,7 @@ iddialı bir hedeftir; bazı işlemler 60 dakikadan uzun sürebilir. İsterseniz
 - **İşlem kaydı** (`data/trades_<mod>.csv`): her işlemin sinyal puanı, düşüş, RSI, hacim, spread,
   BTC durumu, piyasa rejimi ve işlem boyunca görülen en yüksek / en düşük kâr bilgisi de yazılır.
   Bakiye seyri `data/equity_<mod>.csv` dosyasında.
-- **Backtest** (`python main.py --backtest --gun 30`): strateji ve tüm kurallarınız (+%15, −%10,
+- **Backtest** (`python main.py --backtest --gun 30`; swing stratejilerinde varsayılan 365 gün ve 1 saatlik mumlar): strateji ve tüm kurallarınız (+%15, −%10,
   izleyen stop, kill-switch, 11 USDT, %0.1 komisyon) son 30 günün verisiyle denenir. İlk çalıştırma
   veri indirdiği için birkaç dakika sürebilir; veriler `data/backtest_cache` klasörüne kaydedilir.
   **Geçmiş geleceği garanti etmez**: listeden çıkarılmış coinler eksik olduğu için sonuç iyimser
@@ -409,8 +451,10 @@ iddialı bir hedeftir; bazı işlemler 60 dakikadan uzun sürebilir. İsterseniz
 | `BNB_FEE_CHECK` / `BNB_MIN_TRADES` | `true` / `20` | BNB bakiyesi bildirimleri (yalnızca bilgi verir, BNB almaz). Yanlış `FEE_RATE` uyarısı her zaman açıktır |
 | `BACKUP_STOP_ENABLED` / `BACKUP_STOP_PCT` | `true` / `12` | Binance'teki yedek zarar-kes emri |
 | `BREAKEVEN_ENABLED` / `BREAKEVEN_TRIGGER_PCT` | `true` / `5` | Başabaş koruması (TRIGGER, izleyen stop başlangıcından küçük olmalı) |
-| `STRATEGY` | `rebound` | Giriş stratejisi: `rebound` / `trend` / `breakout` (yukarıdaki tablo) |
-| `MIN_ROOM_RATIO` | `0` | Hedef alanı filtresi: düşüş öncesi zirveye kalan alan Kâr Al için yetmiyorsa alma (0 = kapalı). `trend`'de alan son 3 saatin zirvesine mesafedir ve en fazla `TREND_PULLBACK_MAX_PCT` kadar olabilir (Kâr Al bundan büyükse 1 değeri trend'i durdurur); `breakout`'ta uygulanmaz |
+| `STRATEGY` | `rebound` | Giriş stratejisi: `rebound` / `trend` / `breakout` (5 dk) veya `swing` / `swing_pullback` (1 saatlik, 1-5 gün; çıkış ayarlarını da değiştirin) |
+| `SWING_LOOKBACK_HOURS` / `SWING_VOLUME_RATIO` | `72` / `1.5` | `swing`: kırılacak zirvenin penceresi (saat) ve kırılım mumunun hacim katı |
+| `SWING_PULLBACK_MIN_PCT` / `SWING_PULLBACK_MAX_PCT` | `4` / `12` | `swing_pullback`: zirveden geri çekilme aralığı (%) |
+| `MIN_ROOM_RATIO` | `0` | Hedef alanı filtresi: düşüş öncesi zirveye kalan alan Kâr Al için yetmiyorsa alma (0 = kapalı). `trend`'de alan son 3 saatin zirvesine mesafedir ve en fazla `TREND_PULLBACK_MAX_PCT` kadar olabilir (Kâr Al bundan büyükse 1 değeri trend'i durdurur); `breakout` ve `swing`'de uygulanmaz |
 | `BTC_CRASH_EXIT` | `false` | BTC çöküşünde erken çıkış |
 | `USE_WEBSOCKET` | `true` | Anlık fiyat akışı |
 | `TELEGRAM_COMMANDS` / `COMMAND_PIN` | `true` / boş | Telegram komutları / onay PIN'i |
