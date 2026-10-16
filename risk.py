@@ -19,7 +19,7 @@ from dataclasses import asdict, dataclass, field, fields
 from enum import Enum
 from typing import Dict, Optional
 
-from config import is_rotation
+from config import is_rotation, strategy_family
 from exchange import SymbolRules, floor_decimals, to_dec
 
 
@@ -180,8 +180,12 @@ def kill_switch_hit(realized_pnl: float, unrealized_pnl: float, loss_limit: floa
 
 
 def _backup_floor(cfg) -> float:
-    """Binance yedek stop emrinin (STOP_LOSS / STOP_LOSS_LIMIT) tetiklenince değerinin pozisyona oranı."""
-    if not getattr(cfg, "backup_stop_enabled", False):
+    """Binance yedek stop emrinin (STOP_LOSS / STOP_LOSS_LIMIT) tetiklenince değerinin pozisyona oranı.
+
+    Yalnızca günlerce / haftalarca tutulan stratejilerde (swing, rotasyon) boyutlandırmaya katılır: bot kapalıyken
+    korumanın asıl önemli olduğu yer orası. 5 dk stratejilerinin boyutlandırması değişmez (1.0 döner).
+    """
+    if not getattr(cfg, "backup_stop_enabled", False) or strategy_family(getattr(cfg, "strategy", "")) == "short":
         return 1.0
     return (1 - cfg.backup_stop_pct / 100) * (1 - getattr(cfg, "backup_stop_limit_gap_pct", 0.0) / 100)
 
@@ -190,8 +194,8 @@ def min_position_usdt(min_notional: float, cfg) -> float:
     """Stop-loss seviyesinde bile satılabilmesi için bir pozisyonun olması gereken en küçük tutar.
 
     Örn. min. emir 5 USDT, güvenlik payı 1.05, stop-loss %10 → 5 × 1.05 / 0.90 ≈ 5.83 USDT
-    Binance yedek stop emri de (daha aşağıda, örn. -%25) minimum emir tutarının üstünde kalmalı; yoksa emir
-    konulamaz ve pozisyon bot kapalıyken korumasız kalır (5 dk ayarlarında -%12 için ≈5.74, etkisi yok).
+    Swing / rotasyonda Binance yedek stop emri de (daha aşağıda, örn. -%25) minimum emir tutarının üstünde kalmalı;
+    yoksa emir konulamaz ve pozisyon bot kapalıyken korumasız kalır.
     """
     by_stop = min_notional * cfg.min_notional_safety / (1 - cfg.stop_loss_pct / 100)
     floor = _backup_floor(cfg)

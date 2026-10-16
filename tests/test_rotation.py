@@ -413,6 +413,8 @@ def test_live_rotation_stops_buying_after_unknown_buy(rcfg, fake_client, tmp_pat
 def test_rotation_position_size_keeps_backup_stop_placeable(cfg, rcfg):
     from risk import min_position_usdt, plan_entry
     assert min_position_usdt(5.0, cfg) == pytest.approx(5 * 1.05 / 0.9)          # 5 dk ayarları değişmedi
+    tight = replace(cfg, stop_loss_pct=3.5)            # 5 dk'da sıkı zarar kesle de boyut / yer sayısı aynı kalır
+    assert min_position_usdt(5.0, tight) == pytest.approx(5 * 1.05 / 0.965)
     rot_min = min_position_usdt(5.0, rcfg)
     assert rot_min == pytest.approx(5 / (0.75 * 0.99))                             # -%25 yedek stop ≥ 5 USDT
     from exchange import parse_symbol_rules
