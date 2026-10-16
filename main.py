@@ -201,7 +201,8 @@ def show_stats(cfg) -> int:
              else cfg.loss_limit(cfg.start_capital))
     prob = stats.kill_switch_probability([t["kar_zarar_usdt"] for t in trades], realized, limit)
     print(_strip_html(stats.format_stats(st, cfg.quote_asset, realized, limit,
-                                         cfg.take_profit_pct, cfg.stop_loss_pct, prob)))
+                                         0.0 if is_rotation(cfg.strategy) else cfg.take_profit_pct,
+                                         cfg.stop_loss_pct, prob)))
     return EXIT_OK
 
 
@@ -247,8 +248,8 @@ def run_backtest_cli(cfg, args) -> int:
         env_strategy = cfg.strategy
         cfg, profile = with_strategy(cfg, args.strateji)
         if profile:
-            kind = ("haftalarca tutulan rotasyon" if is_rotation(cfg.strategy) else "1-5 gün süren")
-            print(f"ℹ️ .env'deki çıkış ayarları {env_strategy} stratejisi içindir; {cfg.strategy} {kind} işlemler "
+            kind = ("haftalarca tutulan rotasyon işlemleri" if is_rotation(cfg.strategy) else "1-5 gün süren işlemler")
+            print(f"ℹ️ .env'deki çıkış ayarları {env_strategy} stratejisi içindir; {cfg.strategy}, {kind} "
                   f"için önerilen ayarlarla deneniyor:")
             print("   " + " ".join(f"{k}={getattr(cfg, PROFILE_ATTRS[k]):g}"
                                    for k in PROFILES[strategy_family(cfg.strategy)]))
@@ -279,18 +280,19 @@ def run_backtest_cli(cfg, args) -> int:
     period = f"{args.bitis} tarihinde biten {days} günün" if end_ms else f"Son {days} günün"
     print(f"⏳ {period} verisi indiriliyor ve strateji deneniyor (ilk seferde birkaç dakika sürebilir)...")
     client = BinanceClient(cfg.binance_api_key, cfg.binance_api_secret, cfg.binance_base_url)
+    compare = args.strateji_karsilastir and not is_rotation(cfg.strategy)
+    if args.strateji_karsilastir and not compare:
+        print("ℹ️ Rotasyon tek stratejidir (günlük mumlarla başka strateji yok); karşılaştırma yerine normal rapor "
+              "gösteriliyor (BTC'yi alıp tutmakla kıyaslı). Ayarları denemek için --tara ve --tara-giris kullanın.")
     try:
-        if not (args.tara or args.tara_giris or args.strateji_karsilastir):
+        if not (args.tara or args.tara_giris or compare):
             result = backtest.run_backtest(cfg, client, days=days, max_symbols=args.coin_sayisi, end_time_ms=end_ms)
             print(backtest.format_backtest_report(result, cfg))
             return EXIT_OK
         data = backtest.prepare_backtest(cfg, client, days=days, max_symbols=args.coin_sayisi, end_time_ms=end_ms)
         cache: dict = {}   # Giriş analizleri taramalar arasında da paylaşılır (anahtar stratejiyi içerir)
         reports = []
-        if args.strateji_karsilastir and is_rotation(cfg.strategy):
-            print("ℹ️ Rotasyon tek stratejidir (günlük mumlarla başka strateji yok); karşılaştırma yerine "
-                  "--tara ve --tara-giris kullanın. Raporlarda BTC'yi alıp tutmakla kıyas vardır.")
-        elif args.strateji_karsilastir:
+        if compare:
             combos = backtest.strategy_combos(cfg)
             print(f"🧪 Strateji karşılaştırması: {', '.join(st['STRATEGY'] for st, _ in combos)} aynı veriyle "
                   f"deneniyor...")
@@ -369,8 +371,9 @@ def run_bot(cfg, store, args, log) -> int:
         print("  ⚠️  CANLI MOD: Bot GERÇEK PARANIZLA Binance'te işlem yapacak!")
         kill = (f"-{cfg.legacy_loss_usdt:g} {cfg.quote_asset}" if cfg.legacy_loss_usdt is not None
                 else f"sermayenin %{cfg.max_total_loss_pct:g}'i")
-        print(f"  Sermaye: {cfg.start_capital:g} {cfg.quote_asset} | Kill-switch: {kill} "
-              f"| TP +%{cfg.take_profit_pct:g} | SL -%{cfg.stop_loss_pct:g}")
+        exits = (f"Rotasyon: en güçlü {cfg.rotation_top_n} coin, felaket zarar kesi -%{cfg.stop_loss_pct:g}"
+                 if is_rotation(cfg.strategy) else f"TP +%{cfg.take_profit_pct:g} | SL -%{cfg.stop_loss_pct:g}")
+        print(f"  Sermaye: {cfg.start_capital:g} {cfg.quote_asset} | Kill-switch: {kill} | {exits}")
         print("!" * 64)
         if not args.yes and not confirm("Devam etmek için EVET yazın: "):
             print("İptal edildi.")

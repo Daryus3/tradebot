@@ -13,7 +13,7 @@ import queue
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING, Dict, List, Optional
 
 import requests
@@ -407,30 +407,50 @@ class CommandProcessor:
             f"Mod: {'🧪 TEST' if cfg.is_paper else '💵 CANLI'}\n"
             f"🧭 Strateji: {STRATEGY_LABELS.get(cfg.strategy, cfg.strategy)}\n"
             + (f"🔄 En güçlü {cfg.rotation_top_n} coin | momentum {cfg.rotation_lookback_days} gün | her "
-               f"{cfg.rotation_days} günde dengeleme | BTC ort. {cfg.rotation_btc_ma_days or 'kapalı'} gün\n"
-               f"🛑 Felaket zarar kesi -%{cfg.stop_loss_pct:g} (kâr al / izleyen stop kullanılmaz)\n"
+               f"{cfg.rotation_days} günde dengeleme | "
+               + (f"BTC {cfg.rotation_btc_ma_days} günlük ortalama altında USDT" if cfg.rotation_btc_ma_days
+                  else "BTC trend filtresi kapalı") + "\n"
+               f"🛑 Felaket zarar kesi -%{cfg.stop_loss_pct:g} (kâr al / izleyen stop / başabaş / maks. süre "
+               f"kullanılmaz)\n"
                if is_rotation(cfg.strategy) else
                f"🎯 Kâr Al +%{cfg.take_profit_pct:g} | 🛑 Zarar Kes -%{cfg.stop_loss_pct:g}\n"
                f"📈 İzleyen stop: +%{cfg.trailing_activation_pct:g} → +%{cfg.trailing_floor_pct:g}\n") +
             f"☠️ Kill-switch: sermayenin %{self.bot.loss_pct:.4g}'i "
             f"(şu an {fmt_usdt(self.bot.loss_limit)} {cfg.quote_asset})\n"
-            f"📦 En fazla pozisyon: {cfg.max_open_positions} (şu an {self.bot.slots()})\n"
+            f"📦 En fazla pozisyon: {cfg.max_open_positions} (şu an {self.bot.target_slots()})\n"
             f"🧷 Binance yedek stop: {on(cfg.backup_stop_enabled)} (-%{cfg.backup_stop_pct:g})\n"
-            f"🔒 Başabaş: {on(cfg.breakeven_enabled)} | 📉 BTC çöküş çıkışı: {on(cfg.btc_crash_exit)}\n"
-            f"↔️ Maks. spread: %{cfg.max_spread_pct:g} | 🌡️ Piyasa rejimi filtresi: {on(cfg.regime_filter)}\n"
-            f"{esc(self.bot.fee_status_line())}\n"
-            f"⏱️ Tarama: {cfg.scan_interval_sec} sn | Maks. tutma: "
-            f"{fmt_duration(cfg.max_hold_minutes * 60, exact=True) if cfg.max_hold_minutes else 'sınırsız'}\n"
-            "<i>Ayarlar bilgisayardaki .env dosyasından değiştirilir.</i>")
+            + (f"📉 BTC çöküş çıkışı: {on(cfg.btc_crash_exit)} | ↔️ Maks. spread: %{cfg.max_spread_pct:g}\n"
+               f"{esc(self.bot.fee_status_line())}\n"
+               f"⏱️ Kontrol: {cfg.scan_interval_sec} sn'de bir (kararlar UTC 00:05 sonrası)\n"
+               if is_rotation(cfg.strategy) else
+               f"🔒 Başabaş: {on(cfg.breakeven_enabled)} | 📉 BTC çöküş çıkışı: {on(cfg.btc_crash_exit)}\n"
+               f"↔️ Maks. spread: %{cfg.max_spread_pct:g} | 🌡️ Piyasa rejimi filtresi: {on(cfg.regime_filter)}\n"
+               f"{esc(self.bot.fee_status_line())}\n"
+               f"⏱️ Tarama: {cfg.scan_interval_sec} sn | Maks. tutma: "
+               f"{fmt_duration(cfg.max_hold_minutes * 60, exact=True) if cfg.max_hold_minutes else 'sınırsız'}\n")
+            + "<i>Ayarlar bilgisayardaki .env dosyasından değiştirilir.</i>")
 
     # ------------------------------------------------------------ kontrol komutları
     def cmd_durdur(self, args) -> None:
         self.bot.set_paused(True)
+        if is_rotation(self.bot.cfg.strategy):
+            self.reply("⏸️ <b>Yeniden dengeleme ertelendi</b> (sıralamaya göre alım ve satış yapılmaz).\n"
+                       "Felaket zarar kesi ve BTC trend filtresi satışları sürüyor. Devam için /devam yazın.")
+            return
         self.reply("⏸️ <b>Yeni alımlar durduruldu.</b>\nAçık pozisyonların kâr al / zarar kes takibi sürüyor. "
                    "Devam etmek için /devam yazın.")
 
     def cmd_devam(self, args) -> None:
         self.bot.set_paused(False)
+        if is_rotation(self.bot.cfg.strategy):
+            state, cfg = self.bot.state, self.bot.cfg
+            due_day = state.last_rebalance_day + cfg.rotation_days
+            if state.last_rebalance_day < 0 or self.bot.rotation_day(self.time_fn()) >= due_day:
+                when = "zamanı geldiği için birkaç saniye içinde yapılacak"
+            else:
+                when = f"{(date(1970, 1, 1) + timedelta(days=due_day)).strftime('%d.%m.%Y')} UTC 00:05'ten sonra yapılacak"
+            self.reply(f"▶️ <b>Rotasyona devam ediliyor.</b> Yeniden dengeleme {when}.")
+            return
         self.reply("▶️ <b>Alımlara devam ediliyor.</b> Bir sonraki taramada fırsat aranacak.")
 
     def cmd_sat(self, args) -> None:

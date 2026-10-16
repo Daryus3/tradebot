@@ -179,12 +179,23 @@ def kill_switch_hit(realized_pnl: float, unrealized_pnl: float, loss_limit: floa
     return realized_pnl + unrealized_pnl <= -abs(loss_limit) + 1e-9
 
 
+def _backup_floor(cfg) -> float:
+    """Binance yedek stop emrinin (STOP_LOSS / STOP_LOSS_LIMIT) tetiklenince değerinin pozisyona oranı."""
+    if not getattr(cfg, "backup_stop_enabled", False):
+        return 1.0
+    return (1 - cfg.backup_stop_pct / 100) * (1 - getattr(cfg, "backup_stop_limit_gap_pct", 0.0) / 100)
+
+
 def min_position_usdt(min_notional: float, cfg) -> float:
     """Stop-loss seviyesinde bile satılabilmesi için bir pozisyonun olması gereken en küçük tutar.
 
     Örn. min. emir 5 USDT, güvenlik payı 1.05, stop-loss %10 → 5 × 1.05 / 0.90 ≈ 5.83 USDT
+    Binance yedek stop emri de (daha aşağıda, örn. -%25) minimum emir tutarının üstünde kalmalı; yoksa emir
+    konulamaz ve pozisyon bot kapalıyken korumasız kalır (5 dk ayarlarında -%12 için ≈5.74, etkisi yok).
     """
-    return min_notional * cfg.min_notional_safety / (1 - cfg.stop_loss_pct / 100)
+    by_stop = min_notional * cfg.min_notional_safety / (1 - cfg.stop_loss_pct / 100)
+    floor = _backup_floor(cfg)
+    return max(by_stop, min_notional / floor) if floor > 0 else by_stop
 
 
 def position_slots(capital: float, min_notional: float, cfg) -> int:
@@ -222,6 +233,10 @@ def plan_entry(available_usdt: float, rules: SymbolRules, price: float, cfg) -> 
     if value_at_stop < min_notional * cfg.min_notional_safety:
         return EntryPlan(False, reason=f"Stop-loss seviyesinde pozisyon değeri ({value_at_stop:.2f}) "
                                        f"minimum satış tutarının ({min_notional:.2f}) altına düşer")
+    value_at_backup = invest * _backup_floor(cfg)
+    if value_at_backup < min_notional:
+        return EntryPlan(False, reason=f"Binance yedek stop seviyesinde pozisyon değeri ({value_at_backup:.2f}) "
+                                       f"minimum emir tutarının ({min_notional:.2f}) altına düşer")
 
     qty = rules.floor_market_qty(to_dec(invest) / to_dec(price))
     if qty <= 0 or qty < rules.market_min_qty:

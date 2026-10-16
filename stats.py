@@ -22,6 +22,7 @@ from itertools import accumulate
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
+from config import is_rotation
 from logger import get_logger
 from state import TradeLog
 from telegram_bot import LINE, esc, fmt_duration, fmt_price, fmt_signed, fmt_usdt
@@ -529,7 +530,8 @@ def stats_message(trades: Iterable[dict], cfg, realized_pnl: float, horizon: int
     limit = cfg.loss_limit(cfg.start_capital if base_capital is None else base_capital, capital_added)
     prob = kill_switch_probability(trade_pnls(trades), realized_pnl, limit, horizon=horizon)
     return format_stats(compute_stats(trades), cfg.quote_asset, realized_pnl, limit,
-                        cfg.take_profit_pct, cfg.stop_loss_pct, prob, kill_horizon=horizon)
+                        0.0 if is_rotation(cfg.strategy) else cfg.take_profit_pct, cfg.stop_loss_pct, prob,
+                        kill_horizon=horizon)
 
 
 def format_period_report(trades: Iterable[dict], start: datetime, end: datetime, title: str,

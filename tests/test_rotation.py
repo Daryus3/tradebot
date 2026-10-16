@@ -87,7 +87,7 @@ def test_rotation_exits_only_on_catastrophic_stop(rcfg):
 
 # ---------------------------------------------------------------- backtest (günlük mumlar)
 END_TIME_MS = 1_700_000_000_000
-END_MS = END_TIME_MS // HOUR_MS * HOUR_MS
+END_MS = END_TIME_MS // DAY_MS * DAY_MS      # Günlük mumlarda dönem UTC gün başında biter (son mum kapanmış gün)
 DAYS = 120
 N = DAYS + 210
 
@@ -129,7 +129,7 @@ class DailyClient:
 
 
 def _start_ms():
-    return END_MS - int((DAYS + 210) * 24) * HOUR_MS
+    return END_MS - N * DAY_MS
 
 
 def _series(btc_crash_at=None):
@@ -160,7 +160,12 @@ def test_rotation_backtest_holds_leader_then_rotates(rcfg, fake_client, tmp_path
     assert any(t.symbol == "NEXTUSDT" for t in result.trades)           # Yerine yükselen alındı
     opens = [(t.open_time_ms - data.start_ms) // DAY_MS - 1 for t in result.trades]
     assert all((k - 210) % cfg.rotation_days == 0 for k in opens)       # Yalnızca dengeleme günlerinde alım
-    assert result.stats["dengeleme"] == len(range(210, N, cfg.rotation_days))
+    assert result.stats["dengeleme"] == len(range(210, N - 1, cfg.rotation_days))   # Son mumda dengeleme yok
+    assert data.start_ms == _start_ms() and data.start_ms % DAY_MS == 0
+    # Kârlı satışın geliri aynı dengelemede yerine alınan coine gider (canlıdaki gibi satış SONRASI sermaye)
+    sold = result.trades[0]
+    replacement = next(t for t in result.trades if t.open_time_ms == sold.close_time_ms)
+    assert replacement.cost == pytest.approx(cfg.start_capital + sold.pnl, rel=0.01)
     assert result.btc_hold_pct == pytest.approx((1.001 ** (N - 1 - 210) - 1) * 100, rel=1e-6)
     report = backtest.format_backtest_report(result, cfg)
     assert "Rotasyon: En güçlü 1 coin" in report and "BTC'yi alıp tutmak" in report and "Kâr Al +%" not in report
@@ -202,6 +207,17 @@ def test_rotation_sweeps_and_advice(rcfg):
                  "ROTATION_LOOKBACK_DAYS=28", "BACKUP_STOP_PCT=34"):
         assert line in lines, line
     assert sum(1 for ln in lines if ln.startswith("BACKUP_STOP_PCT=")) == 1
+
+
+def test_cli_rotation_compare_falls_back_to_report(cfg, monkeypatch, capsys):
+    import binance_client
+    import main
+    monkeypatch.setattr(binance_client, "BinanceClient", lambda *a, **k: object())
+    ran = []
+    monkeypatch.setattr(backtest, "run_backtest", lambda *a, **k: ran.append(1) or (_ for _ in ()).throw(RuntimeError("dur")))
+    monkeypatch.setattr(backtest, "prepare_backtest", lambda *a, **k: (_ for _ in ()).throw(AssertionError("indirme")))
+    main.run_backtest_cli(cfg, main.parse_args(["--backtest", "--strateji", "rotation", "--strateji-karsilastir"]))
+    assert ran and "tek stratejidir" in capsys.readouterr().out
 
 
 def test_cli_rotation_defaults(cfg, monkeypatch, capsys):
@@ -348,7 +364,80 @@ def test_live_rotation_retries_failed_sell(rcfg, fake_client, tmp_path, monkeypa
     monkeypatch.setattr(bot, "close_position", real_close)
     clock[0] += 60
     bot.tick()
+    # Satıldı ve boşalan yer hemen dolduruldu (backtest satış + alımı aynı anda yapar)
     assert "AUSDT" not in bot.state.positions and not bot.state.rotation_sells
+    assert set(bot.state.positions) == {"BUSDT"} and not bot.state.rotation_refill
+    assert bot.state.last_rebalance_day == 19676 + 7      # Takvim kaymaz
+    assert any("BOŞALAN YER DOLDURULDU" in m for m in notes.messages)
+
+
+def test_live_rotation_network_error_mid_rebalance_is_retried(rcfg, fake_client, tmp_path, monkeypatch):
+    import requests
+    cfg = replace(rcfg, rotation_top_n=2)
+    clock = [T0]
+    closes = {"AUSDT": rising(f=1.02), "BUSDT": rising(f=1.01), "BTCUSDT": rising(f=1.002, start=30_000.0)}
+    bot, feed, notes = make_rotation_bot(cfg, fake_client, tmp_path, closes, clock)
+    real_buy, calls = bot.open_position, []
+
+    def flaky(signal, *a, **k):
+        calls.append(signal.symbol)
+        if len(calls) == 2:
+            raise requests.ConnectionError("ağ koptu")
+        return real_buy(signal, *a, **k)
+    monkeypatch.setattr(bot, "open_position", flaky)
+    with pytest.raises(requests.ConnectionError):
+        bot.tick()
+    assert set(bot.state.positions) == {"AUSDT"} and bot.state.last_rebalance_day == -1   # Gün kaydedilmedi
+    bot.next_scan_at = 0
+    bot.tick()                                             # Yeniden planlanır: A elde, yalnızca B alınır
+    assert set(bot.state.positions) == {"AUSDT", "BUSDT"} and bot.state.last_rebalance_day == 19676
+    assert calls == ["AUSDT", "BUSDT", "BUSDT"]
+
+
+def test_live_rotation_stops_buying_after_unknown_buy(rcfg, fake_client, tmp_path, monkeypatch):
+    cfg = replace(rcfg, rotation_top_n=2)
+    clock = [T0]
+    closes = {"AUSDT": rising(f=1.02), "BUSDT": rising(f=1.01), "BTCUSDT": rising(f=1.002, start=30_000.0)}
+    bot, feed, notes = make_rotation_bot(cfg, fake_client, tmp_path, closes, clock)
+    tried = []
+
+    def unknown(signal, *a, **k):
+        tried.append(signal.symbol)
+        bot.state.pending_orders["cid-1"] = {"symbol": signal.symbol, "side": "BUY", "created_at": clock[0]}
+        return False
+    monkeypatch.setattr(bot, "open_position", unknown)
+    bot.tick()
+    assert tried == ["AUSDT"]                              # Sonuç belirsizken ikinci coin alınmadı
+
+
+def test_rotation_position_size_keeps_backup_stop_placeable(cfg, rcfg):
+    from risk import min_position_usdt, plan_entry
+    assert min_position_usdt(5.0, cfg) == pytest.approx(5 * 1.05 / 0.9)          # 5 dk ayarları değişmedi
+    rot_min = min_position_usdt(5.0, rcfg)
+    assert rot_min == pytest.approx(5 / (0.75 * 0.99))                             # -%25 yedek stop ≥ 5 USDT
+    from exchange import parse_symbol_rules
+    from conftest import FakeClient
+    rules = parse_symbol_rules(FakeClient({"AUSDT": 1.0}).exchange_info(), "USDT")["AUSDT"]
+    small = plan_entry(6.6, rules, 1.0, rcfg)
+    assert not small.ok and "yedek stop" in small.reason
+    assert plan_entry(6.8, rules, 1.0, rcfg).ok
+
+
+def test_rotation_pause_and_resume_replies(rcfg, fake_client, tmp_path):
+    from commands import CommandProcessor
+    clock = [T0]
+    bot, feed, notes = make_rotation_bot(rcfg, fake_client, tmp_path,
+                                         {"AUSDT": rising(f=1.02), "BTCUSDT": rising(f=1.002, start=30_000.0)}, clock)
+    replies = []
+    proc = CommandProcessor(bot, time_fn=lambda: clock[0])
+    proc.reply = replies.append
+    proc.cmd_durdur([])
+    assert "Yeniden dengeleme ertelendi" in replies[-1] and bot.state.paused
+    proc.cmd_devam([])
+    assert "birkaç saniye içinde" in replies[-1]
+    bot.tick()
+    proc.cmd_devam([])
+    assert "UTC 00:05" in replies[-1]
 
 
 def test_rotation_scan_for_selftest(rcfg, fake_client):

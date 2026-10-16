@@ -356,7 +356,8 @@ class Messages:
                 f"🪙 Miktar: {fmt_qty(pos.qty)} {esc(pos.base_asset)}\n"
                 f"🏷️ Ort. alış fiyatı: {fmt_price(pos.entry_price)}\n"
                 f"💸 Alış komisyonu: {pos.buy_fee_usdt:.4f} {q}\n{LINE}\n"
-                f"🔄 Sıralamadan düşünce (her {cfg.rotation_days} günde kontrol) veya BTC trendi bozulunca satılır\n"
+                f"🔄 Sıralamadan düşünce (her {cfg.rotation_days} günde kontrol)"
+                + (" veya BTC trendi bozulunca" if cfg.rotation_btc_ma_days > 0 else "") + " satılır\n"
                 f"🛑 Felaket zarar kesi (-%{cfg.stop_loss_pct:g}): {fmt_price(levels['sl'])} → "
                 f"≈{fmt_usdt(levels['sl_value'])} {q}{extra}\n"
                 f"🔍 {esc(note)}"
@@ -377,13 +378,16 @@ class Messages:
         )
 
     @staticmethod
-    def rotation(plan, note: str, sold: List[str], unsold: List[str], bought: List[str], cfg) -> str:
-        """Yeniden dengeleme özeti."""
-        lines = [f"🔄 <b>ROTASYON — YENİDEN DENGELEME</b>\n{LINE}"]
+    def rotation(plan, note: str, sold: List[str], unsold: List[str], bought: List[str], cfg,
+                 refill: bool = False) -> str:
+        """Yeniden dengeleme özeti (refill: dengelemede satılamayan coinin yeri sonradan dolduruldu)."""
+        title = "BOŞALAN YER DOLDURULDU" if refill else "YENİDEN DENGELEME"
+        lines = [f"🔄 <b>ROTASYON — {title}</b>\n{LINE}"]
         if note:
             lines.append(f"📉 {esc(note)}")
         if plan.risk_on is False:
-            lines.append("⛔ BTC düşüş trendinde: alım yapılmadı, eldekiler satıldı; USDT'de bekleniyor.")
+            lines.append("⛔ BTC düşüş trendinde: alım yapılmadı; " +
+                         ("eldekiler satıldı, USDT'de bekleniyor." if not unsold else "eldekiler satılıyor."))
         else:
             top = ", ".join(f"{i}) {esc(sym)} {fmt_signed(mom, 1)}%" for i, (sym, mom) in
                             enumerate(plan.ranking[:max(3, plan.slots * 2)], 1))
@@ -392,9 +396,11 @@ class Messages:
                 lines.append(f"✅ Tutulan: {esc(', '.join(plan.keep))}")
             if bought:
                 lines.append(f"🟢 Alınan: {esc(', '.join(bought))}")
-            missing = plan.slots - len(plan.keep) - len(bought)
+            missing = plan.slots - len(plan.keep) - len(bought) - len(unsold)
             if missing > 0:
                 lines.append(f"💵 {missing} yer boş kaldı (uygun coin / bakiye yok): USDT'de bekliyor")
+            if unsold:
+                lines.append(f"⏳ {len(unsold)} yer, satılamayan coin satılınca doldurulacak")
         if sold:
             lines.append(f"🔴 Satılan: {esc(', '.join(sold))}")
         if unsold:

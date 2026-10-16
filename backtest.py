@@ -564,6 +564,7 @@ class _Simulator:
     # ------------------------------------------------------------ ana döngü
     def run(self, t0: int, k_start: int, n: int) -> None:
         self.k_start = k_start   # Rotasyonun yeniden dengeleme günleri simülasyonun ilk gününden sayılır
+        self.last_k = n - 1
         total = max(1, n - k_start)
         next_report = 0.25
         for k in range(k_start, n):
@@ -804,6 +805,8 @@ class _Simulator:
                 self._close(symbol, self._close_price(symbol, k), ExitReason.TREND_FILTER.value, t_close)
         if (k - self.k_start) % cfg.rotation_days != 0 or risk_on is False:
             return
+        if k >= self.last_k:   # Son mum yalnızca değerlemedir: alınan coin aynı fiyattan hemen "kapatılırdı"
+            return
         self.stats["dengeleme"] += 1
 
         capital = cfg.start_capital + self.realized
@@ -829,12 +832,14 @@ class _Simulator:
         for symbol in plan.sell:
             self._close(symbol, self._close_price(symbol, k), ExitReason.ROTATION.value, t_close)
 
+        # Canlıdaki gibi: alım tutarı ve yer sayısı satışlardan SONRAKİ sermayeyle (satışın kârı / zararı dahil)
+        capital = cfg.start_capital + self.realized
+        slots = min(slots, position_slots(capital, self.min_notional, cfg))
         target = capital / slots if slots > 0 else 0.0
         ranks = {sym: i + 1 for i, (sym, _) in enumerate(plan.ranking)}
         moms = dict(plan.ranking)
-        bought = 0
         for symbol in plan.candidates:
-            if bought >= plan.wanted:
+            if len(self.open) >= slots:
                 break
             s = self.series[symbol]
             committed = sum(op.pos.cost_usdt for op in self.open.values())
@@ -852,7 +857,6 @@ class _Simulator:
                                                            "rank": float(ranks[symbol]),
                                                            "lookback_days": float(lookback)})
             if self._open(signal, s.rules, entry.quote_amount, entry_price, t_close):
-                bought += 1
                 self.stats["sinyal"] += 1
 
     def _analyze(self, symbol: str, k: int, strict: bool) -> Optional[Signal]:
@@ -950,8 +954,8 @@ def _base_notes(spread_pct: float, interval: str = INTERVAL, rotation: bool = Fa
                     "alırdı. Sonuç olduğundan iyi görünebilir.")
         notes = [n for n in notes if not n.startswith("Spread, delist")] + [
             "Rotasyon gün kapanışında, kapanış fiyatından simüle edildi (canlı bot UTC 00:05 sonrası işlem yapar). "
-            "Yeni listelenen coin ve pompa filtresi canlıdaki gibi uygulandı; delist takvimi ve spread filtresi "
-            "simüle edilmedi."]
+            "Yeni listelenen coin ve pompa filtresi canlıdaki gibi uygulandı; delist takvimi, spread filtresi ve "
+            "(açıksa) BTC_CRASH_EXIT simüle edilmedi."]
     return notes
 
 
@@ -995,6 +999,10 @@ def prepare_backtest(cfg, client, days: float = 30, max_symbols: int = 40,
 
     # --- semboller
     if symbols is None:
+        if strategy_class(cfg.strategy).is_rotation and max_symbols < cfg.rotation_universe:
+            notes.append(f"Rotasyon evreni (ROTATION_UNIVERSE={cfg.rotation_universe}) için {max_symbols} yerine "
+                         f"{cfg.rotation_universe} sembol indirildi.")
+            max_symbols = cfg.rotation_universe
         trade_symbols = select_symbols(cfg, client.tickers_24h(), rules, max_symbols)
     else:
         trade_symbols, skipped = [], []
@@ -1011,10 +1019,15 @@ def prepare_backtest(cfg, client, days: float = 30, max_symbols: int = 40,
     interval = strategy.interval
     step_ms = INTERVAL_MS_BY_NAME[interval]
 
-    # --- zaman aralığı (saate yuvarlanmış → önbellek anahtarı sabit kalır)
+    # --- zaman aralığı (saate yuvarlanmış → önbellek anahtarı sabit kalır). Günlük mumlarda UTC gün başına:
+    #     Binance günlük mumları 00:00 UTC'de açılır; böylece son mum kapanmış gün olur ve karar anı gerçek kapanıştır
     now_ms = int(time.time() * 1000) if end_time_ms is None else int(end_time_ms)
-    end_ms = now_ms // HOUR_MS * HOUR_MS
-    total_hours = int(math.ceil((days + strategy.warmup_days) * 24))
+    if step_ms >= DAY_MS:
+        end_ms = now_ms // DAY_MS * DAY_MS
+        total_hours = int(math.ceil(days + strategy.warmup_days)) * 24
+    else:
+        end_ms = now_ms // HOUR_MS * HOUR_MS
+        total_hours = int(math.ceil((days + strategy.warmup_days) * 24))
     start_ms = end_ms - total_hours * HOUR_MS
     n = (end_ms - start_ms) // step_ms
     sim_bars = min(n, max(1, int(round(days * DAY_MS / step_ms))))
