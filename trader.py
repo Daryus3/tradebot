@@ -30,7 +30,7 @@ from logger import get_logger
 from risk import (ExitReason, Position, evaluate_exit, kill_switch_hit, net_exit_value, plan_entry, pnl_pct,
                   position_slots, price_for_pnl, trailing_floor_pct, update_breakeven, update_trailing)
 from state import BotState, EquityLog, StateStore, TradeLog
-from strategy import ReboundStrategy, ScanResult
+from strategy import ReboundStrategy, ScanResult, Signal
 from telegram_bot import (CRITICAL_EXITS, Messages, TelegramNotifier, esc, fmt_duration, fmt_qty, fmt_rate,
                           fmt_signed, fmt_usdt)
 
@@ -49,7 +49,9 @@ KILL_RETRY_SEC = 5           # Kill-switch sonrası satılamayan pozisyonlar iç
 FEE_CHECK_SEC = 3600         # Komisyon / BNB bakiyesi kontrol aralığı
 FEE_WARN_COOLDOWN_SEC = 6 * 3600  # Yanlış FEE_RATE uyarısı en fazla bu aralıkla tekrarlanır
 BNB_LOW_NOTICE_SEC = 24 * 3600   # "BNB azalıyor" bilgisi en fazla günde bir
-UNSELLABLE_CODES = {"MIN_NOTIONAL", "LOT_SIZE", "NO_BALANCE"}  # Kalanın satılamayacak kadar az olduğu hatalar
+UNSELLABLE_CODES = {"MIN_NOTIONAL", "LOT_SIZE", "NO_BALANCE"}
+ROTATION_DELAY_SEC = 300     # Rotasyon kararları günlük mum kapandıktan (UTC 00:00) 5 dk sonra verilir
+ROTATION_SELL_RETRY_SEC = 30  # Satılamayan rotasyon pozisyonu bu aralıkla tekrar denenir  # Kalanın satılamayacak kadar az olduğu hatalar
 
 
 @dataclass
@@ -117,6 +119,9 @@ class TradingBot:
         self._next_kill_retry = 0.0
         self._next_kill_notice = 0.0
         self._error_streak = 0
+        self._next_rotation_sell = 0.0
+        self.last_rotation: Optional[str] = None   # Son yeniden dengeleme özeti (/tarama)
+        self.last_rotation_at = 0.0
 
     # ================================================================ yaşam döngüsü
     def run(self, do_startup: bool = True) -> int:
@@ -237,7 +242,10 @@ class TradingBot:
         if not self.running:
             return
 
-        if (not self.state.paused and not self.state.killed and now >= self.next_scan_at
+        if getattr(self.strategy, "is_rotation", False):
+            if not self.state.killed:
+                self.rotation_tick(now)
+        elif (not self.state.paused and not self.state.killed and now >= self.next_scan_at
                 and self.free_slots() > 0):
             self.next_scan_at = now + self.cfg.scan_interval_sec
             self.scan_and_enter(now)
@@ -392,6 +400,121 @@ class TradingBot:
                 opened += 1
                 self.day_stats.buys += 1
                 free -= state.positions[signal.symbol].cost_usdt
+
+    # ================================================================ momentum rotasyonu
+    @staticmethod
+    def rotation_day(now: float) -> int:
+        """Rotasyon günü (UTC): günlük mum kapandıktan ROTATION_DELAY_SEC sonra bir sonraki güne geçer."""
+        return int((now - ROTATION_DELAY_SEC) // 86400)
+
+    def rotation_tick(self, now: float) -> None:
+        """STRATEGY=rotation: her gün BTC trend kontrolü, ROTATION_DAYS günde bir yeniden dengeleme.
+
+        Backtest'in gün kapanışı kararlarıyla aynı mantık (rotation.plan_rotation). /durdur yeniden dengelemeyi
+        erteler; BTC trend filtresinin koruyucu satışları sürer.
+        """
+        state, cfg = self.state, self.cfg
+        self._retry_rotation_sells(now)
+        if now < self.next_scan_at:
+            return
+        self.next_scan_at = now + cfg.scan_interval_sec
+        day = self.rotation_day(now)
+        due = state.last_rebalance_day < 0 or day - state.last_rebalance_day >= cfg.rotation_days
+        if due and not state.paused:
+            self.rebalance(day, now)
+        elif cfg.rotation_btc_ma_days > 0 and state.positions and state.last_trend_check_day != day:
+            on, note = self.strategy.risk_on()
+            state.last_trend_check_day = day
+            self.store.save(state)
+            if on is False:
+                self.notifier.send(Messages.warning(
+                    f"BTC düşüş trendine girdi ({note}). Rotasyon pozisyonları satılıp USDT'de bekleniyor; "
+                    f"trend düzelince bir sonraki yeniden dengelemede tekrar alım yapılır."), critical=True)
+                self._queue_rotation_sells(list(state.positions), ExitReason.TREND_FILTER, now)
+
+    def rebalance(self, day: int, now: float) -> None:
+        state, cfg = self.state, self.cfg
+        slots = min(cfg.rotation_top_n, self.slots())
+        excluded = {p["symbol"] for p in state.pending_orders.values()}
+        if self.fee_info is not None and self.fee_info.bnb_enabled:
+            excluded.add(f"BNB{cfg.quote_asset}")  # Komisyon BNB'den kesilirken BNB alınmaz (bkz. scan_and_enter)
+        plan, note = self.strategy.plan(list(state.positions), self.exchange.rules, excluded, slots)
+        state.last_rebalance_day = state.last_trend_check_day = day
+        self.store.save(state)
+        reason = ExitReason.TREND_FILTER if plan.risk_on is False else ExitReason.ROTATION
+        to_sell = list(plan.sell)
+        self._queue_rotation_sells(to_sell, reason, now)
+        sold = [s for s in to_sell if s not in state.positions]
+        bought = self._rotation_buys(plan, slots) if plan.risk_on is not False else []
+        text = Messages.rotation(plan, note, sold, [s for s in to_sell if s in state.positions], bought, cfg)
+        self.last_rotation, self.last_rotation_at = text, now
+        log.info("Rotasyon: tut %s | sat %s | al %s | %s", plan.keep, to_sell, bought, note)
+        self.notifier.send(text)
+
+    def _rotation_buys(self, plan, slots: int) -> List[str]:
+        state, cfg = self.state, self.cfg
+        if slots <= 0:
+            return []
+        capital = state.capital
+        target = capital / slots   # Eşit ağırlık
+        free = self.exchange.free_balance(cfg.quote_asset)
+        momentum = dict(plan.ranking)
+        bought: List[str] = []
+        for symbol in plan.candidates:
+            if len(state.positions) >= slots:
+                break
+            rules = self.exchange.rules.get(symbol)
+            if rules is None or symbol in state.positions:
+                continue
+            bid, ask = self.bid_ask(symbol)
+            spread = (ask - bid) / ((ask + bid) / 2) * 100 if ask > 0 and bid > 0 else 100.0
+            if spread > cfg.max_spread_pct:
+                log.info("%s atlandı: spread %%%.2f > %%%.2f", symbol, spread, cfg.max_spread_pct)
+                continue
+            remaining = capital - state.committed
+            is_last_slot = len(state.positions) + 1 >= slots
+            budget = remaining if is_last_slot else min(target, remaining)
+            entry = plan_entry(min(budget, free), rules, ask, cfg)
+            if not entry.ok:
+                log.info("%s atlandı: %s", symbol, entry.reason)
+                if "bakiye" in entry.reason.lower():
+                    self.notifier.send_error("low-balance", Messages.warning(
+                        f"{entry.reason}. Serbest bakiye: {free:.2f} {cfg.quote_asset}"), cooldown_sec=3600)
+                    break
+                continue
+            signal = Signal(symbol, ask, momentum[symbol], {
+                "kind": "rotation", "momentum_pct": momentum[symbol], "rank": float(plan.rank_of(symbol) or 0),
+                "lookback_days": float(cfg.rotation_lookback_days)})
+            context = {"spread_pct": spread, "regime": "ROTASYON", "expected_ask": ask}
+            if self.open_position(signal, entry.quote_amount, slots, context):
+                bought.append(symbol)
+                self.day_stats.buys += 1
+                free -= state.positions[symbol].cost_usdt
+        return bought
+
+    def _queue_rotation_sells(self, symbols: List[str], reason: ExitReason, now: float) -> None:
+        """Satılacakları kalıcı listeye yazar ve hemen satmayı dener (satılamayanlar sonra tekrar denenir)."""
+        if not symbols:
+            return
+        for symbol in symbols:
+            self.state.rotation_sells[symbol] = reason.value
+        self.store.save(self.state)
+        self._next_rotation_sell = 0.0
+        self._retry_rotation_sells(now)
+
+    def _retry_rotation_sells(self, now: float) -> None:
+        state = self.state
+        if not state.rotation_sells or now < self._next_rotation_sell:
+            return
+        failed = False
+        for symbol, reason in list(state.rotation_sells.items()):
+            pos = state.positions.get(symbol)
+            if pos is None or self.close_position(pos, ExitReason(reason)):
+                state.rotation_sells.pop(symbol, None)
+            else:
+                failed = True
+        self._next_rotation_sell = now + ROTATION_SELL_RETRY_SEC if failed else 0.0
+        self.store.save(state)
 
     def open_position(self, signal, quote_amount: float, slots: int = 1, context: Optional[dict] = None) -> bool:
         context = context or {}
@@ -1066,6 +1189,14 @@ class TradingBot:
             self.day_stats.rejects[key] += 1
 
     def scan_report(self) -> str:
+        if getattr(self.strategy, "is_rotation", False):
+            if self.last_rotation is None:
+                day = self.state.last_rebalance_day
+                when = ("henüz yapılmadı" if day < 0 else
+                        f"son dengeleme {(date(1970, 1, 1) + timedelta(days=day)).strftime('%d.%m.%Y')} (UTC)")
+                return f"🔄 Rotasyon: bu oturumda yeniden dengeleme yapılmadı ({when})."
+            age = (self.time_fn() - self.last_rotation_at) / 3600
+            return f"{self.last_rotation}\n<i>({age:.0f} saat önce)</i>"
         r = self.last_scan
         if r is None:
             return "🔍 Henüz tarama yapılmadı."

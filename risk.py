@@ -19,6 +19,7 @@ from dataclasses import asdict, dataclass, field, fields
 from enum import Enum
 from typing import Dict, Optional
 
+from config import is_rotation
 from exchange import SymbolRules, floor_decimals, to_dec
 
 
@@ -33,6 +34,8 @@ class ExitReason(str, Enum):
     MANUAL = "MANUAL"          # Telegram /sat komutuyla elle satış
     BTC_CRASH = "BTC_CRASH"    # BTC sert düştüğü için erken çıkış
     BACKUP_STOP = "BACKUP_STOP"  # Binance'teki yedek zarar-kes emri çalıştı
+    ROTATION = "ROTATION"        # Momentum rotasyonu: coin sıralamadan düştü (yerine daha güçlüsü alınır)
+    TREND_FILTER = "TREND_FILTER"  # Momentum rotasyonu: BTC düşüş trendine girdi, her şey USDT'ye çevrildi
 
 
 @dataclass
@@ -102,12 +105,23 @@ def trailing_floor_pct(pos: Position, cfg) -> float:
     return floor
 
 
+def target_exits(cfg) -> bool:
+    """Kâr al / izleyen stop / başabaş / maks. süre çıkışları kullanılıyor mu?
+
+    Momentum rotasyonunda (STRATEGY=rotation) pozisyon sıralamadan düşünce veya BTC trend filtresiyle satılır;
+    yalnızca zarar kes (felaket koruması) ve kill-switch geçerlidir.
+    """
+    return not is_rotation(getattr(cfg, "strategy", ""))
+
+
 def update_trailing(pos: Position, current_pnl_pct: float, cfg) -> bool:
     """Zirveyi günceller. İzleyen stop bu çağrıda ilk kez aktifleştiyse True döner."""
     if current_pnl_pct > pos.peak_pnl_pct:
         pos.peak_pnl_pct = current_pnl_pct
     if current_pnl_pct < pos.min_pnl_pct:
         pos.min_pnl_pct = current_pnl_pct
+    if not target_exits(cfg):
+        return False
     if not pos.trailing_active and pos.peak_pnl_pct >= cfg.trailing_activation_pct:
         pos.trailing_active = True
         return True
@@ -121,7 +135,7 @@ def breakeven_effective(cfg) -> bool:
     ve başabaş tabanı izleyen stop tabanından yüksek değilse, izleyen stop (daha yüksek tabanla) her
     zaman önce satar. Bu durumlarda koruma etkisizdir.
     """
-    if not getattr(cfg, "breakeven_enabled", False):
+    if not getattr(cfg, "breakeven_enabled", False) or not target_exits(cfg):
         return False
     if cfg.breakeven_trigger_pct >= cfg.take_profit_pct:
         return False
@@ -144,6 +158,8 @@ def update_breakeven(pos: Position, cfg) -> bool:
 
 def evaluate_exit(pos: Position, current_pnl_pct: float, now: float, cfg) -> Optional[ExitReason]:
     """Pozisyonun kapatılması gerekiyorsa nedenini, gerekmiyorsa None döndürür."""
+    if not target_exits(cfg):   # Rotasyon: yalnızca felaket koruması
+        return ExitReason.STOP_LOSS if current_pnl_pct <= -cfg.stop_loss_pct else None
     if current_pnl_pct >= cfg.take_profit_pct:
         return ExitReason.TAKE_PROFIT
     if current_pnl_pct <= -cfg.stop_loss_pct:

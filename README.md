@@ -190,6 +190,7 @@ Birkaç gün test modunda çalıştırıp sonuçları izlemenizi öneririz (`/is
 | `python main.py --backtest --gun 90 --tara-giris` | Aynı veriyle giriş filtrelerini (piyasa rejimi, 24s düşüş, sinyal puanı, hedef alanı) karşılaştırır |
 | `python main.py --backtest --gun 90 --bitis 2026-07-01` | O tarihte biten (daha eski) bir dönemi dener: bulunan ayarı bağımsız dönemde doğrulamak için |
 | `python main.py --backtest --strateji swing --strateji-karsilastir` | Uzun vadeli (1 saatlik mum) stratejileri son 1 yılın verisiyle karşılaştırır |
+| `python main.py --backtest --strateji rotation` | Haftalık momentum rotasyonunu son 3 yılın günlük verisiyle dener (BTC al-tut kıyaslı) |
 | `python main.py --telegram-chat-id` | Telegram chat ID'nizi bulur |
 | `python main.py --reset-state` | Kayıtlı durumu sıfırlar (kill-switch kilidi dahil) |
 | `python watchdog.py --install-autostart --mode paper` | Windows açılışında otomatik başlatmayı kurar |
@@ -322,6 +323,47 @@ geçmişleri (~11 gün saatlik mum) oluşunca ve `MIN_LISTING_DAYS` (listelenme 
 alınır) dolunca teste girer. 30'dan az işlem
 çıkan sonuç şanstan ayırt edilemez. 5 dk ve 1 saatlik stratejiler farklı veriyle çalıştığından
 `--strateji-karsilastir` yalnızca aynı vadedekileri karşılaştırır.
+
+### 🔄 Haftalık momentum rotasyonu (`STRATEGY=rotation`)
+Sinyal arayıp kâr al / zarar kes ile çıkan stratejilerin aksine rotasyon **en güçlü birkaç coini tutar ve her
+hafta yeniden dengeler**. Kriptoda akademik olarak en çok çalışılmış etki momentumdur: son haftalarda en çok
+yükselen coinler sonraki haftalarda da ortalamada daha iyi gitme eğilimindedir. Garanti değildir; bu yüzden
+sonuç her zaman **"BTC'yi alıp tutmak"la karşılaştırılarak** raporlanır.
+
+Her `ROTATION_DAYS` günde bir (varsayılan 7), UTC 00:05'ten sonra (günlük mum kapanınca):
+1. En hacimli `ROTATION_UNIVERSE` (30) coin, son `ROTATION_LOOKBACK_DAYS` (28) günlük getirisine göre sıralanır.
+   Stabil / kaldıraçlı coinler, delist takvimindekiler, yeni listelenenler ve son günlerde pompalananlar girmez.
+2. Getirisi pozitif olan en güçlü `ROTATION_TOP_N` (3) coin eşit tutarla tutulur. Elinizdeki coin hâlâ ilk 6
+   içindeyse satılmaz (gereksiz al-sat ve komisyon olmasın); sıralamadan düşen satılıp yerine yenisi alınır.
+3. **BTC trend filtresi:** BTC'nin günlük kapanışı `ROTATION_BTC_MA_DAYS` (50) günlük ortalamasının altına
+   inerse (her gün kontrol edilir) her şey satılır ve USDT'de beklenir; trend düzelince bir sonraki yeniden
+   dengelemede tekrar alınır.
+
+Kâr al, izleyen stop, başabaş ve maks. süre **kullanılmaz**; `STOP_LOSS_PCT` yalnızca felaket korumasıdır (önerilen
+20, Binance yedek stop 25). Kill-switch, Telegram, `/durdur` (yeniden dengelemeyi erteler; BTC trend satışları sürer)
+ve `/sat` aynen çalışır. Satılamayan coin (internet / Binance hatası) kayda alınıp yarım dakikada bir tekrar denenir.
+Önerilen başlangıç (25 USDT ile 3 coin tutulabilir):
+```
+STRATEGY=rotation
+STOP_LOSS_PCT=20
+BACKUP_STOP_PCT=25
+ROTATION_TOP_N=3
+ROTATION_LOOKBACK_DAYS=28
+ROTATION_DAYS=7
+ROTATION_BTC_MA_DAYS=50
+ROTATION_UNIVERSE=30
+```
+**Önce backtest** (günlük mumlar, varsayılan 3 yıl; veri birkaç saniyede iner):
+```bash
+python main.py --backtest --strateji rotation                  # Rapor + BTC al-tut kıyası
+python main.py --backtest --strateji rotation --tara           # Felaket zarar kesi 10/20/30, dengeleme 7/14 gün
+python main.py --backtest --strateji rotation --tara-giris     # Momentum 14/28/56 gün, BTC ort. 0/50/100, 2/3 coin
+python main.py --backtest --strateji rotation --bitis 2023-10-16   # Önceki (çakışmayan) 3 yılda doğrulama
+```
+⚠️ **Hayatta kalma yanlılığı rotasyonda büyüktür:** backtest bugünün en hacimli coinleriyle yapılır; geçmişte
+yükselip sonra çöken veya delist olan coinler listede yoktur ve momentum stratejisi tam da onları alırdı. Gerçek
+sonuç backtest'ten kötü olabilir. Önceki 3 yılda (`--bitis`) da BTC al-tut'a yakın veya daha iyi ve daha az
+düşüşlü çıkmıyorsa kullanmayın.
 
 ### 🧷 Binance'teki yedek zarar-kes emri
 Bot normalde zarar kesi kendisi yapar (−%10). Ama bilgisayar kapanır, uykuya geçer veya internet
@@ -463,9 +505,11 @@ iddialı bir hedeftir; bazı işlemler 60 dakikadan uzun sürebilir. İsterseniz
 | `BNB_FEE_CHECK` / `BNB_MIN_TRADES` | `true` / `20` | BNB bakiyesi bildirimleri (yalnızca bilgi verir, BNB almaz). Yanlış `FEE_RATE` uyarısı her zaman açıktır |
 | `BACKUP_STOP_ENABLED` / `BACKUP_STOP_PCT` | `true` / `12` | Binance'teki yedek zarar-kes emri |
 | `BREAKEVEN_ENABLED` / `BREAKEVEN_TRIGGER_PCT` | `true` / `5` | Başabaş koruması (TRIGGER, izleyen stop başlangıcından küçük olmalı) |
-| `STRATEGY` | `rebound` | Giriş stratejisi: `rebound` / `trend` / `breakout` (5 dk) veya `swing` / `swing_pullback` (1 saatlik, 1-5 gün; çıkış ayarlarını da değiştirin) |
+| `STRATEGY` | `rebound` | Giriş stratejisi: `rebound` / `trend` / `breakout` (5 dk), `swing` / `swing_pullback` (1 saatlik, 1-5 gün; çıkış ayarlarını da değiştirin) veya `rotation` (haftalık momentum rotasyonu) |
 | `SWING_LOOKBACK_HOURS` / `SWING_VOLUME_RATIO` | `72` / `1.5` | `swing`: kırılacak zirvenin penceresi (saat) ve kırılım mumunun hacim katı |
 | `SWING_PULLBACK_MIN_PCT` / `SWING_PULLBACK_MAX_PCT` | `4` / `12` | `swing_pullback`: zirveden geri çekilme aralığı (%) |
+| `ROTATION_TOP_N` / `ROTATION_LOOKBACK_DAYS` / `ROTATION_DAYS` | `3` / `28` / `7` | `rotation`: tutulan coin sayısı, momentum süresi (gün), yeniden dengeleme aralığı (gün) |
+| `ROTATION_BTC_MA_DAYS` / `ROTATION_UNIVERSE` | `50` / `30` | `rotation`: BTC trend filtresi (gün, 0 = kapalı), sıralamaya giren en hacimli coin sayısı |
 | `MIN_ROOM_RATIO` | `0` | Hedef alanı filtresi: düşüş öncesi zirveye kalan alan Kâr Al için yetmiyorsa alma (0 = kapalı). `trend`'de alan son 3 saatin zirvesine mesafedir ve en fazla `TREND_PULLBACK_MAX_PCT` kadar olabilir (Kâr Al bundan büyükse 1 değeri trend'i durdurur); `swing_pullback`'te alan en fazla `SWING_PULLBACK_MAX_PCT` kadardır (Kâr Al 12 ile 1 değeri stratejiyi neredeyse durdurur); `breakout` ve `swing`'de uygulanmaz |
 | `BTC_CRASH_EXIT` | `false` | BTC çöküşünde erken çıkış |
 | `USE_WEBSOCKET` | `true` | Anlık fiyat akışı |
@@ -497,7 +541,8 @@ tradebot/
 ├── autostart.py       # Windows açılışında otomatik başlatma
 ├── config.py          # .env ayarlarını okur ve doğrular
 ├── trader.py          # Ana döngü: tarama, alım, pozisyon takibi, yedek stop, kill-switch, raporlar
-├── strategy.py        # Düşüş sonrası toparlanma tarayıcısı
+├── strategy.py        # Giriş stratejileri (rebound / trend / breakout / swing / rotation)
+├── rotation.py        # Momentum rotasyonunun ortak karar fonksiyonları (canlı + backtest)
 ├── coin_filters.py    # Tehlikeli coin filtresi (delist, yeni listeleme, pompa)
 ├── market_regime.py   # Piyasa rejimi tespiti
 ├── indicators.py      # RSI, EMA, ATR hesaplamaları

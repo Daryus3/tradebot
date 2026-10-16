@@ -38,9 +38,10 @@ from config import DATA_DIR
 from exchange import SymbolRules, parse_symbol_rules, to_dec
 from market_regime import COKUS, KLINE_1D_LIMIT, KLINE_4H_LIMIT, ZAYIF, classify
 from risk import (ExitReason, Position, breakeven_effective, evaluate_exit, kill_switch_hit, net_exit_value,
-                  plan_entry, pnl_pct, position_slots, price_for_pnl, trailing_floor_pct, update_breakeven,
-                  update_trailing)
-from config import PROFILE_ATTRS, SWING_EXIT_PROFILE, is_long_horizon
+                  plan_entry, pnl_pct, position_slots, price_for_pnl, target_exits, trailing_floor_pct,
+                  update_breakeven, update_trailing)
+from rotation import btc_trend, momentum_pct, plan_rotation, pump_pct
+from config import PROFILE_ATTRS, PROFILES, is_long_horizon, is_rotation, strategy_family
 from strategy import KLINE_LIMIT, STRATEGIES, Signal, make_strategy, required_move_pct, room_ok, strategy_class
 from telegram_bot import LINE, fmt_duration, fmt_price, fmt_rate, fmt_signed, fmt_usdt
 
@@ -67,6 +68,8 @@ REASON_LABELS = {
     ExitReason.BREAKEVEN.value: "🔒 Başabaş",
     ExitReason.MAX_HOLD.value: "⏱️ Süre Doldu",
     ExitReason.KILL_SWITCH.value: "☠️ Kill-switch",
+    ExitReason.ROTATION.value: "🔄 Rotasyon (sıralamadan düştü)",
+    ExitReason.TREND_FILTER.value: "📉 BTC trend filtresi",
     END_REASON: "🏁 Dönem Sonu",
 }
 
@@ -124,7 +127,9 @@ class BacktestResult:
     end_ms: int = 0                      # Verinin bittiği an (saate yuvarlanmış)
     spread_pct: float = 0.0
     stats: Dict[str, int] = field(default_factory=dict)  # analiz/sinyal/BTC engeli sayıları
-    interval: str = INTERVAL                             # Mum aralığı (5m / 1h)
+    interval: str = INTERVAL                             # Mum aralığı (5m / 1h / 1d)
+    btc_hold_pct: Optional[float] = None                 # Kıyas: aynı dönemde BTC'yi alıp tutmak (%)
+    btc_hold_dd_pct: Optional[float] = None              # ...ve en büyük düşüşü (%)
 
     @property
     def wins(self) -> int:
@@ -558,6 +563,7 @@ class _Simulator:
 
     # ------------------------------------------------------------ ana döngü
     def run(self, t0: int, k_start: int, n: int) -> None:
+        self.k_start = k_start   # Rotasyonun yeniden dengeleme günleri simülasyonun ilk gününden sayılır
         total = max(1, n - k_start)
         next_report = 0.25
         for k in range(k_start, n):
@@ -565,7 +571,10 @@ class _Simulator:
             self._manage(k, t_close)
             if self._check_kill_switch(k, t_close):
                 break
-            self._scan_and_enter(k, t_close)
+            if self.strategy.is_rotation:
+                self._rotation_step(k, t_close)
+            else:
+                self._scan_and_enter(k, t_close)
             self._record_equity(k, t_close)
             done = (k - k_start + 1) / total
             if self.progress and done >= next_report and done < 1:
@@ -758,6 +767,94 @@ class _Simulator:
             if self._open(signal, rules, plan.quote_amount, entry_price, t_close):
                 opened += 1
 
+    # ------------------------------------------------------------ 3b) momentum rotasyonu
+    def _pumped(self, s: _Series, k: int) -> bool:
+        """Canlı coin filtresinin pompa kontrolü (DELIST_FILTER, PUMP_FILTER_PCT) günlük mumlarla.
+
+        Canlıda yeniden dengeleme gün kapanışından hemen sonra yapılır; günlük mum listesinin sonunda yeni açılmış
+        (fiyatı ≈ kapanış) bugünün mumu vardır. Burada da aynı liste kurulur.
+        """
+        cfg = self.cfg
+        days = cfg.pump_lookback_days
+        if not cfg.delist_filter or cfg.pump_filter_pct <= 0 or days <= 0 or s.step_ms != DAY_MS:
+            return False
+        lo = k - 2 * days + 2
+        if lo < max(0, s.first):
+            return False
+        highs = s.h[lo:k + 1] + [s.c[k]]
+        lows = s.l[lo:k + 1] + [s.c[k]]
+        pump = pump_pct(highs, lows, days)
+        return pump is not None and pump >= cfg.pump_filter_pct
+
+    def _rotation_step(self, k: int, t_close: int) -> None:
+        """Canlı TradingBot.rotation_tick'in karşılığı (gün kapanışında, kapanış fiyatından):
+        her gün BTC trend kontrolü, ROTATION_DAYS günde bir yeniden dengeleme."""
+        cfg = self.cfg
+        risk_on: Optional[bool] = True
+        if cfg.rotation_btc_ma_days > 0 and cfg.quote_asset == "USDT":
+            btc = self.btc
+            if btc is not None and btc.has(k):
+                lo = max(btc.first, k - cfg.rotation_btc_ma_days + 1)
+                risk_on, _avg = btc_trend(btc.c[lo:k + 1], cfg.rotation_btc_ma_days)
+            else:
+                risk_on = None
+        if risk_on is False:
+            self.stats["trend_kapali_gun"] += 1
+            for symbol in list(self.open):
+                self._close(symbol, self._close_price(symbol, k), ExitReason.TREND_FILTER.value, t_close)
+        if (k - self.k_start) % cfg.rotation_days != 0 or risk_on is False:
+            return
+        self.stats["dengeleme"] += 1
+
+        capital = cfg.start_capital + self.realized
+        slots = min(cfg.rotation_top_n, position_slots(capital, self.min_notional, cfg))
+        liquid: List[Tuple[float, str]] = []
+        for symbol, s in self.series.items():
+            if s.rules is None or not s.has(k) or s.change24[k] is None:   # Hacim / fiyat adımı ön elemesi
+                continue
+            liquid.append((s.qv[k], symbol))
+        liquid.sort(key=lambda x: (-x[0], x[1]))
+        lookback = cfg.rotation_lookback_days
+        momentum: Dict[str, Optional[float]] = {}
+        for _, symbol in liquid[: cfg.rotation_universe]:
+            s = self.series[symbol]
+            if not self._listing_ok(s, t_close):      # Canlıda da güvenlik filtresine takılan sıralamaya girmez
+                self.stats["yeni_coin"] += 1
+                continue
+            if self._pumped(s, k):
+                self.stats["pompa"] += 1
+                continue
+            momentum[symbol] = momentum_pct(s.c[k - lookback:k + 1], lookback) if k - lookback >= s.first else None
+        plan = plan_rotation(list(self.open), momentum, slots, risk_on)
+        for symbol in plan.sell:
+            self._close(symbol, self._close_price(symbol, k), ExitReason.ROTATION.value, t_close)
+
+        target = capital / slots if slots > 0 else 0.0
+        ranks = {sym: i + 1 for i, (sym, _) in enumerate(plan.ranking)}
+        moms = dict(plan.ranking)
+        bought = 0
+        for symbol in plan.candidates:
+            if bought >= plan.wanted:
+                break
+            s = self.series[symbol]
+            committed = sum(op.pos.cost_usdt for op in self.open.values())
+            remaining = capital - committed
+            is_last_slot = len(self.open) + 1 >= slots
+            budget = remaining if is_last_slot else min(target, remaining)
+            entry_price = s.c[k] * self.entry_factor
+            entry = plan_entry(min(budget, self.cash), s.rules, entry_price, cfg)
+            if not entry.ok:
+                self.stats["plan_red"] += 1
+                if "bakiye" in entry.reason.lower():
+                    break
+                continue   # Toz / LOT adımı: sıradakini dene (canlıda da)
+            signal = Signal(symbol, s.c[k], moms[symbol], {"kind": "rotation", "momentum_pct": moms[symbol],
+                                                           "rank": float(ranks[symbol]),
+                                                           "lookback_days": float(lookback)})
+            if self._open(signal, s.rules, entry.quote_amount, entry_price, t_close):
+                bought += 1
+                self.stats["sinyal"] += 1
+
     def _analyze(self, symbol: str, k: int, strict: bool) -> Optional[Signal]:
         key = (self.strategy.name, self.analysis_key, symbol, k, strict)
         if key in self.signal_cache:
@@ -791,7 +888,7 @@ class _Simulator:
         op = _OpenPos(pos=pos, rules=rules, sellable=sellable, score=signal.score, open_ms=t_close,
                       tp_price=0.0, sl_price=0.0, market_entry=ask / self.entry_factor, buy_fee=fee_base * ask,
                       room=signal.metrics.get("room_pct"))
-        op.tp_price = self._market_level(cfg.take_profit_pct, op)
+        op.tp_price = self._market_level(cfg.take_profit_pct, op) if target_exits(cfg) else math.inf
         op.sl_price = self._market_level(-cfg.stop_loss_pct, op)
         op.peak = op.trough = self._pnl_at(op, op.market_entry)   # Girişte: -(komisyon + spread)
         op.peak_ms = t_close
@@ -822,7 +919,7 @@ class _Simulator:
 
 
 # ================================================================ ana fonksiyon
-def _base_notes(spread_pct: float, interval: str = INTERVAL) -> List[str]:
+def _base_notes(spread_pct: float, interval: str = INTERVAL, rotation: bool = False) -> List[str]:
     label = INTERVAL_LABELS.get(interval, interval)
     notes = [
         "Hayatta kalma yanlılığı: semboller BUGÜNÜN en hacimli paritelerinden seçildi; dönem içinde "
@@ -843,6 +940,18 @@ def _base_notes(spread_pct: float, interval: str = INTERVAL) -> List[str]:
     if interval != INTERVAL:
         notes.insert(1, "Uzun dönem: bugünün en hacimli coinlerinden dönem içinde listelenenler, canlıdaki gibi "
                         "yeterli geçmişleri oluşunca (swing için ~11 gün saatlik mum, MIN_LISTING_DAYS) teste girer.")
+    if rotation:   # Kâr al / piyasa rejimi rotasyonda yok; yeni listelenen coinler için daha açık bir not
+        notes = [n for n in notes if not n.startswith(("Kötümser mum", "Piyasa rejimi", "Uzun dönem"))]
+        notes.insert(1, "Kötümser mum içi sıralama: felaket zarar kesi gün içinde görüldüyse o seviyeden satıldı.")
+        notes.insert(2, "Dönem içinde listelenen coinler canlıdaki gibi momentum süresi kadar geçmişleri ve "
+                        "MIN_LISTING_DAYS dolunca sıralamaya girer.")
+        notes[0] = ("Hayatta kalma yanlılığı (rotasyonda ÖNEMLİ): coinler BUGÜNÜN en hacimlilerinden seçildi. Geçmişte "
+                    "yükselip sonra çöken / delist olan coinler listede yok; momentum stratejisi tam da bu coinleri "
+                    "alırdı. Sonuç olduğundan iyi görünebilir.")
+        notes = [n for n in notes if not n.startswith("Spread, delist")] + [
+            "Rotasyon gün kapanışında, kapanış fiyatından simüle edildi (canlı bot UTC 00:05 sonrası işlem yapar). "
+            "Yeni listelenen coin ve pompa filtresi canlıdaki gibi uygulandı; delist takvimi ve spread filtresi "
+            "simüle edilmedi."]
     return notes
 
 
@@ -897,7 +1006,7 @@ def prepare_backtest(cfg, client, days: float = 30, max_symbols: int = 40,
     if not trade_symbols:
         raise BacktestError("Test edilecek uygun sembol bulunamadı")
     usdt = cfg.quote_asset == "USDT"
-    btc_symbol = "BTCUSDT" if (cfg.btc_filter or cfg.regime_filter) and usdt else None
+    btc_symbol = "BTCUSDT" if usdt else None   # BTC filtresi, piyasa rejimi, rotasyon trend filtresi ve kıyas için
     strategy = strategy_class(cfg.strategy)
     interval = strategy.interval
     step_ms = INTERVAL_MS_BY_NAME[interval]
@@ -959,11 +1068,11 @@ def prepare_backtest(cfg, client, days: float = 30, max_symbols: int = 40,
         if btc is None and btc_symbol in data:
             btc = _Series(btc_symbol, data[btc_symbol], start_ms, n, step_ms=step_ms)
         if btc is None:
-            notes.append("BTC verisi alınamadı: BTC filtresi ve piyasa rejimi uygulanmadı.")
+            notes.append("BTC verisi alınamadı: BTC filtreleri, piyasa rejimi ve BTC kıyası uygulanmadı.")
 
     # --- piyasa rejimi için BTC 4s / 1g mumları (canlıda MarketRegime ile aynı EMA'lar)
     regime: Optional[_RegimeSim] = None
-    if cfg.regime_filter and btc is not None:
+    if cfg.regime_filter and btc is not None and not strategy.is_rotation:   # Rotasyonun kendi BTC filtresi var
         hist_start = start_ms - REGIME_HISTORY_DAYS * DAY_MS
         try:
             rows_4h, _ = load_klines(client, btc_symbol, hist_start // DAY_MS * DAY_MS, end_ms, cache_dir, say,
@@ -988,11 +1097,11 @@ def simulate(cfg, data: BacktestData, spread_pct: float = 0.05, progress: Progre
     if needed != data.interval:
         raise BacktestError(f"{cfg.strategy} stratejisi {needed} mumlarla çalışır ama veri {data.interval} "
                             f"mumlarla hazırlandı (aynı taramada farklı aralıklı stratejiler karşılaştırılamaz)")
-    sim = _Simulator(cfg, data.series, data.btc if cfg.btc_filter else None, data.min_notional, spread_pct,
-                     progress, regime=data.regime, signal_cache=signal_cache)
+    sim = _Simulator(cfg, data.series, data.btc, data.min_notional, spread_pct, progress, regime=data.regime,
+                     signal_cache=signal_cache)
     sim.run(data.start_ms, data.k_start, data.n)
 
-    notes = _base_notes(spread_pct, data.interval) + list(data.notes)
+    notes = _base_notes(spread_pct, data.interval, is_rotation(cfg.strategy)) + list(data.notes)
     if not cfg.regime_filter:
         notes.append("Piyasa rejimi filtresi ayarlarda kapalı (REGIME_FILTER=false).")
     if any(t.reason == END_REASON for t in sim.trades):
@@ -1020,7 +1129,23 @@ def simulate(cfg, data: BacktestData, spread_pct: float = 0.05, progress: Progre
         spread_pct=spread_pct,
         stats=dict(sim.stats),
         interval=data.interval,
+        **dict(zip(("btc_hold_pct", "btc_hold_dd_pct"), btc_hold(data))),
     )
+
+
+def btc_hold(data: BacktestData) -> Tuple[Optional[float], Optional[float]]:
+    """Kıyas: simülasyonun ilk kararından dönem sonuna BTC'yi alıp tutmanın getirisi ve en büyük düşüşü (%)."""
+    btc = data.btc
+    if btc is None or not btc.has(data.k_start):
+        return None, None
+    closes = [btc.c[k] for k in range(data.k_start, min(data.n, btc.last + 1))]
+    if not closes or closes[0] <= 0:
+        return None, None
+    peak, max_dd = closes[0], 0.0
+    for c in closes:
+        peak = max(peak, c)
+        max_dd = max(max_dd, (peak - c) / peak * 100 if peak > 0 else 0.0)
+    return (closes[-1] / closes[0] - 1) * 100, max_dd
 
 
 def run_backtest(cfg, client, days: float = 30, max_symbols: int = 40,
@@ -1049,6 +1174,13 @@ SWING_SWEEP_SL = (4.0, 6.0, 8.0)
 SWING_SWEEP_TRAIL = (6.0, 10.0)
 SWING_SWEEP_HOLD = (2880, 7200)
 SWING_SWEEP_LOOKBACK = (48, 72, 168)  # Giriş taraması: SWING_LOOKBACK_HOURS (2 / 3 / 7 gün)
+# Momentum rotasyonu: "çıkış" = felaket zarar kesi ve yeniden dengeleme sıklığı, "giriş" = momentum süresi,
+# BTC trend filtresi ve tutulan coin sayısı
+ROTATION_SWEEP_SL = (10.0, 20.0, 30.0)
+ROTATION_SWEEP_DAYS = (7, 14)
+ROTATION_SWEEP_LOOKBACK = (14, 28, 56)
+ROTATION_SWEEP_MA = (0, 50, 100)
+ROTATION_SWEEP_TOP = (2, 3)
 # Giriş taraması: çıkışlar .env'deki gibi kalır, hangi sinyallerin alınacağı değişir
 SWEEP_MAX_DROP = (15.0, 8.0)          # + .env'deki MAX_24H_DROP_PCT
 SWEEP_ENTRY_ROOM = (0.0, 0.5, 1.0)
@@ -1070,10 +1202,19 @@ SWEEP_FIELDS: Dict[str, Tuple[str, type, Optional[str]]] = {
     "MIN_SIGNAL_SCORE": ("min_signal_score", float, "Puan"),
     "MIN_ROOM_RATIO": ("min_room_ratio", float, "Alan"),
     "SWING_LOOKBACK_HOURS": ("swing_lookback_hours", int, "Zirve"),
-    # Uzun vadeli stratejiye geçerken çıkış profiliyle .env'e yazılacak satırlar (tabloda gösterilmez)
+    "ROTATION_DAYS": ("rotation_days", int, "Gün"),
+    "ROTATION_LOOKBACK_DAYS": ("rotation_lookback_days", int, "Mom"),
+    "ROTATION_BTC_MA_DAYS": ("rotation_btc_ma_days", int, "BTCort"),
+    "ROTATION_TOP_N": ("rotation_top_n", int, "Coin"),
+    # Başka bir strateji grubuna geçerken profille .env'e yazılacak satırlar (tabloda gösterilmez)
     "BREAKEVEN_TRIGGER_PCT": ("breakeven_trigger_pct", float, None),
     "BREAKEVEN_FLOOR_PCT": ("breakeven_floor_pct", float, None),
+    "BACKUP_STOP_PCT": ("backup_stop_pct", float, None),
+    "ROTATION_UNIVERSE": ("rotation_universe", int, None),
 }
+ROTATION_EXIT_KEYS = ("STOP_LOSS_PCT", "ROTATION_DAYS")
+ROTATION_ENTRY_KEYS = ("ROTATION_LOOKBACK_DAYS", "ROTATION_BTC_MA_DAYS", "ROTATION_TOP_N")
+ROTATION_KEYS = ROTATION_EXIT_KEYS[1:] + ROTATION_ENTRY_KEYS + ("ROTATION_UNIVERSE",)
 EXIT_KEYS = ("TAKE_PROFIT_PCT", "STOP_LOSS_PCT", "TRAILING_ACTIVATION_PCT", "TRAILING_FLOOR_PCT",
              "MAX_HOLD_MINUTES", "MIN_ROOM_RATIO")
 ENTRY_KEYS = ("REGIME_SKIP_WEAK", "MAX_24H_DROP_PCT", "MIN_SIGNAL_SCORE", "MIN_ROOM_RATIO")
@@ -1085,6 +1226,8 @@ def entry_keys(cfg) -> Tuple[str, ...]:
     swing stratejileri zirve penceresini (SWING_LOOKBACK_HOURS)."""
     if cfg.strategy == "rebound":
         return ENTRY_KEYS
+    if is_rotation(cfg.strategy):
+        return ROTATION_ENTRY_KEYS
     range_key = "SWING_LOOKBACK_HOURS" if is_long_horizon(cfg.strategy) else "MAX_24H_GAIN_PCT"
     return tuple(range_key if k == "MAX_24H_DROP_PCT" else k for k in ENTRY_KEYS)
 
@@ -1164,7 +1307,17 @@ def sweep_combos(cfg, tps: Optional[Sequence[float]] = None, sls: Optional[Seque
     """Çıkış taraması kombinasyonları; ilk satır .env'deki mevcut ayarlardır.
 
     Verilmeyen listeler stratejinin vadesine göre seçilir (5 dk: TP %2-5 / süre 1-4 saat, swing: TP %8-15 / 2-5 gün).
+    Rotasyonda yalnızca felaket zarar kesi (--sl) ve yeniden dengeleme sıklığı denenir.
     """
+    if is_rotation(cfg.strategy):
+        base = _current(cfg, ROTATION_EXIT_KEYS)
+        combos = [(base, True)]
+        for sl in sls or ROTATION_SWEEP_SL:
+            for days in ROTATION_SWEEP_DAYS:
+                st = {"STOP_LOSS_PCT": float(sl), "ROTATION_DAYS": int(days)}
+                if st != base:
+                    combos.append((st, False))
+        return combos
     swing = is_long_horizon(cfg.strategy)
     tps = tps or (SWING_SWEEP_TP if swing else SWEEP_TP)
     sls = sls or (SWING_SWEEP_SL if swing else SWEEP_SL)
@@ -1211,6 +1364,15 @@ def entry_combos(cfg, scores: Sequence[float], max_drops: Sequence[float] = SWEE
     """
     keys = entry_keys(cfg)
     base = _current(cfg, keys)
+    if is_rotation(cfg.strategy):   # Sinyal puanı / alan / piyasa rejimi rotasyonda kullanılmaz
+        combos = [(base, True)]
+        for lookback in sorted({cfg.rotation_lookback_days, *ROTATION_SWEEP_LOOKBACK}):
+            for ma in sorted({cfg.rotation_btc_ma_days, *ROTATION_SWEEP_MA}):
+                for top in sorted({cfg.rotation_top_n, *ROTATION_SWEEP_TOP}):
+                    st = {"ROTATION_LOOKBACK_DAYS": lookback, "ROTATION_BTC_MA_DAYS": ma, "ROTATION_TOP_N": top}
+                    if st != base:
+                        combos.append((st, False))
+        return combos
     if cfg.strategy == "rebound":
         range_key = "MAX_24H_DROP_PCT"
         ranges = sorted({cfg.max_24h_drop_pct, *(d for d in max_drops if d > cfg.min_24h_drop_pct)}, reverse=True)
@@ -1299,18 +1461,24 @@ def _fmt_setting(key: str, value) -> str:
 def _advice_lines(cfg, r: SweepRow) -> List[str]:
     """Önerilen satırın .env'e yazılacak TÜM satırları: strateji + satırın ayarları.
 
-    Uzun vadeli stratejide çıkış ayarlarının tamamı da yazılır: .env'deki çıkışlar çoğu zaman 5 dk stratejisine
-    göredir (test bunların yerine SWING_EXIT_PROFILE ile yapılmış olabilir).
+    Swing / rotasyon stratejisinde o grubun profil ayarlarının tamamı da yazılır: .env'deki çıkışlar çoğu zaman 5 dk
+    stratejisine göredir (test bunların yerine SWING_EXIT_PROFILE / ROTATION_PROFILE ile yapılmış olabilir).
+    Rotasyonda tüm ROTATION_* ayarları da yazılır.
     """
     strategy = str(r.settings.get("STRATEGY", cfg.strategy))
     settings: Settings = {"STRATEGY": strategy}
-    if is_long_horizon(strategy):
-        settings.update({k: getattr(cfg, PROFILE_ATTRS[k]) for k in SWING_EXIT_PROFILE})
+    family = strategy_family(strategy)
+    if family in PROFILES:
+        settings.update({k: getattr(cfg, PROFILE_ATTRS[k]) for k in PROFILES[family]})
+    if family == "rotation":
+        settings.update({k: getattr(cfg, SWEEP_FIELDS[k][0]) for k in ROTATION_KEYS})
     settings.update(r.settings)
     lines = [f"{k}={_fmt_setting(k, v)}" for k, v in settings.items()]
     stop = float(settings.get("STOP_LOSS_PCT", cfg.stop_loss_pct))
-    if cfg.backup_stop_enabled and cfg.backup_stop_pct <= stop:   # Yedek stop, zarar kesin altında beklemeli
-        lines.append(f"BACKUP_STOP_PCT={max(12.0, stop + 4):g}")
+    backup = float(settings.get("BACKUP_STOP_PCT", cfg.backup_stop_pct))
+    if cfg.backup_stop_enabled and backup <= stop:   # Yedek stop, zarar kesin altında beklemeli
+        fixed = f"BACKUP_STOP_PCT={max(12.0, stop + 4):g}"
+        lines = [ln for ln in lines if not ln.startswith("BACKUP_STOP_PCT=")] + [fixed]
     return lines
 
 
@@ -1345,7 +1513,25 @@ def _strategy_flag(cfg, r: Optional[SweepRow] = None) -> str:
     return f" --strateji {r.settings.get('STRATEGY', cfg.strategy) if r is not None else cfg.strategy}"
 
 
+def _benchmark_lines(data: BacktestData) -> List[str]:
+    hold, dd = btc_hold(data)
+    if hold is None:
+        return []
+    return [f"📈 Kıyas: aynı dönemde BTC'yi alıp tutmak {fmt_signed(hold)}% (maks. düşüş %{dd:.1f}); "
+            f"Getiri sütunu = net K/Z ÷ başlangıç sermayesi"]
+
+
+def _rotation_summary(cfg) -> str:
+    btc = f"BTC {cfg.rotation_btc_ma_days} günlük ortalamanın altındayken USDT" if cfg.rotation_btc_ma_days else \
+        "BTC trend filtresi kapalı"
+    return (f"En güçlü {cfg.rotation_top_n} coin | momentum: son {cfg.rotation_lookback_days} gün | her "
+            f"{cfg.rotation_days} günde dengeleme | {btc} | evren: en hacimli {cfg.rotation_universe} | felaket zarar "
+            f"kesi -%{cfg.stop_loss_pct:g}")
+
+
 def _exit_summary(cfg) -> str:
+    if is_rotation(cfg.strategy):
+        return _rotation_summary(cfg)
     hold = fmt_duration(cfg.max_hold_minutes * 60, exact=True) if cfg.max_hold_minutes > 0 else "sınırsız"
     breakeven = (f"+%{cfg.breakeven_trigger_pct:g} → +%{cfg.breakeven_floor_pct:g}" if breakeven_effective(cfg)
                  else "kapalı/etkisiz")
@@ -1406,12 +1592,14 @@ def format_sweep_report(rows: Sequence[SweepRow], cfg, data: BacktestData, sprea
         f"🔢 Denenen ayar: {len(rows)} | kârlı: {len(profitable)} | iki yarıda da kârlı ve "
         f"≥{MIN_TRADES_FOR_EVIDENCE} işlem: {len(robust) + len(lucky)} | şans eleğinden de geçen: {len(robust)}",
         "   (Karşılaştırma adil olsun diye taramada kill-switch kapalıdır; maks. düşüşe bakın.)",
-    ] + ([] if kind == "cikis" else [f"⚙️ Çıkışlar (tüm satırlarda): {_exit_summary(cfg)}"]) + [
+    ] + _benchmark_lines(data) + (
+        [f"⚙️ Rotasyon (taranmayan ayarlar sabit): {_exit_summary(cfg)}"] if is_rotation(cfg.strategy) else
+        [] if kind == "cikis" else [f"⚙️ Çıkışlar (tüm satırlarda): {_exit_summary(cfg)}"]) + [
         f"   Sıralama: işlem başına net sonuca göre; {MIN_TRADES_FOR_EVIDENCE}'dan az işlem açan {len(few)} ayar "
         f"(sonuçları şans) en alta alındı.",
         LINE,
         "   " + " ".join(f"{SWEEP_FIELDS[k][2]:>{widths[k]}}" for k in columns)
-        + " | İşlem  Kaz%   Net USDT  İşl.başı  MaksDD |  1.yarı  2.yarı",
+        + " | İşlem  Kaz%   Net USDT   Getiri  İşl.başı  MaksDD |  1.yarı  2.yarı",
     ]
     for r in shown:
         if r.baseline:
@@ -1424,13 +1612,21 @@ def format_sweep_report(rows: Sequence[SweepRow], cfg, data: BacktestData, sprea
             mark = "· " if not r.enough_trades else "  "
         cells = " ".join(f"{_fmt_setting(k, r.settings.get(k, 0)):>{widths[k]}}" for k in columns)
         lines.append(
-            f"{mark} {cells} | {r.trades:>5d} {r.win_rate:>5.1f} {r.net:>+10.4f} {r.mean_net_pct:>+8.2f}% "
+            f"{mark} {cells} | {r.trades:>5d} {r.win_rate:>5.1f} {r.net:>+10.4f} "
+            f"{r.net / cfg.start_capital * 100 if cfg.start_capital > 0 else 0.0:>+7.1f}% {r.mean_net_pct:>+8.2f}% "
             f"{r.max_dd_pct:>6.1f}% | {r.first_net:>+7.3f} {r.second_net:>+7.3f}")
+    rotation = is_rotation(cfg.strategy)
     mine = ("mevcut ayarlar (.env'de 5 dk stratejisi varsa önerilen uzun vade çıkışlarıyla)" if swing
+            else "mevcut ayarlar (.env'de başka tür strateji varsa önerilen rotasyon ayarlarıyla)" if rotation
             else ".env'deki mevcut ayarlarınız")
     legend = [f"   ⭐ = {mine} | ✅ = aday (iki yarıda kârlı ve şans eleğinden geçti) |",
               f"   ≈ = iki yarıda kârlı ama şans olabilir | · = {MIN_TRADES_FOR_EVIDENCE}'dan az işlem (güvenilmez)"]
-    if compare and swing:
+    if rotation and entry:
+        legend += ["   Mom = ROTATION_LOOKBACK_DAYS (momentum için son kaç gün), BTCort = ROTATION_BTC_MA_DAYS (BTC bu",
+                   "   ortalamanın altındayken USDT'de beklenir; 0 = filtre yok), Coin = ROTATION_TOP_N (tutulan coin sayısı)"]
+    elif rotation and not compare:
+        legend += ["   SL = felaket zarar kesi (%), Gün = ROTATION_DAYS (kaç günde bir yeniden dengelenir)"]
+    elif compare and swing:
         legend += ["   swing = çok günlük yükseliş trendinde son günlerin zirvesinin hacimle kırılmasında alım |",
                    "   swing_pullback = aynı trendde zirveden geri çekilip EMA50'den dönüşte alım (1 saatlik mumlar)"]
     elif compare:
@@ -1626,9 +1822,14 @@ def diagnostics_lines(result: BacktestResult, cfg) -> List[str]:
                      "bir dönemle doğrulayın.")
 
     tp, sl = cfg.take_profit_pct, cfg.stop_loss_pct
-    ups = sorted({x for x in (0.5, 1.0, 2.0, 3.0, 5.0, 8.0, 10.0) if x < tp}, reverse=True)[:4]
-    ups = sorted(set(ups) | {tp})
-    downs = sorted({x for x in ((1.0, 2.0) if sl <= 4 else (2.0, 4.0)) if x < sl} | {sl})
+    if target_exits(cfg):
+        ups = sorted({x for x in (0.5, 1.0, 2.0, 3.0, 5.0, 8.0, 10.0) if x < tp}, reverse=True)[:4]
+        ups = sorted(set(ups) | {tp})
+        downs = sorted({x for x in ((1.0, 2.0) if sl <= 4 else (2.0, 4.0)) if x < sl} | {sl})
+    else:   # Rotasyonda kâr al yok: kârın ne kadar büyüdüğü ve felaket zarar kesine yaklaşma
+        tp = math.inf
+        ups = [5.0, 10.0, 20.0, 50.0]
+        downs = sorted({x for x in (5.0, 10.0) if x < sl} | {sl})
     lines.append("   İşlem açıkken en iyi anı şu kâra ulaşanlar: " + " | ".join(
         f"+%{x:g}{' (Kâr Al)' if x == tp else ''}: {_share(trades, lambda t, x=x: t.peak_pct >= x)}" for x in ups))
     lines.append("   En kötü anı şu zarara düşenler: " + " | ".join(
@@ -1663,7 +1864,8 @@ def diagnostics_lines(result: BacktestResult, cfg) -> List[str]:
     lines.append(f"   Dönemin 1. yarısı: {a.count} işlem, net {fmt_signed(a.net, 4)} {q} | "
                  f"2. yarısı: {b.count} işlem, net {fmt_signed(b.net, 4)} {q}")
     flag = f" --strateji {cfg.strategy}"   # .env'deki stratejiden farklı olabilir (--strateji)
-    lines.append(f"   💡 Farklı Kâr Al / Zarar Kes / süre ayarlarını aynı veriyle karşılaştırmak için: "
+    what = ("zarar kes / dengeleme sıklığı" if is_rotation(cfg.strategy) else "Kâr Al / Zarar Kes / süre")
+    lines.append(f"   💡 Farklı {what} ayarlarını aynı veriyle karşılaştırmak için: "
                  f"python main.py --backtest --gun {result.days:g} --tara{flag}")
     lines.append(f"   💡 Bağımsız doğrulama (bu dönemle çakışmayan, daha önceki {result.days:g} gün): "
                  f"python main.py --backtest --gun {result.days:g}{flag} --bitis {_fmt_date(result.start_ms)}")
@@ -1698,8 +1900,9 @@ def format_backtest_report(result: BacktestResult, cfg) -> str:
         f"🪙 Sembol sayısı: {len(result.symbols_used)}",
         f"🧭 Strateji: {cfg.strategy}" + (f" (zirve penceresi {cfg.swing_lookback_hours} saat)"
                                           if is_long_horizon(cfg.strategy) else ""),
+    ] + ([f"⚙️ Rotasyon: {_rotation_summary(cfg)}"] if is_rotation(cfg.strategy) else [
         f"⚙️ Kâr Al +%{cfg.take_profit_pct:g} | Zarar Kes -%{cfg.stop_loss_pct:g} | İzleyen stop {trailing}{hold}",
-        f"   Başabaş: {breakeven}",
+        f"   Başabaş: {breakeven}"]) + [
         f"   Komisyon {fmt_rate(cfg.fee_rate)} | Spread %{result.spread_pct:g} | "
         f"Kill-switch -%{cfg.loss_pct(result.start_capital):.4g} "
         f"(-{fmt_usdt(cfg.loss_limit(result.start_capital))} {q}) | "
@@ -1714,8 +1917,20 @@ def format_backtest_report(result: BacktestResult, cfg) -> str:
         f"🧾 Toplam komisyon: {fmt_usdt(result.total_fees)} {q}",
         f"⏱️ Ortalama süre: {fmt_duration(avg_dur) if trades else '-'}",
     ]
+    if result.btc_hold_pct is not None:
+        lines.append(f"📈 Kıyas — aynı dönemde BTC'yi alıp tutmak: {fmt_signed(result.btc_hold_pct)}% (maks. düşüş "
+                     f"%{result.btc_hold_dd_pct:.1f}) | USDT'de beklemek: %0")
     st = result.stats or {}
-    if st:
+    if st and is_rotation(cfg.strategy):
+        days = max(1, round(result.days))
+        lines.append(f"🔄 Yeniden dengeleme: {st.get('dengeleme', 0)} kez | alınan coin: {st.get('sinyal', 0)} | "
+                     f"BTC trend filtresiyle USDT'de geçen gün: {st.get('trend_kapali_gun', 0)} "
+                     f"(%{st.get('trend_kapali_gun', 0) / days * 100:.0f})")
+        if st.get("pompa"):
+            lines.append(f"🚀 Pompa filtresine takılan aday: {st['pompa']}")
+        if st.get("yeni_coin"):
+            lines.append(f"🆕 Yeni listelendiği için (MIN_LISTING_DAYS) sıralamaya girmeyen aday: {st['yeni_coin']}")
+    elif st:
         lines.append(f"🔎 Analiz: {st.get('analiz', 0)} | Sinyal: {st.get('sinyal', 0)} | "
                      f"BTC filtresi engeli: {st.get('btc_engel', 0)} mum")
         if st.get("rejim_cokus") or st.get("rejim_zayif"):

@@ -46,6 +46,10 @@ class BotState:
     last_daily_report: str = ""      # En son günlük raporun tarihi (YYYY-MM-DD)
     last_weekly_report: str = ""     # En son haftalık raporun haftası (YYYY-Www)
     capital_added: float = 0.0       # /sermayeekle ile sonradan eklenen toplam tutar (bilgi amaçlı)
+    # Momentum rotasyonu (STRATEGY=rotation)
+    last_rebalance_day: int = -1     # En son yeniden dengelemenin UTC gün numarası (-1 = henüz yapılmadı)
+    last_trend_check_day: int = -1   # BTC trend filtresinin en son kontrol edildiği UTC günü
+    rotation_sells: Dict[str, str] = field(default_factory=dict)  # Satılması gereken ama henüz satılamamış: parite → neden
 
     @property
     def capital(self) -> float:

@@ -17,7 +17,7 @@ from typing import Deque, Dict, List, Optional, Tuple
 
 import requests
 
-from config import in_time_range
+from config import in_time_range, is_rotation
 from logger import get_logger, redact, register_secrets
 
 log = get_logger()
@@ -303,6 +303,8 @@ _EXIT_HEADERS = {
     "MANUAL": "✋ <b>ELLE SATIŞ (Telegram komutu)</b>",
     "BTC_CRASH": "📉 <b>BTC ÇÖKÜŞÜ — ERKEN ÇIKIŞ</b>",
     "BACKUP_STOP": "🧷 <b>BINANCE YEDEK STOP EMRİ ÇALIŞTI</b>",
+    "ROTATION": "🔄 <b>ROTASYON: COİN SIRALAMADAN DÜŞTÜ</b>",
+    "TREND_FILTER": "📉 <b>BTC TREND FİLTRESİ: USDT'YE GEÇİLDİ</b>",
 }
 
 # Kritik mesajlar sessiz saatlerde de sesli gelir
@@ -318,13 +320,22 @@ class Messages:
                     if cfg.trailing_dynamic else
                     f"+%{cfg.trailing_activation_pct:g} görülünce, +%{cfg.trailing_floor_pct:g}'e düşerse sat")
         hold = f"\n⏱️ Maks. tutma süresi: {fmt_duration(cfg.max_hold_minutes * 60, exact=True)}" if cfg.max_hold_minutes > 0 else ""
+        if is_rotation(cfg.strategy):
+            hold = ""
+            exits = (f"🔄 Rotasyon: en güçlü {cfg.rotation_top_n} coin (son {cfg.rotation_lookback_days} gün), "
+                     f"her {cfg.rotation_days} günde yeniden dengeleme\n"
+                     f"📉 BTC trend filtresi: " + (f"BTC {cfg.rotation_btc_ma_days} günlük ortalamanın altına inince "
+                                                  f"USDT'ye geçilir" if cfg.rotation_btc_ma_days else "kapalı") + "\n"
+                     f"🛑 Felaket zarar kesi: -%{cfg.stop_loss_pct:g} (kâr al / izleyen stop yok)\n")
+        else:
+            exits = (f"🎯 Kâr Al: +%{cfg.take_profit_pct:g} | 🛑 Zarar Kes: -%{cfg.stop_loss_pct:g}\n"
+                     f"📈 İzleyen Stop: {trailing}\n")
         return (
             f"🤖 <b>Kripto Al-Sat Botu Başlatıldı</b>\n{LINE}\n"
             f"⚙️ Mod: {mode}\n"
             f"💰 Güncel Bakiye: <b>{fmt_usdt(capital)} {cfg.quote_asset}</b>"
             f" (K/Z: {fmt_signed(realized)})\n"
-            f"🎯 Kâr Al: +%{cfg.take_profit_pct:g} | 🛑 Zarar Kes: -%{cfg.stop_loss_pct:g}\n"
-            f"📈 İzleyen Stop: {trailing}\n"
+            f"{exits}"
             f"💸 Komisyon: {fmt_rate(cfg.fee_rate)} (alış + satış, net hesaplanır)\n"
             f"☠️ Kill-switch: toplam zarar sermayenin %{loss_pct:.4g}'i "
             f"(şu an {fmt_usdt(loss_limit)} {cfg.quote_asset}){hold}\n"
@@ -338,6 +349,18 @@ class Messages:
             backup_line: str = "") -> str:
         q = cfg.quote_asset
         extra = f"\n{backup_line}" if backup_line else ""
+        if is_rotation(cfg.strategy):
+            return (
+                f"🟢 <b>ROTASYON ALIMI</b> — <b>{esc(pos.symbol)}</b> (📦 {open_count}/{slots})\n{LINE}\n"
+                f"💵 Harcanan: {fmt_usdt(pos.cost_usdt)} {q}\n"
+                f"🪙 Miktar: {fmt_qty(pos.qty)} {esc(pos.base_asset)}\n"
+                f"🏷️ Ort. alış fiyatı: {fmt_price(pos.entry_price)}\n"
+                f"💸 Alış komisyonu: {pos.buy_fee_usdt:.4f} {q}\n{LINE}\n"
+                f"🔄 Sıralamadan düşünce (her {cfg.rotation_days} günde kontrol) veya BTC trendi bozulunca satılır\n"
+                f"🛑 Felaket zarar kesi (-%{cfg.stop_loss_pct:g}): {fmt_price(levels['sl'])} → "
+                f"≈{fmt_usdt(levels['sl_value'])} {q}{extra}\n"
+                f"🔍 {esc(note)}"
+            )
         return (
             f"🟢 <b>ALIM YAPILDI</b> — <b>{esc(pos.symbol)}</b> (📦 {open_count}/{slots})\n{LINE}\n"
             f"💵 Harcanan: {fmt_usdt(pos.cost_usdt)} {q}\n"
@@ -352,6 +375,32 @@ class Messages:
             f"{extra}\n"
             f"🔍 Sinyal: {esc(note)}"
         )
+
+    @staticmethod
+    def rotation(plan, note: str, sold: List[str], unsold: List[str], bought: List[str], cfg) -> str:
+        """Yeniden dengeleme özeti."""
+        lines = [f"🔄 <b>ROTASYON — YENİDEN DENGELEME</b>\n{LINE}"]
+        if note:
+            lines.append(f"📉 {esc(note)}")
+        if plan.risk_on is False:
+            lines.append("⛔ BTC düşüş trendinde: alım yapılmadı, eldekiler satıldı; USDT'de bekleniyor.")
+        else:
+            top = ", ".join(f"{i}) {esc(sym)} {fmt_signed(mom, 1)}%" for i, (sym, mom) in
+                            enumerate(plan.ranking[:max(3, plan.slots * 2)], 1))
+            lines.append(f"🏆 Son {cfg.rotation_lookback_days} günün en güçlüleri: {top or 'pozitif momentumlu coin yok'}")
+            if plan.keep:
+                lines.append(f"✅ Tutulan: {esc(', '.join(plan.keep))}")
+            if bought:
+                lines.append(f"🟢 Alınan: {esc(', '.join(bought))}")
+            missing = plan.slots - len(plan.keep) - len(bought)
+            if missing > 0:
+                lines.append(f"💵 {missing} yer boş kaldı (uygun coin / bakiye yok): USDT'de bekliyor")
+        if sold:
+            lines.append(f"🔴 Satılan: {esc(', '.join(sold))}")
+        if unsold:
+            lines.append(f"⚠️ Henüz satılamayan (tekrar denenecek): {esc(', '.join(unsold))}")
+        lines.append(f"⏭️ Sonraki yeniden dengeleme: {cfg.rotation_days} gün sonra (UTC 00:05 sonrası)")
+        return "\n".join(lines)
 
     @staticmethod
     def trailing_activated(pos, pnl_pct: float, floor_price: float, floor_pct: float, cfg) -> str:
@@ -404,8 +453,9 @@ class Messages:
                position_lines: str = "", remaining_loss: float = 0.0, open_count: int = 0,
                slots: int = 1) -> str:
         q = cfg.quote_asset
+        waiting = "sonraki yeniden dengeleme bekleniyor 🔄" if is_rotation(cfg.strategy) else "fırsat taranıyor 🔍"
         pos = (f"📦 Açık pozisyon: {open_count}/{slots}\n{position_lines}" if position_lines
-               else f"📦 Açık pozisyon yok (0/{slots}), fırsat taranıyor 🔍")
+               else f"📦 Açık pozisyon yok (0/{slots}), {waiting}")
         return (
             f"📊 <b>Durum Raporu</b>\n{LINE}\n"
             f"💰 Güncel Bakiye: <b>{fmt_usdt(balance)} {q}</b>\n"

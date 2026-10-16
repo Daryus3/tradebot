@@ -21,6 +21,7 @@ from decimal import Decimal
 from typing import List, Tuple
 
 from binance_client import BinanceClient
+from config import is_rotation
 from exchange import LiveExchange, PaperExchange, SymbolRules, parse_symbol_rules
 from logger import get_logger
 from risk import (ExitReason, Position, evaluate_exit, kill_switch_hit, min_position_usdt, net_exit_value,
@@ -66,20 +67,27 @@ def run_risk_scenarios(cfg) -> List[Tuple[str, bool, str]]:
     tp, sl = cfg.take_profit_pct, cfg.stop_loss_pct
     act, floor = cfg.trailing_activation_pct, cfg.trailing_floor_pct
     checks: List[Tuple[str, bool, str]] = []
+    rotation = is_rotation(cfg.strategy)
 
-    r, i, pct = _run_path(cfg, [p(0), p(tp / 2), p(tp + 0.1)], qty, cost)
-    checks.append(("Kâr Al", r == ExitReason.TAKE_PROFIT and i == 2, f"+%{pct:.2f}'de satış"))
+    if rotation:   # Rotasyonda kâr al / izleyen stop yok: kâr büyürken satmamalı, yalnızca felaket zarar kesi
+        r, i, pct = _run_path(cfg, [p(0), p(30), p(100), p(10)], qty, cost)
+        checks.append(("Rotasyon: kârda erken satış yok", r is None,
+                       "+%100'e çıkıp +%10'a dönen pozisyon satılmadı (çıkış sıralama / BTC trendiyle)"))
+    else:
+        r, i, pct = _run_path(cfg, [p(0), p(tp / 2), p(tp + 0.1)], qty, cost)
+        checks.append(("Kâr Al", r == ExitReason.TAKE_PROFIT and i == 2, f"+%{pct:.2f}'de satış"))
 
     r, i, pct = _run_path(cfg, [p(0), p(-sl / 2), p(-sl - 0.1)], qty, cost)
     checks.append(("Zarar Kes", r == ExitReason.STOP_LOSS and i == 2, f"%{pct:.2f}'de satış"))
 
-    r, i, pct = _run_path(cfg, [p(0), p(act + 0.5), p((act + floor) / 2 + 0.5), p(floor - 0.1)], qty, cost)
-    checks.append(("İzleyen Stop", r == ExitReason.TRAILING_STOP and i == 3,
-                   f"+%{act:g} görüldü, +%{pct:.2f}'de satış"))
+    if not rotation:
+        r, i, pct = _run_path(cfg, [p(0), p(act + 0.5), p((act + floor) / 2 + 0.5), p(floor - 0.1)], qty, cost)
+        checks.append(("İzleyen Stop", r == ExitReason.TRAILING_STOP and i == 3,
+                       f"+%{act:g} görüldü, +%{pct:.2f}'de satış"))
 
-    r, i, pct = _run_path(cfg, [p(0), p(act - 1), p(floor - 1)], qty, cost)
-    checks.append(("İzleyen stop erken çalışmıyor", r is None or r == ExitReason.MAX_HOLD,
-                   f"+%{act - 1:g} zirvede aktifleşmedi"))
+        r, i, pct = _run_path(cfg, [p(0), p(act - 1), p(floor - 1)], qty, cost)
+        checks.append(("İzleyen stop erken çalışmıyor", r is None or r == ExitReason.MAX_HOLD,
+                       f"+%{act - 1:g} zirvede aktifleşmedi"))
 
     m = cfg.loss_limit(cfg.start_capital)
     hit = kill_switch_hit(-(m - 0.5), -0.6, m)
@@ -103,9 +111,9 @@ def run_risk_scenarios(cfg) -> List[Tuple[str, bool, str]]:
                    " | ".join(f"{c:g} USDT → {n} pozisyon" for c, n in slots.items())
                    + f" (pozisyon başı en az {min_pos:.2f} USDT)"))
 
-    # Başabaş koruması (ayar kapalı olsa da mantığı doğrulanır)
+    # Başabaş koruması (ayar kapalı olsa da mantığı doğrulanır; rotasyonda kullanılmaz)
     # Kâr Al / izleyen stop başabaştan önce devreye girmesin diye bu testte uzaklaştırılır
-    be_cfg = replace(cfg, breakeven_enabled=True,
+    be_cfg = replace(cfg, breakeven_enabled=True, strategy="rebound" if rotation else cfg.strategy,
                      take_profit_pct=max(cfg.take_profit_pct, cfg.breakeven_trigger_pct + 5),
                      trailing_activation_pct=max(cfg.trailing_activation_pct, cfg.breakeven_trigger_pct + 5))
     pos = Position("TESTUSDT", "TEST", qty, 1.0, cost, time.time())
@@ -114,9 +122,10 @@ def run_risk_scenarios(cfg) -> List[Tuple[str, bool, str]]:
         update_trailing(pos, pct, be_cfg)
         update_breakeven(pos, be_cfg)
     reason = evaluate_exit(pos, pct, time.time(), be_cfg)
-    checks.append(("Başabaş koruması", reason == ExitReason.BREAKEVEN,
-                   f"+%{be_cfg.breakeven_trigger_pct:g} görüldükten sonra +%{pct:.2f}'de satış "
-                   f"({'açık' if cfg.breakeven_enabled else 'ayarda kapalı'})"))
+    if not rotation:
+        checks.append(("Başabaş koruması", reason == ExitReason.BREAKEVEN,
+                       f"+%{be_cfg.breakeven_trigger_pct:g} görüldükten sonra +%{pct:.2f}'de satış "
+                       f"({'açık' if cfg.breakeven_enabled else 'ayarda kapalı'})"))
 
     # Yedek stop emri: en küçük pozisyonda bile Binance minimumunun üstünde kalmalı
     smallest = max(min_pos, cfg.start_capital / max(1, position_slots(cfg.start_capital, 5.0, cfg)))
@@ -129,6 +138,9 @@ def run_risk_scenarios(cfg) -> List[Tuple[str, bool, str]]:
 
 def _example_levels(cfg) -> str:
     c = cfg.start_capital
+    if is_rotation(cfg.strategy):
+        return (f"{fmt_usdt(c)} USDT işlemde felaket zarar kesi → 🛑 {fmt_usdt(c * (1 - cfg.stop_loss_pct / 100))} "
+                f"(kâr al yok; sıralamadan düşünce satılır)")
     return (f"{fmt_usdt(c)} USDT işlemde net hedefler → 🎯 {fmt_usdt(c * (1 + cfg.take_profit_pct / 100))} | "
             f"📈 {fmt_usdt(c * (1 + cfg.trailing_activation_pct / 100))} | "
             f"🛡️ {fmt_usdt(c * (1 + cfg.trailing_floor_pct / 100))} | "

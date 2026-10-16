@@ -17,6 +17,7 @@ Kullanım:
     python main.py --backtest --gun 90 --bitis 2026-07-01  # Bu tarihte biten (daha eski) bir dönemi dener
     python main.py --backtest --gun 365 --strateji swing   # Uzun vadeli strateji: 1 saatlik mumlar, 1 yıllık veri
     python main.py --backtest --strateji swing --strateji-karsilastir  # swing / swing_pullback karşılaştırması
+    python main.py --backtest --strateji rotation  # Haftalık momentum rotasyonu: günlük mumlar, 3 yıllık veri
     python main.py --telegram-chat-id  # Telegram chat ID'nizi bulur
     python main.py --reset-state       # Kayıtlı durumu (K/Z, kill-switch) sıfırlar
 
@@ -34,7 +35,7 @@ import time
 from datetime import datetime
 from typing import Optional
 
-from config import BASE_DIR, DATA_DIR, STRATEGY_NAMES, ConfigError, is_long_horizon, load_config
+from config import BASE_DIR, DATA_DIR, STRATEGY_NAMES, ConfigError, is_long_horizon, is_rotation, load_config
 from logger import redact, register_secrets, setup_logging
 
 EXIT_OK, EXIT_CONFIG, EXIT_KILLED, EXIT_CRASH = 0, 1, 2, 3
@@ -55,7 +56,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--istatistik", action="store_true", help="Performans istatistiklerini gösterir")
     parser.add_argument("--backtest", action="store_true", help="Stratejiyi geçmiş verilerle dener")
     parser.add_argument("--gun", type=int, default=None,
-                        help="Backtest gün sayısı (varsayılan: 5 dk stratejilerinde 30, swing stratejilerinde 365)")
+                        help="Backtest gün sayısı (varsayılan: 5 dk stratejilerinde 30, swing stratejilerinde 365, "
+                             "rotation'da 1095)")
     parser.add_argument("--coin-sayisi", type=int, default=40, help="Backtest'te kullanılacak coin sayısı")
     parser.add_argument("--sermaye", type=float, default=None,
                         help="Backtest başlangıç sermayesi (.env'deki START_CAPITAL_USDT yerine)")
@@ -68,8 +70,8 @@ def parse_args(argv=None) -> argparse.Namespace:
                         help="Backtest: aynı veriyle farklı giriş filtrelerini (piyasa rejimi, 24s düşüş, sinyal "
                              "puanı, hedef alanı) karşılaştırır; çıkış ayarları .env'deki gibi kalır")
     parser.add_argument("--strateji", choices=list(STRATEGY_NAMES), default=None,
-                        help="Backtest için strateji (.env'deki STRATEGY yerine). .env'deki 5 dk stratejisinden "
-                             "swing / swing_pullback'e geçilirse çıkışlar uzun vadeye göre önerilen değerlerle denenir")
+                        help="Backtest için strateji (.env'deki STRATEGY yerine). Başka tür bir stratejiye "
+                             "(5 dk → swing / rotation) geçilirse çıkışlar o tür için önerilen değerlerle denenir")
     parser.add_argument("--strateji-karsilastir", action="store_true",
                         help="Backtest: aynı mum aralığındaki stratejileri aynı veriyle karşılaştırır "
                              "(5 dk: rebound / trend / breakout, 1 saat: swing / swing_pullback)")
@@ -234,7 +236,7 @@ def run_backtest_cli(cfg, args) -> int:
 
     import backtest
     from binance_client import BinanceClient
-    from config import PROFILE_ATTRS, SWING_EXIT_PROFILE, short_entry_filters, with_strategy
+    from config import PROFILE_ATTRS, PROFILES, short_entry_filters, strategy_family, with_strategy
 
     if args.sermaye is not None:
         if args.sermaye <= 0:
@@ -245,19 +247,22 @@ def run_backtest_cli(cfg, args) -> int:
         env_strategy = cfg.strategy
         cfg, profile = with_strategy(cfg, args.strateji)
         if profile:
-            print(f"ℹ️ .env'deki çıkış ayarları 5 dk stratejisi ({env_strategy}) içindir; {cfg.strategy} 1-5 gün "
-                  f"süren işlemler için önerilen çıkışlarla deneniyor:")
-            print("   " + " ".join(f"{k}={getattr(cfg, PROFILE_ATTRS[k]):g}" for k in SWING_EXIT_PROFILE))
+            kind = ("haftalarca tutulan rotasyon" if is_rotation(cfg.strategy) else "1-5 gün süren")
+            print(f"ℹ️ .env'deki çıkış ayarları {env_strategy} stratejisi içindir; {cfg.strategy} {kind} işlemler "
+                  f"için önerilen ayarlarla deneniyor:")
+            print("   " + " ".join(f"{k}={getattr(cfg, PROFILE_ATTRS[k]):g}"
+                                   for k in PROFILES[strategy_family(cfg.strategy)]))
             print(f"   Kendi çıkış ayarlarınızla denemek için .env'de STRATEGY={cfg.strategy} yazıp çıkışları "
                   f"değiştirin.")
         # Karşılaştırma puan / alan filtresini kapatır: orada yalnızca diğer engeller geçerlidir
         blocking = short_entry_filters(replace(cfg, min_room_ratio=0.0) if args.strateji_karsilastir else cfg)
         if is_long_horizon(cfg.strategy) and blocking:
             print("⚠️ Bu test şu giriş filtreleriyle yapılıyor: " + "; ".join(blocking))
-        if is_long_horizon(env_strategy) and not is_long_horizon(cfg.strategy):
-            print(f"⚠️ .env'deki çıkış ayarları uzun vadeli strateji ({env_strategy}) içindir; {cfg.strategy} "
-                  f"(5 dk) bu çıkışlarla deneniyor.")
-    days = args.gun if args.gun is not None else (365 if is_long_horizon(cfg.strategy) else 30)
+        if strategy_family(env_strategy) != "short" and strategy_family(cfg.strategy) == "short":
+            print(f"⚠️ .env'deki çıkış ayarları {env_strategy} stratejisi içindir; {cfg.strategy} (5 dk) bu "
+                  f"çıkışlarla deneniyor.")
+    days = args.gun if args.gun is not None else (
+        1095 if is_rotation(cfg.strategy) else 365 if is_long_horizon(cfg.strategy) else 30)
     if days <= 0:
         print("❌ --gun sıfırdan büyük olmalı")
         return EXIT_CONFIG
@@ -282,7 +287,10 @@ def run_backtest_cli(cfg, args) -> int:
         data = backtest.prepare_backtest(cfg, client, days=days, max_symbols=args.coin_sayisi, end_time_ms=end_ms)
         cache: dict = {}   # Giriş analizleri taramalar arasında da paylaşılır (anahtar stratejiyi içerir)
         reports = []
-        if args.strateji_karsilastir:
+        if args.strateji_karsilastir and is_rotation(cfg.strategy):
+            print("ℹ️ Rotasyon tek stratejidir (günlük mumlarla başka strateji yok); karşılaştırma yerine "
+                  "--tara ve --tara-giris kullanın. Raporlarda BTC'yi alıp tutmakla kıyas vardır.")
+        elif args.strateji_karsilastir:
             combos = backtest.strategy_combos(cfg)
             print(f"🧪 Strateji karşılaştırması: {', '.join(st['STRATEGY'] for st, _ in combos)} aynı veriyle "
                   f"deneniyor...")
@@ -295,9 +303,13 @@ def run_backtest_cli(cfg, args) -> int:
             reports.append(("cikis", backtest.run_sweep(cfg, data, progress=print, combos=combos,
                                                         signal_cache=cache)))
         if args.tara_giris:
-            what = ("zirve penceresi" if is_long_horizon(cfg.strategy)
-                    else "24s düşüş" if cfg.strategy == "rebound" else "24s yükseliş")
-            print(f"🧪 Giriş taraması: piyasa rejimi / {what} / sinyal puanı / hedef alanı filtreleri deneniyor...")
+            if is_rotation(cfg.strategy):
+                print("🧪 Giriş taraması: momentum süresi / BTC trend filtresi / tutulan coin sayısı deneniyor...")
+            else:
+                what = ("zirve penceresi" if is_long_horizon(cfg.strategy)
+                        else "24s düşüş" if cfg.strategy == "rebound" else "24s yükseliş")
+                print(f"🧪 Giriş taraması: piyasa rejimi / {what} / sinyal puanı / hedef alanı filtreleri "
+                      f"deneniyor...")
             reports.append(("giris", backtest.run_entry_sweep(cfg, data, progress=print, signal_cache=cache)))
     except Exception as exc:  # noqa: BLE001
         print(f"❌ Backtest çalıştırılamadı: {exc}")

@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional
 import requests
 
 from logger import get_logger, redact
+from config import is_rotation
 from risk import ExitReason, trailing_floor_pct
 from telegram_bot import (API_URL, LINE, Messages, esc, fmt_duration, fmt_price, fmt_qty, fmt_signed,
                           fmt_usdt)
@@ -32,7 +33,8 @@ CONFIRM_TIMEOUT_SEC = 60
 STRATEGY_LABELS = {"rebound": "rebound (düşen coinde dip)", "trend": "trend (yükselişte geri çekilme)",
                    "breakout": "breakout (zirve kırılımı)",
                    "swing": "swing (uzun vade: çok günlük zirve kırılımı, 1 saatlik mumlar)",
-                   "swing_pullback": "swing_pullback (uzun vade: trendde geri çekilme, 1 saatlik mumlar)"}
+                   "swing_pullback": "swing_pullback (uzun vade: trendde geri çekilme, 1 saatlik mumlar)",
+                   "rotation": "rotation (haftalık momentum rotasyonu, günlük mumlar)"}
 
 # Telegram'ın "/" menüsünde görünecek komutlar
 COMMAND_MENU = [
@@ -324,12 +326,16 @@ class CommandProcessor:
                 protect.append("🔒 Başabaş koruması aktif")
             if pos.backup_order_id:
                 protect.append(f"🧷 Binance yedek stop: {fmt_price(pos.backup_stop_price)}")
+            targets = (f"🛑 Felaket zarar kesi: {fmt_price(lv['sl'])} | 🔄 sıralamadan düşünce satılır"
+                       + (f" ({esc(pos.signal_note)})" if pos.signal_note else "")
+                       if is_rotation(bot.cfg.strategy) else
+                       f"🎯 TP: {fmt_price(lv['tp'])} | 🛑 SL: {fmt_price(lv['sl'])} | "
+                       f"📈 İz. başlar: {fmt_price(lv['trail_on'])}")
             parts.append(
                 f"<b>{esc(pos.symbol)}</b> — {fmt_duration(now - pos.opened_at)}\n"
                 f"🪙 {fmt_qty(pos.qty)} | Alış: {fmt_price(pos.entry_price)} | Maliyet: {fmt_usdt(pos.cost_usdt)} {q}\n"
                 f"{status}\n"
-                f"🎯 TP: {fmt_price(lv['tp'])} | 🛑 SL: {fmt_price(lv['sl'])} | "
-                f"📈 İz. başlar: {fmt_price(lv['trail_on'])}"
+                f"{targets}"
                 + ("\n" + "\n".join(protect) if protect else ""))
         self.reply(f"📦 <b>Açık Pozisyonlar</b>\n{LINE}\n" + f"\n{LINE}\n".join(parts))
 
@@ -400,8 +406,12 @@ class CommandProcessor:
             "⚙️ <b>Geçerli Ayarlar</b>\n"
             f"Mod: {'🧪 TEST' if cfg.is_paper else '💵 CANLI'}\n"
             f"🧭 Strateji: {STRATEGY_LABELS.get(cfg.strategy, cfg.strategy)}\n"
-            f"🎯 Kâr Al +%{cfg.take_profit_pct:g} | 🛑 Zarar Kes -%{cfg.stop_loss_pct:g}\n"
-            f"📈 İzleyen stop: +%{cfg.trailing_activation_pct:g} → +%{cfg.trailing_floor_pct:g}\n"
+            + (f"🔄 En güçlü {cfg.rotation_top_n} coin | momentum {cfg.rotation_lookback_days} gün | her "
+               f"{cfg.rotation_days} günde dengeleme | BTC ort. {cfg.rotation_btc_ma_days or 'kapalı'} gün\n"
+               f"🛑 Felaket zarar kesi -%{cfg.stop_loss_pct:g} (kâr al / izleyen stop kullanılmaz)\n"
+               if is_rotation(cfg.strategy) else
+               f"🎯 Kâr Al +%{cfg.take_profit_pct:g} | 🛑 Zarar Kes -%{cfg.stop_loss_pct:g}\n"
+               f"📈 İzleyen stop: +%{cfg.trailing_activation_pct:g} → +%{cfg.trailing_floor_pct:g}\n") +
             f"☠️ Kill-switch: sermayenin %{self.bot.loss_pct:.4g}'i "
             f"(şu an {fmt_usdt(self.bot.loss_limit)} {cfg.quote_asset})\n"
             f"📦 En fazla pozisyon: {cfg.max_open_positions} (şu an {self.bot.slots()})\n"

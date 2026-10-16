@@ -53,10 +53,14 @@ REASON_LABELS: Dict[str, str] = {
     "EXTERNAL": "Bot Dışı",
     "MANUAL": "Elle Satış",
     "BTC_CRASH": "BTC Çöküşü",
+    "BACKUP_STOP": "Yedek Stop",
+    "ROTATION": "Rotasyon",
+    "TREND_FILTER": "BTC Trend Filtresi",
 }
 REASON_EMOJIS: Dict[str, str] = {
     "TAKE_PROFIT": "🎯", "STOP_LOSS": "🛑", "TRAILING_STOP": "🛡️", "BREAKEVEN": "⚖️",
     "MAX_HOLD": "⏱️", "KILL_SWITCH": "☠️", "EXTERNAL": "❔", "MANUAL": "✋", "BTC_CRASH": "📉",
+    "BACKUP_STOP": "🧷", "ROTATION": "🔄", "TREND_FILTER": "📉",
 }
 
 PathLike = Union[str, Path]

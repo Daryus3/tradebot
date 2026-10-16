@@ -41,6 +41,11 @@ Uzun vadeli (swing) stratejiler — 1 SAATLİK mumlar, 1-5 gün tutulan, %8-15 h
 hareketlerde aynı maliyet hedefin küçük bir parçasıdır. Çıkış ayarları da buna göre olmalıdır (bkz.
 config.SWING_EXIT_PROFILE). Backtest 1 yıllık saatlik veriyle yapılır:
     python main.py --backtest --gun 365 --strateji swing
+
+Haftalık momentum rotasyonu ("rotation", günlük mumlar): sinyal/kâr al mantığı yerine en güçlü birkaç coini tutar ve
+her hafta yeniden dengeler (bkz. rotation.py). Canlı botta TradingBot.rotation_tick, backtest'te
+_Simulator._rotation_step aynı rotation.plan_rotation fonksiyonunu kullanır:
+    python main.py --backtest --strateji rotation
 """
 from __future__ import annotations
 
@@ -52,6 +57,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from binance_client import BinanceClient, RateLimitError
 from config import STRATEGY_NAMES
+from rotation import RotationPlan, btc_trend, momentum_pct, plan_rotation
 from exchange import SymbolRules
 from indicators import atr, ema, mean, rsi
 from logger import get_logger
@@ -93,6 +99,11 @@ SWING_CANDIDATE_FACTOR = 3       # Saatlik mumda sinyal yavaş değişir: her ta
 SWING_ATR_SCALE = math.sqrt(12)
 SWING_WARMUP_DAYS = 18.0         # Backtest ısınması: 400 saatlik analiz geçmişi (16.7 gün) + pay
 
+# Haftalık momentum rotasyonu: günlük mumlar
+ROTATION_INTERVAL = "1d"
+ROTATION_WARMUP_DAYS = 210.0     # En uzun momentum (180 gün) / BTC ortalaması (200 gün) için geçmiş
+LEVERAGED_SUFFIXES = ("DOWN", "BULL", "BEAR")
+
 
 @dataclass
 class Kline:
@@ -130,6 +141,9 @@ class Signal:
             return (f"{int(m.get('lookback_hours', 0))} saatlik zirve kırılımı %{m.get('breakout_pct', 0):.2f} | "
                     f"Trend %{m.get('trend_pct', 0):+.1f} (1s EMA50/200) | 7 gün %{m.get('momentum_pct', 0):+.1f} | "
                     f"RSI {m.get('rsi', 0):.0f} | Hacim x{m.get('vol_ratio', 0):.1f}")
+        if kind == "rotation":
+            return (f"Momentum %{m.get('momentum_pct', 0):+.1f} (son {int(m.get('lookback_days', 0))} gün) | "
+                    f"sıra {int(m.get('rank', 0))}")
         if kind == "swing_pullback":
             return (f"Trend %{m.get('trend_pct', 0):+.1f} (1s EMA50/200) | Zirveden geri çekilme "
                     f"%{m.get('pullback_pct', 0):.1f} | RSI {m.get('rsi_min', 0):.0f}→{m.get('rsi', 0):.0f} | "
@@ -183,6 +197,7 @@ class ReboundStrategy:
     warmup_days = BACKTEST_WARMUP_DAYS
     uses_room = True               # Sinyal "eski zirveye kalan alan" (room_pct) ölçer mi? (MIN_ROOM_RATIO etkili mi)
     uses_24h_range = True          # Ön elemede MIN_24H_RANGE_PCT (24 saatlik fiyat aralığı) uygulanır mı?
+    is_rotation = False            # Sinyal yerine haftalık sıralamayla tutan / satan strateji mi? (RotationStrategy)
     # Analiz sonucunu değiştiren ayarlar: backtest'in sinyal önbelleği bunlara göre ayrılır (giriş taraması
     # bunlardan birini değiştirirse önbellekteki eski sinyaller kullanılmaz)
     analysis_fields: Tuple[str, ...] = ("min_dip_pct", "min_retrace", "max_retrace", "rsi_period", "rsi_oversold",
@@ -245,7 +260,7 @@ class ReboundStrategy:
             r = rules.get(symbol)
             if r is None or symbol in excluded_symbols or r.base_asset in cfg.excluded_assets:
                 continue
-            if r.base_asset.endswith(("DOWN", "BULL", "BEAR")):  # Kaldıraçlı tokenler
+            if r.base_asset.endswith(LEVERAGED_SUFFIXES):  # Kaldıraçlı tokenler
                 continue
             try:
                 last = float(t["lastPrice"])
@@ -855,8 +870,119 @@ class SwingPullbackStrategy(_SwingBase):
         return Signal(symbol, price, score, metrics), ""
 
 
+# ================================================================ haftalık momentum rotasyonu
+class RotationStrategy(ReboundStrategy):
+    """En hacimli coinler arasında son ROTATION_LOOKBACK_DAYS günün en güçlü ROTATION_TOP_N'ini tutar.
+
+    Sinyal taraması yapmaz: canlı bot yeniden dengeleme zamanı geldiğinde `plan()` çağırır. `scan()` yalnızca
+    self-test ve /tarama gibi bilgi amaçlı çağrılar içindir (o an alınacak coinleri sinyal olarak listeler).
+    """
+    name = "rotation"
+    interval = ROTATION_INTERVAL
+    warmup_days = ROTATION_WARMUP_DAYS
+    uses_room = False
+    uses_24h_range = False
+    is_rotation = True
+    analysis_fields: Tuple[str, ...] = ()
+
+    @property
+    def kline_limit(self) -> int:   # type: ignore[override]
+        return max(self.cfg.rotation_lookback_days, self.cfg.rotation_btc_ma_days) + 2
+
+    @property
+    def bar_interval(self) -> str:
+        return ROTATION_INTERVAL
+
+    # ------------------------------------------------------------ veri
+    def daily_closes(self, symbol: str, days: int) -> List[float]:
+        """Son `days` KAPANMIŞ günün kapanışları (Binance'in son satırı bugünün açık mumudur, atılır)."""
+        rows = self.client.klines(symbol, ROTATION_INTERVAL, days + 1) or []
+        return [float(r[4]) for r in rows[:-1]]
+
+    def universe(self, tickers: List[dict], rules: Dict[str, SymbolRules], excluded_symbols: Set[str]) -> List[str]:
+        """Sıralamaya girecek en hacimli ROTATION_UNIVERSE parite (stabil / fiat / kaldıraçlı / ince fiyat adımlı hariç)."""
+        cfg = self.cfg
+        rows: List[Tuple[float, str]] = []
+        for t in tickers:
+            symbol = t.get("symbol", "")
+            r = rules.get(symbol)
+            if r is None or symbol in excluded_symbols or r.base_asset in cfg.excluded_assets:
+                continue
+            if r.base_asset.endswith(LEVERAGED_SUFFIXES):
+                continue
+            try:
+                last, quote_vol = float(t["lastPrice"]), float(t["quoteVolume"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if last <= 0 or quote_vol < cfg.min_quote_volume_24h:
+                continue
+            if r.tick_size > 0 and float(r.tick_size) / last > 0.002:
+                continue
+            rows.append((quote_vol, symbol))
+        rows.sort(key=lambda x: (-x[0], x[1]))
+        return [sym for _, sym in rows[: cfg.rotation_universe]]
+
+    def risk_on(self) -> Tuple[Optional[bool], str]:
+        """BTC trend filtresi: (olumlu mu, açıklama)."""
+        cfg = self.cfg
+        ma = cfg.rotation_btc_ma_days
+        if ma <= 0 or cfg.quote_asset != "USDT":
+            return True, ""
+        closes = self.daily_closes("BTCUSDT", ma)
+        on, avg = btc_trend(closes, ma)
+        if on is None:
+            return None, "BTC günlük verisi yetersiz, trend filtresi uygulanamadı"
+        word = "üstünde" if on else "ALTINDA"
+        return on, f"BTC {closes[-1]:,.0f} — {ma} günlük ortalamanın ({avg:,.0f}) {word}"
+
+    def plan(self, held: List[str], rules: Dict[str, SymbolRules], excluded_symbols: Set[str],
+             slots: int) -> Tuple[RotationPlan, str]:
+        """Yeniden dengeleme planı ve açıklaması. Ağ hatası / istek limiti yukarı iletilir (döngü tekrar dener)."""
+        cfg = self.cfg
+        risk, note = self.risk_on()
+        if risk is False:
+            return plan_rotation(held, {}, slots, risk), note
+        tickers = self.client.tickers_24h()
+        universe = self.universe(tickers, rules, excluded_symbols)
+        if self.coin_filter is not None:
+            try:
+                self.coin_filter.refresh_delist()
+            except RateLimitError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                log.debug("Delist listesi yenilenemedi: %s", exc)
+        momentum: Dict[str, Optional[float]] = {}
+        skipped: List[str] = []
+        for symbol in universe:
+            if self.coin_filter is not None:
+                safe, why = self.coin_filter.check(symbol)
+                if not safe:   # Delist takvimi / yeni listelenme / pompa: sıralamaya girmez (elde varsa satılır)
+                    skipped.append(f"{symbol} ({why})")
+                    continue
+            momentum[symbol] = momentum_pct(self.daily_closes(symbol, cfg.rotation_lookback_days + 1),
+                                            cfg.rotation_lookback_days)
+        if skipped:
+            note = (note + " | " if note else "") + "güvenlik filtresi: " + ", ".join(skipped[:5])
+        return plan_rotation(held, momentum, slots, risk), note
+
+    # ------------------------------------------------------------ bilgi amaçlı tarama (self-test, /tarama)
+    def scan(self, rules: Dict[str, SymbolRules], excluded_symbols: Set[str], invest_hint: float) -> ScanResult:
+        result = ScanResult()
+        plan, note = self.plan([], rules, excluded_symbols, self.cfg.rotation_top_n)
+        result.market_ok = plan.risk_on is not False
+        result.market_note = note
+        result.candidates = result.analyzed = len(plan.ranking)
+        for symbol in plan.candidates[: plan.wanted]:
+            mom = dict(plan.ranking)[symbol]
+            result.signals.append(Signal(symbol, 0.0, mom, {"kind": "rotation", "momentum_pct": mom,
+                                                            "rank": float(plan.rank_of(symbol) or 0),
+                                                            "lookback_days": float(self.cfg.rotation_lookback_days)}))
+        return result
+
+
 STRATEGY_CLASSES = {"rebound": ReboundStrategy, "trend": TrendPullbackStrategy, "breakout": BreakoutStrategy,
-                    "swing": SwingBreakoutStrategy, "swing_pullback": SwingPullbackStrategy}
+                    "swing": SwingBreakoutStrategy, "swing_pullback": SwingPullbackStrategy,
+                    "rotation": RotationStrategy}
 assert tuple(STRATEGY_CLASSES) == STRATEGIES
 
 

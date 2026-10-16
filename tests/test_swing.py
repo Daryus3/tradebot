@@ -333,7 +333,7 @@ def test_cli_swing_defaults_to_one_year_with_profile(cfg, fake_client, tmp_path,
     main.run_backtest_cli(short, main.parse_args(["--backtest", "--strateji", "swing"]))
     out = capsys.readouterr().out
     assert seen == {"strategy": "swing", "days": 365, "tp": 12.0, "hold": 7200}
-    assert "önerilen çıkışlarla" in out and "MAX_HOLD_MINUTES=7200" in out
+    assert "önerilen ayarlarla" in out and "MAX_HOLD_MINUTES=7200" in out
     main.run_backtest_cli(short, main.parse_args(["--backtest"]))
     assert seen["days"] == 30 and seen["strategy"] == "rebound"
 
@@ -347,9 +347,10 @@ def test_fmt_duration_days():
 
 def test_profile_keys_are_known_settings():
     from backtest import SWEEP_FIELDS
-    from config import PROFILE_ATTRS
-    assert set(SWING_EXIT_PROFILE) == set(PROFILE_ATTRS) and set(SWING_EXIT_PROFILE) <= set(SWEEP_FIELDS)
-    assert all(SWEEP_FIELDS[k][0] == PROFILE_ATTRS[k] for k in SWING_EXIT_PROFILE)
+    from config import PROFILE_ATTRS, PROFILES
+    keys = set().union(*PROFILES.values())
+    assert set(SWING_EXIT_PROFILE) <= keys and keys == set(PROFILE_ATTRS) and keys <= set(SWEEP_FIELDS)
+    assert all(SWEEP_FIELDS[k][0] == PROFILE_ATTRS[k] for k in keys)
 
 
 # ---------------------------------------------------------------- inceleme düzeltmeleri

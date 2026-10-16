@@ -62,9 +62,11 @@ class ConfigError(Exception):
 
 
 # Giriş stratejileri. İlk üçü 5 dakikalık mumlarla dakikalar-saatler süren işlemler içindir; swing stratejileri
-# 1 saatlik mumlarla 1-5 gün süren işlemler içindir (bkz. strategy.py).
-STRATEGY_NAMES = ("rebound", "trend", "breakout", "swing", "swing_pullback")
+# 1 saatlik mumlarla 1-5 gün süren işlemler içindir; rotation günlük mumlarla haftalık momentum rotasyonudur
+# (en güçlü birkaç coini tutar, her hafta yeniden dengeler; bkz. strategy.py ve rotation.py).
+STRATEGY_NAMES = ("rebound", "trend", "breakout", "swing", "swing_pullback", "rotation")
 LONG_HORIZON_STRATEGIES = frozenset({"swing", "swing_pullback"})
+ROTATION_STRATEGIES = frozenset({"rotation"})
 
 # Uzun vadeli (swing) stratejiler için önerilen çıkış ayarları ve stratejiye özel giriş eşikleri (.env anahtarı →
 # değer). 5 dk stratejilerine göre ayarlanmış çıkışlar (örn. 4 saatlik maks. süre, +%1 başabaş) swing işlemlerini
@@ -81,18 +83,40 @@ SWING_EXIT_PROFILE = {
     "MIN_ROOM_RATIO": 0.0,
     "MAX_24H_GAIN_PCT": 25.0,          # En az bu (5 dk trend/breakout taraması 12 / 6 önerebilir; kırılımları eler)
 }
+# Momentum rotasyonu: pozisyon sıralamadan düşünce veya BTC trend filtresiyle satılır; Kâr Al / izleyen stop /
+# başabaş / maks. süre kullanılmaz. Zarar kes yalnızca felaket korumasıdır (haftalık dalgalanmada satmasın).
+ROTATION_PROFILE = {
+    "STOP_LOSS_PCT": 20.0,
+    "BACKUP_STOP_PCT": 25.0,           # Binance'teki yedek stop, zarar kesin altında beklemeli
+    "MIN_SIGNAL_SCORE": 0.0,
+    "MIN_ROOM_RATIO": 0.0,
+}
 PROFILE_ATTRS = {
     "TAKE_PROFIT_PCT": "take_profit_pct", "STOP_LOSS_PCT": "stop_loss_pct",
     "TRAILING_ACTIVATION_PCT": "trailing_activation_pct", "TRAILING_FLOOR_PCT": "trailing_floor_pct",
     "MAX_HOLD_MINUTES": "max_hold_minutes", "BREAKEVEN_TRIGGER_PCT": "breakeven_trigger_pct",
     "BREAKEVEN_FLOOR_PCT": "breakeven_floor_pct", "MIN_SIGNAL_SCORE": "min_signal_score",
     "MIN_ROOM_RATIO": "min_room_ratio", "MAX_24H_GAIN_PCT": "max_24h_gain_pct",
+    "BACKUP_STOP_PCT": "backup_stop_pct",
 }
+PROFILES = {"swing": SWING_EXIT_PROFILE, "rotation": ROTATION_PROFILE}
 
 
 def is_long_horizon(strategy: str) -> bool:
     """1 saatlik mumlarla günlerce tutulan (swing) bir strateji mi?"""
     return strategy in LONG_HORIZON_STRATEGIES
+
+
+def is_rotation(strategy: str) -> bool:
+    """Haftalık momentum rotasyonu mu? (sinyal + kâr al yerine sıralamaya göre tut / sat)"""
+    return strategy in ROTATION_STRATEGIES
+
+
+def strategy_family(strategy: str) -> str:
+    """Aynı çıkış mantığını ve mum aralığını paylaşan strateji grubu: 'short' (5 dk), 'swing' (1 saat), 'rotation'."""
+    if is_rotation(strategy):
+        return "rotation"
+    return "swing" if is_long_horizon(strategy) else "short"
 
 
 def _env_str(name: str, default: str = "") -> str:
@@ -242,6 +266,12 @@ class Config:
     swing_volume_ratio: float = 1.5        # swing: kırılım mumunun hacmi son 24 saatin ortalamasının en az bu katı
     swing_pullback_min_pct: float = 4.0    # swing_pullback: zirveden geri çekilme en az
     swing_pullback_max_pct: float = 12.0   # swing_pullback: ...en fazla
+    # Haftalık momentum rotasyonu (STRATEGY=rotation; günlük mumlar)
+    rotation_top_n: int = 3                # Aynı anda tutulacak en güçlü coin sayısı (bakiye yetmezse azalır)
+    rotation_lookback_days: int = 28       # Momentum: son kaç günün getirisine göre sıralanır
+    rotation_days: int = 7                 # Kaç günde bir yeniden dengelenir
+    rotation_btc_ma_days: int = 50         # BTC bu günlük ortalamanın altına inince her şey satılıp USDT'de beklenir (0 = kapalı)
+    rotation_universe: int = 30            # Sıralamaya giren en hacimli coin sayısı
     signal_confirm_scans: int = 1          # 1 = kapalı (2 = sinyal art arda 2 taramada görülmeli)
     # 31) Oynaklık (ATR) filtresi — 5 dk ATR(14) / fiyat (%)
     min_atr_pct: float = 0.25
@@ -356,6 +386,16 @@ class Config:
             errors.append("SWING_VOLUME_RATIO sıfırdan büyük olmalı")
         if not 0 < self.swing_pullback_min_pct < self.swing_pullback_max_pct < 50:
             errors.append("SWING_PULLBACK_MIN_PCT, SWING_PULLBACK_MAX_PCT'den küçük olmalı (ikisi de 0-50 arası)")
+        if not 1 <= self.rotation_top_n <= 10:
+            errors.append("ROTATION_TOP_N 1 ile 10 arasında olmalı")
+        if not 7 <= self.rotation_lookback_days <= 180:
+            errors.append("ROTATION_LOOKBACK_DAYS 7 ile 180 arasında olmalı")
+        if not 1 <= self.rotation_days <= 30:
+            errors.append("ROTATION_DAYS 1 ile 30 arasında olmalı")
+        if not (self.rotation_btc_ma_days == 0 or 10 <= self.rotation_btc_ma_days <= 200):
+            errors.append("ROTATION_BTC_MA_DAYS 0 (kapalı) veya 10 ile 200 arasında olmalı")
+        if not self.rotation_top_n <= self.rotation_universe <= 200:
+            errors.append("ROTATION_UNIVERSE, ROTATION_TOP_N'den küçük olmamalı (en fazla 200)")
         if self.signal_confirm_scans < 1:
             errors.append("SIGNAL_CONFIRM_SCANS en az 1 olmalı")
         if self.min_atr_pct >= self.max_atr_pct:
@@ -465,6 +505,11 @@ def load_config(env_file: Optional[str] = None, mode_override: Optional[str] = N
         swing_volume_ratio=_env_float("SWING_VOLUME_RATIO", 1.5),
         swing_pullback_min_pct=_env_float("SWING_PULLBACK_MIN_PCT", 4.0),
         swing_pullback_max_pct=_env_float("SWING_PULLBACK_MAX_PCT", 12.0),
+        rotation_top_n=_env_int("ROTATION_TOP_N", 3),
+        rotation_lookback_days=_env_int("ROTATION_LOOKBACK_DAYS", 28),
+        rotation_days=_env_int("ROTATION_DAYS", 7),
+        rotation_btc_ma_days=_env_int("ROTATION_BTC_MA_DAYS", 50),
+        rotation_universe=_env_int("ROTATION_UNIVERSE", 30),
         signal_confirm_scans=_env_int("SIGNAL_CONFIRM_SCANS", 1),
         min_atr_pct=_env_float("MIN_ATR_PCT", 0.25),
         max_atr_pct=_env_float("MAX_ATR_PCT", 4.0),
@@ -525,6 +570,15 @@ def _setting_notes(cfg: Config) -> List[str]:
         if filters:
             notes.append(f"STRATEGY={cfg.strategy} ile şu giriş filtreleri sinyalleri gereksiz yere eleyebilir: "
                          f"{'; '.join(filters)}.")
+    if is_rotation(cfg.strategy):
+        if cfg.stop_loss_pct < 10:
+            notes.append(f"STRATEGY=rotation coinleri haftalarca tutar; STOP_LOSS_PCT={cfg.stop_loss_pct:g} haftalık "
+                         f"dalgalanmada bile satar. Rotasyonda zarar kes yalnızca felaket korumasıdır, önerilen: "
+                         + " ".join(f"{k}={v:g}" for k, v in ROTATION_PROFILE.items()))
+        if cfg.rotation_top_n > cfg.max_open_positions:
+            notes.append(f"ROTATION_TOP_N={cfg.rotation_top_n} ama MAX_OPEN_POSITIONS={cfg.max_open_positions}: "
+                         f"en fazla {cfg.max_open_positions} coin tutulur.")
+        return notes   # Kâr al / izleyen stop / başabaş rotasyonda kullanılmaz: onlarla ilgili uyarılar anlamsız
     if cfg.regime_skip_weak and not cfg.regime_filter:
         notes.append("REGIME_SKIP_WEAK=true yalnızca REGIME_FILTER=true iken çalışır; şu an etkisi yok.")
     if cfg.breakeven_enabled:
@@ -573,17 +627,19 @@ def short_entry_filters(cfg) -> List[str]:
 def with_strategy(cfg: Config, strategy: str) -> Tuple[Config, bool]:
     """Backtest'te --strateji: stratejiyi değiştirir. (yeni ayarlar, çıkış profili uygulandı mı)
 
-    .env'deki strateji 5 dk stratejisiyken uzun vadeli bir strateji seçilirse .env'deki çıkış ayarları kısa vadeye
-    göredir; onların yerine SWING_EXIT_PROFILE kullanılır. .env'de zaten uzun vadeli bir strateji varsa (çıkışlar da
-    ona göre ayarlanmış sayılır) yalnızca strateji değişir.
+    .env'deki strateji başka bir gruptansa (5 dk / swing / rotasyon) .env'deki çıkış ayarları o gruba göredir; yeni
+    grubun profili (SWING_EXIT_PROFILE / ROTATION_PROFILE) kullanılır. 5 dk grubunun profili yoktur. Aynı gruptan bir
+    stratejiye geçilirse (çıkışlar ona göre ayarlanmış sayılır) yalnızca strateji değişir.
     """
     if strategy == cfg.strategy:
         return cfg, False
     changes = {"strategy": strategy}
-    profile = is_long_horizon(strategy) and not is_long_horizon(cfg.strategy)
+    family = strategy_family(strategy)
+    profile = family != strategy_family(cfg.strategy) and family in PROFILES
     if profile:
         changes.update({PROFILE_ATTRS[k]: type(getattr(cfg, PROFILE_ATTRS[k]))(v)
-                        for k, v in SWING_EXIT_PROFILE.items()})
-        # Üst sınır: .env'deki daha geniş değer korunur (yalnızca 5 dk için daraltılmışsa genişletilir)
-        changes["max_24h_gain_pct"] = max(cfg.max_24h_gain_pct, SWING_EXIT_PROFILE["MAX_24H_GAIN_PCT"])
+                        for k, v in PROFILES[family].items()})
+        if family == "swing":
+            # Üst sınır: .env'deki daha geniş değer korunur (yalnızca 5 dk için daraltılmışsa genişletilir)
+            changes["max_24h_gain_pct"] = max(cfg.max_24h_gain_pct, SWING_EXIT_PROFILE["MAX_24H_GAIN_PCT"])
     return replace(cfg, **changes), profile
