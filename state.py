@@ -50,7 +50,9 @@ class BotState:
     last_rebalance_day: int = -1     # En son yeniden dengelemenin UTC gün numarası (-1 = henüz yapılmadı)
     last_trend_check_day: int = -1   # BTC trend filtresinin en son kontrol edildiği UTC günü
     rotation_sells: Dict[str, str] = field(default_factory=dict)  # Satılması gereken ama henüz satılamamış: parite → neden
-    rotation_refill: bool = False    # Dengelemede satılamayan coin sonradan satıldı: yeri aynı plana göre doldurulacak
+    rotation_refill: bool = False    # Dengeleme günü boşalan / dolmayan yer var: aynı gün yalnızca alımla doldurulacak
+    rotation_plan_day: int = -1      # Son planlı dengelemenin günü (yarıda kalan / doldurma denemeleri aynı günle sınırlı)
+    rotation_plan_slots: int = 0     # O günün hedef coin sayısı (yeniden denemelerde aynı sayı kullanılır)
 
     @property
     def capital(self) -> float:

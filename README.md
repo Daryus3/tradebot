@@ -342,10 +342,13 @@ Her `ROTATION_DAYS` günde bir (varsayılan 7), UTC 00:05'ten sonra (günlük mu
 Kâr al, izleyen stop, başabaş ve maks. süre **kullanılmaz**; `STOP_LOSS_PCT` yalnızca felaket korumasıdır (önerilen
 20, Binance yedek stop 25). Kill-switch, Telegram, `/durdur` (yeniden dengelemeyi erteler; BTC trend satışları sürer)
 ve `/sat` aynen çalışır. Satılamayan coin (internet / Binance hatası) kayda alınıp yarım dakikada bir tekrar denenir;
-satılınca boşalan yeri aynı gün doldurulur. Dengeleme sırasında bağlantı koparsa dengeleme bir sonraki kontrolde
-tekrarlanır (alınanlar ikinci kez alınmaz). `BTC_CRASH_EXIT=true` ise BTC çöküşünde rotasyon pozisyonları da satılır
-(backtest'te simüle edilmez). Pozisyon tutarı, Binance yedek stop emri (-%25) de minimum emir tutarının üstünde
-kalacak şekilde ayarlanır (pozisyon başı en az ~6.7 USDT).
+dengeleme günü içinde satılırsa boşalan yeri yalnızca alımla doldurulur (başka coin satılmaz), ertesi güne kalırsa
+yer bir sonraki dengelemeye kadar USDT'de bekler. Dengeleme sırasında bağlantı koparsa dengeleme bir sonraki
+kontrolde tekrarlanır; her alım emri gönderilmeden önce kaydedildiği için bot o anda kapansa bile açılışta emir
+Binance'ten sorgulanır, coin iki kez alınmaz. Kararlar günlük mum kapandıktan 5 dk sonra (UTC 00:05) verilir.
+`BTC_CRASH_EXIT=true` ise BTC çöküşünde rotasyon pozisyonları da satılır (backtest'te simüle edilmez). Pozisyon
+tutarı, Binance yedek stop emri (-%25) de minimum emir tutarının üstünde kalacak şekilde ayarlanır (pozisyon başı en
+az ~7.1 USDT; 25 USDT ile 3 coin, ~21 USDT altında 2 coin).
 Önerilen başlangıç (25 USDT ile 3 coin tutulabilir):
 ```
 STRATEGY=rotation

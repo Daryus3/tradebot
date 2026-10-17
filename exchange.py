@@ -376,7 +376,8 @@ class BaseExchange:
         """Komisyon ve BNB indirimi durumu (sadece canlı modda)."""
         return None
 
-    def market_buy(self, symbol: str, quote_amount: float) -> Fill:
+    def market_buy(self, symbol: str, quote_amount: float, client_order_id: Optional[str] = None) -> Fill:
+        """client_order_id: önceden kaydedilmiş emir kimliği (bot emir sırasında kapanırsa sonucu sorgulanabilsin)."""
         raise NotImplementedError
 
     def market_sell(self, symbol: str, qty: float) -> Fill:
@@ -397,7 +398,7 @@ class PaperExchange(BaseExchange):
     def free_balance(self, asset: str) -> float:
         return float(self.balances.get(asset, 0.0))
 
-    def market_buy(self, symbol: str, quote_amount: float) -> Fill:
+    def market_buy(self, symbol: str, quote_amount: float, client_order_id: Optional[str] = None) -> Fill:
         rules = self.rules_for(symbol)
         _, ask = self.get_bid_ask(symbol)
         free = self.free_balance(self.quote_asset)
@@ -505,12 +506,12 @@ class LiveExchange(BaseExchange):
         if not acc.get("canTrade", False):
             raise OrderError("Bu API anahtarının işlem (Spot Trading) izni yok", "NO_PERMISSION")
 
-    def market_buy(self, symbol: str, quote_amount: float) -> Fill:
+    def market_buy(self, symbol: str, quote_amount: float, client_order_id: Optional[str] = None) -> Fill:
         rules = self.rules_for(symbol)
         amount = floor_decimals(quote_amount, 2)
         if amount < float(rules.min_notional):
             raise OrderError(f"Emir tutarı ({amount:.2f}) minimumun ({rules.min_notional}) altında", "MIN_NOTIONAL")
-        resp = self._place(symbol, "BUY", quote_order_qty=f"{amount:.2f}")
+        resp = self._place(symbol, "BUY", quote_order_qty=f"{amount:.2f}", client_id=client_order_id)
         return self._parse_fill(resp, rules, "BUY")
 
     def market_sell(self, symbol: str, qty: float) -> Fill:
@@ -654,8 +655,8 @@ class LiveExchange(BaseExchange):
         return notional * rate
 
     def _place(self, symbol: str, side: str, quantity: Optional[str] = None,
-               quote_order_qty: Optional[str] = None) -> dict:
-        client_id = f"tb{side[0]}{int(time.time() * 1000)}"
+               quote_order_qty: Optional[str] = None, client_id: Optional[str] = None) -> dict:
+        client_id = client_id or f"tb{side[0]}{int(time.time() * 1000)}"
         try:
             return self.client.order_market(symbol, side, quantity=quantity,
                                             quote_order_qty=quote_order_qty, client_order_id=client_id)

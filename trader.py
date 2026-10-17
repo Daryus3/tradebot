@@ -410,19 +410,26 @@ class TradingBot:
     def rotation_tick(self, now: float) -> None:
         """STRATEGY=rotation: her gün BTC trend kontrolü, ROTATION_DAYS günde bir yeniden dengeleme.
 
-        Backtest'in gün kapanışı kararlarıyla aynı mantık (rotation.plan_rotation). /durdur yeniden dengelemeyi
-        erteler; BTC trend filtresinin koruyucu satışları sürer.
+        Backtest'in gün kapanışı kararlarıyla aynı mantık (rotation.plan_rotation). Kararlar günlük mum kapandıktan
+        ROTATION_DELAY_SEC sonra verilir. /durdur yeniden dengelemeyi erteler; BTC trend satışları sürer.
         """
         state, cfg = self.state, self.cfg
         self._retry_rotation_sells(now, refill=True)
         if now < self.next_scan_at:
             return
         self.next_scan_at = now + cfg.scan_interval_sec
+        if now % 86400 < ROTATION_DELAY_SEC:
+            return   # Günlük mum yeni kapandı; Binance verisi oturana kadar (ve gün etiketi kaymasın diye) beklenir
         day = self.rotation_day(now)
+        if state.rotation_refill and state.rotation_plan_day != day:
+            state.rotation_refill = False   # Boşalan yer yalnızca dengeleme günü doldurulur (backtest gibi)
+            self.store.save(state)
         due = state.last_rebalance_day < 0 or day - state.last_rebalance_day >= cfg.rotation_days
-        refill = state.rotation_refill and not state.rotation_sells
-        if (due or refill) and not state.paused:
-            self.rebalance(day, now, scheduled=due)
+        pending_buy = any(p.get("side", "BUY") == "BUY" for p in state.pending_orders.values())
+        if due and not state.paused:
+            self.rebalance(day, now)
+        elif state.rotation_refill and not state.rotation_sells and not pending_buy and not state.paused:
+            self.refill(day, now)
         elif cfg.rotation_btc_ma_days > 0 and state.positions and state.last_trend_check_day != day:
             on, note = self.strategy.risk_on()
             state.last_trend_check_day = day
@@ -438,33 +445,51 @@ class TradingBot:
         slots = self.slots()
         return min(self.cfg.rotation_top_n, slots) if getattr(self.strategy, "is_rotation", False) else slots
 
-    def rebalance(self, day: int, now: float, scheduled: bool = True) -> None:
-        """Yeniden dengeleme. Dengeleme günü ancak satış ve alımlar bitince kaydedilir: arada ağ hatası olursa bir
-        sonraki taramada aynı günün kapanışlarıyla yeniden planlanır (alınanlar elde sayılır, iki kez alınmaz).
-
-        scheduled=False: dengelemede satılamayan coin sonradan satıldı, boşalan yer doldurulur (takvim değişmez).
-        """
+    def _rotation_plan(self, slots: int):
         state, cfg = self.state, self.cfg
-        slots = self.target_slots()
         excluded = {p["symbol"] for p in state.pending_orders.values()}
         if self.fee_info is not None and self.fee_info.bnb_enabled:
             excluded.add(f"BNB{cfg.quote_asset}")  # Komisyon BNB'den kesilirken BNB alınmaz (bkz. scan_and_enter)
         held = [s for s in state.positions if s not in state.rotation_sells]   # Satışı süren coin elde sayılmaz
-        plan, note = self.strategy.plan(held, self.exchange.rules, excluded, slots)
+        return self.strategy.plan(held, self.exchange.rules, excluded, slots)
+
+    def rebalance(self, day: int, now: float) -> None:
+        """Planlı yeniden dengeleme. Dengeleme günü ancak satış ve alımlar bitince kaydedilir: arada ağ hatası olursa
+        bir sonraki kontrolde aynı günün kapanışları ve AYNI hedef coin sayısıyla yeniden planlanır (alınanlar elde
+        sayılır; gönderilmekte olan alım önceden kaydedildiği için iki kez alınmaz)."""
+        state = self.state
+        if state.rotation_plan_day != day:
+            state.rotation_plan_day, state.rotation_plan_slots = day, self.target_slots()   # Satışlardan ÖNCE
+            self.store.save(state)
+        slots = state.rotation_plan_slots
+        plan, note = self._rotation_plan(slots)
         reason = ExitReason.TREND_FILTER if plan.risk_on is False else ExitReason.ROTATION
         to_sell = list(plan.sell)
         self._queue_rotation_sells(to_sell, reason, now)
         unsold = [s for s in to_sell if s in state.positions]
         sold = [s for s in to_sell if s not in state.positions]
         bought = self._rotation_buys(plan, slots) if plan.risk_on is not False else []
-        if scheduled:
-            state.last_rebalance_day = day
-        state.last_trend_check_day = day
+        state.last_rebalance_day = state.last_trend_check_day = day
         state.rotation_refill = False
         self.store.save(state)
-        text = Messages.rotation(plan, note, sold, unsold, bought, cfg, refill=not scheduled)
+        self._announce_rotation(plan, note, sold, unsold, bought, now)
+
+    def refill(self, day: int, now: float) -> None:
+        """Dengeleme günü boşalan / dolmayan yerleri YALNIZCA alımla doldurur (elde tutulanlar satılmaz, takvim
+        değişmez): dengelemede satılamayıp sonra satılan coin, sonucu belirsiz kalıp sonra netleşen alım."""
+        state = self.state
+        plan, note = self._rotation_plan(state.rotation_plan_slots)
+        bought = self._rotation_buys(plan, state.rotation_plan_slots) if plan.risk_on is not False else []
+        state.rotation_refill = False
+        self.store.save(state)
+        if bought:
+            self._announce_rotation(plan, note, [], [], bought, now, refill=True)
+
+    def _announce_rotation(self, plan, note: str, sold, unsold, bought, now: float, refill: bool = False) -> None:
+        text = Messages.rotation(plan, note, sold, unsold, bought, self.cfg, refill=refill)
         self.last_rotation, self.last_rotation_at = text, now
-        log.info("Rotasyon: tut %s | sat %s | al %s | %s", plan.keep, to_sell, bought, note)
+        log.info("Rotasyon%s: tut %s | sat %s | al %s | %s", " (doldurma)" if refill else "", plan.keep,
+                 sold + unsold, bought, note)
         self.notifier.send(text)
 
     def _rotation_buys(self, plan, slots: int) -> List[str]:
@@ -479,6 +504,10 @@ class TradingBot:
         momentum = dict(plan.ranking)
         bought: List[str] = []
         for symbol in plan.candidates:
+            if symbol in state.rotation_sells and symbol in state.positions:
+                # Önceki (trend / sıralama) satışı hâlâ sürüyor ama yeni plan bu coini istiyor: satış iptal, tutulur
+                state.rotation_sells.pop(symbol, None)
+                self.store.save(state)
             pending_buys = sum(1 for p in state.pending_orders.values() if p.get("side", "BUY") == "BUY")
             if len(state.positions) + pending_buys >= slots:
                 break
@@ -505,11 +534,18 @@ class TradingBot:
                 "kind": "rotation", "momentum_pct": momentum[symbol], "rank": float(plan.rank_of(symbol) or 0),
                 "lookback_days": float(cfg.rotation_lookback_days)})
             context = {"spread_pct": spread, "regime": "ROTASYON", "expected_ask": ask}
-            if self.open_position(signal, entry.quote_amount, slots, context):
+            # Emir gönderilmeden ÖNCE kaydedilir: bot tam bu sırada kapanırsa açılışta Binance'ten sorgulanır
+            cid = f"tbR{int(self.time_fn() * 1000)}{len(bought)}"
+            state.pending_orders[cid] = {
+                "symbol": symbol, "side": "BUY", "created_at": self.time_fn(), "note": signal.note(),
+                "score": signal.score, "metrics": dict(signal.metrics), "slots": slots, "spread_pct": spread,
+                "regime": "ROTASYON"}
+            self.store.save(state)
+            if self.open_position(signal, entry.quote_amount, slots, context, client_order_id=cid):
                 bought.append(symbol)
                 self.day_stats.buys += 1
                 free -= state.positions[symbol].cost_usdt
-            elif any(p.get("symbol") == symbol for p in state.pending_orders.values()):
+            elif cid in state.pending_orders:
                 break   # Sonucu belirsiz alım: bakiye ve yer hesabı netleşmeden başka alım yapılmaz
         return bought
 
@@ -532,8 +568,10 @@ class TradingBot:
         failed = False
         for symbol, reason in list(state.rotation_sells.items()):
             pos = state.positions.get(symbol)
-            if pos is None:
+            if pos is None:   # Bu arada başka yoldan kapandı (zarar kes, yedek stop, /sat): yer yine boşaldı
                 state.rotation_sells.pop(symbol, None)
+                if refill and reason == ExitReason.ROTATION.value:
+                    state.rotation_refill = True
             elif self.close_position(pos, ExitReason(reason)):
                 state.rotation_sells.pop(symbol, None)
                 if refill and reason == ExitReason.ROTATION.value:
@@ -543,11 +581,17 @@ class TradingBot:
         self._next_rotation_sell = now + ROTATION_SELL_RETRY_SEC if failed else 0.0
         self.store.save(state)
 
-    def open_position(self, signal, quote_amount: float, slots: int = 1, context: Optional[dict] = None) -> bool:
+    def open_position(self, signal, quote_amount: float, slots: int = 1, context: Optional[dict] = None,
+                      client_order_id: Optional[str] = None) -> bool:
+        """client_order_id: emir önceden pending_orders'a yazıldıysa kimliği (başarı / ret sonrası kayıt silinir)."""
         context = context or {}
         try:
-            fill = self.exchange.market_buy(signal.symbol, quote_amount)
+            fill = (self.exchange.market_buy(signal.symbol, quote_amount, client_order_id=client_order_id)
+                    if client_order_id else self.exchange.market_buy(signal.symbol, quote_amount))
         except OrderError as exc:
+            if client_order_id and not (exc.code == "UNKNOWN" and exc.client_order_id):
+                self.state.pending_orders.pop(client_order_id, None)   # Emir reddedildi: gerçekleşmedi
+                self.store.save(self.state)
             if exc.code == "UNKNOWN" and exc.client_order_id:
                 # İnternet koptu, emrin gerçekleşip gerçekleşmediği bilinmiyor: takibe al
                 self.state.pending_orders[exc.client_order_id] = {
@@ -570,6 +614,8 @@ class TradingBot:
             if slip > self.cfg.slippage_warn_pct:
                 self.notifier.send(Messages.warning(
                     f"{signal.symbol} alış fiyatı beklenenden %{slip:.2f} yüksek gerçekleşti (kayma)."))
+        if client_order_id:
+            self.state.pending_orders.pop(client_order_id, None)   # Pozisyonla aynı kayıtta silinir
         self._register_position(signal.symbol, fill, signal.note(), signal.score, dict(signal.metrics),
                                  context, slots)
         return True
@@ -1044,6 +1090,7 @@ class TradingBot:
                 continue
             if fill is not None:
                 del self.state.pending_orders[client_id]
+                self._rotation_pending_resolved(info, now)
                 if symbol not in self.state.positions:
                     self.notifier.send(f"♻️ <b>Belirsiz kalan {esc(symbol)} alımı gerçekleşmiş</b> — "
                                        f"pozisyon takibe alındı.", critical=True)
@@ -1052,7 +1099,14 @@ class TradingBot:
             elif now - float(info.get("created_at", now)) > PENDING_GIVE_UP_SEC:
                 log.info("Belirsiz %s emri Binance'te bulunamadı; hiç gerçekleşmemiş sayılıyor.", symbol)
                 del self.state.pending_orders[client_id]
+                self._rotation_pending_resolved(info, now)
             self.store.save(self.state)
+
+    def _rotation_pending_resolved(self, info: dict, now: float) -> None:
+        """Rotasyonda sonucu belirsiz alım netleşti: dengeleme günündeysek kalan boş yerler doldurulsun."""
+        if (getattr(self.strategy, "is_rotation", False) and info.get("side", "BUY") == "BUY"
+                and self.rotation_day(now) == self.state.rotation_plan_day):
+            self.state.rotation_refill = True
 
     # ================================================================ komisyon / BNB indirimi
     def _check_commission(self) -> None:

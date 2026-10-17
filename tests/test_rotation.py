@@ -388,10 +388,20 @@ def test_live_rotation_network_error_mid_rebalance_is_retried(rcfg, fake_client,
     with pytest.raises(requests.ConnectionError):
         bot.tick()
     assert set(bot.state.positions) == {"AUSDT"} and bot.state.last_rebalance_day == -1   # Gün kaydedilmedi
+    # B'nin alımı gönderilmeden önce kaydedilmişti: sonucu netleşene kadar tekrar alınmaz
+    assert [p["symbol"] for p in bot.state.pending_orders.values()] == ["BUSDT"]
+    assert [p["symbol"] for p in StateStore(tmp_path / "s.json").load().pending_orders.values()] == ["BUSDT"]
     bot.next_scan_at = 0
-    bot.tick()                                             # Yeniden planlanır: A elde, yalnızca B alınır
-    assert set(bot.state.positions) == {"AUSDT", "BUSDT"} and bot.state.last_rebalance_day == 19676
-    assert calls == ["AUSDT", "BUSDT", "BUSDT"]
+    bot.tick()                                             # Yeniden planlanır; B beklemede olduğu için alınmaz
+    assert set(bot.state.positions) == {"AUSDT"} and bot.state.last_rebalance_day == 19676
+    assert calls == ["AUSDT", "BUSDT"]
+    clock[0] += 200                                        # Binance'te bulunamadı → gerçekleşmemiş sayılır
+    bot.next_scan_at = 0
+    bot.tick()
+    bot.next_scan_at = 0
+    bot.tick()                                             # Aynı gün boşalan yer yalnızca alımla doldurulur
+    assert set(bot.state.positions) == {"AUSDT", "BUSDT"} and not bot.state.pending_orders
+    assert calls == ["AUSDT", "BUSDT", "BUSDT"] and bot.state.last_rebalance_day == 19676
 
 
 def test_live_rotation_stops_buying_after_unknown_buy(rcfg, fake_client, tmp_path, monkeypatch):
@@ -416,13 +426,13 @@ def test_rotation_position_size_keeps_backup_stop_placeable(cfg, rcfg):
     tight = replace(cfg, stop_loss_pct=3.5)            # 5 dk'da sıkı zarar kesle de boyut / yer sayısı aynı kalır
     assert min_position_usdt(5.0, tight) == pytest.approx(5 * 1.05 / 0.965)
     rot_min = min_position_usdt(5.0, rcfg)
-    assert rot_min == pytest.approx(5 / (0.75 * 0.99))                             # -%25 yedek stop ≥ 5 USDT
+    assert rot_min == pytest.approx(5 * 1.05 / (0.75 * 0.99))                      # -%25 yedek stop ≥ 5 USDT (+pay)
     from exchange import parse_symbol_rules
     from conftest import FakeClient
     rules = parse_symbol_rules(FakeClient({"AUSDT": 1.0}).exchange_info(), "USDT")["AUSDT"]
-    small = plan_entry(6.6, rules, 1.0, rcfg)
+    small = plan_entry(7.0, rules, 1.0, rcfg)
     assert not small.ok and "yedek stop" in small.reason
-    assert plan_entry(6.8, rules, 1.0, rcfg).ok
+    assert plan_entry(7.2, rules, 1.0, rcfg).ok
 
 
 def test_rotation_pause_and_resume_replies(rcfg, fake_client, tmp_path):
@@ -453,3 +463,71 @@ def test_rotation_scan_for_selftest(rcfg, fake_client):
     # BTC de sıralamaya girer (en güçlüler arasındaysa tutulur); düşen B girmez
     assert result.market_ok and [s.symbol for s in result.signals] == ["AUSDT", "BTCUSDT"]
     assert "Momentum" in result.signals[0].note()
+
+
+def test_live_refill_is_buy_only_and_same_day(rcfg, fake_client, tmp_path, monkeypatch):
+    cfg = replace(rcfg, rotation_top_n=2)
+    clock = [T0]
+    closes = {"AUSDT": rising(f=1.02), "BUSDT": rising(f=1.01), "CUSDT": rising(f=1.005),
+              "BTCUSDT": rising(f=1.002, start=30_000.0)}
+    bot, feed, notes = make_rotation_bot(cfg, fake_client, tmp_path, closes, clock)
+    bot.tick()
+    assert set(bot.state.positions) == {"AUSDT", "BUSDT"}
+    real_close = bot.close_position
+    monkeypatch.setattr(bot, "close_position", lambda pos, reason: False)
+    feed.set("AUSDT", faded(peak_factor=1.0405))           # A sıralamadan düşer ama satılamaz
+    clock[0] += 7 * 86400
+    bot.next_scan_at = 0
+    bot.tick()
+    assert bot.state.rotation_sells == {"AUSDT": "ROTATION"} and set(bot.state.positions) == {"AUSDT", "BUSDT"}
+    feed.set("BUSDT", faded())                             # Aynı gün B de zayıfladı: doldurma B'yi SATMAMALI
+    monkeypatch.setattr(bot, "close_position", real_close)
+    clock[0] += 3600
+    bot.next_scan_at = 0
+    bot.tick()
+    assert set(bot.state.positions) == {"BUSDT", "CUSDT"}   # Yalnızca boşalan yer dolduruldu
+    assert bot.state.last_rebalance_day == 19676 + 7
+
+    # Satış ertesi güne kalırsa doldurma yapılmaz (backtest yalnızca dengeleme gününde alır)
+    monkeypatch.setattr(bot, "close_position", lambda pos, reason: False)
+    feed.set("CUSDT", faded(peak_factor=1.025))
+    feed.set("BUSDT", rising(f=1.01))
+    clock[0] += 7 * 86400 - 3600
+    bot.next_scan_at = 0
+    bot.tick()
+    assert "CUSDT" in bot.state.rotation_sells
+    monkeypatch.setattr(bot, "close_position", real_close)
+    clock[0] += 86400
+    bot.next_scan_at = 0
+    bot.tick()
+    bot.next_scan_at = 0
+    bot.tick()
+    assert "CUSDT" not in bot.state.positions and not bot.state.rotation_refill
+    assert len(bot.state.positions) == 1
+
+
+def test_live_rotation_waits_for_daily_close_to_settle(rcfg, fake_client, tmp_path):
+    clock = [19676 * 86400 + 120]                          # 00:02 UTC: karar verilmez
+    bot, feed, notes = make_rotation_bot(rcfg, fake_client, tmp_path,
+                                         {"AUSDT": rising(f=1.02), "BTCUSDT": rising(f=1.002, start=30_000.0)},
+                                         clock)
+    bot.tick()
+    assert not bot.state.positions and bot.state.last_rebalance_day == -1
+    clock[0] = 19676 * 86400 + 400
+    bot.next_scan_at = 0
+    bot.tick()
+    assert bot.state.positions and bot.state.last_rebalance_day == 19676
+
+
+def test_live_rebalance_cancels_stale_sale_of_wanted_coin(rcfg, fake_client, tmp_path, monkeypatch):
+    cfg = replace(rcfg, rotation_top_n=1)
+    clock = [T0]
+    closes = {"AUSDT": rising(f=1.02), "BTCUSDT": rising(f=1.002, start=30_000.0)}
+    bot, feed, notes = make_rotation_bot(cfg, fake_client, tmp_path, closes, clock)
+    bot.tick()
+    monkeypatch.setattr(bot, "close_position", lambda pos, reason: False)
+    bot.state.rotation_sells["AUSDT"] = "TREND_FILTER"     # Trend satışı hâlâ sürüyor...
+    clock[0] += 7 * 86400                                  # ...ama trend düzeldi ve plan A'yı istiyor
+    bot.next_scan_at = 0
+    bot.tick()
+    assert "AUSDT" in bot.state.positions and "AUSDT" not in bot.state.rotation_sells

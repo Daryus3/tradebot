@@ -199,7 +199,8 @@ def min_position_usdt(min_notional: float, cfg) -> float:
     """
     by_stop = min_notional * cfg.min_notional_safety / (1 - cfg.stop_loss_pct / 100)
     floor = _backup_floor(cfg)
-    return max(by_stop, min_notional / floor) if floor > 0 else by_stop
+    # Yedek stopta da aynı güvenlik payı: alış komisyonu, LOT / fiyat adımı yuvarlamaları emri biraz küçültür
+    return max(by_stop, min_notional * cfg.min_notional_safety / floor) if floor > 0 else by_stop
 
 
 def position_slots(capital: float, min_notional: float, cfg) -> int:
@@ -238,7 +239,7 @@ def plan_entry(available_usdt: float, rules: SymbolRules, price: float, cfg) -> 
         return EntryPlan(False, reason=f"Stop-loss seviyesinde pozisyon değeri ({value_at_stop:.2f}) "
                                        f"minimum satış tutarının ({min_notional:.2f}) altına düşer")
     value_at_backup = invest * _backup_floor(cfg)
-    if value_at_backup < min_notional:
+    if value_at_backup < min_notional * cfg.min_notional_safety:
         return EntryPlan(False, reason=f"Binance yedek stop seviyesinde pozisyon değeri ({value_at_backup:.2f}) "
                                        f"minimum emir tutarının ({min_notional:.2f}) altına düşer")
 
