@@ -464,6 +464,11 @@ class TradingBot:
         slots = state.rotation_plan_slots
         plan, note = self._rotation_plan(slots)
         reason = ExitReason.TREND_FILTER if plan.risk_on is False else ExitReason.ROTATION
+        if plan.risk_on is not False:
+            # Trend düzeldi ama eski trend satışı hâlâ sürüyor: artık sıralama satışıdır, satılınca yeri bugün dolar
+            for symbol, why in list(state.rotation_sells.items()):
+                if why == ExitReason.TREND_FILTER.value:
+                    state.rotation_sells[symbol] = ExitReason.ROTATION.value
         to_sell = list(plan.sell)
         self._queue_rotation_sells(to_sell, reason, now)
         unsold = [s for s in to_sell if s in state.positions]
@@ -504,8 +509,10 @@ class TradingBot:
         momentum = dict(plan.ranking)
         bought: List[str] = []
         for symbol in plan.candidates:
-            if symbol in state.rotation_sells and symbol in state.positions:
-                # Önceki (trend / sıralama) satışı hâlâ sürüyor ama yeni plan bu coini istiyor: satış iptal, tutulur
+            pos = state.positions.get(symbol)
+            if symbol in state.rotation_sells and pos is not None and not pos.pending_sell_client_id:
+                # Önceki (trend / sıralama) satışı hâlâ sürüyor ama yeni plan bu coini istiyor: satış iptal, tutulur.
+                # Sonucu belirsiz satış emri varsa iptal edilmez: satış listesi onu Binance'ten sorgulayıp netleştirir.
                 state.rotation_sells.pop(symbol, None)
                 self.store.save(state)
             pending_buys = sum(1 for p in state.pending_orders.values() if p.get("side", "BUY") == "BUY")
@@ -614,14 +621,14 @@ class TradingBot:
             if slip > self.cfg.slippage_warn_pct:
                 self.notifier.send(Messages.warning(
                     f"{signal.symbol} alış fiyatı beklenenden %{slip:.2f} yüksek gerçekleşti (kayma)."))
-        if client_order_id:
-            self.state.pending_orders.pop(client_order_id, None)   # Pozisyonla aynı kayıtta silinir
         self._register_position(signal.symbol, fill, signal.note(), signal.score, dict(signal.metrics),
-                                 context, slots)
+                                 context, slots, client_order_id)
         return True
 
     def _register_position(self, symbol: str, fill: Fill, note: str, score: float, metrics: dict,
-                           context: dict, slots: int) -> Position:
+                           context: dict, slots: int, client_order_id: Optional[str] = None) -> Position:
+        """client_order_id: önceden kaydedilmiş alım kaydı; pozisyon state'e girdiği anda silinir (arada bot
+        durdurulursa kayıt kalır ve açılışta Binance'ten sorgulanır — coin takipsiz kalıp tekrar alınmaz)."""
         rules = self.exchange.rules_for(symbol)
         pos = Position(symbol=symbol, base_asset=rules.base_asset, qty=fill.qty,
                        entry_price=fill.avg_price, cost_usdt=fill.usdt, opened_at=self.time_fn(),
@@ -637,6 +644,8 @@ class TradingBot:
                 log.warning("Alış sonrası bakiye doğrulanamadı: %s", exc)
 
         self.state.positions[pos.symbol] = pos
+        if client_order_id:
+            self.state.pending_orders.pop(client_order_id, None)
         self.state.total_fees += fill.fee_usdt
         backup_line = self._place_backup(pos)
         self.store.save(self.state)
@@ -1089,13 +1098,15 @@ class TradingBot:
                 log.warning("Belirsiz emir (%s) sorgulanamadı: %s", symbol, exc)
                 continue
             if fill is not None:
-                del self.state.pending_orders[client_id]
-                self._rotation_pending_resolved(info, now)
                 if symbol not in self.state.positions:
                     self.notifier.send(f"♻️ <b>Belirsiz kalan {esc(symbol)} alımı gerçekleşmiş</b> — "
                                        f"pozisyon takibe alındı.", critical=True)
+                    # Kayıt pozisyon state'e girerken silinir (arada durdurulursa sorgu tekrarlanır)
                     self._register_position(symbol, fill, info.get("note", ""), float(info.get("score") or 0),
-                                            info.get("metrics") or {}, info, int(info.get("slots") or 1))
+                                            info.get("metrics") or {}, info, int(info.get("slots") or 1),
+                                            client_id)
+                self.state.pending_orders.pop(client_id, None)
+                self._rotation_pending_resolved(info, now)
             elif now - float(info.get("created_at", now)) > PENDING_GIVE_UP_SEC:
                 log.info("Belirsiz %s emri Binance'te bulunamadı; hiç gerçekleşmemiş sayılıyor.", symbol)
                 del self.state.pending_orders[client_id]

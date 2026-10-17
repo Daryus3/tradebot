@@ -531,3 +531,117 @@ def test_live_rebalance_cancels_stale_sale_of_wanted_coin(rcfg, fake_client, tmp
     bot.next_scan_at = 0
     bot.tick()
     assert "AUSDT" in bot.state.positions and "AUSDT" not in bot.state.rotation_sells
+
+
+# ---------------------------------------------------------------- canlı mod: kapanma / belirsiz satış
+
+
+class LiveDailyBinance:
+    """Günlük kapanışlı sahte canlı Binance hesabı (bakiyeler ve emirler fake_binance.FakeBinance'ten)."""
+
+    @staticmethod
+    def make(closes, usdt):
+        from fake_binance import FakeBinance
+
+        class F(FakeBinance):
+            def klines(self, symbol, interval="5m", limit=100, start_time=None, end_time=None):
+                c = closes[symbol]
+                return [[i * DAY_MS, str(x), str(x), str(x), str(x), "0", i * DAY_MS + DAY_MS - 1, "1e7", 0, "0",
+                         "0", "0"] for i, x in enumerate(c)][-limit:]
+
+            def tickers_24h(self):
+                return [{"symbol": s, "lastPrice": str(self.prices[s]), "quoteVolume": "50000000",
+                         "priceChangePercent": "0", "highPrice": str(self.prices[s]),
+                         "lowPrice": str(self.prices[s])} for s in closes]
+        return F({s: c[-1] for s, c in closes.items()}, usdt=usdt)
+
+
+def make_live_rotation_bot(cfg, fake, tmp_path, clock, state=None):
+    from exchange import LiveExchange
+    live = replace(cfg, trading_mode="live")
+    state = state or BotState.new("live", live.start_capital)
+    bot = TradingBot(live, LiveExchange(fake, fee_rate=live.fee_rate), RotationStrategy(fake, live),
+                     CaptureNotifier(), StateStore(tmp_path / "s.json"), state, TradeLog(tmp_path / "t.csv"),
+                     time_fn=lambda: clock[0])
+    bot.startup()
+    bot.running = True
+    return bot
+
+
+def market_buys(fake):
+    return [o["symbol"] for o in fake.orders.values() if o["side"] == "BUY" and o["type"] == "MARKET"]
+
+
+def test_live_stop_while_registering_buy_keeps_intent(rcfg, tmp_path, monkeypatch):
+    # Alım gerçekleşti, pozisyon state'e yazılmadan bot durduruldu (Ctrl+C / watchdog): kayıt diskte kalmalı,
+    # açılışta Binance'ten bulunup takibe alınmalı ve coin ikinci kez alınmamalı
+    clock = [T0]
+    closes = {"AUSDT": rising(f=1.02), "BUSDT": rising(f=1.01), "CUSDT": rising(f=1.005),
+              "BTCUSDT": rising(f=1.002, start=30_000.0)}
+    fake = LiveDailyBinance.make(closes, usdt=25.0)
+    bot = make_live_rotation_bot(rcfg, fake, tmp_path, clock)
+    real_free = bot.exchange.free_balance
+
+    def free(asset):
+        if asset == "A":                                   # _register_position'daki cüzdan kontrolü
+            raise KeyboardInterrupt
+        return real_free(asset)
+    monkeypatch.setattr(bot.exchange, "free_balance", free)
+    monkeypatch.setattr(bot, "_sleep", lambda s: None)
+    bot.run(do_startup=False)                              # finally: bellekteki durum diske yazılır
+    disk = StateStore(tmp_path / "s.json").load()
+    assert not disk.positions and [p["symbol"] for p in disk.pending_orders.values()] == ["AUSDT"]
+    monkeypatch.setattr(bot.exchange, "free_balance", real_free)
+    bot2 = make_live_rotation_bot(rcfg, fake, tmp_path, clock, state=disk)
+    for _ in range(3):
+        clock[0] += 31
+        bot2.next_scan_at = 0
+        bot2.tick()
+    assert sorted(market_buys(fake)) == sorted(bot2.state.positions) == ["AUSDT", "BUSDT", "CUSDT"]
+    assert not bot2.state.pending_orders
+
+
+def test_trend_sale_finishing_on_rebalance_day_is_refilled(rcfg, fake_client, tmp_path, monkeypatch):
+    cfg = replace(rcfg, rotation_top_n=2)
+    clock = [T0]
+    btc = rising(f=1.002, start=30_000.0)
+    closes = {"AUSDT": rising(f=1.02), "BUSDT": rising(f=1.01), "CUSDT": rising(f=1.005), "BTCUSDT": btc}
+    bot, feed, notes = make_rotation_bot(cfg, fake_client, tmp_path, closes, clock)
+    bot.tick()
+    assert set(bot.state.positions) == {"AUSDT", "BUSDT"}
+    real_close = bot.close_position
+    monkeypatch.setattr(bot, "close_position",
+                        lambda pos, reason: real_close(pos, reason) if pos.symbol == "AUSDT" else False)
+    clock[0] += 5 * 86400                                  # BTC trendi bozuldu: A satıldı, B satılamadı
+    feed.set("BTCUSDT", closed_last(btc, 20_000.0))
+    bot.next_scan_at = 0
+    bot.tick()
+    assert set(bot.state.positions) == {"BUSDT"} and bot.state.rotation_sells == {"BUSDT": "TREND_FILTER"}
+    clock[0] += 2 * 86400                                  # Dengeleme günü: trend düzeldi, B zayıfladı
+    feed.set("BTCUSDT", btc)
+    feed.set("BUSDT", faded())
+    bot.next_scan_at = 0
+    bot.tick()
+    assert "AUSDT" in bot.state.positions and bot.state.rotation_sells == {"BUSDT": "ROTATION"}
+    monkeypatch.setattr(bot, "close_position", real_close)  # B aynı gün satıldı → yeri C ile doldurulur
+    clock[0] += 3600
+    bot.next_scan_at = 0
+    bot.tick()
+    assert set(bot.state.positions) == {"AUSDT", "CUSDT"} and not bot.state.rotation_sells
+
+
+def test_wanted_coin_with_unknown_sell_is_not_unqueued(rcfg, fake_client, tmp_path, monkeypatch):
+    # Sonucu belirsiz satış emri olan coin yeni plan istese de satış listesinde kalır: satış Binance'ten
+    # sorgulanıp netleşmeden "tutuluyor" sayılırsa gerçekte satılmış coin hayalet pozisyon olarak kalırdı
+    cfg = replace(rcfg, rotation_top_n=1)
+    clock = [T0]
+    closes = {"AUSDT": rising(f=1.02), "BTCUSDT": rising(f=1.002, start=30_000.0)}
+    bot, feed, notes = make_rotation_bot(cfg, fake_client, tmp_path, closes, clock)
+    bot.tick()
+    monkeypatch.setattr(bot, "close_position", lambda pos, reason: False)
+    bot.state.rotation_sells["AUSDT"] = "TREND_FILTER"
+    bot.state.positions["AUSDT"].pending_sell_client_id = "tbS1"
+    clock[0] += 7 * 86400
+    bot.next_scan_at = 0
+    bot.tick()
+    assert bot.state.rotation_sells == {"AUSDT": "ROTATION"}
