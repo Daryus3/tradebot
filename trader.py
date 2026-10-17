@@ -471,9 +471,13 @@ class TradingBot:
                     state.rotation_sells[symbol] = ExitReason.ROTATION.value
         to_sell = list(plan.sell)
         self._queue_rotation_sells(to_sell, reason, now)
-        unsold = [s for s in to_sell if s in state.positions]
         sold = [s for s in to_sell if s not in state.positions]
+        leftover = set(state.rotation_sells) - set(to_sell)   # Önceki günlerden süren satışlar
         bought = self._rotation_buys(plan, slots) if plan.risk_on is not False else []
+        # Özet: plan istediği için satışı iptal edilen coin tutulur; süren satışlar "henüz satılamayan" sayılır
+        plan.keep += [s for s in plan.candidates if s in leftover and s in state.positions
+                      and s not in state.rotation_sells]
+        unsold = [s for s in state.rotation_sells if s in state.positions]
         state.last_rebalance_day = state.last_trend_check_day = day
         state.rotation_refill = False
         self.store.save(state)
@@ -510,9 +514,8 @@ class TradingBot:
         bought: List[str] = []
         for symbol in plan.candidates:
             pos = state.positions.get(symbol)
-            if symbol in state.rotation_sells and pos is not None and not pos.pending_sell_client_id:
-                # Önceki (trend / sıralama) satışı hâlâ sürüyor ama yeni plan bu coini istiyor: satış iptal, tutulur.
-                # Sonucu belirsiz satış emri varsa iptal edilmez: satış listesi onu Binance'ten sorgulayıp netleştirir.
+            if symbol in state.rotation_sells and pos is not None and self._still_held(pos):
+                # Önceki (trend / sıralama) satışı hâlâ sürüyor ama yeni plan bu coini istiyor: satış iptal, tutulur
                 state.rotation_sells.pop(symbol, None)
                 self.store.save(state)
             pending_buys = sum(1 for p in state.pending_orders.values() if p.get("side", "BUY") == "BUY")
@@ -555,6 +558,22 @@ class TradingBot:
             elif cid in state.pending_orders:
                 break   # Sonucu belirsiz alım: bakiye ve yer hesabı netleşmeden başka alım yapılmaz
         return bought
+
+    def _still_held(self, pos: Position) -> bool:
+        """Sonucu belirsiz kalan satış emri varsa Binance'ten sorgular: emir gerçekleşmediyse coin hâlâ eldedir
+        (True). Gerçekleştiyse veya sorgulanamadıysa False: satış listesi close_position ile netleştirir."""
+        if not pos.pending_sell_client_id:
+            return True
+        try:
+            earlier = self.exchange.recover_order(pos.symbol, pos.pending_sell_client_id, "SELL")
+        except (OrderError, requests.RequestException, BinanceAPIError) as exc:
+            log.warning("%s önceki satış emri sorgulanamadı: %s", pos.symbol, exc)
+            return False
+        if earlier is not None:
+            return False
+        pos.pending_sell_client_id = ""
+        self._next_backup_check[pos.symbol] = 0   # Satış denemesinde kaldırılan yedek stop geri konsun
+        return True
 
     def _queue_rotation_sells(self, symbols: List[str], reason: ExitReason, now: float) -> None:
         """Satılacakları kalıcı listeye yazar ve hemen satmayı dener (satılamayanlar sonra tekrar denenir)."""
@@ -1098,6 +1117,7 @@ class TradingBot:
                 log.warning("Belirsiz emir (%s) sorgulanamadı: %s", symbol, exc)
                 continue
             if fill is not None:
+                self._rotation_pending_resolved(info, now)   # Bayrak pozisyonla aynı kayıtta diske yazılsın
                 if symbol not in self.state.positions:
                     self.notifier.send(f"♻️ <b>Belirsiz kalan {esc(symbol)} alımı gerçekleşmiş</b> — "
                                        f"pozisyon takibe alındı.", critical=True)
@@ -1106,7 +1126,6 @@ class TradingBot:
                                             info.get("metrics") or {}, info, int(info.get("slots") or 1),
                                             client_id)
                 self.state.pending_orders.pop(client_id, None)
-                self._rotation_pending_resolved(info, now)
             elif now - float(info.get("created_at", now)) > PENDING_GIVE_UP_SEC:
                 log.info("Belirsiz %s emri Binance'te bulunamadı; hiç gerçekleşmemiş sayılıyor.", symbol)
                 del self.state.pending_orders[client_id]
