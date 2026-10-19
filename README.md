@@ -188,6 +188,7 @@ Birkaç gün test modunda çalıştırıp sonuçları izlemenizi öneririz (`/is
 | `python main.py --backtest --gun 30` | Stratejiyi geçmiş verilerle dener (`--coin-sayisi 40`, `--sermaye 25`) |
 | `python main.py --backtest --gun 90 --tara` | Aynı veriyle onlarca Kâr Al / Zarar Kes / süre ayarını karşılaştırır |
 | `python main.py --backtest --gun 90 --tara-giris` | Aynı veriyle giriş filtrelerini (piyasa rejimi, 24s düşüş, sinyal puanı, hedef alanı) karşılaştırır |
+| `python main.py --backtest --gun 90 --tara-filtre` | rebound filtrelerini tek tek gevşetip işlem sayısına ve işlem başı sonuca etkisini gösterir |
 | `python main.py --backtest --gun 90 --bitis 2026-07-01` | O tarihte biten (daha eski) bir dönemi dener: bulunan ayarı bağımsız dönemde doğrulamak için |
 | `python main.py --backtest --strateji swing --strateji-karsilastir` | Uzun vadeli (1 saatlik mum) stratejileri son 1 yılın verisiyle karşılaştırır |
 | `python main.py --backtest --strateji rotation` | Haftalık momentum rotasyonunu son 3 yılın günlük verisiyle dener (BTC al-tut kıyaslı) |
@@ -494,6 +495,18 @@ iddialı bir hedeftir; bazı işlemler 60 dakikadan uzun sürebilir. İsterseniz
   kârlı ve denenen ayar sayısı hesaba katılarak şanstan ayırt edilebiliyor), ≈ iki yarıda kârlı ama şans
   olabilir, · 30'dan az işlem. Bir satırı sınamak için satırları `.env`'e yazıp `--bitis` ile daha önceki
   dönemde normal backtest çalıştırın. CSV dosyası Türkçe Excel'e göredir (`;` ayırıcı, `,` ondalık).
+- **Filtre gevşetme taraması** (`--tara-filtre`, yalnızca `rebound`): "bot çok az işlem yapıyor, hangi filtreyi
+  gevşeteyim?" sorusu için. Her satırda TEK filtre bir adım gevşetilir (`MIN_24H_DROP_PCT`, `MIN_24H_RANGE_PCT`,
+  `MAX_CANDIDATES`, `MIN_DIP_PCT`, `MIN_RETRACE` / `MAX_RETRACE`, `RSI_*`, `MIN_VOLUME_RATIO`, `MIN_ATR_PCT`,
+  `SYMBOL_COOLDOWN_MINUTES`, `BTC_MAX_1H_DROP_PCT`, açıksa `MIN_SIGNAL_SCORE` / `MIN_ROOM_RATIO` /
+  `REGIME_SKIP_WEAK`), son satırda hepsi birden. Rapor her gevşetmenin kaç işlem eklediğini ve işlem başı
+  sonucu ne yaptığını gösterir: 🟢 daha çok işlem ve işlem başı sonuç kötüleşmedi, 🔴 daha çok ama daha kötü
+  işlem, · bu filtre şu an işlem kısıtlamıyor. Sinyal filtreleri değiştiği için analizler her satırda yeniden
+  yapılır (90 günde birkaç dakika). **İşlem başı sonuç negatifse işlem sayısını artırmak zararı da artırır.**
+  ```bash
+  python main.py --backtest --gun 90 --tara-filtre --sermaye 25
+  ```
+  Canlıda hangi filtrenin eleme yaptığını Telegram'dan `/tarama` ile de görebilirsiniz ("En sık eleme nedenleri").
 
 ---
 

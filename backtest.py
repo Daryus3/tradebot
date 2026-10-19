@@ -41,7 +41,7 @@ from risk import (ExitReason, Position, breakeven_effective, evaluate_exit, kill
                   plan_entry, pnl_pct, position_slots, price_for_pnl, target_exits, trailing_floor_pct,
                   update_breakeven, update_trailing)
 from rotation import btc_trend, momentum_pct, plan_rotation, pump_pct
-from config import PROFILE_ATTRS, PROFILES, is_long_horizon, is_rotation, strategy_family
+from config import PROFILE_ATTRS, PROFILES, ConfigError, is_long_horizon, is_rotation, strategy_family
 from strategy import KLINE_LIMIT, STRATEGIES, Signal, make_strategy, required_move_pct, room_ok, strategy_class
 from telegram_bot import LINE, fmt_duration, fmt_price, fmt_rate, fmt_signed, fmt_usdt
 
@@ -1224,7 +1224,41 @@ SWEEP_FIELDS: Dict[str, Tuple[str, type, Optional[str]]] = {
     "BREAKEVEN_FLOOR_PCT": ("breakeven_floor_pct", float, None),
     "BACKUP_STOP_PCT": ("backup_stop_pct", float, None),
     "ROTATION_UNIVERSE": ("rotation_universe", int, None),
+    # Filtre gevşetme taraması (--tara-filtre); kendi tablosunda gösterilir
+    "MIN_24H_DROP_PCT": ("min_24h_drop_pct", float, None),
+    "MIN_24H_RANGE_PCT": ("min_24h_range_pct", float, None),
+    "MIN_DIP_PCT": ("min_dip_pct", float, None),
+    "MIN_RETRACE": ("min_retrace", float, None),
+    "MAX_RETRACE": ("max_retrace", float, None),
+    "RSI_OVERSOLD": ("rsi_oversold", float, None),
+    "RSI_ENTRY_MIN": ("rsi_entry_min", float, None),
+    "RSI_ENTRY_MAX": ("rsi_entry_max", float, None),
+    "MIN_VOLUME_RATIO": ("min_volume_ratio", float, None),
+    "MIN_ATR_PCT": ("min_atr_pct", float, None),
+    "MAX_CANDIDATES": ("max_candidates", int, None),
+    "SYMBOL_COOLDOWN_MINUTES": ("symbol_cooldown_minutes", int, None),
+    "BTC_MAX_1H_DROP_PCT": ("btc_max_1h_drop_pct", float, None),
 }
+# Filtre gevşetme taraması (rebound): her satırda TEK filtre bir adım gevşetilir. (.env anahtarı, yön: +1 = değeri
+# büyütmek gevşetir / -1 = küçültmek gevşetir, adımlar hafiften güçlüye; mevcut değerden gevşek olan ilki denenir)
+FILTER_STEPS: Tuple[Tuple[str, int, Tuple[Union[float, bool], ...]], ...] = (
+    ("MIN_24H_DROP_PCT", -1, (1.0, 0.0)),        # Ön eleme: 24 saatte en az ne kadar düşmüş
+    ("MIN_24H_RANGE_PCT", -1, (3.0, 2.0, 0.0)),  # Ön eleme: 24 saatlik fiyat aralığı
+    ("MAX_CANDIDATES", +1, (25, 40)),            # Taramada incelenen aday sayısı
+    ("MIN_DIP_PCT", -1, (2.5, 2.0, 1.5)),        # Son 3 saatte zirveden dibe düşüş
+    ("MIN_RETRACE", -1, (0.10, 0.05)),           # Düşüşün en az ne kadarı geri alınmış
+    ("MAX_RETRACE", +1, (0.75, 0.9)),            # ... en fazla ne kadarı
+    ("RSI_OVERSOLD", +1, (40.0, 45.0)),          # Dipte görülmesi gereken RSI
+    ("RSI_ENTRY_MIN", -1, (35.0, 30.0)),
+    ("RSI_ENTRY_MAX", +1, (70.0, 75.0)),
+    ("MIN_VOLUME_RATIO", -1, (0.8, 0.6, 0.0)),   # Hacim teyidi
+    ("MIN_ATR_PCT", -1, (0.15, 0.1, 0.0)),       # Oynaklık alt sınırı
+    ("SYMBOL_COOLDOWN_MINUTES", -1, (30, 15, 0)),
+    ("BTC_MAX_1H_DROP_PCT", +1, (2.5, 4.0)),     # BTC filtresi
+    ("MIN_SIGNAL_SCORE", -1, (0.0,)),
+    ("MIN_ROOM_RATIO", -1, (0.0,)),
+    ("REGIME_SKIP_WEAK", -1, (False,)),
+)
 ROTATION_EXIT_KEYS = ("STOP_LOSS_PCT", "ROTATION_DAYS")
 ROTATION_ENTRY_KEYS = ("ROTATION_LOOKBACK_DAYS", "ROTATION_BTC_MA_DAYS", "ROTATION_TOP_N")
 ROTATION_KEYS = ROTATION_EXIT_KEYS[1:] + ROTATION_ENTRY_KEYS + ("ROTATION_UNIVERSE",)
@@ -1459,6 +1493,188 @@ def run_entry_sweep(cfg, data: BacktestData, spread_pct: float = 0.05, progress:
     cache.update(own)
     combos = entry_combos(cfg, thresholds, regime_available=data.regime is not None)[1:]
     return base + run_sweep(cfg, data, spread_pct, progress, combos, cache)
+
+
+def _valid(cfg) -> bool:
+    try:
+        cfg.validate()
+    except ConfigError:
+        return False
+    return True
+
+
+def filter_combos(cfg) -> List[Combo]:
+    """Filtre gevşetme taraması: ilk satır mevcut ayarlar, sonra her filtre için tek adımlık gevşetme, en sonda
+    hepsi birden. Zaten kapalı / gevşek olan veya bu ayarlarla anlamsız olan filtreler atlanır."""
+    combos: List[Combo] = [({}, True)]
+    together: Settings = {}
+    for key, direction, steps in FILTER_STEPS:
+        attr, kind = SWEEP_FIELDS[key][0], SWEEP_FIELDS[key][1]
+        if key == "BTC_MAX_1H_DROP_PCT" and not cfg.btc_filter:
+            continue
+        if key == "REGIME_SKIP_WEAK" and not cfg.regime_filter:
+            continue
+        current = getattr(cfg, attr)
+        for step in steps:
+            value = kind(step)
+            if (value - current) * direction <= 0:
+                continue   # Mevcut değerden gevşek değil
+            if not _valid(replace(cfg, **{attr: value})):
+                continue
+            combos.append(({key: value}, False))
+            if _valid(_apply(cfg, {**together, key: value})):
+                together[key] = value
+            break
+    if len(together) > 1:
+        combos.append((together, False))   # Hepsi birden (her filtrenin ilk adımı)
+    return combos
+
+
+def _prefilter_all(data: BacktestData, cfg) -> None:
+    """24s ön elemesi (MIN_24H_RANGE_PCT) veriyle birlikte hesaplanır: değişince yeniden hesaplanır."""
+    for s in data.series.values():
+        s.change24 = [None] * len(s.change24)
+        s.prepare_prefilter(cfg)
+
+
+def run_filter_sweep(cfg, data: BacktestData, spread_pct: float = 0.05, progress: Progress = None,
+                     signal_cache: Optional[dict] = None) -> List[SweepRow]:
+    """Her filtreyi tek tek gevşetip aynı veriyle simüle eder (çıkışlar .env'deki gibi)."""
+    say = progress or (lambda _msg: None)
+    cache = signal_cache if signal_cache is not None else {}
+    combos = filter_combos(cfg)
+    rows: List[SweepRow] = []
+    prepared = cfg.min_24h_range_pct
+    try:
+        for i, (settings, is_base) in enumerate(combos, 1):
+            run_cfg = _apply(cfg, settings)
+            if run_cfg.min_24h_range_pct != prepared:
+                _prefilter_all(data, run_cfg)
+                prepared = run_cfg.min_24h_range_pct
+            res = simulate(run_cfg, data, spread_pct, None, signal_cache=cache)
+            sm = summarize(res.trades)
+            first, second = split_halves(res.trades, res.start_ms, res.end_ms)
+            rows.append(SweepRow(dict(settings), is_base, sm.count, sm.win_rate, sm.net, sm.mean_net_pct,
+                                 res.max_drawdown_pct, sum(t.pnl for t in first), sum(t.pnl for t in second),
+                                 sm.profit_factor, sm.se_net_pct))
+            say(f"   ⏳ Filtre taraması {i}/{len(combos)} ayar denendi")
+    finally:
+        if prepared != cfg.min_24h_range_pct:
+            _prefilter_all(data, cfg)   # Aynı veriyle sonraki taramalar .env'deki ön elemeyi görsün
+    return rows
+
+
+def _filter_label(cfg, settings: Settings) -> str:
+    if not settings:
+        return "mevcut ayarlar"
+    if len(settings) > 1:
+        return "hepsi birden (ilk adımlar)"
+    (key, value), = settings.items()
+    return f"{key} {_fmt_setting(key, getattr(cfg, SWEEP_FIELDS[key][0]))} → {_fmt_setting(key, value)}"
+
+
+def format_filter_report(rows: Sequence[SweepRow], cfg, data: BacktestData, spread_pct: float = 0.05) -> str:
+    """Filtre gevşetme raporu: hangi filtre işlem sayısını ne kadar artırıyor, işlem başı sonucu ne oluyor."""
+    q = cfg.quote_asset
+    base = next(r for r in rows if r.baseline)
+    days = max(data.days, 1e-9)
+    width = max([24] + [len(_filter_label(cfg, r.settings)) for r in rows])
+    label = INTERVAL_LABELS.get(data.interval, data.interval)
+    lines = [
+        f"🧪 FİLTRE GEVŞETME TARAMASI — strateji: {cfg.strategy} (her satırda TEK filtre gevşetildi; çıkışlar sabit)",
+        LINE,
+        f"🗓️ Dönem: {_fmt_time(data.sim_start_ms)} → {_fmt_time(data.end_ms)} ({data.days:g} gün, {label} mumlar) | "
+        f"{len(data.series)} sembol | sermaye {fmt_usdt(cfg.start_capital)} {q} | komisyon {fmt_rate(cfg.fee_rate)} "
+        f"| spread %{spread_pct:g}",
+        f"⚙️ Çıkışlar (tüm satırlarda): {_exit_summary(cfg)}",
+        "   (Karşılaştırma adil olsun diye taramada kill-switch kapalıdır; maks. düşüşe bakın.)",
+        LINE,
+        f"   {'Gevşetilen ayar':<{width}} | İşlem  Fark  Gün.  Kaz%  İşl.başı   Net USDT  MaksDD |  1.yarı  2.yarı",
+    ]
+    more: List[SweepRow] = []     # İşlem sayısını artıranlar
+    better: List[SweepRow] = []   # ... yeterli işlemle ve işlem başı sonucu kötüleştirmeden
+    worse: List[SweepRow] = []    # ... yeterli işlemle ama işlem başı sonucu kötüleştirerek
+    # Mevcut ayar çok az işlem açıyorsa onun işlem başı sonucu şanstır: kıyas sıfıra (kâr / zarar sınırına) yapılır
+    reference = base.mean_net_pct if base.enough_trades else 0.0
+    for r in rows:
+        diff = r.trades - base.trades
+        if r.baseline:
+            mark = "⭐"
+        elif diff <= 0:
+            mark = "· "
+        elif not r.enough_trades:
+            mark = "? "
+            more.append(r)
+        elif r.mean_net_pct >= reference:
+            mark = "🟢"
+            more.append(r)
+            better.append(r)
+        else:
+            mark = "🔴"
+            more.append(r)
+            worse.append(r)
+        lines.append(
+            f"{mark} {_filter_label(cfg, r.settings):<{width}} | {r.trades:>5d} {diff:>+5d} {r.trades / days:>5.1f} "
+            f"{r.win_rate:>5.1f} {r.mean_net_pct:>+8.2f}% {r.net:>+10.4f} {r.max_dd_pct:>6.1f}% | "
+            f"{r.first_net:>+7.3f} {r.second_net:>+7.3f}")
+    lines += [
+        "   ⭐ = .env'deki mevcut ayarlarınız | Fark = mevcut ayara göre işlem farkı | Gün. = günde ortalama işlem",
+        "   🟢 = daha çok işlem ve işlem başı sonuç kötüleşmedi | 🔴 = daha çok işlem ama işlem başı sonuç kötüleşti",
+        f"   ? = {MIN_TRADES_FOR_EVIDENCE}'dan az işlem (sonuç şans olabilir) | · = işlem sayısı artmadı (bu filtre "
+        "şu an işlemleri kısıtlamıyor)",
+        "   İşl.başı = işlem başına ortalama net K/Z (komisyon dahil)",
+        LINE,
+    ]
+    if not base.enough_trades:
+        lines.append(f"ℹ️ Mevcut ayarlarla yalnızca {base.trades} işlem var: işlem başı sonucu şans olabileceği için "
+                     "satırlar sıfırla (kâr / zarar sınırı) kıyaslandı.")
+    if not more:
+        lines.append("ℹ️ Hiçbir filtre tek başına işlem sayısını artırmadı. İşlemleri kısıtlayan şey filtreler değil;")
+        lines.append("   pozisyon yeri (MAX_OPEN_POSITIONS / sermaye) veya piyasa koşulları olabilir.")
+    else:
+        top = sorted(more, key=lambda r: r.trades, reverse=True)[:3]
+        lines.append("📈 İşlem sayısını en çok artıranlar: " + ", ".join(
+            f"{_filter_label(cfg, r.settings)} ({r.trades - base.trades:+d})" for r in top))
+    combined = next((r for r in rows if len(r.settings) > 1), None)
+    single = sum(max(0, r.trades - base.trades) for r in rows if len(r.settings) == 1)
+    if combined is not None and combined.trades - base.trades > 2 * max(single, 1):
+        lines += [f"🔗 Filtreler birbirini örtüyor: tek tek gevşetmek toplam {single:+d} işlem getirirken hepsi birden "
+                  f"{combined.trades - base.trades:+d} getiriyor.",
+                  "   Bir sinyal birden çok filtreye takılıyor; tek filtre gevşetilince yine diğerine takılır."]
+    if base.mean_net_pct < 0:
+        lines += [
+            f"❗ Mevcut ayarlarla işlem başı sonuç {fmt_signed(base.mean_net_pct)}% (negatif): bu durumda işlem",
+            "   sayısını artırmak toplam zararı da artırır. Daha çok işlem ancak işlem başı sonuç da sıfırın üstüne",
+            "   çıkıyorsa kâr getirir.",
+        ]
+    if better:
+        best = max(better, key=lambda r: r.mean_net_pct)
+        lines.append("🟢 İşlem sayısını artırıp işlem başı sonucu bozmayan filtreler (tek tek denendi):")
+        for r in sorted(better, key=lambda r: r.mean_net_pct, reverse=True):
+            lines.append(f"   {_filter_label(cfg, r.settings)}: {r.trades - base.trades:+d} işlem, işlem başı "
+                         f"{fmt_signed(r.mean_net_pct)}% → .env: " + "  ".join(
+                             f"{k}={_fmt_setting(k, v)}" for k, v in r.settings.items()))
+        lines += [
+            "   Fark küçükse şans olabilir. Önce en iyisini daha önceki bir dönemde sınayın: .env'de değiştirip",
+            f"   python main.py --backtest --gun {data.days:g} --strateji {cfg.strategy} --bitis "
+            f"{_fmt_date(data.sim_start_ms)}",
+        ]
+        if not best.profitable:
+            lines.append("   Not: bu ayarlarla da toplamda zarar var; yalnızca işlem başı zarar büyümüyor.")
+    elif worse:
+        if base.enough_trades:
+            lines.append("🔴 Yeterli işlemle ölçülebilen her gevşetme işlem başı sonucu kötüleştiriyor: filtreler kötü")
+        else:
+            lines.append("🔴 Yeterli işlemle ölçülebilen her gevşetmede işlem başı sonuç zararda: filtreler kötü")
+        lines.append("   sinyalleri eliyor. Gevşetirseniz daha çok ama daha zararlı işlem beklenir.")
+    elif more:
+        lines.append(f"? İşlem sayısını artıran gevşetmeler {MIN_TRADES_FOR_EVIDENCE}'dan az işlem açtı: etkileri bu veriyle "
+                     "ölçülemiyor; daha uzun bir dönem deneyin (--gun 180).")
+    lines.append(f"🔁 Aynı taramayı önceki {data.days:g} günde yapmak için: python main.py --backtest --gun "
+                 f"{data.days:g} --tara-filtre --strateji {cfg.strategy} --bitis {_fmt_date(data.sim_start_ms)}")
+    lines.append(f"📝 Backtest en hacimli {len(data.series)} coinle yapılır; canlı bot daha çok coine bakar ve 30 sn'de "
+                 "bir tarar, işlem sayıları canlıda farklı olabilir. Kayma yok, geçmiş sonuçlar geleceği garanti etmez.")
+    return "\n".join(lines)
 
 
 def _fmt_setting(key: str, value) -> str:

@@ -586,6 +586,58 @@ def test_entry_sweep_varies_filters_and_reuses_cache(cfg, make_client, tmp_path)
     assert content[0].startswith("REGIME_SKIP_WEAK;MAX_24H_DROP_PCT") and len(content) == len(rows) + 1
 
 
+def test_filter_combos_loosen_one_step_at_a_time(cfg):
+    from backtest import filter_combos
+    combos = filter_combos(cfg)
+    assert combos[0] == ({}, True)
+    single = {k: v for st, _ in combos[1:-1] for k, v in st.items()}
+    assert all(len(st) == 1 for st, _ in combos[1:-1]) and len(combos[-1][0]) > 1   # Son satır: hepsi birden
+    assert single["MIN_DIP_PCT"] == 2.5 and single["RSI_OVERSOLD"] == 40 and single["MAX_CANDIDATES"] == 25
+    assert single["MIN_24H_DROP_PCT"] == 1 and single["MIN_VOLUME_RATIO"] == 0.8
+    assert "MIN_SIGNAL_SCORE" not in single and "REGIME_SKIP_WEAK" not in single     # Zaten kapalı
+    tuned = replace(cfg, min_dip_pct=2.2, min_signal_score=19.0, regime_skip_weak=True, rsi_oversold=50.0,
+                    btc_filter=False)
+    single = {k: v for st, _ in filter_combos(tuned)[1:-1] for k, v in st.items()}
+    assert single["MIN_DIP_PCT"] == 2.0                    # Mevcut değerden gevşek olan ilk adım
+    assert "RSI_OVERSOLD" not in single                    # 50 zaten 45'ten gevşek
+    assert "BTC_MAX_1H_DROP_PCT" not in single             # BTC filtresi kapalıyken anlamsız
+    assert single["MIN_SIGNAL_SCORE"] == 0 and single["REGIME_SKIP_WEAK"] is False
+    # Ayarları geçersiz kılacak adım atlanır (MIN_RETRACE < MAX_RETRACE olmalı)
+    narrow = replace(cfg, min_retrace=0.15, max_retrace=0.16)
+    single = {k: v for st, _ in filter_combos(narrow)[1:-1] for k, v in st.items()}
+    assert single["MIN_RETRACE"] == 0.10 and single["MAX_RETRACE"] == 0.75
+
+
+def test_filter_sweep_shows_which_filter_blocks_trades(cfg, make_client, tmp_path):
+    from backtest import format_filter_report, prepare_backtest, run_filter_sweep, save_sweep_csv, simulate
+    blocked = replace(cfg, min_24h_range_pct=50.0)        # Ön elemede her coini eler
+    client = make_client({"ABCUSDT": scenario(lambda p: trend(p, 1.03, 8)), "BTCUSDT": btc_flat()})
+    data = prepare_backtest(blocked, client, days=DAYS, cache_dir=tmp_path / "c", progress=None,
+                            symbols=["ABCUSDT"], end_time_ms=END_TIME_MS)
+    rows = run_filter_sweep(blocked, data)
+    assert rows[0].baseline and rows[0].trades == 0
+    by_key = {next(iter(r.settings)): r for r in rows[1:] if len(r.settings) == 1}
+    assert by_key["MIN_24H_RANGE_PCT"].trades == 1          # Ön eleme yeniden hesaplandı
+    assert by_key["MIN_DIP_PCT"].trades == 0                # Diğer filtreler tek başına yetmez
+    assert simulate(blocked, data).trades == []             # Taramadan sonra ön eleme .env'deki haline döndü
+    text = format_filter_report(rows, blocked, data)
+    assert "FİLTRE GEVŞETME TARAMASI" in text and "MIN_24H_RANGE_PCT 50 → 3" in text
+    assert "yalnızca 0 işlem" in text and "--tara-filtre --strateji rebound --bitis" in text
+    content = save_sweep_csv(rows, tmp_path / "f.csv").read_text(encoding="utf-8-sig").splitlines()
+    assert len(content) == len(rows) + 1 and "MIN_24H_RANGE_PCT" in content[0]
+
+
+def test_cli_filter_sweep_only_for_rebound(cfg, monkeypatch, capsys):
+    import main
+    calls = []
+    monkeypatch.setattr(main, "load_config", lambda *a, **k: replace(cfg, strategy="trend"))
+    monkeypatch.setattr(backtest, "run_backtest", lambda *a, **k: calls.append("report") or None)
+    monkeypatch.setattr(backtest, "format_backtest_report", lambda *a, **k: "RAPOR")
+    assert main.main(["--backtest", "--tara-filtre"]) == 0
+    out = capsys.readouterr().out
+    assert "yalnızca rebound" in out and calls == ["report"]
+
+
 def test_max_24h_drop_applied_at_simulation_time(cfg, make_client, tmp_path):
     client = make_client({"ABCUSDT": scenario(lambda p: trend(p, 1.03, 8)), "BTCUSDT": btc_flat()})
     assert run(cfg, client, tmp_path).trades

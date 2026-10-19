@@ -11,6 +11,7 @@ Kullanım:
     python main.py --backtest --gun 30 # Stratejiyi geçmiş verilerle dener
     python main.py --backtest --gun 90 --tara       # Aynı veriyle farklı TP/SL/süre ayarlarını karşılaştırır
     python main.py --backtest --gun 90 --tara-giris # Aynı veriyle farklı giriş filtrelerini karşılaştırır
+    python main.py --backtest --gun 90 --tara-filtre # rebound filtrelerini tek tek gevşetip işlem sayısına etkisini gösterir
     python main.py --backtest --gun 90 --strateji-karsilastir  # rebound / trend / breakout stratejilerini karşılaştırır
     python main.py --backtest --gun 90 --strateji trend --tara # .env'yi değiştirmeden başka stratejiyle dener
     python main.py --backtest --gun 90 --sermaye 25 # Farklı bir başlangıç sermayesiyle dener
@@ -69,6 +70,9 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--tara-giris", action="store_true",
                         help="Backtest: aynı veriyle farklı giriş filtrelerini (piyasa rejimi, 24s düşüş, sinyal "
                              "puanı, hedef alanı) karşılaştırır; çıkış ayarları .env'deki gibi kalır")
+    parser.add_argument("--tara-filtre", action="store_true",
+                        help="Backtest (rebound): sinyal filtrelerini tek tek gevşetip işlem sayısına ve işlem başı "
+                             "sonuca etkisini gösterir; çıkış ayarları .env'deki gibi kalır")
     parser.add_argument("--strateji", choices=list(STRATEGY_NAMES), default=None,
                         help="Backtest için strateji (.env'deki STRATEGY yerine). Başka tür bir stratejiye "
                              "(5 dk → swing / rotation) geçilirse çıkışlar o tür için önerilen değerlerle denenir")
@@ -285,7 +289,11 @@ def run_backtest_cli(cfg, args) -> int:
         print("ℹ️ Rotasyon tek stratejidir (günlük mumlarla başka strateji yok); karşılaştırma yerine normal rapor "
               "gösteriliyor (BTC'yi alıp tutmakla kıyaslı). Ayarları denemek için --tara ve --tara-giris kullanın.")
     try:
-        if not (args.tara or args.tara_giris or compare):
+        filters = args.tara_filtre and cfg.strategy == "rebound"
+        if args.tara_filtre and not filters:
+            print(f"ℹ️ --tara-filtre yalnızca rebound stratejisinin filtrelerini dener ({cfg.strategy} için "
+                  f"--tara-giris kullanın).")
+        if not (args.tara or args.tara_giris or compare or filters):
             result = backtest.run_backtest(cfg, client, days=days, max_symbols=args.coin_sayisi, end_time_ms=end_ms)
             print(backtest.format_backtest_report(result, cfg))
             return EXIT_OK
@@ -313,12 +321,17 @@ def run_backtest_cli(cfg, args) -> int:
                 print(f"🧪 Giriş taraması: piyasa rejimi / {what} / sinyal puanı / hedef alanı filtreleri "
                       f"deneniyor...")
             reports.append(("giris", backtest.run_entry_sweep(cfg, data, progress=print, signal_cache=cache)))
+        if filters:
+            print("🧪 Filtre taraması: her sinyal filtresi tek tek gevşetilip deneniyor (sinyal filtreleri değiştiği "
+                  "için her satır analizleri yeniden yapar; birkaç dakika sürebilir)...")
+            reports.append(("filtre", backtest.run_filter_sweep(cfg, data, progress=print, signal_cache=cache)))
     except Exception as exc:  # noqa: BLE001
         print(f"❌ Backtest çalıştırılamadı: {exc}")
         return EXIT_CONFIG
     stamp = datetime.now().strftime("%Y%m%d-%H%M")
     for kind, rows in reports:
-        print(backtest.format_sweep_report(rows, cfg, data, kind=kind))
+        print(backtest.format_filter_report(rows, cfg, data) if kind == "filtre"
+              else backtest.format_sweep_report(rows, cfg, data, kind=kind))
         try:
             path = backtest.save_sweep_csv(rows, DATA_DIR / f"tarama_{kind}_{stamp}.csv")
             print(f"📄 Tüm {len(rows)} satır Excel ile açılabilir dosyada: {path}")
