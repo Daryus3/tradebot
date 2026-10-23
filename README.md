@@ -173,6 +173,27 @@ Birkaç gün test modunda çalıştırıp sonuçları izlemenizi öneririz (`/is
 > 💡 Test ve canlı modu **aynı anda** çalıştıracaksanız iki ayrı Telegram botu kullanın;
 > aynı token'la iki bot komut alamaz.
 
+### 10) Linux sunucuda (VPS) 7/24 çalıştırma 🖥️
+Ubuntu sunucuda bot `systemd` servisi olarak çalışır: çökerse 15 sn sonra, sunucu yeniden başlarsa açılışta
+kendiliğinden başlar. Normal durdurma, Telegram `/kapat`, ayar hatası ve kill-switch'te yeniden **başlatılmaz**
+(bekçiyle aynı kurallar). Sunucunun ABD dışında olması gerekir (Binance ABD'den gelen bağlantıları engeller).
+```bash
+sudo apt update && sudo apt -y install python3 python3-venv git
+sudo timedatectl set-timezone Europe/Istanbul          # Günlük rapor / sessiz saatler yerel saate göre
+sudo adduser --disabled-password --gecos "" tradebot
+sudo -iu tradebot git clone -b claude/crypto-trading-bot-larh4t https://github.com/Daryus3/tradebot.git
+sudo -iu tradebot bash -c 'cd ~/tradebot && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt'
+sudo -iu tradebot nano /home/tradebot/tradebot/.env    # Ayarları yapıştırın, Ctrl+O Enter Ctrl+X
+sudo chmod 600 /home/tradebot/tradebot/.env
+sudo -iu tradebot bash -c 'cd ~/tradebot && .venv/bin/python main.py --selftest'
+sudo cp /home/tradebot/tradebot/deploy/tradebot.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now tradebot
+sudo journalctl -u tradebot -f                         # Canlı log (çıkmak: Ctrl+C, bot çalışmaya devam eder)
+```
+Servis test modunda başlar; canlı mod için `/etc/systemd/system/tradebot.service` içindeki `--mode paper`'ı
+`--mode live --yes` yapıp `sudo systemctl daemon-reload && sudo systemctl restart tradebot` çalıştırın.
+Aynı Telegram token'ıyla bilgisayardaki botu da çalıştırmayın (Windows'ta `python watchdog.py --remove-autostart`).
+
 ---
 
 ## 🧭 Bilgisayar komutları
@@ -558,6 +579,7 @@ ayarları eklemeniz gerekmez; yazmadığınız ayarlar için yukarıdaki varsay�
 tradebot/
 ├── main.py            # Giriş noktası (komut satırı, modlar)
 ├── watchdog.py        # Bekçi: bot çökerse yeniden başlatır
+├── deploy/tradebot.service  # Linux sunucu (VPS) için systemd servisi
 ├── autostart.py       # Windows açılışında otomatik başlatma
 ├── config.py          # .env ayarlarını okur ve doğrular
 ├── trader.py          # Ana döngü: tarama, alım, pozisyon takibi, yedek stop, kill-switch, raporlar
