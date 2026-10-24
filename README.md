@@ -174,13 +174,16 @@ Birkaç gün test modunda çalıştırıp sonuçları izlemenizi öneririz (`/is
 > aynı token'la iki bot komut alamaz.
 
 ### 10) Linux sunucuda (VPS) 7/24 çalıştırma 🖥️
+> 🆕 VPS veya GitHub'ı hiç kullanmadıysanız: **[VPS_KURULUM.md](VPS_KURULUM.md)** her adımı, ekranda ne
+> görmeniz gerektiğiyle birlikte anlatır. Aşağısı deneyimli kullanıcılar için kısa özettir.
+
 Ubuntu sunucuda bot `systemd` servisi olarak çalışır: çökerse 15 sn sonra, sunucu yeniden başlarsa açılışta
 kendiliğinden başlar. Normal durdurma, Telegram `/kapat`, ayar hatası ve kill-switch'te yeniden **başlatılmaz**
 (bekçiyle aynı kurallar). Sunucunun ABD dışında olması gerekir (Binance ABD'den gelen bağlantıları engeller).
 ```bash
 sudo apt update && sudo apt -y install python3 python3-venv git
 sudo timedatectl set-timezone Europe/Istanbul          # Günlük rapor / sessiz saatler yerel saate göre
-sudo adduser --disabled-password --gecos "" tradebot
+sudo useradd -m -s /bin/bash tradebot
 sudo -iu tradebot git clone -b claude/crypto-trading-bot-larh4t https://github.com/Daryus3/tradebot.git
 sudo -iu tradebot bash -c 'cd ~/tradebot && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt'
 sudo -iu tradebot nano /home/tradebot/tradebot/.env    # Ayarları yapıştırın, Ctrl+O Enter Ctrl+X
@@ -580,6 +583,7 @@ tradebot/
 ├── main.py            # Giriş noktası (komut satırı, modlar)
 ├── watchdog.py        # Bekçi: bot çökerse yeniden başlatır
 ├── deploy/tradebot.service  # Linux sunucu (VPS) için systemd servisi
+├── VPS_KURULUM.md      # Sunucu kurulumu: sıfırdan, adım adım
 ├── autostart.py       # Windows açılışında otomatik başlatma
 ├── config.py          # .env ayarlarını okur ve doğrular
 ├── trader.py          # Ana döngü: tarama, alım, pozisyon takibi, yedek stop, kill-switch, raporlar
