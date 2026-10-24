@@ -51,6 +51,11 @@ FEE_WARN_COOLDOWN_SEC = 6 * 3600  # Yanlış FEE_RATE uyarısı en fazla bu aral
 BNB_LOW_NOTICE_SEC = 24 * 3600   # "BNB azalıyor" bilgisi en fazla günde bir
 UNSELLABLE_CODES = {"MIN_NOTIONAL", "LOT_SIZE", "NO_BALANCE"}
 ROTATION_DELAY_SEC = 300     # Rotasyon kararları günlük mum kapandıktan (UTC 00:00) 5 dk sonra verilir
+SCAN_TIME_BUDGET_SEC = 45     # Bir tarama en fazla bu kadar sürer (Binance yavaşsa kalan adaylar sonraki taramaya)
+SLOW_TICK_SEC = 20           # Döngü bundan uzun sürerse adım adım süreler loga yazılır
+# Tarama sürerken de hemen cevaplanan, yalnızca bilgi gösteren komutlar (diğerleri tarama bitince çalışır)
+READ_ONLY_COMMANDS = frozenset({"durum", "pozisyon", "bakiye", "islemler", "csv", "istatistik", "rapor", "tarama",
+                                "ayarlar", "ping", "yardim", "help", "start"})
 ROTATION_SELL_RETRY_SEC = 30  # Satılamayan rotasyon pozisyonu bu aralıkla tekrar denenir  # Kalanın satılamayacak kadar az olduğu hatalar
 
 
@@ -90,6 +95,8 @@ class TradingBot:
         self.time_fn = time_fn
         from commands import CommandProcessor  # döngüsel içe aktarmayı önlemek için
         self.commands = CommandProcessor(self, time_fn=time_fn)
+        self._deferred_commands: list = []   # Tarama sırasında gelen, tarama bitince çalışacak komutlar
+        self._scan_deadline = 0.0
 
         now = time_fn()
         self.running = False
@@ -224,43 +231,79 @@ class TradingBot:
     # ================================================================ ana adım
     def tick(self) -> None:
         now = self.time_fn()
-        if now - self.exchange.rules_loaded_at > RULES_REFRESH_SEC:
-            try:
-                self.exchange.refresh_rules()
-            except Exception as exc:  # noqa: BLE001 - eski kurallarla devam et
-                log.warning("Parite kuralları yenilenemedi: %s", exc)
+        steps: Dict[str, float] = {}
+        mark = time.monotonic()
 
-        self.process_commands()
-        if not self.running:
-            return
-        self._process_pending_orders(now)
+        def lap(name: str) -> None:
+            nonlocal mark
+            t = time.monotonic()
+            steps[name] = steps.get(name, 0.0) + t - mark
+            mark = t
 
-        if self.state.positions:
-            self.manage_positions(now)
-        elif self.state.killed or kill_switch_hit(self.state.realized_pnl, 0.0, self.loss_limit):
-            self.trigger_kill(self.state.realized_pnl)
-        if not self.running:
-            return
+        try:
+            if now - self.exchange.rules_loaded_at > RULES_REFRESH_SEC:
+                try:
+                    self.exchange.refresh_rules()
+                except Exception as exc:  # noqa: BLE001 - eski kurallarla devam et
+                    log.warning("Parite kuralları yenilenemedi: %s", exc)
+                lap("parite kuralları")
 
-        if getattr(self.strategy, "is_rotation", False):
-            if not self.state.killed:
-                self.rotation_tick(now)
-        elif (not self.state.paused and not self.state.killed and now >= self.next_scan_at
-                and self.free_slots() > 0):
-            self.next_scan_at = now + self.cfg.scan_interval_sec
-            self.scan_and_enter(now)
+            self.process_commands()
+            lap("komutlar")
+            if not self.running:
+                return
+            self._process_pending_orders(now)
 
-        self._periodic(now)
+            if self.state.positions:
+                self.manage_positions(now)
+            elif self.state.killed or kill_switch_hit(self.state.realized_pnl, 0.0, self.loss_limit):
+                self.trigger_kill(self.state.realized_pnl)
+            lap("pozisyonlar")
+            if not self.running:
+                return
+
+            if getattr(self.strategy, "is_rotation", False):
+                if not self.state.killed:
+                    self.rotation_tick(now)
+                lap("rotasyon")
+            elif (not self.state.paused and not self.state.killed and now >= self.next_scan_at
+                    and self.free_slots() > 0):
+                self.next_scan_at = now + self.cfg.scan_interval_sec
+                self.scan_and_enter(now)
+                lap("tarama")
+
+            self._periodic(now)
+            lap("raporlar / kontroller")
+        finally:
+            total = sum(steps.values())
+            if total > SLOW_TICK_SEC:
+                log.warning("Döngü %.0f sn sürdü: %s", total, ", ".join(
+                    f"{k} {v:.0f} sn" for k, v in sorted(steps.items(), key=lambda kv: -kv[1]) if v >= 1))
 
     def process_commands(self) -> None:
         if self.command_listener is None:
             return
-        for cmd in self.command_listener.get_commands():
-            shown = "***" if cmd.name == "evet" and cmd.args else " ".join(cmd.args)  # PIN log'a yazılmasın
-            log.info("Telegram komutu: /%s %s", cmd.name, shown)
-            self.commands.handle(cmd)
+        pending, self._deferred_commands = self._deferred_commands, []
+        for cmd in pending + self.command_listener.get_commands():
+            self._run_command(cmd)
             if not self.running:
                 return
+
+    def _run_command(self, cmd) -> None:
+        shown = "***" if cmd.name == "evet" and cmd.args else " ".join(cmd.args)  # PIN log'a yazılmasın
+        log.info("Telegram komutu: /%s %s", cmd.name, shown)
+        self.commands.handle(cmd)
+
+    def _during_scan(self) -> bool:
+        """Taramada her adaydan önce: bilgi komutlarını hemen cevaplar, işlem yapan komutları (satış, durdurma,
+        onay...) tarama bitince çalıştırmak üzere sıraya alır. Süre sınırı dolduysa False (taramayı bitir)."""
+        if self.command_listener is not None:
+            for cmd in self.command_listener.get_commands():
+                if cmd.name in READ_ONLY_COMMANDS:
+                    self._run_command(cmd)
+                else:
+                    self._deferred_commands.append(cmd)
+        return time.monotonic() < self._scan_deadline
 
     # ================================================================ pozisyon sayısı
     def slots(self) -> int:
@@ -358,7 +401,12 @@ class TradingBot:
             # Komisyon BNB'den kesilirken BNB'nin kendisini almak, pozisyon miktarının komisyonlarla
             # erimesine ve komisyon için ayrılan BNB'nin satılmasına yol açar
             excluded.add(f"BNB{cfg.quote_asset}")
-        result = self.strategy.scan(self.exchange.rules, excluded, target)
+        self._scan_deadline = time.monotonic() + SCAN_TIME_BUDGET_SEC
+        self.strategy.between_candidates = self._during_scan
+        try:
+            result = self.strategy.scan(self.exchange.rules, excluded, target)
+        finally:
+            self.strategy.between_candidates = None
         self._record_scan(result, now)
         log.info("%s | pozisyon %d/%d", result.summary(), len(state.positions), slots)
         if not result.signals:

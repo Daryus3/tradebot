@@ -15,6 +15,11 @@ from urllib.parse import urlencode
 
 import requests
 
+from logger import get_logger
+
+log = get_logger()
+SLOW_REQUEST_SEC = 5.0   # Bundan uzun süren Binance isteği loga yazılır (yavaş sunucu / ağ teşhisi için)
+
 
 class BinanceAPIError(Exception):
     """Binance'in döndürdüğü hata (HTTP durum kodu + Binance hata kodu)."""
@@ -85,7 +90,11 @@ class BinanceClient:
         if query:
             url = f"{url}?{query}"
 
+        started = time.monotonic()
         resp = self.session.request(method, url, timeout=self.timeout)
+        elapsed = time.monotonic() - started
+        if elapsed > SLOW_REQUEST_SEC:   # Yalnızca yol yazılır (sorgu imza / anahtar içerebilir)
+            log.warning("Binance yavaş yanıt verdi: %s %.1f sn", path, elapsed)
 
         if resp.status_code in (418, 429):
             retry_after = int(resp.headers.get("Retry-After", "60") or 60)

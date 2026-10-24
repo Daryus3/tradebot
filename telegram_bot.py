@@ -479,7 +479,7 @@ class Messages:
 
     @staticmethod
     def outage(minutes: float, open_symbols: List[str], startup: bool = False) -> str:
-        what = "Bot kapalıydı" if startup else "Bot çalışmadı (bilgisayar uykuda olabilir)"
+        what = "Bot kapalıydı" if startup else "Bot yanıt vermedi (bağlantı çok yavaş ya da sunucu takıldı)"
         if open_symbols:
             tail = (f"\n⚠️ Bu sürede açık pozisyonların ({esc(', '.join(open_symbols))}) kâr al / zarar kes "
                     f"kontrolü bot tarafından yapılamadı. Şimdi kontrol ediliyor.")

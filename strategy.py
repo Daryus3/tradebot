@@ -53,7 +53,7 @@ import math
 import time
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from binance_client import BinanceClient, RateLimitError
 from config import STRATEGY_NAMES
@@ -198,6 +198,8 @@ class ReboundStrategy:
     uses_room = True               # Sinyal "eski zirveye kalan alan" (room_pct) ölçer mi? (MIN_ROOM_RATIO etkili mi)
     uses_24h_range = True          # Ön elemede MIN_24H_RANGE_PCT (24 saatlik fiyat aralığı) uygulanır mı?
     is_rotation = False            # Sinyal yerine haftalık sıralamayla tutan / satan strateji mi? (RotationStrategy)
+    # Canlı bot her adayın analizinden önce çağırır (Telegram komutlarına cevap, süre sınırı); False = taramayı bitir
+    between_candidates: Optional[Callable[[], bool]] = None
     # Analiz sonucunu değiştiren ayarlar: backtest'in sinyal önbelleği bunlara göre ayrılır (giriş taraması
     # bunlardan birini değiştirirse önbellekteki eski sinyaller kullanılmaz)
     analysis_fields: Tuple[str, ...] = ("min_dip_pct", "min_retrace", "max_retrace", "rsi_period", "rsi_oversold",
@@ -431,7 +433,12 @@ class ReboundStrategy:
         candidates = self.prefilter(tickers, rules, excluded_symbols, invest_hint)
         result.candidates = len(candidates)
         found: Dict[str, Signal] = {}
-        for t in candidates:
+        for i, t in enumerate(candidates):
+            if self.between_candidates is not None and not self.between_candidates():
+                result.rejects["tarama süresi doldu"] += len(candidates) - i
+                log.warning("Tarama süre sınırına ulaştı: %d adaydan %d tanesi incelenmedi (Binance yavaş yanıt "
+                            "veriyor olabilir)", len(candidates), len(candidates) - i)
+                break
             symbol = t["symbol"]
             if self.coin_filter is not None:
                 safe, why = self.coin_filter.check(symbol)

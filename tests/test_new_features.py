@@ -101,7 +101,7 @@ def test_loop_gap_sends_outage_alert(cfg, fake_client, tmp_path):
     tick(bot)
     bot.last_loop_at = time.time() - 1800
     bot._check_loop_gap(time.time())
-    assert any("Bot çalışmadı" in m and "ABCUSDT" in m for m in notes.messages)
+    assert any("Bot yanıt vermedi" in m and "ABCUSDT" in m for m in notes.messages)
 
 
 def test_startup_reports_downtime(cfg, fake_client, tmp_path):
@@ -494,3 +494,52 @@ def test_live_scan_skips_weak_market_when_configured(cfg, fake_client):
     skip = ReboundStrategy(ScanClient(scaled_rows()), replace(cfg, regime_skip_weak=True),
                            regime=FixedRegime("ZAYIF")).scan(scan_rules(fake_client), set(), 11)
     assert not skip.market_ok and not skip.signals and "REGIME_SKIP_WEAK" in skip.market_note
+
+
+def test_scan_stops_when_time_budget_runs_out(cfg, fake_client):
+    from strategy import ReboundStrategy
+
+    class Client:
+        def __init__(self):
+            self.analyzed = []
+
+        def klines(self, symbol, interval="5m", limit=100, start_time=None, end_time=None):
+            if symbol == "BTCUSDT":
+                return [[i * 300_000, "100", "100", "100", "100", "0", 0, "1e6", 0, "0", "5e5", "0"] for i in range(13)]
+            self.analyzed.append(symbol)
+            return []
+
+        def tickers_24h(self):
+            return [{"symbol": s, "lastPrice": "1.0", "priceChangePercent": "-5", "quoteVolume": "9000000",
+                     "highPrice": "1.06", "lowPrice": "0.95"} for s in ("ABCUSDT", "XYZUSDT")]
+    client = Client()
+    strat = ReboundStrategy(client, cfg)
+    calls = []
+    strat.between_candidates = lambda: calls.append(1) or len(calls) < 2   # İlk adaydan sonra süre doldu
+    from exchange import parse_symbol_rules
+    rules = parse_symbol_rules(fake_client({"ABCUSDT": 1.0, "XYZUSDT": 1.0}).exchange_info())
+    result = strat.scan(rules, set(), 11)
+    assert len(client.analyzed) == 1 and result.rejects["tarama süresi doldu"] == 1
+
+
+def test_read_only_commands_answered_during_scan(cfg, fake_client, tmp_path):
+    from commands import Command
+
+    class Listener:
+        def __init__(self, cmds):
+            self.cmds = list(cmds)
+
+        def get_commands(self):
+            out, self.cmds = self.cmds, []
+            return out
+
+    bot, _, notes = make_bot(cfg, fake_client, tmp_path)
+    bot.command_listener = Listener([Command("ping"), Command("durdur")])
+    bot._scan_deadline = time.monotonic() + 30
+    assert bot._during_scan()
+    assert any("Çalışıyorum" in m for m in notes.messages)          # Bilgi komutu hemen cevaplandı
+    assert not bot.state.paused and [c.name for c in bot._deferred_commands] == ["durdur"]   # Tarama bitince
+    bot.process_commands()
+    assert bot.state.paused and not bot._deferred_commands
+    bot._scan_deadline = time.monotonic() - 1
+    assert not bot._during_scan()
