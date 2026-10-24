@@ -8,7 +8,7 @@ Bu rehber VPS ve GitHub'ı **hiç kullanmamış** biri için yazıldı. Acele et
 
 ---
 
-## 📚 Başlamadan önce: üç kavram
+## 📚 Başlamadan önce: dört kavram
 
 - **VPS (sanal sunucu):** İnternette kiraladığınız, hiç kapanmayan küçük bir bilgisayar. Ekranı ve faresi
   yoktur; Windows bilgisayarınızdan ona **yazı komutlarıyla** bağlanırsınız. Bu bağlantının adı **SSH**'tır.
@@ -17,6 +17,9 @@ Bu rehber VPS ve GitHub'ı **hiç kullanmamış** biri için yazıldı. Acele et
   GitHub hesabı açmanıza gerek yok.
 - **systemd:** Sunucunun (Ubuntu'nun) "bu programı hep açık tut" sistemi. Bot çökerse veya sunucu yeniden
   başlarsa botu kendisi tekrar açar.
+- **İki ayar dosyası:** Bütün ayarlarınız (strateji, kâr al, zarar kes, filtreler...) `ayarlar.env` dosyasında
+  **hazır olarak** GitHub'dan gelir. Gizli bilgiler (Telegram token'ı, chat ID, ileride Binance anahtarı)
+  GitHub'a **konmaz**; onları sunucuda `.env` adlı küçük bir dosyaya siz yazacaksınız (Adım 6).
 
 Rehberde iki tür pencere kullanacağız:
 
@@ -31,7 +34,7 @@ Rehberde iki tür pencere kullanacağız:
 
 ---
 
-## Adım 1 — Güvenlik: sızan anahtarları iptal edin (bilgisayarınızda, 10 dk)
+## Adım 1 — Güvenlik: sızan anahtarları iptal edin (telefon / bilgisayar, 10 dk)
 
 Daha önce sohbete gönderdiğiniz `.env` dosyasında gerçek anahtarlarınız vardı. Bunları değiştiriyoruz.
 
@@ -44,23 +47,12 @@ yalnızca sunucunun IP adresinden çalışacak şekilde oluştururuz.
 Telegram'da **@BotFather**'a yazın: `/revoke` → listeden botunuzu seçin. BotFather size **yeni bir token**
 verir (`1234567890:AAH...` gibi uzun bir yazı). Eski token artık çalışmaz. Chat ID'niz değişmez.
 
-**1.3 Bilgisayarınızdaki `.env` dosyasını güncelleyin.**
-`C:\Users\inyer\PycharmProjects\TRADE2` klasörünü açın → `.env` dosyasına sağ tıklayın →
-**Birlikte aç** → **Not Defteri**. Şu satırları bulup böyle yapın:
+**1.3 Chat ID'nizi bulun.** Bilgisayarınızda `C:\Users\inyer\PycharmProjects\TRADE2` klasöründeki `.env`
+dosyasına sağ tıklayın → **Birlikte aç** → **Not Defteri**. `TELEGRAM_CHAT_ID=` satırındaki sayıyı not edin
+(örn. `TELEGRAM_CHAT_ID=1234567890` ise `1234567890`). Dosyayı **değiştirmeden** kapatın.
 
-```
-BINANCE_API_KEY=
-BINANCE_API_SECRET=
-TELEGRAM_BOT_TOKEN=BotFather'ın_verdiği_yeni_token
-MAX_OPEN_POSITIONS=3
-RSI_ENTRY_MAX=65
-```
-
-İlk iki satırda `=` işaretinden sonra **hiçbir şey olmayacak**. Son iki satır, işlem sayısını artırmak için
-önerdiğim ayarlar. **Ctrl+S** ile kaydedip Not Defteri'ni kapatın.
-
-**✅ Kontrol:** Proje klasöründeki **TEST_ET.bat** dosyasına çift tıklayın. Telefonunuza Telegram'dan
-"🧪 Self-Test Sonuçları" mesajı gelmeli. Geldiyse yeni token çalışıyor.
+**✅ Kontrol:** İki şeyi not ettiniz: BotFather'ın verdiği **yeni token** ve **chat ID**'niz. Bunları
+kimseyle (Claude dahil) paylaşmayın.
 
 ---
 
@@ -204,7 +196,7 @@ Son komutun sonunda `Successfully installed ... python-dotenv ... requests ... w
 ls
 ```
 
-Listede `main.py`, `requirements.txt` ve `deploy` görünmeli.
+Listede `main.py`, `ayarlar.env` (sizin ayarlarınız), `requirements.txt` ve `deploy` görünmeli.
 
 **5.4 root'a geri dönün:**
 
@@ -216,7 +208,7 @@ Satırın başı yine `root@...:~#` olur.
 
 ---
 
-## Adım 6 — Bilgisayardaki botu kapatın ve ayarları sunucuya kopyalayın (10 dk)
+## Adım 6 — Bilgisayardaki botu kapatın ve gizli bilgileri sunucuya yazın (10 dk)
 
 **6.1 Bilgisayarınızdaki botu kapatın.** İki bot aynı Telegram token'ıyla çalışırsa birbirini bozar.
 
@@ -224,26 +216,44 @@ Satırın başı yine `root@...:~#` olur.
 - Windows açılışında kendiliğinden başlamasın: klavyede **Windows tuşu + R** → `shell:startup` yazıp Enter →
   açılan klasörde `kripto_bot_baslat.bat` varsa **silin**.
 
-**6.2 İkinci bir PowerShell penceresi açın** (Başlat → PowerShell). Bu pencere sunucuya değil,
-**bilgisayarınıza** komut verir. Sunucuya bağlı ilk pencereyi kapatmayın.
+**6.2 Token'ı kopyalamaya hazırlanın.** Token uzun olduğu için elle yazmak yerine kopyalayın: bilgisayarda
+Telegram'ı açın (**web.telegram.org** veya Telegram Desktop) ve BotFather'ın gönderdiği mesajı bulun.
 
-**6.3 Bu yeni pencerede `.env` dosyanızı sunucuya kopyalayın** (`SUNUCU_IP` yerine kendi adresiniz):
+**6.3 `.env` dosyasını oluşturun.** Sunucuya bağlı pencerede (`root@...:~#`):
 
 ```
-scp "C:\Users\inyer\PycharmProjects\TRADE2\.env" root@SUNUCU_IP:/home/tradebot/tradebot/.env
+nano /home/tradebot/tradebot/.env
 ```
 
-Sunucu şifrenizi sorar (yine görünmez). Sonunda `.env    100%` gibi bir satır yazar.
+Pencere bir metin düzenleyiciye (**nano**) dönüşür: üstte dosya adı, altta `^G Help  ^O Write Out ...` gibi
+kısayollar görünür. Fare burada çalışmaz; **ok tuşlarıyla** gezinirsiniz.
 
-**6.4 (İsteğe bağlı) Test geçmişinizi de taşıyın.** Atlarsanız bot sunucuda 32 USDT sanal bakiyeyle sıfırdan
-başlar:
+1. Şu dört satırı kopyalayıp pencereye **sağ tıklayarak** yapıştırın:
+
+   ```
+   BINANCE_API_KEY=
+   BINANCE_API_SECRET=
+   TELEGRAM_BOT_TOKEN=
+   TELEGRAM_CHAT_ID=
+   ```
+
+2. **Ok tuşlarıyla** `TELEGRAM_BOT_TOKEN=` satırının en sonuna gidin. Telegram'dan token'ı kopyalayıp
+   **sağ tıklayın**; `=` işaretinin hemen arkasına yapışır (arada boşluk olmasın).
+3. Bir alt satıra, `TELEGRAM_CHAT_ID=` satırının sonuna gidip chat ID'nizi yazın.
+4. İlk iki satır (Binance) **boş kalır**: test modunda gerekmez.
+5. Kaydedin: **Ctrl+O** → altta `File Name to Write: ...` yazar → **Enter**.
+6. Çıkın: **Ctrl+X**.
+
+**6.4 (İsteğe bağlı) Test geçmişinizi taşıyın.** Atlarsanız bot sunucuda 32 USDT sanal bakiyeyle sıfırdan
+başlar. Taşımak için **ikinci bir PowerShell penceresi** açın (Başlat → PowerShell; bu pencere sunucuya değil
+**bilgisayarınıza** komut verir) ve yazın (`SUNUCU_IP` yerine kendi adresiniz, şifreyi sorar):
 
 ```
 scp -r "C:\Users\inyer\PycharmProjects\TRADE2\data" root@SUNUCU_IP:/home/tradebot/tradebot/
 ```
 
-**6.5 Sunucuya bağlı ilk pencereye dönün** (`root@...:~#`) ve dosyaların sahibini ve izinlerini ayarlayın.
-Dosyaları root kopyaladığı için sahibi root oldu; onları bot kullanıcısına veriyoruz. `.env`'yi de yalnızca
+**6.5 Sunucuya bağlı pencereye dönün** (`root@...:~#`) ve dosyaların sahibini ve izinlerini ayarlayın.
+Dosyaları root oluşturduğu için sahibi root oldu; onları bot kullanıcısına veriyoruz. `.env`'yi de yalnızca
 bot kullanıcısının okuyabileceği hale getiriyoruz:
 
 ```
@@ -285,8 +295,8 @@ su - tradebot -c "cd ~/tradebot && .venv/bin/python main.py --selftest"
 - **Binance bağlantısı ❌** ve hata içinde `restricted location` veya `451` geçiyorsa: sunucunun konumu
   Binance tarafından engelleniyor. Sağlayıcının panelinden sunucuyu silin ve başka bir Avrupa konumunda
   yeniden oluşturun (Adım 2'den devam).
-- **Telegram ❌**: `.env`'deki `TELEGRAM_BOT_TOKEN` veya `TELEGRAM_CHAT_ID` yanlış. Bilgisayarınızdaki
-  `.env`'yi düzeltip Adım 6.3 ve 6.5'i tekrarlayın.
+- **Telegram ❌**: `.env`'deki `TELEGRAM_BOT_TOKEN` veya `TELEGRAM_CHAT_ID` yanlış. `nano /home/tradebot/tradebot/.env`
+  ile açıp düzeltin (Ctrl+O, Enter, Ctrl+X) ve testi tekrarlayın.
 
 ---
 
@@ -386,22 +396,22 @@ bağlanmanız bile gerekmez.
 
 ### Ayar değiştirmek
 
-**Kolay yol:**
-
-1. Bilgisayarınızdaki `.env`'yi Not Defteri ile düzenleyip kaydedin.
-2. Normal PowerShell'de Adım 6.3'teki `scp` komutunu tekrar çalıştırın.
-3. Sunucuda:
+Ayarlarınız `ayarlar.env` dosyasında. **Bu dosyayı sunucuda düzenlemeyin**: güncelleme sırasında çakışır.
+Bunun yerine değiştirmek istediğiniz satırı `.env`'ye ekleyin; `.env`'deki değer her zaman geçerli olur.
+Örneğin aynı anda 3 pozisyon için:
 
 ```
-chown tradebot:tradebot /home/tradebot/tradebot/.env && chmod 600 /home/tradebot/tradebot/.env
+nano /home/tradebot/tradebot/.env
 ```
+
+En alta `MAX_OPEN_POSITIONS=3` satırını ekleyin → **Ctrl+O**, **Enter** → **Ctrl+X**. Sonra:
 
 ```
 systemctl restart tradebot
 ```
 
-**Doğrudan sunucuda:** `nano /home/tradebot/tradebot/.env` → ok tuşlarıyla satıra gidip değiştirin →
-**Ctrl+O**, **Enter** (kaydet) → **Ctrl+X** (çık) → `systemctl restart tradebot`.
+Telegram'da `/ayarlar` yazarak yeni değeri görebilirsiniz. Ayarın kalıcı olarak `ayarlar.env`'ye (GitHub'a)
+yazılmasını isterseniz Claude'a söyleyin; sonra aşağıdaki güncelleme adımlarını yapın.
 
 ### Botu güncellemek (yeni bir özellik eklendiğinde)
 
@@ -431,7 +441,7 @@ systemctl start tradebot
 
 ### Sunucuda backtest
 
-İsterseniz bilgisayarınızda çalıştırmaya devam edebilirsiniz. Sunucuda çalıştırmak için:
+Bot çalışmaya devam ederken de yapılabilir (90 günlük filtre taraması birkaç dakika sürer):
 
 ```
 su - tradebot -c "cd ~/tradebot && .venv/bin/python main.py --backtest --gun 90 --sermaye 32 --tara-filtre"
@@ -458,7 +468,7 @@ Backtestler kâr göstermediği için test modunda kalmanızı öneririm. Zaman�
 
 1. Binance'te yeni bir API anahtarı oluşturmak: yalnızca okuma + spot işlem izni; **para çekme kapalı**;
    **yalnızca sunucunun IP adresinden** çalışacak şekilde.
-2. Anahtarı `.env`'ye yazmak ve `TRADING_MODE=live` yapmak.
+2. Anahtarı `.env`'deki `BINANCE_API_KEY` / `BINANCE_API_SECRET` satırlarına yazmak.
 3. `nano /etc/systemd/system/tradebot.service` ile dosyayı açıp `--mode paper` yerine `--mode live --yes`
    yazmak.
 4. `systemctl daemon-reload && systemctl restart tradebot` çalıştırmak.

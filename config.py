@@ -412,11 +412,19 @@ class Config:
             raise ConfigError("Ayar hataları:\n  - " + "\n  - ".join(errors))
 
 
+SETTINGS_FILE = "ayarlar.env"   # GitHub'daki ayarlar (gizli bilgi İÇERMEZ); aynı klasördeki .env bunları ezer
+
+
 def load_config(env_file: Optional[str] = None, mode_override: Optional[str] = None) -> Config:
-    """.env dosyasını okuyup doğrulanmış bir Config döndürür."""
+    """Ayarları okuyup doğrulanmış bir Config döndürür.
+
+    Öncelik: ortam değişkenleri > .env (sunucuda; API anahtarı ve Telegram token'ı burada, GitHub'a yüklenmez) >
+    aynı klasördeki ayarlar.env (GitHub'daki strateji / risk ayarları) > koddaki varsayılanlar.
+    """
     env_path = Path(env_file) if env_file else BASE_DIR / ".env"
-    if env_path.exists():
-        load_dotenv(env_path, override=False)
+    for path in (env_path, env_path.parent / SETTINGS_FILE):
+        if path.exists():
+            load_dotenv(path, override=False)   # Önce yüklenen kazanır
 
     mode = (mode_override or _env_str("TRADING_MODE", "paper")).lower()
     loss_pct, legacy_usdt, notes = _loss_pct_setting(_env_float("START_CAPITAL_USDT", 11.0))

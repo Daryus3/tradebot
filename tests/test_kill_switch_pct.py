@@ -6,7 +6,6 @@ import pytest
 from commands import Command
 from config import ConfigError, load_config
 from exchange import LiveExchange
-from setup_wizard import migrate_legacy
 from state import BotState, StateStore, TradeLog
 from trader import TradingBot
 
@@ -88,27 +87,6 @@ def test_breakeven_enabled_by_default_and_warns_when_ineffective(monkeypatch, tm
     off = load(monkeypatch, tmp_path, BREAKEVEN_ENABLED="false", TAKE_PROFIT_PCT="5",
                TRAILING_ACTIVATION_PCT="2", TRAILING_FLOOR_PCT="1")
     assert not off.breakeven_enabled and not off.notes
-
-
-def test_wizard_keeps_legacy_usdt_and_blanks_template_percent(monkeypatch, tmp_path):
-    from pathlib import Path
-
-    from setup_wizard import render_env
-    out, notes = migrate_legacy({"MAX_TOTAL_LOSS_USDT": "2", "START_CAPITAL_USDT": "10"})
-    assert out["MAX_TOTAL_LOSS_USDT"] == "2" and out["MAX_TOTAL_LOSS_PCT"] == "" and notes
-    # Yeni şablonla yazılan .env yüklendiğinde eski 2 USDT limiti aynen geçerli olmalı (şablondaki %45 değil)
-    template = (Path(__file__).resolve().parent.parent / ".env.example").read_text(encoding="utf-8")
-    env_file = tmp_path / "yeni.env"
-    env_file.write_text(render_env(template, out), encoding="utf-8")
-    for key in ("MAX_TOTAL_LOSS_USDT", "MAX_TOTAL_LOSS_PCT", "START_CAPITAL_USDT"):
-        monkeypatch.delenv(key, raising=False)
-    cfg = load_config(env_file=str(env_file), mode_override="paper")
-    assert cfg.loss_limit(10) == pytest.approx(2.0) and cfg.loss_limit(7) == pytest.approx(2.0)
-
-    out, notes = migrate_legacy({"MAX_TOTAL_LOSS_USDT": "5", "MAX_TOTAL_LOSS_PCT": "40"})
-    assert out == {"MAX_TOTAL_LOSS_PCT": "40"} and not notes
-    out, notes = migrate_legacy({"TRADING_MODE": "paper"})
-    assert out == {"TRADING_MODE": "paper"} and not notes
 
 
 # ------------------------------------------------------------------ bot
@@ -275,3 +253,24 @@ def test_breakeven_with_suggested_trigger_protects_small_gains(cfg, fake_client,
     client.prices["ABCUSDT"] = 1.004                      # net ~+%0.2 → zarara dönmeden sat
     tick(bot)
     assert not bot.state.positions and bot.state.wins == 1
+
+
+def test_settings_file_loaded_and_env_wins(tmp_path):
+    """ayarlar.env (GitHub'daki ayarlar) okunur; sunucudaki .env (gizli bilgiler) aynı ayarı ezer."""
+    import os
+    from pathlib import Path
+    keys = ("MIN_DIP_PCT", "RSI_PERIOD", "TELEGRAM_CHAT_ID")
+    saved = {k: os.environ.pop(k) for k in keys if k in os.environ}
+    try:
+        (tmp_path / "ayarlar.env").write_text("MIN_DIP_PCT=2.2\nRSI_PERIOD=20\n", encoding="utf-8")
+        (tmp_path / ".env").write_text("RSI_PERIOD=9\nTELEGRAM_CHAT_ID=42\n", encoding="utf-8")
+        cfg = load_config(env_file=str(tmp_path / ".env"), mode_override="paper")
+        assert cfg.min_dip_pct == 2.2 and cfg.rsi_period == 9 and cfg.telegram_chat_id == "42"
+    finally:
+        for k in keys:
+            os.environ.pop(k, None)
+        os.environ.update(saved)
+    # Depodaki ayarlar.env gizli bilgi içermez
+    repo = (Path(__file__).resolve().parent.parent / "ayarlar.env").read_text(encoding="utf-8")
+    for key in ("BINANCE_API_KEY", "BINANCE_API_SECRET", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"):
+        assert f"\n{key}=" not in repo

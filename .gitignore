@@ -1,4 +1,4 @@
-# Gizli bilgiler — ASLA paylaşmayın / GitHub'a yüklemeyin
+# Gizli bilgiler (API anahtarı, Telegram) — ASLA GitHub'a yüklemeyin. Ayarlar ayarlar.env'de (yüklenir)
 .env
 .env.bak-*
 .env.tmp

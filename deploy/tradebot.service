@@ -1,5 +1,5 @@
 # Kripto Al-Sat Botu — Linux sunucuda (VPS) 7/24 çalıştırma için systemd servisi.
-# Kurulum: README.md → "Linux sunucuda (VPS) 7/24 çalıştırma".
+# Kurulum: VPS_KURULUM.md (adım adım).
 # Varsayım: kullanıcı "tradebot", proje /home/tradebot/tradebot, sanal ortam .venv. Farklıysa yolları değiştirin.
 [Unit]
 Description=Kripto Al-Sat Botu (Binance Spot)
@@ -21,7 +21,7 @@ Environment=PYTHONUNBUFFERED=1
 KillSignal=SIGINT
 TimeoutStopSec=60
 # Çökerse 15 sn sonra yeniden başlatılır. Yeniden BAŞLATILMAZ: normal durdurma / Telegram /kapat (0),
-# ayar hatası (1), kill-switch (2) — bekçinin (watchdog.py) kurallarıyla aynı
+# ayar hatası (1), kill-switch (2)
 Restart=on-failure
 RestartSec=15
 RestartPreventExitStatus=1 2

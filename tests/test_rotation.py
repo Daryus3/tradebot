@@ -574,7 +574,7 @@ def market_buys(fake):
 
 
 def test_live_stop_while_registering_buy_keeps_intent(rcfg, tmp_path, monkeypatch):
-    # Alım gerçekleşti, pozisyon state'e yazılmadan bot durduruldu (Ctrl+C / watchdog): kayıt diskte kalmalı,
+    # Alım gerçekleşti, pozisyon state'e yazılmadan bot durduruldu (Ctrl+C / systemd): kayıt diskte kalmalı,
     # açılışta Binance'ten bulunup takibe alınmalı ve coin ikinci kez alınmamalı
     clock = [T0]
     closes = {"AUSDT": rising(f=1.02), "BUSDT": rising(f=1.01), "CUSDT": rising(f=1.005),

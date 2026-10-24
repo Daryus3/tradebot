@@ -428,7 +428,7 @@ class CommandProcessor:
                f"{esc(self.bot.fee_status_line())}\n"
                f"⏱️ Tarama: {cfg.scan_interval_sec} sn | Maks. tutma: "
                f"{fmt_duration(cfg.max_hold_minutes * 60, exact=True) if cfg.max_hold_minutes else 'sınırsız'}\n")
-            + "<i>Ayarlar bilgisayardaki .env dosyasından değiştirilir.</i>")
+            + "<i>Ayarlar sunucudaki ayarlar.env / .env dosyasından değiştirilir.</i>")
 
     # ------------------------------------------------------------ kontrol komutları
     def cmd_durdur(self, args) -> None:

@@ -226,7 +226,7 @@ def run_selftest(cfg) -> int:
     if failed:
         print(f"❌ {failed} kontrol başarısız. Lütfen yukarıdaki hataları düzeltin.")
     else:
-        print("✅ Tüm kritik kontroller başarılı. Sonraki adım: BASLAT.bat (Windows) veya python watchdog.py --mode paper")
+        print("✅ Tüm kritik kontroller başarılı. Sonraki adım: sudo systemctl restart tradebot (VPS_KURULUM.md, Adım 8)")
 
     if notifier.enabled:
         lines = "\n".join(f"{s} <b>{esc(t)}</b>\n<i>{esc(d)}</i>" for s, t, d in results)

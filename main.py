@@ -2,11 +2,10 @@
 Kripto Al-Sat Botu — giriş noktası.
 
 Kullanım:
-    python main.py                     # .env'deki TRADING_MODE ile çalışır (varsayılan: paper = test)
+    python main.py                     # ayarlar.env / .env'deki TRADING_MODE ile çalışır (varsayılan: paper = test)
     python main.py --mode paper        # 11 USDT sanal bakiye, canlı verilerle simülasyon
     python main.py --mode live         # GERÇEK para ile işlem (onay ister)
     python main.py --selftest          # Bağlantı ve risk kurallarını test eder
-    python main.py --kurulum           # Türkçe kurulum sihirbazı (.env dosyasını hazırlar)
     python main.py --istatistik        # İşlem geçmişinden performans istatistikleri
     python main.py --backtest --gun 30 # Stratejiyi geçmiş verilerle dener
     python main.py --backtest --gun 90 --tara       # Aynı veriyle farklı TP/SL/süre ayarlarını karşılaştırır
@@ -22,7 +21,10 @@ Kullanım:
     python main.py --telegram-chat-id  # Telegram chat ID'nizi bulur
     python main.py --reset-state       # Kayıtlı durumu (K/Z, kill-switch) sıfırlar
 
-Çıkış kodları (watchdog.py bunlara göre yeniden başlatıp başlatmayacağına karar verir):
+Ayarlar: ayarlar.env (GitHub'da, gizli bilgi yok) + .env (sunucuda; API anahtarı ve Telegram bilgileri).
+Sunucuda systemd servisi olarak çalışır: deploy/tradebot.service, kurulum VPS_KURULUM.md.
+
+Çıkış kodları (systemd servisi bunlara göre yeniden başlatıp başlatmayacağına karar verir):
     0 = normal durdurma (Ctrl+C veya Telegram /kapat)   → yeniden başlatılmaz
     1 = ayar / kullanıcı hatası                           → yeniden başlatılmaz
     2 = kill-switch tetiklendi                            → ASLA yeniden başlatılmaz
@@ -36,7 +38,7 @@ import time
 from datetime import datetime
 from typing import Optional
 
-from config import BASE_DIR, DATA_DIR, STRATEGY_NAMES, ConfigError, is_long_horizon, is_rotation, load_config
+from config import DATA_DIR, STRATEGY_NAMES, ConfigError, is_long_horizon, is_rotation, load_config
 from logger import redact, register_secrets, setup_logging
 
 EXIT_OK, EXIT_CONFIG, EXIT_KILLED, EXIT_CRASH = 0, 1, 2, 3
@@ -53,7 +55,6 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser = _Parser(description="Kripto Para Al-Sat Botu (Binance Spot)")
     parser.add_argument("--mode", choices=["paper", "live"], help="Çalışma modu (.env'deki TRADING_MODE'u ezer)")
     parser.add_argument("--selftest", action="store_true", help="Bağlantı ve kural testlerini çalıştırır")
-    parser.add_argument("--kurulum", action="store_true", help="Türkçe kurulum sihirbazı (.env hazırlar)")
     parser.add_argument("--istatistik", action="store_true", help="Performans istatistiklerini gösterir")
     parser.add_argument("--backtest", action="store_true", help="Stratejiyi geçmiş verilerle dener")
     parser.add_argument("--gun", type=int, default=None,
@@ -103,7 +104,7 @@ def find_chat_id(cfg) -> int:
     from telegram_bot import discover_chat_ids
 
     if not cfg.telegram_bot_token:
-        print("❌ Önce .env dosyasına TELEGRAM_BOT_TOKEN yazın (veya python main.py --kurulum).")
+        print("❌ Önce .env dosyasına TELEGRAM_BOT_TOKEN yazın.")
         return EXIT_CONFIG
     print("🔍 Bota gelen mesajlar kontrol ediliyor...")
     try:
@@ -123,13 +124,6 @@ def find_chat_id(cfg) -> int:
 
 def main(argv=None) -> int:
     args = parse_args(argv)
-
-    if args.kurulum:
-        from setup_wizard import run_wizard
-        env_path = BASE_DIR / ".env" if args.env is None else args.env
-        if not run_wizard(env_path=env_path, example_path=BASE_DIR / ".env.example"):
-            return EXIT_CONFIG
-        args.selftest = True  # Kurulumun sonunda her şeyi test et
 
     try:
         cfg = load_config(args.env, mode_override=args.mode)
@@ -177,7 +171,7 @@ def main(argv=None) -> int:
     except KeyboardInterrupt:
         print("\nDurduruldu.")
         return EXIT_OK
-    except Exception:  # noqa: BLE001 - beklenmedik çökme: watchdog yeniden başlatsın
+    except Exception:  # noqa: BLE001 - beklenmedik çökme: systemd yeniden başlatsın
         log.exception("Bot beklenmedik şekilde durdu")
         return EXIT_CRASH
 
