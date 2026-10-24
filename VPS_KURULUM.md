@@ -25,7 +25,7 @@ Rehberde iki tür pencere kullanacağız:
 
 | Pencere | Satırın başında görünen | Komutlar nerede çalışır? |
 |---|---|---|
-| Sunucuya bağlı PowerShell | `root@...:~#` veya `tradebot@...:~$` | **Sunucuda** |
+| Sunucuya bağlı PowerShell | `root@...:~#`, `ubuntu@...:~$` veya `tradebot@...:~$` | **Sunucuda** |
 | Normal PowerShell | `PS C:\Users\inyer>` | **Bilgisayarınızda** |
 
 > 💡 **Komut nasıl yapıştırılır?** Rehberdeki gri kutudaki komutu kopyalayın (kutunun sağ üstündeki
@@ -86,11 +86,14 @@ ayrılmış dört sayı, örneğin `203.0.113.25`. Bu adresi not edin.
 
 **3.1** Windows'ta **Başlat**'a tıklayın, `PowerShell` yazın ve **Windows PowerShell**'i açın.
 
-**3.2** Şunu yazın (`SUNUCU_IP` yerine kendi adresiniz) ve Enter'a basın:
+**3.2** Şunu yazın ve Enter'a basın. `KULLANICI` yerine sağlayıcının verdiği kullanıcı adını (panelde veya
+e-postada yazar; çoğunlukla `root` ya da `ubuntu`), `SUNUCU_IP` yerine sunucunun adresini yazın:
 
 ```
-ssh root@SUNUCU_IP
+ssh KULLANICI@SUNUCU_IP
 ```
+
+Örnek: `ssh ubuntu@203.0.113.25` veya `ssh root@203.0.113.25`.
 
 **3.3** İlk seferde şunu sorar:
 `Are you sure you want to continue connecting (yes/no/[fingerprint])?`
@@ -103,11 +106,14 @@ Kopyaladıysanız sağ tık ile yapıştırabilirsiniz.
 **3.5** Bazı sağlayıcılar ilk girişte şifre değiştirmenizi ister (*You are required to change your password*):
 önce mevcut şifreyi, sonra yeni şifreyi iki kez yazın.
 
-**✅ Kontrol:** Satırın başında `root@...:~#` gibi bir yazı var. Artık bu pencereye yazdığınız her komut
-**sunucuda** çalışır. Bu pencereyi açık bırakın.
+**✅ Kontrol:** Satırın başında `ubuntu@...:~$` veya `root@...:~#` gibi bir yazı var. Artık bu pencereye
+yazdığınız her komut **sunucuda** çalışır. Bu pencereyi açık bırakın.
 
-> Satırın başında `root@` değil de `ubuntu@` görüyorsanız, bundan sonraki her komutun başına `sudo ` ekleyin.
-> Bağlantı koparsa ya da pencereyi kapatırsanız aynı `ssh root@SUNUCU_IP` komutuyla yeniden bağlanırsınız.
+> 🔑 **`sudo` hakkında:** Rehberdeki yönetici komutları `sudo` ile başlar ("bunu yönetici olarak yap"). İlk
+> `sudo` komutunda `[sudo] password for ubuntu:` diye **kendi giriş şifrenizi** sorabilir (yine görünmez);
+> yazıp Enter'a basın. Birkaç dakika boyunca tekrar sormaz. `root` olarak bağlandıysanız hiç sormaz.
+>
+> Bağlantı koparsa ya da pencereyi kapatırsanız aynı `ssh KULLANICI@SUNUCU_IP` komutuyla yeniden bağlanırsınız.
 
 ---
 
@@ -118,7 +124,7 @@ Komutları **sırayla, tek tek** yapıştırın.
 **4.1 Güncellemeleri yükleyin** (birkaç dakika sürer, ekrandan çok yazı akar):
 
 ```
-apt update && apt -y upgrade
+sudo apt update && sudo apt -y upgrade
 ```
 
 Mor/mavi bir pencere açılıp bir şey sorarsa (örneğin hangi servislerin yeniden başlatılacağı) **Enter**'a
@@ -127,21 +133,21 @@ basarak geçin.
 **4.2 Gerekli programları kurun** (Python ve Git):
 
 ```
-apt -y install python3 python3-venv git
+sudo apt -y install python3 python3-venv git
 ```
 
 **4.3 Saat dilimini Türkiye yapın** (günlük rapor 23:55'te Türkiye saatiyle gelsin; sunucunun varsayılan
 saati UTC'dir, Türkiye'nin 3 saat gerisi):
 
 ```
-timedatectl set-timezone Europe/Istanbul
+sudo timedatectl set-timezone Europe/Istanbul
 ```
 
 **4.4 Bot için ayrı bir kullanıcı oluşturun.** Bot, sunucunun tam yetkili yöneticisi olan `root` olarak
 çalışmasın; bir sorun olursa etkisi sınırlı kalsın:
 
 ```
-useradd -m -s /bin/bash tradebot
+sudo useradd -m -s /bin/bash tradebot
 ```
 
 **✅ Kontrol:**
@@ -159,10 +165,11 @@ python3 --version
 **5.1 Bot kullanıcısına geçin:**
 
 ```
-su - tradebot
+sudo -iu tradebot
 ```
 
-Satırın başı `tradebot@...:~$` olur. (`$` = normal kullanıcı, `#` = root.)
+Satırın başı `tradebot@...:~$` olur. Şifre sorarsa kendi giriş şifrenizdir (`tradebot` kullanıcısının
+şifresi yoktur; `su - tradebot` bu yüzden çalışmaz).
 
 **5.2 Kodu GitHub'dan indirin:**
 
@@ -198,13 +205,13 @@ ls
 
 Listede `main.py`, `ayarlar.env` (sizin ayarlarınız), `requirements.txt` ve `deploy` görünmeli.
 
-**5.4 root'a geri dönün:**
+**5.4 Kendi kullanıcınıza geri dönün:**
 
 ```
 exit
 ```
 
-Satırın başı yine `root@...:~#` olur.
+Satırın başı yine `ubuntu@...:~$` (veya `root@...:~#`) olur.
 
 ---
 
@@ -219,10 +226,10 @@ Satırın başı yine `root@...:~#` olur.
 **6.2 Token'ı kopyalamaya hazırlanın.** Token uzun olduğu için elle yazmak yerine kopyalayın: bilgisayarda
 Telegram'ı açın (**web.telegram.org** veya Telegram Desktop) ve BotFather'ın gönderdiği mesajı bulun.
 
-**6.3 `.env` dosyasını oluşturun.** Sunucuya bağlı pencerede (`root@...:~#`):
+**6.3 `.env` dosyasını oluşturun.** Sunucuya bağlı pencerede (`ubuntu@...` veya `root@...`):
 
 ```
-nano /home/tradebot/tradebot/.env
+sudo nano /home/tradebot/tradebot/.env
 ```
 
 Pencere bir metin düzenleyiciye (**nano**) dönüşür: üstte dosya adı, altta `^G Help  ^O Write Out ...` gibi
@@ -246,32 +253,39 @@ kısayollar görünür. Fare burada çalışmaz; **ok tuşlarıyla** gezinirsini
 
 **6.4 (İsteğe bağlı) Test geçmişinizi taşıyın.** Atlarsanız bot sunucuda 32 USDT sanal bakiyeyle sıfırdan
 başlar. Taşımak için **ikinci bir PowerShell penceresi** açın (Başlat → PowerShell; bu pencere sunucuya değil
-**bilgisayarınıza** komut verir) ve yazın (`SUNUCU_IP` yerine kendi adresiniz, şifreyi sorar):
+**bilgisayarınıza** komut verir) ve yazın (`KULLANICI` ve `SUNUCU_IP` yerine kendi bilgileriniz, şifreyi sorar):
 
 ```
-scp -r "C:\Users\inyer\PycharmProjects\TRADE2\data" root@SUNUCU_IP:/home/tradebot/tradebot/
+scp -r "C:\Users\inyer\PycharmProjects\TRADE2\data" KULLANICI@SUNUCU_IP:
 ```
 
-**6.5 Sunucuya bağlı pencereye dönün** (`root@...:~#`) ve dosyaların sahibini ve izinlerini ayarlayın.
-Dosyaları root oluşturduğu için sahibi root oldu; onları bot kullanıcısına veriyoruz. `.env`'yi de yalnızca
+(Sondaki `:` işareti önemli: klasör sunucuda kendi ev klasörünüze kopyalanır.) Sonra sunucuya bağlı pencerede
+bot klasörüne taşıyın:
+
+```
+sudo cp -r ~/data /home/tradebot/tradebot/
+```
+
+**6.5 Sunucuya bağlı pencerede** dosyaların sahibini ve izinlerini ayarlayın.
+Dosyaları `sudo` (yönetici) oluşturduğu için sahibi root oldu; onları bot kullanıcısına veriyoruz. `.env`'yi de yalnızca
 bot kullanıcısının okuyabileceği hale getiriyoruz:
 
 ```
-chown -R tradebot:tradebot /home/tradebot/tradebot
+sudo chown -R tradebot:tradebot /home/tradebot/tradebot
 ```
 
 ```
-chmod 600 /home/tradebot/tradebot/.env
+sudo chmod 600 /home/tradebot/tradebot/.env
 ```
 
 ```
-chmod 700 /home/tradebot
+sudo chmod 700 /home/tradebot
 ```
 
 **✅ Kontrol:**
 
 ```
-ls -l /home/tradebot/tradebot/.env
+sudo ls -l /home/tradebot/tradebot/.env
 ```
 
 Satır `-rw------- 1 tradebot tradebot` ile başlamalı.
@@ -281,7 +295,7 @@ Satır `-rw------- 1 tradebot tradebot` ile başlamalı.
 ## Adım 7 — Test edin (2 dk)
 
 ```
-su - tradebot -c "cd ~/tradebot && .venv/bin/python main.py --selftest"
+sudo -iu tradebot bash -c 'cd ~/tradebot && .venv/bin/python main.py --selftest'
 ```
 
 **✅ Kontrol:**
@@ -295,7 +309,7 @@ su - tradebot -c "cd ~/tradebot && .venv/bin/python main.py --selftest"
 - **Binance bağlantısı ❌** ve hata içinde `restricted location` veya `451` geçiyorsa: sunucunun konumu
   Binance tarafından engelleniyor. Sağlayıcının panelinden sunucuyu silin ve başka bir Avrupa konumunda
   yeniden oluşturun (Adım 2'den devam).
-- **Telegram ❌**: `.env`'deki `TELEGRAM_BOT_TOKEN` veya `TELEGRAM_CHAT_ID` yanlış. `nano /home/tradebot/tradebot/.env`
+- **Telegram ❌**: `.env`'deki `TELEGRAM_BOT_TOKEN` veya `TELEGRAM_CHAT_ID` yanlış. `sudo nano /home/tradebot/tradebot/.env`
   ile açıp düzeltin (Ctrl+O, Enter, Ctrl+X) ve testi tekrarlayın.
 
 ---
@@ -306,19 +320,19 @@ Botla birlikte gelen servis dosyası (`deploy/tradebot.service`) sistemin servis
 başlatılır. Komutları tek tek yapıştırın:
 
 ```
-cp /home/tradebot/tradebot/deploy/tradebot.service /etc/systemd/system/
+sudo cp /home/tradebot/tradebot/deploy/tradebot.service /etc/systemd/system/
 ```
 
 ```
-systemctl daemon-reload
+sudo systemctl daemon-reload
 ```
 
 ```
-systemctl enable --now tradebot
+sudo systemctl enable --now tradebot
 ```
 
 ```
-systemctl status tradebot --no-pager
+sudo systemctl status tradebot --no-pager
 ```
 
 Ne yaptılar:
@@ -340,13 +354,13 @@ Servis botu **test modunda** (`--mode paper`) çalıştırır: gerçek emir gön
 **9.1 Çökmeyi taklit edin:**
 
 ```
-systemctl kill -s SIGKILL tradebot
+sudo systemctl kill -s SIGKILL tradebot
 ```
 
 20 saniye bekleyin, sonra:
 
 ```
-systemctl status tradebot --no-pager
+sudo systemctl status tradebot --no-pager
 ```
 
 Yine **`active (running)`** olmalı ve Telegram'a yeni bir "Başlatıldı" mesajı gelmeli.
@@ -354,13 +368,13 @@ Yine **`active (running)`** olmalı ve Telegram'a yeni bir "Başlatıldı" mesaj
 **9.2 Sunucuyu yeniden başlatın:**
 
 ```
-reboot
+sudo reboot
 ```
 
-Bağlantınız kopar (normal). 1-2 dakika bekleyin, `ssh root@SUNUCU_IP` ile yeniden bağlanın ve:
+Bağlantınız kopar (normal). 1-2 dakika bekleyin, `ssh KULLANICI@SUNUCU_IP` ile yeniden bağlanın ve:
 
 ```
-systemctl status tradebot --no-pager
+sudo systemctl status tradebot --no-pager
 ```
 
 Yine **`active (running)`** olmalı.
@@ -373,16 +387,16 @@ bağlanmanız bile gerekmez.
 
 ## 📋 Günlük kullanım (kopya kâğıdı)
 
-Önce sunucuya bağlanın: normal PowerShell'de `ssh root@SUNUCU_IP`.
+Önce sunucuya bağlanın: normal PowerShell'de `ssh KULLANICI@SUNUCU_IP`.
 
 | Ne istiyorsunuz? | Komut |
 |---|---|
-| Botun canlı loglarını izlemek | `journalctl -u tradebot -f` (çıkmak için **Ctrl+C** — bot durmaz) |
-| Son 100 satır log | `journalctl -u tradebot -n 100 --no-pager` |
-| Bot çalışıyor mu? | `systemctl status tradebot --no-pager` |
-| Botu durdurmak | `systemctl stop tradebot` |
-| Botu başlatmak | `systemctl start tradebot` |
-| Botu yeniden başlatmak | `systemctl restart tradebot` |
+| Botun canlı loglarını izlemek | `sudo journalctl -u tradebot -f` (çıkmak için **Ctrl+C** — bot durmaz) |
+| Son 100 satır log | `sudo journalctl -u tradebot -n 100 --no-pager` |
+| Bot çalışıyor mu? | `sudo systemctl status tradebot --no-pager` |
+| Botu durdurmak | `sudo systemctl stop tradebot` |
+| Botu başlatmak | `sudo systemctl start tradebot` |
+| Botu yeniden başlatmak | `sudo systemctl restart tradebot` |
 
 **Botun kendiliğinden yeniden başlayıp başlamaması:**
 
@@ -390,9 +404,9 @@ bağlanmanız bile gerekmez.
 |---|---|
 | Çökerse | 15 saniye sonra kendiliğinden açılır |
 | Sunucu yeniden başlarsa | Kendiliğinden açılır |
-| `systemctl stop` veya Telegram `/kapat` | Kapalı kalır (`systemctl start tradebot` ile açarsınız) |
+| `sudo systemctl stop` veya Telegram `/kapat` | Kapalı kalır (`sudo systemctl start tradebot` ile açarsınız) |
 | Kill-switch tetiklenirse | Kapalı kalır (aşağıya bakın) |
-| 15 dakikada 5 kez çökerse | Denemeyi bırakır: `systemctl reset-failed tradebot && systemctl start tradebot` |
+| 15 dakikada 5 kez çökerse | Denemeyi bırakır: `sudo systemctl reset-failed tradebot && sudo systemctl start tradebot` |
 
 ### Ayar değiştirmek
 
@@ -401,13 +415,13 @@ Bunun yerine değiştirmek istediğiniz satırı `.env`'ye ekleyin; `.env`'deki 
 Örneğin aynı anda 3 pozisyon için:
 
 ```
-nano /home/tradebot/tradebot/.env
+sudo nano /home/tradebot/tradebot/.env
 ```
 
 En alta `MAX_OPEN_POSITIONS=3` satırını ekleyin → **Ctrl+O**, **Enter** → **Ctrl+X**. Sonra:
 
 ```
-systemctl restart tradebot
+sudo systemctl restart tradebot
 ```
 
 Telegram'da `/ayarlar` yazarak yeni değeri görebilirsiniz. Ayarın kalıcı olarak `ayarlar.env`'ye (GitHub'a)
@@ -416,15 +430,15 @@ yazılmasını isterseniz Claude'a söyleyin; sonra aşağıdaki güncelleme ad�
 ### Botu güncellemek (yeni bir özellik eklendiğinde)
 
 ```
-systemctl stop tradebot
+sudo systemctl stop tradebot
 ```
 
 ```
-su - tradebot -c "cd ~/tradebot && git pull && .venv/bin/pip install -r requirements.txt"
+sudo -iu tradebot bash -c 'cd ~/tradebot && git pull && .venv/bin/pip install -r requirements.txt'
 ```
 
 ```
-systemctl start tradebot
+sudo systemctl start tradebot
 ```
 
 ### Kill-switch tetiklenirse
@@ -432,11 +446,11 @@ systemctl start tradebot
 Bot her şeyi satar, kapanır ve kendiliğinden açılmaz. Nedenini anladıktan sonra:
 
 ```
-su - tradebot -c "cd ~/tradebot && .venv/bin/python main.py --mode paper --reset-state --yes"
+sudo -iu tradebot bash -c 'cd ~/tradebot && .venv/bin/python main.py --mode paper --reset-state --yes'
 ```
 
 ```
-systemctl start tradebot
+sudo systemctl start tradebot
 ```
 
 ### Sunucuda backtest
@@ -444,7 +458,7 @@ systemctl start tradebot
 Bot çalışmaya devam ederken de yapılabilir (90 günlük filtre taraması birkaç dakika sürer):
 
 ```
-su - tradebot -c "cd ~/tradebot && .venv/bin/python main.py --backtest --gun 90 --sermaye 32 --tara-filtre"
+sudo -iu tradebot bash -c 'cd ~/tradebot && .venv/bin/python main.py --backtest --gun 90 --sermaye 32 --tara-filtre'
 ```
 
 ---
@@ -456,7 +470,7 @@ su - tradebot -c "cd ~/tradebot && .venv/bin/python main.py --backtest --gun 90 
 | `ssh: connect to host ... Connection timed out` | IP yanlış ya da sunucu henüz açılmadı; paneli kontrol edin |
 | `Permission denied (publickey)` | Sağlayıcı şifreyle girişe izin vermiyor. Panelde "root şifresini sıfırla" (*Reset root password*) kullanın ya da sunucuyu "Password" seçerek yeniden oluşturun |
 | `WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED` | Sunucuyu silip yeniden kurduysanız normaldir. Bilgisayarınızda `ssh-keygen -R SUNUCU_IP` çalıştırıp tekrar bağlanın |
-| `systemctl status` → `failed` veya `activating (auto-restart)` | `journalctl -u tradebot -n 50 --no-pager` çıktısını Claude'a gönderin |
+| `sudo systemctl status` → `failed` veya `activating (auto-restart)` | `sudo journalctl -u tradebot -n 50 --no-pager` çıktısını Claude'a gönderin |
 | Telegram'a mesajlar iki kez geliyor, komutlar karışıyor | Bilgisayardaki bot hâlâ açık; kapatın (Adım 6.1) |
 | `git clone` kullanıcı adı / şifre soruyor | Adres yanlış yazıldı; Adım 5.2'deki satırı aynen kopyalayın |
 
@@ -469,6 +483,6 @@ Backtestler kâr göstermediği için test modunda kalmanızı öneririm. Zaman�
 1. Binance'te yeni bir API anahtarı oluşturmak: yalnızca okuma + spot işlem izni; **para çekme kapalı**;
    **yalnızca sunucunun IP adresinden** çalışacak şekilde.
 2. Anahtarı `.env`'deki `BINANCE_API_KEY` / `BINANCE_API_SECRET` satırlarına yazmak.
-3. `nano /etc/systemd/system/tradebot.service` ile dosyayı açıp `--mode paper` yerine `--mode live --yes`
+3. `sudo nano /etc/systemd/system/tradebot.service` ile dosyayı açıp `--mode paper` yerine `--mode live --yes`
    yazmak.
-4. `systemctl daemon-reload && systemctl restart tradebot` çalıştırmak.
+4. `sudo systemctl daemon-reload && sudo systemctl restart tradebot` çalıştırmak.
