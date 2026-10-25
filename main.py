@@ -453,7 +453,17 @@ def _start_bot(cfg, store, client, notifier, log) -> int:
                 client.sync_time()
                 return LiveExchange(client, cfg.quote_asset, cfg.fee_rate).free_balance(cfg.quote_asset)
 
-            free = wait_for_network(first_balance, "Bakiye okunamadı", cfg, log)
+            from binance_client import BinanceAPIError
+            try:
+                free = wait_for_network(first_balance, "Bakiye okunamadı", cfg, log)
+            except BinanceAPIError as exc:   # Geçersiz anahtar / IP / izin: yeniden denemek düzeltmez
+                msg = f"Binance bakiyesi okunamadı: {exc}"
+                if exc.code == -2015:
+                    msg += ("\nAPI anahtarını, 'Enable Spot & Margin Trading' iznini ve IP kısıtlamasını (sunucunun "
+                            "IP adresi) kontrol edin; .env'deki BINANCE_API_KEY / BINANCE_API_SECRET doğru mu?")
+                print(f"❌ {msg}")
+                notifier.send(Messages.error(f"Bot başlatılamadı: {msg}", fatal=True), critical=True)
+                return EXIT_CRASH if is_transient_binance_error(exc) else EXIT_CONFIG
             if free <= 0:
                 print(f"❌ Binance SPOT cüzdanınızda serbest {cfg.quote_asset} bakiyesi yok.\n"
                       f"   Bot Spot piyasada işlem yapar. Paranız Futures/Funding cüzdanındaysa Binance'te\n"

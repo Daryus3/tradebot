@@ -274,3 +274,23 @@ def test_settings_file_loaded_and_env_wins(tmp_path):
     repo = (Path(__file__).resolve().parent.parent / "ayarlar.env").read_text(encoding="utf-8")
     for key in ("BINANCE_API_KEY", "BINANCE_API_SECRET", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"):
         assert f"\n{key}=" not in repo
+
+
+def test_live_start_with_rejected_api_key_is_config_error(cfg, monkeypatch, tmp_path, capsys):
+    """-2015 (geçersiz anahtar / IP / izin) yeniden denemekle düzelmez: çökme (3) değil ayar hatası (1) → servis
+    sonsuz yeniden başlatmaz."""
+    import binance_client
+    import main
+    from binance_client import BinanceAPIError
+
+    class Rejecting(binance_client.BinanceClient):
+        def _request(self, method, path, params=None, signed=False, _retry=True):
+            if path == "/api/v3/time":
+                return {"serverTime": 0}
+            raise BinanceAPIError(401, -2015, "Invalid API-key, IP, or permissions for action.")
+    live = replace(cfg, trading_mode="live", binance_api_key="k", binance_api_secret="s")
+    monkeypatch.setattr(main, "load_config", lambda *a, **k: live)
+    monkeypatch.setattr(main, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(binance_client, "BinanceClient", Rejecting)
+    assert main.main(["--mode", "live", "--yes"]) == 1
+    assert "IP kısıtlamasını" in capsys.readouterr().out
