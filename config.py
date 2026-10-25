@@ -62,10 +62,12 @@ class ConfigError(Exception):
 
 
 # Giriş stratejileri. İlk üçü 5 dakikalık mumlarla dakikalar-saatler süren işlemler içindir; swing stratejileri
-# 1 saatlik mumlarla 1-5 gün süren işlemler içindir; rotation günlük mumlarla haftalık momentum rotasyonudur
+# 1 saatlik mumlarla 1-5 gün süren işlemler içindir; mean_revert 1 saatlik mumlarla en hacimli coinlerde trend içi
+# aşırı satımı alıp küçük hedefle (saatler-2 gün) satar; rotation günlük mumlarla haftalık momentum rotasyonudur
 # (en güçlü birkaç coini tutar, her hafta yeniden dengeler; bkz. strategy.py ve rotation.py).
-STRATEGY_NAMES = ("rebound", "trend", "breakout", "swing", "swing_pullback", "rotation")
+STRATEGY_NAMES = ("rebound", "trend", "breakout", "swing", "swing_pullback", "mean_revert", "rotation")
 LONG_HORIZON_STRATEGIES = frozenset({"swing", "swing_pullback"})
+MEAN_REVERSION_STRATEGIES = frozenset({"mean_revert"})
 ROTATION_STRATEGIES = frozenset({"rotation"})
 
 # Uzun vadeli (swing) stratejiler için önerilen çıkış ayarları ve stratejiye özel giriş eşikleri (.env anahtarı →
@@ -91,6 +93,20 @@ ROTATION_PROFILE = {
     "MIN_SIGNAL_SCORE": 0.0,
     "MIN_ROOM_RATIO": 0.0,
 }
+# Ortalamaya dönüş (mean_revert): küçük hedef + daha geniş zarar kes + süre sınırı. Kazanma oranı yüksek olur ama
+# kâr ancak kazananlar kaybedenleri karşılıyorsa çıkar (backtest'te işlem başı sonuca bakın).
+MEAN_REVERSION_PROFILE = {
+    "TAKE_PROFIT_PCT": 1.5,
+    "STOP_LOSS_PCT": 5.0,
+    "TRAILING_ACTIVATION_PCT": 1.0,
+    "TRAILING_FLOOR_PCT": 0.5,
+    "MAX_HOLD_MINUTES": 2880,          # 2 gün: dönmeyen düşüşte beklenmez
+    "BREAKEVEN_TRIGGER_PCT": 0.7,
+    "BREAKEVEN_FLOOR_PCT": 0.2,
+    "MIN_SIGNAL_SCORE": 0.0,
+    "MIN_ROOM_RATIO": 0.0,
+    "BACKUP_STOP_PCT": 8.0,
+}
 PROFILE_ATTRS = {
     "TAKE_PROFIT_PCT": "take_profit_pct", "STOP_LOSS_PCT": "stop_loss_pct",
     "TRAILING_ACTIVATION_PCT": "trailing_activation_pct", "TRAILING_FLOOR_PCT": "trailing_floor_pct",
@@ -99,12 +115,17 @@ PROFILE_ATTRS = {
     "MIN_ROOM_RATIO": "min_room_ratio", "MAX_24H_GAIN_PCT": "max_24h_gain_pct",
     "BACKUP_STOP_PCT": "backup_stop_pct",
 }
-PROFILES = {"swing": SWING_EXIT_PROFILE, "rotation": ROTATION_PROFILE}
+PROFILES = {"swing": SWING_EXIT_PROFILE, "mr": MEAN_REVERSION_PROFILE, "rotation": ROTATION_PROFILE}
 
 
 def is_long_horizon(strategy: str) -> bool:
     """1 saatlik mumlarla günlerce tutulan (swing) bir strateji mi?"""
     return strategy in LONG_HORIZON_STRATEGIES
+
+
+def is_mean_reversion(strategy: str) -> bool:
+    """1 saatlik mumlarla en hacimli coinlerde trend içi aşırı satımı alan, küçük hedefli strateji mi?"""
+    return strategy in MEAN_REVERSION_STRATEGIES
 
 
 def is_rotation(strategy: str) -> bool:
@@ -113,9 +134,12 @@ def is_rotation(strategy: str) -> bool:
 
 
 def strategy_family(strategy: str) -> str:
-    """Aynı çıkış mantığını ve mum aralığını paylaşan strateji grubu: 'short' (5 dk), 'swing' (1 saat), 'rotation'."""
+    """Aynı çıkış mantığını ve mum aralığını paylaşan strateji grubu: 'short' (5 dk), 'swing' (1 saat, günler),
+    'mr' (1 saat, ortalamaya dönüş), 'rotation' (günlük)."""
     if is_rotation(strategy):
         return "rotation"
+    if is_mean_reversion(strategy):
+        return "mr"
     return "swing" if is_long_horizon(strategy) else "short"
 
 
@@ -272,6 +296,9 @@ class Config:
     rotation_days: int = 7                 # Kaç günde bir yeniden dengelenir
     rotation_btc_ma_days: int = 50         # BTC bu günlük ortalamanın altına inince her şey satılıp USDT'de beklenir (0 = kapalı)
     rotation_universe: int = 30            # Sıralamaya giren en hacimli coin sayısı
+    # Ortalamaya dönüş (STRATEGY=mean_revert; 1 saatlik mumlar)
+    mr_band_std: float = 2.0               # Kapanış 20 saatlik ortalamanın en az bu kadar standart sapma altında olmalı
+    mr_universe: int = 20                  # Yalnızca en hacimli bu kadar coin (büyük, likit coinler)
     signal_confirm_scans: int = 1          # 1 = kapalı (2 = sinyal art arda 2 taramada görülmeli)
     # 31) Oynaklık (ATR) filtresi — 5 dk ATR(14) / fiyat (%)
     min_atr_pct: float = 0.25
@@ -396,6 +423,10 @@ class Config:
             errors.append("ROTATION_BTC_MA_DAYS 0 (kapalı) veya 10 ile 200 arasında olmalı")
         if not self.rotation_top_n <= self.rotation_universe <= 200:
             errors.append("ROTATION_UNIVERSE, ROTATION_TOP_N'den küçük olmamalı (en fazla 200)")
+        if not 0.5 <= self.mr_band_std <= 5:
+            errors.append("MR_BAND_STD 0.5 ile 5 arasında olmalı (örn. 2 = ortalamanın 2 standart sapma altı)")
+        if not 1 <= self.mr_universe <= 200:
+            errors.append("MR_UNIVERSE 1 ile 200 arasında olmalı")
         if self.signal_confirm_scans < 1:
             errors.append("SIGNAL_CONFIRM_SCANS en az 1 olmalı")
         if self.min_atr_pct >= self.max_atr_pct:
@@ -518,6 +549,8 @@ def load_config(env_file: Optional[str] = None, mode_override: Optional[str] = N
         rotation_days=_env_int("ROTATION_DAYS", 7),
         rotation_btc_ma_days=_env_int("ROTATION_BTC_MA_DAYS", 50),
         rotation_universe=_env_int("ROTATION_UNIVERSE", 30),
+        mr_band_std=_env_float("MR_BAND_STD", 2.0),
+        mr_universe=_env_int("MR_UNIVERSE", 20),
         signal_confirm_scans=_env_int("SIGNAL_CONFIRM_SCANS", 1),
         min_atr_pct=_env_float("MIN_ATR_PCT", 0.25),
         max_atr_pct=_env_float("MAX_ATR_PCT", 4.0),
@@ -578,6 +611,16 @@ def _setting_notes(cfg: Config) -> List[str]:
         if filters:
             notes.append(f"STRATEGY={cfg.strategy} ile şu giriş filtreleri sinyalleri gereksiz yere eleyebilir: "
                          f"{'; '.join(filters)}.")
+    if is_mean_reversion(cfg.strategy):
+        odd = []
+        if cfg.take_profit_pct > 5:
+            odd.append(f"TAKE_PROFIT_PCT={cfg.take_profit_pct:g}")
+        if cfg.max_hold_minutes <= 0:
+            odd.append("MAX_HOLD_MINUTES=0 (süre sınırı yok)")
+        if odd:
+            notes.append(f"STRATEGY=mean_revert düşüşün ortalamaya dönüşünü küçük hedefle (saatler-2 gün) alır; şu "
+                         f"ayarlar ona uymuyor: {', '.join(odd)}. Önerilen: " + " ".join(
+                             f"{k}={v:g}" for k, v in MEAN_REVERSION_PROFILE.items()))
     if is_rotation(cfg.strategy):
         if cfg.stop_loss_pct < 10:
             notes.append(f"STRATEGY=rotation coinleri haftalarca tutar; STOP_LOSS_PCT={cfg.stop_loss_pct:g} haftalık "
@@ -645,8 +688,8 @@ def with_strategy(cfg: Config, strategy: str) -> Tuple[Config, bool]:
     family = strategy_family(strategy)
     profile = family != strategy_family(cfg.strategy) and family in PROFILES
     if profile:
-        changes.update({PROFILE_ATTRS[k]: type(getattr(cfg, PROFILE_ATTRS[k]))(v)
-                        for k, v in PROFILES[family].items()})
+        # Profildeki türle (1.5 → float, 2880 → int): mevcut değerin türüne çevirmek 1.5'i 1'e kırpabilirdi
+        changes.update({PROFILE_ATTRS[k]: v for k, v in PROFILES[family].items()})
         if family == "swing":
             # Üst sınır: .env'deki daha geniş değer korunur (yalnızca 5 dk için daraltılmışsa genişletilir)
             changes["max_24h_gain_pct"] = max(cfg.max_24h_gain_pct, SWING_EXIT_PROFILE["MAX_24H_GAIN_PCT"])

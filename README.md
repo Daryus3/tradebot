@@ -77,6 +77,7 @@ Normal durdurma, Telegram `/kapat`, ayar hatası ve kill-switch'te bot yeniden *
 | `python main.py --backtest --gun 90 --tara` | Aynı veriyle onlarca Kâr Al / Zarar Kes / süre ayarını karşılaştırır |
 | `python main.py --backtest --gun 90 --tara-giris` | Giriş filtrelerini (piyasa rejimi, 24s düşüş, sinyal puanı, hedef alanı) karşılaştırır |
 | `python main.py --backtest --gun 90 --tara-filtre` | rebound filtrelerini tek tek gevşetip işlem sayısına ve işlem başı sonuca etkisini gösterir |
+| `python main.py --backtest --turnuva` | Ortalamaya dönüş / swing / rotasyon stratejilerini farklı çıkış kurallarıyla aynı yılda dener, sıralar |
 | `python main.py --backtest --gun 90 --strateji-karsilastir` | rebound / trend / breakout stratejilerini karşılaştırır |
 | `python main.py --backtest --gun 90 --bitis 2026-07-01` | O tarihte biten (daha eski) bir dönemi dener: bulunan ayarı bağımsız dönemde doğrulamak için |
 | `python main.py --telegram-chat-id` | Telegram chat ID'nizi bulur |
@@ -160,11 +161,30 @@ günleri haftalık özet gelir.
 | `trend` | 24 saatte yükselmiş, 5 dk EMA50 > EMA200 coinde fiyat EMA20'ye geri çekilip yukarı dönünce alır |
 | `breakout` | Yükselen trendde son 4 saatin zirvesi yüksek hacimle kırılınca alır |
 | `swing` / `swing_pullback` | 1 saatlik mumlarla 1-5 günlük, %8-15'lik hareketler (çıkış ayarları da uzun vadeye göre olmalı: örn. TP 12, SL 6, süre 7200 dk) |
+| `mean_revert` | **Ortalamaya dönüş:** yalnızca en hacimli `MR_UNIVERSE` (20) coinde, yükseliş trendindeki (1 saatlik EMA50 > EMA200) coinin saatlik kapanışı 20 saatlik ortalamanın `MR_BAND_STD` (2) standart sapma altına inince alır; küçük hedefle satar (önerilen: TP 1.5, SL 5, süre 2880 dk, izleyen stop 1 → 0.5, başabaş 0.7 → 0.2). Kazanma oranı yüksek olur; kâr, kayıpların kazançları silmemesine bağlıdır |
 | `rotation` | Haftalık momentum rotasyonu: en hacimli 30 coinden son 4 haftanın en güçlü 3'ünü tutar, BTC 50 günlük ortalamasının altına inince USDT'ye geçer (`STOP_LOSS_PCT=20`, `BACKUP_STOP_PCT=25` önerilir) |
 
-`--strateji` yalnızca o backtest için geçerlidir; botun kullandığı strateji `STRATEGY` ayarıdır. Swing'de
-backtest varsayılanı 365 gün, rotasyonda 3 yıldır (`--strateji swing --strateji-karsilastir`,
-`--strateji rotation`). Rotasyon sonucu her zaman "BTC'yi alıp tutmak"la kıyaslanır.
+`--strateji` yalnızca o backtest için geçerlidir; botun kullandığı strateji `STRATEGY` ayarıdır. Swing ve
+mean_revert'te backtest varsayılanı 365 gün, rotasyonda 3 yıldır (`--strateji swing --strateji-karsilastir`,
+`--strateji mean_revert`, `--strateji rotation`). Rotasyon sonucu her zaman "BTC'yi alıp tutmak"la kıyaslanır.
+
+### 🏆 Strateji turnuvası (`--turnuva`)
+Hangi strateji türünün sizin dönemde işe yaradığını **tek komutla** görmek için:
+```bash
+python main.py --backtest --turnuva --sermaye 32
+```
+Aynı bir yılda (varsayılan 365 gün; `--gun`, `--bitis` ile değişir) şu birleşimleri, her biri kendi çıkış
+kurallarıyla dener ve kazanma oranı, ortalama kazanç / kayıp, işlem başı sonuç ve dönemin iki yarısıyla sıralar:
+- **Giriş:** `mean_revert`, `swing_pullback`, `swing` (1 saatlik mumlar)
+- **Çıkış:** küçük hedef (+%1.5 / −%5, 2 gün — kazanma oranı yüksek), dengeli (+%3 / −%3, 3 gün),
+  trend (+%12 / −%6, izleyen stop, 5 gün)
+- **Piyasa filtresi:** zayıf piyasada alım yap / yapma (`REGIME_SKIP_WEAK`)
+- **Rotasyon** (günlük mumlar): haftalık momentum rotasyonu ve "en hacimli coinin (genelde BTC) trendini tut"
+- Kıyas: aynı dönemde BTC'yi alıp tutmak
+
+✅ işaretli satır (iki yarıda kârlı, ≥30 işlem, şanstan ayırt edilebiliyor) varsa rapor `.env`'ye yazılacak satırları
+verir. **Kazanma oranı tek başına kârlılık değildir:** %70 kazanan işlem, kayıplar kazançların 3 katıysa yine zarar
+ettirir; kararı "İşl.başı" sütunu verir. Seçilen birleşimi `--bitis` ile önceki yılda doğrulayın ve test modunda izleyin.
 
 ---
 

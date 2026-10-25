@@ -18,6 +18,8 @@ Kullanım:
     python main.py --backtest --gun 365 --strateji swing   # Uzun vadeli strateji: 1 saatlik mumlar, 1 yıllık veri
     python main.py --backtest --strateji swing --strateji-karsilastir  # swing / swing_pullback karşılaştırması
     python main.py --backtest --strateji rotation  # Haftalık momentum rotasyonu: günlük mumlar, 3 yıllık veri
+    python main.py --backtest --strateji mean_revert   # Büyük coinlerde trend içi aşırı satım alımı (küçük hedef)
+    python main.py --backtest --turnuva             # Tüm strateji türleri × çıkış profilleri aynı yılda, sıralı tablo
     python main.py --telegram-chat-id  # Telegram chat ID'nizi bulur
     python main.py --reset-state       # Kayıtlı durumu (K/Z, kill-switch) sıfırlar
 
@@ -38,7 +40,8 @@ import time
 from datetime import datetime
 from typing import Optional
 
-from config import DATA_DIR, STRATEGY_NAMES, ConfigError, is_long_horizon, is_rotation, load_config
+from config import (DATA_DIR, STRATEGY_NAMES, ConfigError, is_long_horizon, is_mean_reversion, is_rotation,
+                    load_config)
 from logger import redact, register_secrets, setup_logging
 
 EXIT_OK, EXIT_CONFIG, EXIT_KILLED, EXIT_CRASH = 0, 1, 2, 3
@@ -74,6 +77,10 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--tara-filtre", action="store_true",
                         help="Backtest (rebound): sinyal filtrelerini tek tek gevşetip işlem sayısına ve işlem başı "
                              "sonuca etkisini gösterir; çıkış ayarları .env'deki gibi kalır")
+    parser.add_argument("--turnuva", action="store_true",
+                        help="Backtest: ortalamaya dönüş / swing / rotasyon stratejilerini farklı çıkış kuralları ve "
+                             "piyasa filtresiyle aynı dönemde (varsayılan 365 gün) dener, kazanma oranı ve işlem başı "
+                             "kâra göre sıralar")
     parser.add_argument("--strateji", choices=list(STRATEGY_NAMES), default=None,
                         help="Backtest için strateji (.env'deki STRATEGY yerine). Başka tür bir stratejiye "
                              "(5 dk → swing / rotation) geçilirse çıkışlar o tür için önerilen değerlerle denenir")
@@ -246,7 +253,9 @@ def run_backtest_cli(cfg, args) -> int:
         env_strategy = cfg.strategy
         cfg, profile = with_strategy(cfg, args.strateji)
         if profile:
-            kind = ("haftalarca tutulan rotasyon işlemleri" if is_rotation(cfg.strategy) else "1-5 gün süren işlemler")
+            kind = ("haftalarca tutulan rotasyon işlemleri" if is_rotation(cfg.strategy) else
+                    "saatler-2 gün süren küçük hedefli ortalamaya dönüş işlemleri" if is_mean_reversion(cfg.strategy)
+                    else "1-5 gün süren işlemler")
             print(f"ℹ️ .env'deki çıkış ayarları {env_strategy} stratejisi içindir; {cfg.strategy}, {kind} "
                   f"için önerilen ayarlarla deneniyor:")
             print("   " + " ".join(f"{k}={getattr(cfg, PROFILE_ATTRS[k]):g}"
@@ -261,7 +270,8 @@ def run_backtest_cli(cfg, args) -> int:
             print(f"⚠️ .env'deki çıkış ayarları {env_strategy} stratejisi içindir; {cfg.strategy} (5 dk) bu "
                   f"çıkışlarla deneniyor.")
     days = args.gun if args.gun is not None else (
-        1095 if is_rotation(cfg.strategy) else 365 if is_long_horizon(cfg.strategy) else 30)
+        1095 if is_rotation(cfg.strategy) and not args.turnuva else
+        365 if args.turnuva or is_long_horizon(cfg.strategy) or is_mean_reversion(cfg.strategy) else 30)
     if days <= 0:
         print("❌ --gun sıfırdan büyük olmalı")
         return EXIT_CONFIG
@@ -282,6 +292,23 @@ def run_backtest_cli(cfg, args) -> int:
     if args.strateji_karsilastir and not compare:
         print("ℹ️ Rotasyon tek stratejidir (günlük mumlarla başka strateji yok); karşılaştırma yerine normal rapor "
               "gösteriliyor (BTC'yi alıp tutmakla kıyaslı). Ayarları denemek için --tara ve --tara-giris kullanın.")
+    if args.turnuva:
+        print("🏆 Strateji turnuvası: saatlik veriyle 3 giriş stratejisi × 3 çıkış kuralı × piyasa filtresi ve günlük "
+              "veriyle rotasyon aynı dönemde deneniyor (ilk seferde veri indirilir; 5-20 dk sürebilir)...")
+        try:
+            result = backtest.run_tournament(cfg, client, days=days, max_symbols=args.coin_sayisi, progress=print,
+                                             end_time_ms=end_ms)
+        except Exception as exc:  # noqa: BLE001
+            print(f"❌ Turnuva çalıştırılamadı: {exc}")
+            return EXIT_CONFIG
+        print(backtest.format_tournament_report(result, cfg))
+        try:
+            stamp = datetime.now().strftime("%Y%m%d-%H%M")
+            path = backtest.save_sweep_csv([t.row for t in result.rows], DATA_DIR / f"turnuva_{stamp}.csv")
+            print(f"📄 Tüm {len(result.rows)} satır Excel ile açılabilir dosyada: {path}")
+        except OSError as exc:
+            print(f"⚠️ Turnuva dosyası yazılamadı: {exc}")
+        return EXIT_OK
     try:
         filters = args.tara_filtre and cfg.strategy == "rebound"
         if args.tara_filtre and not filters:

@@ -474,7 +474,7 @@ def test_rebound_suggestion_keeps_strategy_family(cfg):
     rows = [SweepRow(st, True, 100, 40, -2, -0.3, 9, -1, -1, 0.7, se_net_pct=0.1)]
     text = format_sweep_report(rows, replace(cfg, strategy="rebound"), data)
     assert "--strateji-karsilastir --strateji rebound" in text
-    assert "--strateji swing --strateji-karsilastir" in text      # 5 dk başarısızsa uzun vade önerilir
+    assert "--backtest --turnuva" in text                         # 5 dk başarısızsa diğer türler önerilir
 
 
 def test_listing_lookup_stops_on_rate_limit(fake_client):

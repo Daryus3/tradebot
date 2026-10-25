@@ -42,6 +42,13 @@ hareketlerde aynı maliyet hedefin küçük bir parçasıdır. Çıkış ayarlar
 config.SWING_EXIT_PROFILE). Backtest 1 yıllık saatlik veriyle yapılır:
     python main.py --backtest --gun 365 --strateji swing
 
+Ortalamaya dönüş ("mean_revert", 1 SAATLİK mumlar, saatler-2 gün, küçük hedef): yalnızca en hacimli MR_UNIVERSE
+coinde; çok günlük yükseliş trendindeki (EMA50 > EMA200, fiyat EMA200 üstünde) coinin saatlik kapanışı 20 saatlik
+ortalamasının MR_BAND_STD standart sapma altına inince (aşırı satım) alır, ortalamaya dönüşte küçük kârla satar
+(config.MEAN_REVERSION_PROFILE). Kazanma oranı doğası gereği yüksektir; kâr, kazananların kaybedenleri karşılamasına
+bağlıdır:
+    python main.py --backtest --strateji mean_revert
+
 Haftalık momentum rotasyonu ("rotation", günlük mumlar): sinyal/kâr al mantığı yerine en güçlü birkaç coini tutar ve
 her hafta yeniden dengeler (bkz. rotation.py). Canlı botta TradingBot.rotation_tick, backtest'te
 _Simulator._rotation_step aynı rotation.plan_rotation fonksiyonunu kullanır:
@@ -99,6 +106,11 @@ SWING_CANDIDATE_FACTOR = 3       # Saatlik mumda sinyal yavaş değişir: her ta
 SWING_ATR_SCALE = math.sqrt(12)
 SWING_WARMUP_DAYS = 18.0         # Backtest ısınması: 400 saatlik analiz geçmişi (16.7 gün) + pay
 
+# Ortalamaya dönüş (mean_revert): 1 saatlik mumlar, Bollinger tarzı aşırı satım + trend filtresi
+MR_BAND_BARS = 20                # Ortalama ve standart sapma son 20 saatlik kapanıştan
+MR_STRICT_BAND_EXTRA = 0.5       # Zayıf piyasada aşırı satım eşiği bu kadar standart sapma daha derin
+MR_MAX_CHASE_PCT = 0.5           # Fiyat sinyal mumunun kapanışından bu kadar yükseldiyse alınmaz (dönüşün çoğu kaçmış)
+
 # Haftalık momentum rotasyonu: günlük mumlar
 ROTATION_INTERVAL = "1d"
 ROTATION_WARMUP_DAYS = 210.0     # En uzun momentum (180 gün) / BTC ortalaması (200 gün) için geçmiş
@@ -144,6 +156,10 @@ class Signal:
         if kind == "rotation":
             return (f"Momentum %{m.get('momentum_pct', 0):+.1f} (son {int(m.get('lookback_days', 0))} gün) | "
                     f"sıra {int(m.get('rank', 0))}")
+        if kind == "mean_revert":
+            return (f"Aşırı satım {m.get('z', 0):.1f}σ (20 saatlik ortalamanın altında) | Ortalamaya "
+                    f"%{m.get('room_pct', 0):.1f} | Trend %{m.get('trend_pct', 0):+.1f} (1s EMA50/200) | "
+                    f"RSI {m.get('rsi', 0):.0f}")
         if kind == "swing_pullback":
             return (f"Trend %{m.get('trend_pct', 0):+.1f} (1s EMA50/200) | Zirveden geri çekilme "
                     f"%{m.get('pullback_pct', 0):.1f} | RSI {m.get('rsi_min', 0):.0f}→{m.get('rsi', 0):.0f} | "
@@ -248,7 +264,7 @@ class ReboundStrategy:
         """24 saatlik değişim bu stratejinin aradığı aralıkta mı? (rebound: düşmüş coinler)"""
         return -self.cfg.max_24h_drop_pct <= change_24h_pct <= -self.cfg.min_24h_drop_pct
 
-    def candidate_key(self, change_24h_pct: float) -> float:
+    def candidate_key(self, change_24h_pct: float, quote_volume_24h: float = 0.0) -> float:
         """Aday sıralaması (küçükten büyüğe): rebound için en çok düşen önce."""
         return change_24h_pct
 
@@ -286,7 +302,7 @@ class ReboundStrategy:
             if invest_hint > 0 and r.step_value(last) / invest_hint * 100 > cfg.max_dust_pct:
                 continue
             out.append(t)
-        out.sort(key=lambda x: self.candidate_key(float(x["priceChangePercent"])))
+        out.sort(key=lambda x: self.candidate_key(float(x["priceChangePercent"]), float(x["quoteVolume"])))
         return out[: self.candidate_limit]
 
     # ------------------------------------------------------------ ayrıntılı analiz
@@ -510,7 +526,7 @@ class _TrendBase(ReboundStrategy):
     def change_ok(self, change_24h_pct: float) -> bool:
         return self.cfg.min_24h_gain_pct <= change_24h_pct <= self.cfg.max_24h_gain_pct
 
-    def candidate_key(self, change_24h_pct: float) -> float:
+    def candidate_key(self, change_24h_pct: float, quote_volume_24h: float = 0.0) -> float:
         return -change_24h_pct  # En çok yükselen önce
 
     @staticmethod
@@ -784,7 +800,7 @@ class SwingPullbackStrategy(_SwingBase):
     def change_ok(self, change_24h_pct: float) -> bool:
         return -self.cfg.swing_pullback_max_pct <= change_24h_pct <= self.cfg.max_24h_gain_pct
 
-    def candidate_key(self, change_24h_pct: float) -> float:
+    def candidate_key(self, change_24h_pct: float, quote_volume_24h: float = 0.0) -> float:
         return change_24h_pct   # En çok geri çekilen önce
 
     def analyze(self, symbol: str, raw_klines: List[list], strict: bool = False) -> Tuple[Optional[Signal], str]:
@@ -873,6 +889,72 @@ class SwingPullbackStrategy(_SwingBase):
             "taker_ratio": taker_ratio, "atr_pct": atr_pct, "bars_since_low": float(bars_since_low),
             # Geri çekilme öncesi zirveye kalan alan
             "room_pct": (recent_high - price) / price * 100 if price > 0 else 0.0,
+        }
+        return Signal(symbol, price, score, metrics), ""
+
+
+class MeanRevertStrategy(_SwingBase):
+    """En hacimli coinlerde, çok günlük yükseliş trendindeyken saatlik kapanış 20 saatlik ortalamanın belirgin altına
+    inince (aşırı satım) al; küçük hedefle ortalamaya dönüşte sat (çıkışlar MEAN_REVERSION_PROFILE)."""
+    name = "mean_revert"
+    # Hedef alanı = 20 saatlik ortalamaya kalan mesafe: MIN_ROOM_RATIO "dönüş hedefi Kâr Al'a yetiyor mu?" ölçer
+    uses_room = True
+    analysis_fields = ("mr_band_std", "rsi_period")
+
+    @property
+    def candidate_limit(self) -> int:
+        return self.cfg.mr_universe
+
+    def change_ok(self, change_24h_pct: float) -> bool:
+        return -self.cfg.max_24h_drop_pct <= change_24h_pct <= self.cfg.max_24h_gain_pct
+
+    def candidate_key(self, change_24h_pct: float, quote_volume_24h: float = 0.0) -> float:
+        return -quote_volume_24h   # En hacimli (en likit, en büyük) coinler önce
+
+    def analyze(self, symbol: str, raw_klines: List[list], strict: bool = False) -> Tuple[Optional[Signal], str]:
+        cfg = self.cfg
+        if len(raw_klines) < SWING_MIN_BARS:
+            return None, "veri az"
+        current, closed, closes, highs, lows, vols = self._series(raw_klines)
+        price, last = current.close, closed[-1]
+
+        # 1) Aşırı satım (en seçici kontrol önce): son kapanan saatlik mum 20 saatlik ortalamanın en az
+        #    MR_BAND_STD standart sapma altında kapandı
+        window = closes[-MR_BAND_BARS:]
+        avg = mean(window)
+        sd = math.sqrt(sum((x - avg) ** 2 for x in window) / len(window))
+        if avg <= 0 or sd <= 0:
+            return None, "veri az"
+        z = (last.close - avg) / sd
+        band = cfg.mr_band_std + (MR_STRICT_BAND_EXTRA if strict else 0.0)
+        if z > -band:
+            return None, "aşırı satım yok"
+        if last.close > 0 and price > last.close * (1 + MR_MAX_CHASE_PCT / 100):
+            return None, "fiyat kaçtı"
+        if price >= avg:
+            return None, "ortalamaya dönmüş"
+
+        # 2) Çok günlük yükseliş trendi: yalnızca yükselen coinin düşüşü alınır (düşen bıçak tutulmaz)
+        e50, e200 = ema(closes, 50), ema(closes, 200)
+        if e50[-1] is None or e200[-1] is None:
+            return None, "veri az"
+        if e50[-1] <= e200[-1] or last.close <= e200[-1]:
+            return None, "trend yok"
+
+        rsi_now = rsi(closes, cfg.rsi_period)[-1]
+        if rsi_now is None:
+            return None, "veri az"
+        base_vol = mean(vols[-25:-1])
+        vol_ratio = vols[-1] / base_vol if base_vol > 0 else 0.0
+        atr_vals = atr(highs, lows, closes, 14)
+        atr_pct = atr_vals[-1] / price * 100 if atr_vals[-1] and price > 0 else 0.0
+        room_pct = (avg - price) / price * 100 if price > 0 else 0.0
+        trend_pct = (e50[-1] / e200[-1] - 1) * 100
+        # Daha derin aşırı satım, ortalamaya daha çok alan ve daha güçlü trend önce
+        score = -z * 3 + min(room_pct, 5) * 2 + min(trend_pct, 10) * 0.5 + (50 - rsi_now) / 10
+        metrics = {
+            "kind": "mean_revert", "z": z, "room_pct": room_pct, "trend_pct": trend_pct, "rsi": rsi_now,
+            "vol_ratio": vol_ratio, "atr_pct": atr_pct, "band_std": band,
         }
         return Signal(symbol, price, score, metrics), ""
 
@@ -989,7 +1071,7 @@ class RotationStrategy(ReboundStrategy):
 
 STRATEGY_CLASSES = {"rebound": ReboundStrategy, "trend": TrendPullbackStrategy, "breakout": BreakoutStrategy,
                     "swing": SwingBreakoutStrategy, "swing_pullback": SwingPullbackStrategy,
-                    "rotation": RotationStrategy}
+                    "mean_revert": MeanRevertStrategy, "rotation": RotationStrategy}
 assert tuple(STRATEGY_CLASSES) == STRATEGIES
 
 
