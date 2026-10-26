@@ -69,6 +69,9 @@ STRATEGY_NAMES = ("rebound", "trend", "breakout", "swing", "swing_pullback", "me
 LONG_HORIZON_STRATEGIES = frozenset({"swing", "swing_pullback"})
 MEAN_REVERSION_STRATEGIES = frozenset({"mean_revert"})
 ROTATION_STRATEGIES = frozenset({"rotation"})
+# Telegram bildirim modu: all = hepsi | closes = yalnızca pozisyon kapanışları | silent = yalnızca acil durumlar.
+# Komut cevapları, hatalar ve kritik uyarılar (zarar kes, kill-switch...) her modda gelir.
+NOTIFY_MODES = ("all", "closes", "silent")
 
 # Uzun vadeli (swing) stratejiler için önerilen çıkış ayarları ve stratejiye özel giriş eşikleri (.env anahtarı →
 # değer). 5 dk stratejilerine göre ayarlanmış çıkışlar (örn. 4 saatlik maks. süre, +%1 başabaş) swing işlemlerini
@@ -311,6 +314,33 @@ class Config:
     # 38) BNB ile komisyon indirimi takibi: yalnızca izler ve uyarır (BNB ALMAZ, Binance ayarını değiştirmez)
     bnb_fee_check: bool = True             # false = komisyon/BNB kontrolü tamamen kapalı
     bnb_min_trades: int = 20               # BNB bundan az al-sat işlemine yetecekse uyar (0 = uyarma)
+    # 39) Telegram kontrol paneli (/menu) ve bildirim modu
+    notify_mode: str = "all"               # all | closes | silent (bkz. NOTIFY_MODES)
+    service_name: str = "tradebot.service"  # Menüdeki "Sunucu Reset" düğmesinin yeniden başlattığı systemd servisi
+    ip_check_minutes: int = 10             # Sunucunun dış IP adresi bu aralıkla kontrol edilir, değişirse alarm (0 = kapalı)
+    # 40) Ek giriş filtreleri (hepsi varsayılan kapalı; --tara-ab ile etkileri ölçülebilir)
+    spread_filter: bool = True             # false: MAX_SPREAD_PCT kontrolü yapılmaz
+    fakeout_filter: bool = False           # Son kapanmış mumun üst fitili gövdesinden uzunsa alma
+    vwap_filter: bool = False              # Fiyat VWAP'ın (son VWAP_BARS mum) altındaysa alma
+    vwap_bars: int = 48                    # 48 × 5 dk = 4 saat (1 saatlik stratejilerde 2 gün)
+    overheat_filter: bool = False          # Son OVERHEAT_MINUTES dakikada dipten OVERHEAT_PCT'den fazla yükseldiyse alma
+    overheat_pct: float = 10.0
+    overheat_minutes: int = 60
+    ob_wall_filter: bool = False           # Canlı: başabaş bandında (+OB_BAND_PCT) dev satış duvarı varsa alma
+    ob_band_pct: float = 1.0
+    ob_wall_ratio: float = 10.0            # Duvar = tek fiyat seviyesi, defterdeki ortanca seviyenin en az bu katı
+    ob_imbalance_filter: bool = False      # Canlı: ±OB_BAND_PCT bandında satış emirleri alışların bu katıysa alma
+    ob_imbalance_ratio: float = 5.0
+    tape_filter: bool = False              # Canlı: son TAPE_SECONDS sn'deki piyasa alımlarının payı düşükse alma
+    tape_seconds: int = 60
+    tape_min_buy_ratio: float = 0.55
+    # 41) Risk sigortaları (yeni alımları dondurur; açık pozisyonların takibi sürer)
+    daily_loss_limit_pct: float = 0.0      # Günlük net zarar sermayenin bu %'sine ulaşınca gün sonuna kadar alım yok
+    daily_profit_target_pct: float = 0.0   # Günlük net kâr bu %'ye ulaşınca gün sonuna kadar alım yok
+    loss_streak_limit: int = 0             # Üst üste bu kadar zarar kes olursa LOSS_STREAK_PAUSE_HOURS alım yok
+    loss_streak_pause_hours: float = 4.0
+    coin_sl_limit: int = 3                 # Aynı coinde üst üste bu kadar zarar kes olursa 24 saat kara liste teklifi
+    slippage_alert_pct: float = 0.3        # Son 10 alımın ortalama kayması bunu aşarsa uyar (0 = kapalı)
     # Eski sabit USDT kill-switch ayarı (MAX_TOTAL_LOSS_USDT). Yalnızca MAX_TOTAL_LOSS_PCT yazılmamışsa dolu.
     legacy_loss_usdt: Optional[float] = None
     # Ayar okunurken oluşan uyarılar (eski ayar adı, işe yaramayan değer...). Bot açılırken gösterilir.
@@ -439,6 +469,27 @@ class Config:
             errors.append("QUIET_HOURS SS:DD-SS:DD biçiminde olmalı (örn. 23:00-08:00) veya boş")
         if self.bnb_min_trades < 0:
             errors.append("BNB_MIN_TRADES 0 veya daha büyük olmalı (0 = az BNB uyarısı kapalı)")
+        if self.notify_mode not in NOTIFY_MODES:
+            errors.append("NOTIFY_MODE şunlardan biri olmalı: " + ", ".join(NOTIFY_MODES))
+        if self.ip_check_minutes < 0:
+            errors.append("IP_CHECK_MINUTES 0 (kapalı) veya pozitif olmalı")
+        if not 5 <= self.vwap_bars <= 500:
+            errors.append("VWAP_BARS 5 ile 500 arasında olmalı")
+        if self.overheat_pct <= 0 or self.overheat_minutes <= 0:
+            errors.append("OVERHEAT_PCT ve OVERHEAT_MINUTES sıfırdan büyük olmalı")
+        if not 0 < self.ob_band_pct <= 10:
+            errors.append("OB_BAND_PCT 0-10 arasında olmalı")
+        if self.ob_wall_ratio <= 1 or self.ob_imbalance_ratio <= 1:
+            errors.append("OB_WALL_RATIO ve OB_IMBALANCE_RATIO 1'den büyük olmalı")
+        if not 5 <= self.tape_seconds <= 600 or not 0 < self.tape_min_buy_ratio < 1:
+            errors.append("TAPE_SECONDS 5-600 arasında, TAPE_MIN_BUY_RATIO 0 ile 1 arasında olmalı")
+        if not 0 <= self.daily_loss_limit_pct < 100 or self.daily_profit_target_pct < 0:
+            errors.append("DAILY_LOSS_LIMIT_PCT 0-100 arasında, DAILY_PROFIT_TARGET_PCT 0 veya pozitif olmalı")
+        if self.loss_streak_limit < 0 or self.coin_sl_limit < 0 or self.loss_streak_pause_hours <= 0:
+            errors.append("LOSS_STREAK_LIMIT ve COIN_SL_LIMIT 0 (kapalı) veya pozitif, LOSS_STREAK_PAUSE_HOURS "
+                          "sıfırdan büyük olmalı")
+        if self.slippage_alert_pct < 0:
+            errors.append("SLIPPAGE_ALERT_PCT 0 (kapalı) veya pozitif olmalı")
         if errors:
             raise ConfigError("Ayar hataları:\n  - " + "\n  - ".join(errors))
 
@@ -559,6 +610,30 @@ def load_config(env_file: Optional[str] = None, mode_override: Optional[str] = N
         equity_log_minutes=_env_int("EQUITY_LOG_MINUTES", 15),
         bnb_fee_check=_env_bool("BNB_FEE_CHECK", True),
         bnb_min_trades=_env_int("BNB_MIN_TRADES", 20),
+        notify_mode=_env_str("NOTIFY_MODE", "all").lower(),
+        service_name=_env_str("SERVICE_NAME", "tradebot.service"),
+        ip_check_minutes=_env_int("IP_CHECK_MINUTES", 10),
+        spread_filter=_env_bool("SPREAD_FILTER", True),
+        fakeout_filter=_env_bool("FAKEOUT_FILTER", False),
+        vwap_filter=_env_bool("VWAP_FILTER", False),
+        vwap_bars=_env_int("VWAP_BARS", 48),
+        overheat_filter=_env_bool("OVERHEAT_FILTER", False),
+        overheat_pct=_env_float("OVERHEAT_PCT", 10.0),
+        overheat_minutes=_env_int("OVERHEAT_MINUTES", 60),
+        ob_wall_filter=_env_bool("OB_WALL_FILTER", False),
+        ob_band_pct=_env_float("OB_BAND_PCT", 1.0),
+        ob_wall_ratio=_env_float("OB_WALL_RATIO", 10.0),
+        ob_imbalance_filter=_env_bool("OB_IMBALANCE_FILTER", False),
+        ob_imbalance_ratio=_env_float("OB_IMBALANCE_RATIO", 5.0),
+        tape_filter=_env_bool("TAPE_FILTER", False),
+        tape_seconds=_env_int("TAPE_SECONDS", 60),
+        tape_min_buy_ratio=_env_float("TAPE_MIN_BUY_RATIO", 0.55),
+        daily_loss_limit_pct=_env_float("DAILY_LOSS_LIMIT_PCT", 0.0),
+        daily_profit_target_pct=_env_float("DAILY_PROFIT_TARGET_PCT", 0.0),
+        loss_streak_limit=_env_int("LOSS_STREAK_LIMIT", 0),
+        loss_streak_pause_hours=_env_float("LOSS_STREAK_PAUSE_HOURS", 4.0),
+        coin_sl_limit=_env_int("COIN_SL_LIMIT", 3),
+        slippage_alert_pct=_env_float("SLIPPAGE_ALERT_PCT", 0.3),
     )
     cfg.validate()
     notes += _setting_notes(cfg)

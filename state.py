@@ -53,6 +53,17 @@ class BotState:
     rotation_refill: bool = False    # Dengeleme günü boşalan / dolmayan yer var: aynı gün yalnızca alımla doldurulacak
     rotation_plan_day: int = -1      # Son planlı dengelemenin günü (yarıda kalan / doldurma denemeleri aynı günle sınırlı)
     rotation_plan_slots: int = 0     # O günün hedef coin sayısı (yeniden denemelerde aynı sayı kullanılır)
+    # Risk sigortaları (yeni alımları geçici olarak dondurur)
+    day_key: str = ""                # day_pnl'in ait olduğu gün (yerel saat, YYYY-MM-DD)
+    day_pnl: float = 0.0             # Bugün kapanan işlemlerin net K/Z'si
+    sl_streak: int = 0               # Üst üste zarar kesle kapanan işlem sayısı
+    coin_sl_streak: Dict[str, int] = field(default_factory=dict)  # Coin karnesi: parite → üst üste zarar kes
+    freeze_until: float = 0.0        # Bu ana kadar yeni alım yok (0 = dondurma yok)
+    freeze_reason: str = ""
+    slippage_hist: List[float] = field(default_factory=list)      # Son alımların kayması (%)
+    public_ips: Dict[str, str] = field(default_factory=dict)      # Sunucunun bilinen dış IP'leri (IPv4 / IPv6)
+    # Telegram'dan strateji değiştirilirken eski grubun çıkış ayarları (geri dönünce aynen yüklenir)
+    family_settings: Dict[str, Dict[str, str]] = field(default_factory=dict)
 
     @property
     def capital(self) -> float:

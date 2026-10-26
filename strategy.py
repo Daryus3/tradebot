@@ -66,6 +66,7 @@ from binance_client import BinanceClient, RateLimitError
 from config import STRATEGY_NAMES
 from rotation import RotationPlan, btc_trend, momentum_pct, plan_rotation
 from exchange import SymbolRules
+from entry_filters import candle_reject
 from indicators import atr, ema, mean, rsi
 from logger import get_logger
 
@@ -483,6 +484,11 @@ class ReboundStrategy:
             if not room_ok(signal, cfg):
                 result.rejects["hedef alanı dar"] += 1
                 result.near_misses.append((symbol, f"hedef alanı dar (%{signal.metrics['room_pct']:.1f})"))
+                continue
+            why = candle_reject(cfg, raw)   # Ek mum filtreleri (FAKEOUT / VWAP / OVERHEAT; backtest'te de aynı)
+            if why:
+                result.rejects[why] += 1
+                result.near_misses.append((symbol, why))
                 continue
             found[symbol] = signal
 

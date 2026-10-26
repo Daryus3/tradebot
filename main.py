@@ -20,6 +20,7 @@ Kullanım:
     python main.py --backtest --strateji rotation  # Haftalık momentum rotasyonu: günlük mumlar, 3 yıllık veri
     python main.py --backtest --strateji mean_revert   # Büyük coinlerde trend içi aşırı satım alımı (küçük hedef)
     python main.py --backtest --turnuva             # Tüm strateji türleri × çıkış profilleri aynı yılda, sıralı tablo
+    python main.py --backtest --gun 90 --tara-ab    # Her giriş filtresini açıp / kapatıp kâra etkisini karşılaştırır
     python main.py --telegram-chat-id  # Telegram chat ID'nizi bulur
     python main.py --reset-state       # Kayıtlı durumu (K/Z, kill-switch) sıfırlar
 
@@ -30,7 +31,7 @@ Sunucuda systemd servisi olarak çalışır: deploy/tradebot.service, kurulum VP
     0 = normal durdurma (Ctrl+C veya Telegram /kapat)   → yeniden başlatılmaz
     1 = ayar / kullanıcı hatası                           → yeniden başlatılmaz
     2 = kill-switch tetiklendi                            → ASLA yeniden başlatılmaz
-    3 = beklenmedik hata / çökme                          → yeniden başlatılır
+    3 = beklenmedik hata / çökme, Telegram'dan yeniden başlatma → yeniden başlatılır
 """
 from __future__ import annotations
 
@@ -40,8 +41,8 @@ import time
 from datetime import datetime
 from typing import Optional
 
-from config import (DATA_DIR, STRATEGY_NAMES, ConfigError, is_long_horizon, is_mean_reversion, is_rotation,
-                    load_config)
+from config import (BASE_DIR, DATA_DIR, STRATEGY_NAMES, ConfigError, is_long_horizon, is_mean_reversion,
+                    is_rotation, load_config)
 from logger import redact, register_secrets, setup_logging
 
 EXIT_OK, EXIT_CONFIG, EXIT_KILLED, EXIT_CRASH = 0, 1, 2, 3
@@ -77,6 +78,11 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--tara-filtre", action="store_true",
                         help="Backtest (rebound): sinyal filtrelerini tek tek gevşetip işlem sayısına ve işlem başı "
                              "sonuca etkisini gösterir; çıkış ayarları .env'deki gibi kalır")
+    parser.add_argument("--tara-ab", action="store_true",
+                        help="A/B filtre testi: her giriş filtresini / risk sigortasını tek tek açıp kapatarak kazanma "
+                             "oranına ve net kâra etkisini aynı veriyle karşılaştırır")
+    parser.add_argument("--grafiksiz", action="store_true",
+                        help="Backtest K/Z dağılım grafiğini çizme / Telegram'a gönderme")
     parser.add_argument("--turnuva", action="store_true",
                         help="Backtest: ortalamaya dönüş / swing / rotasyon stratejilerini farklı çıkış kuralları ve "
                              "piyasa filtresiyle aynı dönemde (varsayılan 365 gün) dener, kazanma oranı ve işlem başı "
@@ -314,9 +320,15 @@ def run_backtest_cli(cfg, args) -> int:
         if args.tara_filtre and not filters:
             print(f"ℹ️ --tara-filtre yalnızca rebound stratejisinin filtrelerini dener ({cfg.strategy} için "
                   f"--tara-giris kullanın).")
-        if not (args.tara or args.tara_giris or compare or filters):
+        ab = args.tara_ab and not is_rotation(cfg.strategy)
+        if args.tara_ab and not ab:
+            print("ℹ️ --tara-ab giriş filtrelerini dener; rotasyonda bu filtreler kullanılmaz (--tara-giris kullanın).")
+        if not (args.tara or args.tara_giris or compare or filters or ab):
             result = backtest.run_backtest(cfg, client, days=days, max_symbols=args.coin_sayisi, end_time_ms=end_ms)
-            print(backtest.format_backtest_report(result, cfg))
+            report = backtest.format_backtest_report(result, cfg)
+            print(report)
+            if not args.grafiksiz and getattr(result, "trades", None):
+                _send_backtest_chart(cfg, result, report)
             return EXIT_OK
         data = backtest.prepare_backtest(cfg, client, days=days, max_symbols=args.coin_sayisi, end_time_ms=end_ms)
         cache: dict = {}   # Giriş analizleri taramalar arasında da paylaşılır (anahtar stratejiyi içerir)
@@ -346,12 +358,16 @@ def run_backtest_cli(cfg, args) -> int:
             print("🧪 Filtre taraması: her sinyal filtresi tek tek gevşetilip deneniyor (sinyal filtreleri değiştiği "
                   "için her satır analizleri yeniden yapar; birkaç dakika sürebilir)...")
             reports.append(("filtre", backtest.run_filter_sweep(cfg, data, progress=print, signal_cache=cache)))
+        if ab:
+            print("🧪 A/B filtre testi: her filtre / sigorta tek tek açılıp kapatılarak aynı veriyle deneniyor...")
+            reports.append(("ab", backtest.run_ab_test(cfg, data, progress=print, signal_cache=cache)))
     except Exception as exc:  # noqa: BLE001
         print(f"❌ Backtest çalıştırılamadı: {exc}")
         return EXIT_CONFIG
     stamp = datetime.now().strftime("%Y%m%d-%H%M")
     for kind, rows in reports:
         print(backtest.format_filter_report(rows, cfg, data) if kind == "filtre"
+              else backtest.format_ab_report(rows, cfg, data) if kind == "ab"
               else backtest.format_sweep_report(rows, cfg, data, kind=kind))
         try:
             path = backtest.save_sweep_csv(rows, DATA_DIR / f"tarama_{kind}_{stamp}.csv")
@@ -360,6 +376,46 @@ def run_backtest_cli(cfg, args) -> int:
             print(f"⚠️ Tarama dosyası yazılamadı: {exc}")
         print()
     return EXIT_OK
+
+
+def _send_backtest_chart(cfg, result, report: str) -> None:
+    """K/Z dağılım grafiğini data/ klasörüne kaydeder; Telegram ayarlıysa rapor ve grafiği oraya da gönderir
+    (sunucuda resim açılamadığı için grafiği telefondan görmenin en kolay yolu)."""
+    from charts import matplotlib_available, save_pnl_chart
+
+    if not matplotlib_available():
+        print("ℹ️ K/Z dağılım grafiği için matplotlib gerekir: .venv/bin/pip install matplotlib")
+        return
+    stamp = datetime.now().strftime("%Y%m%d-%H%M")
+    rotation = is_rotation(cfg.strategy)
+    try:
+        path = save_pnl_chart(result.trades, DATA_DIR / f"backtest_grafik_{stamp}.png",
+                              f"Backtest: {cfg.strategy} — {result.days:g} gün",
+                              None if rotation else cfg.take_profit_pct, cfg.stop_loss_pct)
+    except Exception as exc:  # noqa: BLE001 - grafik hatası raporu engellemesin
+        print(f"⚠️ Grafik çizilemedi: {exc}")
+        return
+    if path is None:
+        return
+    print(f"🖼️ K/Z dağılım grafiği: {path}")
+    if not cfg.has_telegram:
+        return
+    from telegram_bot import TelegramNotifier
+    notifier = TelegramNotifier(cfg.telegram_bot_token, cfg.telegram_chat_id, async_mode=False)
+    text_path = path.with_suffix(".txt")
+    try:
+        text_path.write_text(report, encoding="utf-8")
+    except OSError:
+        text_path = None
+    try:
+        sent = notifier.send_photo(path, f"📊 Backtest K/Z dağılımı — {cfg.strategy}, {result.days:g} gün, "
+                                         f"{len(result.trades)} işlem")
+        if text_path is not None:
+            notifier.send_document(text_path, "📄 Backtest raporu")
+    except Exception as exc:  # noqa: BLE001 - gönderim hatası backtest sonucunu etkilemesin
+        print(f"⚠️ Grafik Telegram'a gönderilemedi: {exc}")
+        return
+    print("📤 Grafik ve rapor Telegram'a gönderildi." if sent else "⚠️ Grafik Telegram'a gönderilemedi.")
 
 
 def is_transient_binance_error(exc) -> bool:
@@ -416,12 +472,15 @@ def run_bot(cfg, store, args, log) -> int:
     client = BinanceClient(cfg.binance_api_key, cfg.binance_api_secret, cfg.binance_base_url)
     prefix = "🧪 <i>[TEST MODU]</i>\n" if cfg.is_paper else ""
     notifier = TelegramNotifier(cfg.telegram_bot_token, cfg.telegram_chat_id, prefix=prefix,
-                                quiet_window=cfg.quiet_window, max_queue=cfg.telegram_queue_max)
+                                quiet_window=cfg.quiet_window, max_queue=cfg.telegram_queue_max,
+                                mode=cfg.notify_mode)
     if not notifier.enabled:
         log.warning("Telegram ayarlı değil; bildirimler sadece terminale yazılacak.")
 
+    from pathlib import Path
+    env_path = Path(args.env) if args.env else BASE_DIR / ".env"   # Telegram menüsünden değişen ayarlar buraya yazılır
     try:
-        return _start_bot(cfg, store, client, notifier, log)
+        return _start_bot(cfg, store, client, notifier, log, env_path)
     finally:
         notifier.flush()  # Kuyruktaki Telegram mesajlarının gitmesini bekle
 
@@ -452,7 +511,7 @@ def _build_optional_parts(cfg, client, notifier, log):
     return price_stream, listener, coin_filter, regime
 
 
-def _start_bot(cfg, store, client, notifier, log) -> int:
+def _start_bot(cfg, store, client, notifier, log, env_path=None) -> int:
     from exchange import LiveExchange, PaperExchange
     from state import BotState, EquityLog, TradeLog
     from strategy import make_strategy
@@ -509,10 +568,15 @@ def _start_bot(cfg, store, client, notifier, log) -> int:
         exchange = LiveExchange(client, cfg.quote_asset, cfg.fee_rate)
 
     price_stream, listener, coin_filter, regime = _build_optional_parts(cfg, client, notifier, log)
+    ip_monitor = None
+    if cfg.ip_check_minutes > 0:
+        from ip_monitor import IpMonitor
+        ip_monitor = IpMonitor(cfg.ip_check_minutes * 60)
     bot = TradingBot(cfg, exchange, make_strategy(client, cfg, coin_filter=coin_filter, regime=regime),
                      notifier, store, state, TradeLog(DATA_DIR / f"trades_{cfg.trading_mode}.csv"),
                      equity_log=EquityLog(DATA_DIR / f"equity_{cfg.trading_mode}.csv"),
-                     price_stream=price_stream, command_listener=listener)
+                     price_stream=price_stream, command_listener=listener, settings_path=env_path,
+                     ip_monitor=ip_monitor)
 
     from binance_client import BinanceAPIError
     from exchange import OrderError

@@ -43,6 +43,7 @@ from risk import (ExitReason, Position, breakeven_effective, evaluate_exit, kill
 from rotation import btc_trend, momentum_pct, plan_rotation, pump_pct
 from config import (PROFILE_ATTRS, PROFILES, ConfigError, is_long_horizon, is_mean_reversion, is_rotation,
                     strategy_family)
+from entry_filters import candle_filters_on, candle_reject
 from strategy import KLINE_LIMIT, STRATEGIES, Signal, make_strategy, required_move_pct, room_ok, strategy_class
 from telegram_bot import LINE, fmt_duration, fmt_price, fmt_rate, fmt_signed, fmt_usdt
 
@@ -547,6 +548,11 @@ class _Simulator:
         self.killed = False
         self.killed_at: Optional[int] = None
         self.stats: Counter = Counter()
+        # Risk sigortaları (canlı TradingBot._after_close ile aynı kurallar; gün sınırı UTC)
+        self.freeze_until = 0
+        self.day = -1
+        self.day_pnl = 0.0
+        self.sl_streak = 0
 
     # ------------------------------------------------------------ yardımcılar
     def _market_level(self, target_pct: float, op: _OpenPos) -> float:
@@ -654,6 +660,35 @@ class _Simulator:
             fee_usdt=op.buy_fee + fee, peak_after_sec=max(0, op.peak_ms - op.open_ms) / 1000,
             room_pct=op.room))
         self.cooldown[symbol] = t_ms + self.cfg.symbol_cooldown_minutes * 60_000
+        self._after_close(pnl, reason, t_ms)
+
+    def _after_close(self, pnl: float, reason: str, t_ms: int) -> None:
+        """Günlük zarar limiti / kâr hedefi ve zarar serisi sigortası: tetiklenirse yeni alımlar dondurulur."""
+        cfg = self.cfg
+        if self.strategy.is_rotation:
+            return
+        day = t_ms // DAY_MS
+        if day != self.day:
+            self.day, self.day_pnl = day, 0.0
+        self.day_pnl += pnl
+        midnight = (day + 1) * DAY_MS
+        if cfg.daily_loss_limit_pct > 0 and self.day_pnl <= -cfg.start_capital * cfg.daily_loss_limit_pct / 100 + 1e-9:
+            self._freeze(midnight)
+        if cfg.daily_profit_target_pct > 0 and self.day_pnl >= cfg.start_capital * cfg.daily_profit_target_pct / 100:
+            self._freeze(midnight)
+        if reason in (ExitReason.STOP_LOSS.value, ExitReason.BACKUP_STOP.value):
+            self.sl_streak += 1
+        elif reason not in (ExitReason.MANUAL.value, ExitReason.KILL_SWITCH.value, ExitReason.EXTERNAL.value,
+                            END_REASON):
+            self.sl_streak = 0
+        if cfg.loss_streak_limit > 0 and self.sl_streak >= cfg.loss_streak_limit:
+            self.sl_streak = 0
+            self._freeze(t_ms + int(cfg.loss_streak_pause_hours * 3_600_000))
+
+    def _freeze(self, until_ms: int) -> None:
+        if until_ms > self.freeze_until:
+            self.freeze_until = until_ms
+            self.stats["dondurma"] += 1
 
     # ------------------------------------------------------------ 2) kill-switch
     def _check_kill_switch(self, k: int, t_close: int) -> bool:
@@ -698,6 +733,8 @@ class _Simulator:
         free_slots = slots - len(self.open)
         if free_slots <= 0:
             return
+        if t_close < self.freeze_until:      # Canlıda da risk sigortası tetiklenince yeni alım yapılmaz
+            return
         if not self._btc_ok(k):
             self.stats["btc_engel"] += 1
             return
@@ -741,6 +778,11 @@ class _Simulator:
             if signal and not room_ok(signal, cfg):
                 self.stats["alan_dar"] += 1    # Canlı tarama da hedef alanı dar sinyali almaz
                 continue
+            if signal and candle_filters_on(cfg):   # Canlı taramayla aynı ek mum filtreleri
+                why = candle_reject(cfg, self.series[symbol].window(k, self.strategy.kline_limit))
+                if why:
+                    self.stats[f"filtre:{why}"] += 1
+                    continue
             if signal:
                 signals.append(signal)
         if not signals:
@@ -760,7 +802,8 @@ class _Simulator:
             committed = sum(op.pos.cost_usdt for op in self.open.values())
             remaining = capital - committed
             is_last_slot = len(self.open) + 1 >= slots
-            budget = remaining if is_last_slot else min(target, remaining)  # Son slot artanı kullanır
+            # Son slot artanı kullanır (yedek akçe açıkken, CAPITAL_USAGE_PCT < 100, kullanmaz: canlıdaki gibi)
+            budget = remaining if is_last_slot and cfg.capital_usage_pct >= 100 else min(target, remaining)
             entry_price = signal.price * self.entry_factor
             plan = plan_entry(min(budget, self.cash), rules, entry_price, cfg)
             if not plan.ok:
@@ -1249,6 +1292,14 @@ SWEEP_FIELDS: Dict[str, Tuple[str, type, Optional[str]]] = {
     "MAX_CANDIDATES": ("max_candidates", int, None),
     "SYMBOL_COOLDOWN_MINUTES": ("symbol_cooldown_minutes", int, None),
     "BTC_MAX_1H_DROP_PCT": ("btc_max_1h_drop_pct", float, None),
+    # A/B filtre testi (--tara-ab)
+    "BTC_FILTER": ("btc_filter", bool, None),
+    "REGIME_FILTER": ("regime_filter", bool, None),
+    "FAKEOUT_FILTER": ("fakeout_filter", bool, None),
+    "VWAP_FILTER": ("vwap_filter", bool, None),
+    "OVERHEAT_FILTER": ("overheat_filter", bool, None),
+    "LOSS_STREAK_LIMIT": ("loss_streak_limit", int, None),
+    "DAILY_LOSS_LIMIT_PCT": ("daily_loss_limit_pct", float, None),
 }
 # Filtre gevşetme taraması (rebound): her satırda TEK filtre bir adım gevşetilir. (.env anahtarı, yön: +1 = değeri
 # büyütmek gevşetir / -1 = küçültmek gevşetir, adımlar hafiften güçlüye; mevcut değerden gevşek olan ilki denenir)
@@ -1691,6 +1742,135 @@ def format_filter_report(rows: Sequence[SweepRow], cfg, data: BacktestData, spre
                  f"{data.days:g} --tara-filtre --strateji {cfg.strategy} --bitis {_fmt_date(data.sim_start_ms)}")
     lines.append(f"📝 Backtest en hacimli {len(data.series)} coinle yapılır; canlı bot daha çok coine bakar ve 30 sn'de "
                  "bir tarar, işlem sayıları canlıda farklı olabilir. Kayma yok, geçmiş sonuçlar geleceği garanti etmez.")
+    return "\n".join(lines)
+
+
+# ================================================================ A/B filtre testi (--tara-ab)
+# Her satırda TEK filtre / sigorta mevcut durumunun tersine çevrilir (açıksa kapatılır, kapalıysa açılır); çıkışlar
+# ve diğer ayarlar .env'deki gibi kalır. (.env anahtarı, rapordaki ad, "açık" değeri, "kapalı" değeri)
+AB_TESTS: Tuple[Tuple[str, str, Union[bool, int, float], Union[bool, int, float]], ...] = (
+    ("BTC_FILTER", "BTC sigortası", True, False),
+    ("REGIME_FILTER", "Piyasa rejimi filtresi", True, False),
+    ("FAKEOUT_FILTER", "Sahte yükseliş (üst fitil)", True, False),
+    ("VWAP_FILTER", "VWAP filtresi", True, False),
+    ("OVERHEAT_FILTER", "Aşırı ısınma", True, False),
+    ("LOSS_STREAK_LIMIT", "Zarar serisi sigortası", 3, 0),
+    ("DAILY_LOSS_LIMIT_PCT", "Günlük zarar limiti", 3.0, 0.0),
+)
+AB_CANDLE_KEYS = ("FAKEOUT_FILTER", "VWAP_FILTER", "OVERHEAT_FILTER")
+AB_LIVE_ONLY = "Satış duvarı radarı, emir defteri dengesizliği ve tape teyidi"
+
+
+def _ab_state(key: str, value) -> str:
+    if isinstance(value, bool):
+        return "açık" if value else "kapalı"
+    if not value:
+        return "kapalı"
+    return f"{value:g} SL" if key == "LOSS_STREAK_LIMIT" else f"-%{value:g}"
+
+
+def ab_combos(cfg, regime_available: bool = True) -> List[Combo]:
+    """İlk satır mevcut ayarlar; sonra her filtre tek tek ters çevrilir; en sonda üç mum filtresi birden açık."""
+    combos: List[Combo] = [({}, True)]
+    for key, _label, on, off in AB_TESTS:
+        attr = SWEEP_FIELDS[key][0]
+        current = getattr(cfg, attr)
+        if key == "REGIME_FILTER" and not (current and regime_available):
+            continue   # Rejim verisi yalnızca filtre açıkken hazırlanır: kapalıyken "açık" hali denenemez
+        if is_rotation(cfg.strategy) and key != "REGIME_FILTER":
+            continue
+        value = off if current else on
+        if _valid(replace(cfg, **{attr: SWEEP_FIELDS[key][1](value)})):
+            combos.append(({key: value}, False))
+    if not is_rotation(cfg.strategy):
+        together = {k: True for k in AB_CANDLE_KEYS if not getattr(cfg, SWEEP_FIELDS[k][0])}
+        if len(together) > 1:
+            combos.append((together, False))
+    return combos
+
+
+def run_ab_test(cfg, data: BacktestData, spread_pct: float = 0.05, progress: Progress = None,
+                signal_cache: Optional[dict] = None) -> List[SweepRow]:
+    """A/B filtre testi: her filtre açık / kapalı aynı veriyle simüle edilir (sinyal analizi önbellekten)."""
+    return run_sweep(cfg, data, spread_pct, progress, ab_combos(cfg, data.regime is not None), signal_cache)
+
+
+def _ab_label(cfg, settings: Settings) -> str:
+    if not settings:
+        return "mevcut ayarlar"
+    if len(settings) > 1:
+        return "3 mum filtresi birden açık"
+    (key, value), = settings.items()
+    name = next(label for k, label, _on, _off in AB_TESTS if k == key)
+    return f"{name}: {_ab_state(key, getattr(cfg, SWEEP_FIELDS[key][0]))} → {_ab_state(key, value)}"
+
+
+def format_ab_report(rows: Sequence[SweepRow], cfg, data: BacktestData, spread_pct: float = 0.05) -> str:
+    """A/B raporu: her filtrenin kazanma oranına ve net kâra etkisi."""
+    q = cfg.quote_asset
+    base = next(r for r in rows if r.baseline)
+    width = max([26] + [len(_ab_label(cfg, r.settings)) for r in rows])
+    label = INTERVAL_LABELS.get(data.interval, data.interval)
+    lines = [
+        f"🧪 A/B FİLTRE TESTİ — strateji: {cfg.strategy} (her satırda TEK filtre açıldı / kapatıldı; çıkışlar sabit)",
+        LINE,
+        f"🗓️ Dönem: {_fmt_time(data.sim_start_ms)} → {_fmt_time(data.end_ms)} ({data.days:g} gün, {label} mumlar) | "
+        f"{len(data.series)} sembol | sermaye {fmt_usdt(cfg.start_capital)} {q} | komisyon {fmt_rate(cfg.fee_rate)} "
+        f"| spread %{spread_pct:g}",
+        f"⚙️ Çıkışlar (tüm satırlarda): {_exit_summary(cfg)}",
+        "   (Karşılaştırma adil olsun diye kill-switch kapalıdır; maks. düşüşe bakın.)",
+        LINE,
+        f"   {'Değişen filtre':<{width}} | İşlem  Fark  Kaz%  ΔKaz  İşl.başı   Net USDT     ΔNet  MaksDD",
+    ]
+    better: List[SweepRow] = []
+    worse: List[SweepRow] = []
+    for r in rows:
+        d_net = r.net - base.net
+        if r.baseline:
+            mark = "⭐"
+        elif r.trades == base.trades and abs(d_net) < 1e-9:
+            mark = "· "
+        elif not r.enough_trades:
+            mark = "? "
+        elif d_net > 0 and r.mean_net_pct >= base.mean_net_pct:
+            mark = "🟢"
+            better.append(r)
+        elif d_net < 0:
+            mark = "🔴"
+            worse.append(r)
+        else:
+            mark = "🟡"
+        lines.append(
+            f"{mark} {_ab_label(cfg, r.settings):<{width}} | {r.trades:>5d} {r.trades - base.trades:>+5d} "
+            f"{r.win_rate:>5.1f} {r.win_rate - base.win_rate:>+5.1f} {r.mean_net_pct:>+8.2f}% {r.net:>+10.4f} "
+            f"{d_net:>+8.4f} {r.max_dd_pct:>6.1f}%")
+    lines += [
+        "   ⭐ = .env'deki mevcut ayarlarınız | Fark / ΔKaz / ΔNet = mevcut ayara göre işlem sayısı, kazanma oranı",
+        "   (puan) ve net kâr farkı | 🟢 = net kâr arttı ve işlem başı sonuç kötüleşmedi | 🔴 = net kâr azaldı",
+        f"   🟡 = net kâr arttı ama işlem başı sonuç kötüleşti | ? = {MIN_TRADES_FOR_EVIDENCE}'dan az işlem (şans olabilir)",
+        "   · = sonuç değişmedi (bu dönemde filtre hiçbir sinyale takılmadı)",
+        LINE,
+    ]
+    if better:
+        lines.append("🟢 Bu dönemde kârı artıranlar (.env'de bu satırları yazın):")
+        for r in sorted(better, key=lambda r: r.net, reverse=True):
+            lines.append(f"   {_ab_label(cfg, r.settings)} ({r.net - base.net:+.4f} {q}) → " + "  ".join(
+                f"{k}={_fmt_setting(k, v)}" for k, v in r.settings.items()))
+        lines += [
+            "   Fark küçükse şans olabilir. Önce daha önceki bir dönemde de aynı sonucu verdiğini görün:",
+            f"   python main.py --backtest --gun {data.days:g} --tara-ab --bitis {_fmt_date(data.sim_start_ms)}",
+        ]
+    else:
+        lines.append("ℹ️ Bu dönemde hiçbir filtre değişikliği net kârı (yeterli işlemle) artırmadı.")
+    if worse:
+        lines.append("🔴 Kârı azaltanlar: " + ", ".join(_ab_label(cfg, r.settings) for r in worse))
+    if base.mean_net_pct < 0 and not any(r.mean_net_pct > 0 for r in better):
+        lines.append(f"❗ Mevcut ayarlarla işlem başı sonuç {fmt_signed(base.mean_net_pct)}%: filtreler zararı azaltabilir "
+                     "ama stratejiyi kârlı yapmıyor (bkz. --turnuva).")
+    lines.append(f"📝 {AB_LIVE_ONLY} geçmiş emir defteri verisi olmadığı için backtest edilemez; test modunda canlı "
+                 "verilerle /tarama raporundaki elenme sayılarına bakın.")
+    lines.append("📝 Günlük zarar limiti backtest'te UTC gün sınırıyla, canlıda yerel saatle hesaplanır. Kayma yok, "
+                 "geçmiş sonuçlar geleceği garanti etmez.")
     return "\n".join(lines)
 
 
@@ -2375,6 +2555,11 @@ def format_backtest_report(result: BacktestResult, cfg) -> str:
             lines.append(f"📏 Hedef alanı dar olduğu için alınmayan sinyal: {st['alan_dar']}")
         if st.get("yeni_coin"):
             lines.append(f"🆕 Yeni listelendiği için (MIN_LISTING_DAYS) incelenmeyen aday: {st['yeni_coin']}")
+        filtered = {k.split(":", 1)[1]: v for k, v in st.items() if k.startswith("filtre:")}
+        if filtered:
+            lines.append("🛡️ Ek filtrelere takılan sinyal: " + ", ".join(f"{k}: {v}" for k, v in filtered.items()))
+        if st.get("dondurma"):
+            lines.append(f"🧊 Risk sigortası (zarar serisi / günlük limit) alımları {st['dondurma']} kez dondurdu")
 
     lines.append(LINE)
     if trades:

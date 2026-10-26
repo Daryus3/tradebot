@@ -10,6 +10,7 @@ Telegram'dan bot kontrolü (iki yönlü komutlar).
 from __future__ import annotations
 
 import queue
+import secrets
 import threading
 import time
 from dataclasses import dataclass, field
@@ -39,6 +40,7 @@ STRATEGY_LABELS = {"rebound": "rebound (düşen coinde dip)", "trend": "trend (y
 
 # Telegram'ın "/" menüsünde görünecek komutlar
 COMMAND_MENU = [
+    ("menu", "Kontrol paneli (düğmeli menü)"),
     ("durum", "Genel durum ve bakiye"),
     ("pozisyon", "Açık pozisyonlar, hedef ve stop fiyatları"),
     ("bakiye", "Bakiye (TL karşılığıyla)"),
@@ -54,6 +56,11 @@ COMMAND_MENU = [
     ("kapat", "Botu güvenle kapat"),
     ("sermayeekle", "Hesaba eklediğiniz parayı bota tanıtın: /sermayeekle 10"),
     ("ayarlar", "Geçerli kurallar ve ayarlar"),
+    ("ayar", "Ayar değiştir: /ayar tp 2.5"),
+    ("piyasa", "Piyasayı tara: dipte olup hacmi artan coinler"),
+    ("gecikme", "Binance'e ağ gecikmesi (ms)"),
+    ("loglar", "Son 15 log satırı"),
+    ("ip", "Sunucunun dış IP adresi"),
     ("ping", "Bot çalışıyor mu?"),
     ("yardim", "Komut listesi"),
 ]
@@ -64,6 +71,11 @@ class Command:
     name: str
     args: List[str] = field(default_factory=list)
     at: float = field(default_factory=time.time)
+    kind: str = "command"      # command: yazılan komut | callback: menü düğmesine basıldı (args = düğme verisi)
+    message_id: int = 0        # callback: düğmenin bulunduğu mesaj (menü yerinde güncellenir)
+
+
+CALLBACK = "menü"              # Düğme basımlarının komut adı (loglarda görünür; yazılarak çağrılamaz)
 
 
 def parse_command(text: str) -> Optional[Command]:
@@ -156,7 +168,7 @@ class TelegramCommandListener:
                 if not ready:
                     self._setup()
                     ready = True
-                params = {"timeout": self.poll_timeout, "allowed_updates": ["message"]}
+                params = {"timeout": self.poll_timeout, "allowed_updates": ["message", "callback_query"]}
                 if self._offset is not None:
                     params["offset"] = self._offset
                 data = self._call("getUpdates", params, timeout=self.poll_timeout + 10)
@@ -190,6 +202,9 @@ class TelegramCommandListener:
                 backoff = min(backoff * 2, 60)
 
     def _handle_update(self, update: dict) -> None:
+        if update.get("callback_query"):
+            self._handle_callback(update["callback_query"])
+            return
         msg = update.get("message") or {}
         chat_id = str((msg.get("chat") or {}).get("id", ""))
         text = (msg.get("text") or "").strip()
@@ -211,6 +226,30 @@ class TelegramCommandListener:
         self.commands.put(cmd)
         self.wakeup.set()
 
+    def _handle_callback(self, query: dict) -> None:
+        """Menü düğmesine basıldı. Komutlardaki gibi YALNIZCA TELEGRAM_CHAT_ID sohbetindeki düğmeler kabul edilir."""
+        msg = query.get("message") or {}
+        chat_id = str((msg.get("chat") or {}).get("id", ""))
+        data = str(query.get("data") or "")
+        if chat_id != self.chat_id:
+            log.warning("Yetkisiz sohbetten düğme basımı reddedildi (chat %s)", chat_id or "?")
+            self._answer(query.get("id"), "⛔ Bu bot size ait değil.")
+            return
+        self._answer(query.get("id"))   # Telegram'daki "yükleniyor" göstergesini hemen kapat
+        if not data:
+            return
+        self.commands.put(Command(CALLBACK, data.split(":"), kind="callback",
+                                  message_id=int(msg.get("message_id") or 0)))
+        self.wakeup.set()
+
+    def _answer(self, query_id, text: str = "") -> None:
+        if not query_id:
+            return
+        try:
+            self._call("answerCallbackQuery", {"callback_query_id": query_id, **({"text": text} if text else {})})
+        except Exception as exc:  # noqa: BLE001
+            log.debug("Düğme cevabı gönderilemedi: %s", redact(str(exc)))
+
 
 class ConflictError(Exception):
     pass
@@ -218,10 +257,11 @@ class ConflictError(Exception):
 
 @dataclass
 class PendingConfirm:
-    action: str            # sell | sellall | close | addcap
+    action: str            # sell | sellall | close | addcap | restart | strategy (symbol = strateji adı)
     symbol: str = ""
     amount: float = 0.0
     expires: float = 0.0
+    token: str = ""        # Onay düğmesinin kimliği: eski bir mesajdaki düğme sonraki bir işlemi onaylayamaz
 
 
 class CommandProcessor:
@@ -233,10 +273,15 @@ class CommandProcessor:
         self.pending: Optional[PendingConfirm] = None
         self._try_rate: Optional[float] = None
         self._try_at = 0.0
+        from control_panel import ControlPanel   # döngüsel içe aktarmayı önlemek için
+        self.panel = ControlPanel(self)
 
     # ------------------------------------------------------------ yardımcılar
     def reply(self, text: str) -> None:
         self.bot.notifier.send(text)
+
+    def reply_menu(self, text: str, keyboard, message_id: Optional[int] = None) -> None:
+        self.bot.notifier.send_menu(text, keyboard, message_id)
 
     def _find_position(self, query: str):
         q = query.upper().strip()
@@ -267,6 +312,13 @@ class CommandProcessor:
 
     # ------------------------------------------------------------ giriş noktası
     def handle(self, cmd: Command) -> None:
+        if cmd.kind == "callback":
+            try:
+                self.panel.handle_callback(cmd)
+            except Exception as exc:  # noqa: BLE001 - tek düğme hatası botu durdurmasın
+                log.exception("Menü hatası: %s", ":".join(cmd.args))
+                self.reply(Messages.error(f"Menü işlemi yapılamadı: {exc}"))
+            return
         handler = getattr(self, f"cmd_{cmd.name}", None)
         if handler is None:
             self.reply(f"❓ Bilinmeyen komut: /{esc(cmd.name)}\nKomut listesi için /yardim yazın.")
@@ -301,6 +353,8 @@ class CommandProcessor:
         notes = []
         if bot.state.paused:
             notes.append("⏸️ Yeni alımlar DURDURULMUŞ (/devam ile açın)")
+        if bot.freeze_note():
+            notes.append(esc(bot.freeze_note()) + " — /menu → Risk")
         if bot.last_scan is not None and bot.last_scan.regime != "NORMAL":
             notes.append(f"🌡️ Piyasa rejimi: {bot.last_scan.regime} — {esc(bot.last_scan.regime_note)}")
         if notes:
@@ -429,7 +483,48 @@ class CommandProcessor:
                f"{esc(self.bot.fee_status_line())}\n"
                f"⏱️ Tarama: {cfg.scan_interval_sec} sn | Maks. tutma: "
                f"{fmt_duration(cfg.max_hold_minutes * 60, exact=True) if cfg.max_hold_minutes else 'sınırsız'}\n")
-            + "<i>Ayarlar sunucudaki ayarlar.env / .env dosyasından değiştirilir.</i>")
+            + self._extras_line()
+            + "<i>Ayarları /menu'den (veya /ayar ile) değiştirebilirsiniz; değişiklik sunucudaki .env'ye kaydedilir.</i>")
+
+    def _extras_line(self) -> str:
+        """/ayarlar: ek filtreler, risk sigortaları, yedek akçe ve bildirim modu."""
+        from control_panel import FILTER_KEYS, NOTIFY_LABELS
+        from runtime_settings import EDITABLE
+        cfg = self.bot.cfg
+        extra = [EDITABLE[k].label for k in FILTER_KEYS[2:] if getattr(cfg, EDITABLE[k].attr)]
+        guards = []
+        if cfg.daily_loss_limit_pct > 0:
+            guards.append(f"günlük zarar -%{cfg.daily_loss_limit_pct:g}")
+        if cfg.daily_profit_target_pct > 0:
+            guards.append(f"günlük hedef +%{cfg.daily_profit_target_pct:g}")
+        if cfg.loss_streak_limit > 0:
+            guards.append(f"{cfg.loss_streak_limit} SL → {cfg.loss_streak_pause_hours:g} sa ara")
+        return (f"🛡️ Ek filtreler: {esc(', '.join(extra)) if extra else 'kapalı'} | 🧯 Sigortalar: "
+                f"{esc(', '.join(guards)) if guards else 'kapalı'}\n"
+                f"💰 İlk giriş: %{cfg.capital_usage_pct:g} | 🔔 Bildirim: {NOTIFY_LABELS.get(cfg.notify_mode)}\n"
+                + (f"{esc(self.bot.freeze_note())}\n" if self.bot.freeze_note() else ""))
+
+    def cmd_menu(self, args) -> None:
+        self.panel.show_main()
+
+    cmd_panel = cmd_menu
+
+    def cmd_ayar(self, args) -> None:
+        self.panel.set_from_text(args)
+
+    def cmd_piyasa(self, args) -> None:
+        self.panel.market_scan()
+
+    def cmd_gecikme(self, args) -> None:
+        self.panel.latency()
+
+    def cmd_loglar(self, args) -> None:
+        self.panel.logs()
+
+    cmd_log = cmd_loglar
+
+    def cmd_ip(self, args) -> None:
+        self.panel.ip_info()
 
     # ------------------------------------------------------------ kontrol komutları
     def cmd_durdur(self, args) -> None:
@@ -548,6 +643,10 @@ class CommandProcessor:
         elif pending.action == "close":
             self.reply("👋 Bot kapatılıyor...")
             self.bot.stop()
+        elif pending.action == "restart":
+            self.panel.restart("Telegram'dan yeniden başlatma istendi")
+        elif pending.action == "strategy":
+            self.panel.apply_strategy(pending.symbol)
         elif pending.action == "addcap":
             bot, q = self.bot, self.bot.cfg.quote_asset
             problem = self._capital_problem(pending.amount)  # Onay beklerken bakiye değişmiş olabilir
@@ -570,10 +669,15 @@ class CommandProcessor:
 
     def _ask(self, pending: PendingConfirm, detail: str, question: str) -> None:
         pending.expires = self.time_fn() + CONFIRM_TIMEOUT_SEC
+        pending.token = secrets.token_hex(4)
         self.pending = pending
-        pin_hint = " PIN" if self.bot.cfg.command_pin else ""
-        self.reply(f"❓ {question}{detail}\n\n✅ Onaylamak için {CONFIRM_TIMEOUT_SEC} sn içinde "
-                   f"<b>/evet{pin_hint}</b>, vazgeçmek için /hayir yazın.")
+        pin = bool(self.bot.cfg.command_pin)
+        text = (f"❓ {question}{detail}\n\n✅ Onaylamak için {CONFIRM_TIMEOUT_SEC} sn içinde "
+                f"<b>/evet{' PIN' if pin else ''}</b>, vazgeçmek için /hayir yazın.")
+        # PIN ayarlıysa onay yalnızca "/evet PIN" yazılarak verilir (düğmeyle PIN girilemez)
+        no = ("❌ Hayır", f"no:{pending.token}")
+        buttons = [[no]] if pin else [[("✅ Evet", f"yes:{pending.token}"), no]]
+        self.reply_menu(text, buttons)
 
     def _estimate_line(self, positions) -> str:
         q = self.bot.cfg.quote_asset

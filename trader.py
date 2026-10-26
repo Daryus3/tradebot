@@ -25,6 +25,8 @@ import requests
 
 from binance_client import BinanceAPIError, RateLimitError
 from config import is_rotation, parse_hhmm
+from control_panel import READ_ONLY_CALLBACKS
+from entry_filters import live_reject
 from exchange import BaseExchange, FeeInfo, Fill, OrderError, combine_fills
 from logger import get_logger
 from risk import (ExitReason, Position, evaluate_exit, kill_switch_hit, net_exit_value, plan_entry, pnl_pct,
@@ -55,7 +57,14 @@ SCAN_TIME_BUDGET_SEC = 45     # Bir tarama en fazla bu kadar sürer (Binance yav
 SLOW_TICK_SEC = 20           # Döngü bundan uzun sürerse adım adım süreler loga yazılır
 # Tarama sürerken de hemen cevaplanan, yalnızca bilgi gösteren komutlar (diğerleri tarama bitince çalışır)
 READ_ONLY_COMMANDS = frozenset({"durum", "pozisyon", "bakiye", "islemler", "csv", "istatistik", "rapor", "tarama",
-                                "ayarlar", "ping", "yardim", "help", "start"})
+                                "ayarlar", "ping", "yardim", "help", "start", "menu", "panel", "piyasa", "gecikme",
+                                "loglar", "log", "ip"})
+# Risk sigortaları: zarar serisine sayılan çıkışlar; seriyi ne bozan ne artıran (elle / bot dışı) çıkışlar
+STOP_EXITS = frozenset({ExitReason.STOP_LOSS, ExitReason.BACKUP_STOP})
+NEUTRAL_EXITS = frozenset({ExitReason.MANUAL, ExitReason.KILL_SWITCH, ExitReason.EXTERNAL})
+SLIPPAGE_WINDOW = 10           # Kayma alarmı: son bu kadar alımın ortalaması
+SLIPPAGE_MIN_SAMPLES = 5
+SLIPPAGE_ALERT_COOLDOWN_SEC = 6 * 3600
 ROTATION_SELL_RETRY_SEC = 30  # Satılamayan rotasyon pozisyonu bu aralıkla tekrar denenir  # Kalanın satılamayacak kadar az olduğu hatalar
 
 
@@ -81,8 +90,10 @@ class DayScanStats:
 class TradingBot:
     def __init__(self, cfg, exchange: BaseExchange, strategy: ReboundStrategy, notifier: TelegramNotifier,
                  store: StateStore, state: BotState, trade_log: TradeLog, equity_log: Optional[EquityLog] = None,
-                 price_stream=None, command_listener=None, time_fn=time.time):
+                 price_stream=None, command_listener=None, time_fn=time.time, settings_path=None, ip_monitor=None):
         self.cfg = cfg
+        self.settings_path = settings_path   # Telegram menüsünden değişen ayarların yazıldığı .env (None = yazılmaz)
+        self.ip_monitor = ip_monitor
         self.exchange = exchange
         self.strategy = strategy
         self.notifier = notifier
@@ -93,6 +104,7 @@ class TradingBot:
         self.price_stream = price_stream
         self.command_listener = command_listener
         self.time_fn = time_fn
+        notifier.mode = cfg.notify_mode
         from commands import CommandProcessor  # döngüsel içe aktarmayı önlemek için
         self.commands = CommandProcessor(self, time_fn=time_fn)
         self._deferred_commands: list = []   # Tarama sırasında gelen, tarama bitince çalışacak komutlar
@@ -168,6 +180,8 @@ class TradingBot:
             self.store.save(self.state)
             if self.command_listener is not None:
                 self.command_listener.stop()
+            if self.ip_monitor is not None:
+                self.ip_monitor.stop()
             if self.price_stream is not None:
                 self.price_stream.stop()
             if not self.state.killed or self.state.positions:
@@ -202,6 +216,8 @@ class TradingBot:
             self._sync_stream_symbols()
         if self.command_listener is not None:
             self.command_listener.start()
+        if self.ip_monitor is not None:
+            self.ip_monitor.start()
 
     def _announce_startup(self, pairs: int, now: float) -> None:
         cfg = self.cfg
@@ -227,6 +243,14 @@ class TradingBot:
     def set_paused(self, paused: bool) -> None:
         self.state.paused = paused
         self.store.save(self.state)
+
+    def apply_config(self, cfg) -> None:
+        """Telegram menüsünden değişen ayarları çalışan bota uygular (strateji, filtreler, bildirim modu)."""
+        self.cfg = cfg
+        for part in (self.strategy, getattr(self.strategy, "coin_filter", None), getattr(self.strategy, "regime", None)):
+            if part is not None and hasattr(part, "cfg"):
+                part.cfg = cfg
+        self.notifier.mode = cfg.notify_mode
 
     # ================================================================ ana adım
     def tick(self) -> None:
@@ -267,7 +291,7 @@ class TradingBot:
                     self.rotation_tick(now)
                 lap("rotasyon")
             elif (not self.state.paused and not self.state.killed and now >= self.next_scan_at
-                    and self.free_slots() > 0):
+                    and self.free_slots() > 0 and not self.entries_frozen(now)):
                 self.next_scan_at = now + self.cfg.scan_interval_sec
                 self.scan_and_enter(now)
                 lap("tarama")
@@ -299,7 +323,8 @@ class TradingBot:
         onay...) tarama bitince çalıştırmak üzere sıraya alır. Süre sınırı dolduysa False (taramayı bitir)."""
         if self.command_listener is not None:
             for cmd in self.command_listener.get_commands():
-                if cmd.name in READ_ONLY_COMMANDS:
+                if (cmd.name in READ_ONLY_COMMANDS if cmd.kind != "callback"
+                        else bool(cmd.args) and cmd.args[0] in READ_ONLY_CALLBACKS):
                     self._run_command(cmd)
                 else:
                     self._deferred_commands.append(cmd)
@@ -426,13 +451,19 @@ class TradingBot:
                 continue
             bid, ask = self.bid_ask(signal.symbol)
             spread = (ask - bid) / ((ask + bid) / 2) * 100 if ask > 0 and bid > 0 else 100.0
-            if spread > cfg.max_spread_pct:
+            if cfg.spread_filter and spread > cfg.max_spread_pct:
                 log.info("%s atlandı: spread %%%.2f > %%%.2f", signal.symbol, spread, cfg.max_spread_pct)
                 self.day_stats.rejects["spread geniş"] += 1
                 continue
+            why = live_reject(cfg, self.exchange.client, signal.symbol, ask)
+            if why:
+                self.day_stats.rejects[why] += 1
+                continue
             remaining = capital - state.committed
             is_last_slot = len(state.positions) + 1 >= slots
-            budget = remaining if is_last_slot else min(target, remaining)  # Son slot artanı da kullanır
+            # Son slot artanı da kullanır; yedek akçe açıksa (CAPITAL_USAGE_PCT < 100) diğer pozisyonların yedeğine
+            # dokunulmaz
+            budget = remaining if is_last_slot and cfg.capital_usage_pct >= 100 else min(target, remaining)
             plan = plan_entry(min(budget, free), rules, ask, cfg)
             if not plan.ok:
                 log.info("%s atlandı: %s", signal.symbol, plan.reason)
@@ -547,7 +578,7 @@ class TradingBot:
         self.last_rotation, self.last_rotation_at = text, now
         log.info("Rotasyon%s: tut %s | sat %s | al %s | %s", " (doldurma)" if refill else "", plan.keep,
                  sold + unsold, bought, note)
-        self.notifier.send(text)
+        self.notifier.notify(text, "close")
 
     def _rotation_buys(self, plan, slots: int) -> List[str]:
         state, cfg = self.state, self.cfg
@@ -683,11 +714,12 @@ class TradingBot:
             return False
 
         expected = context.get("expected_ask")
-        if expected and self.cfg.slippage_warn_pct > 0:
+        if expected:
             slip = (fill.avg_price - expected) / expected * 100
-            if slip > self.cfg.slippage_warn_pct:
+            if self.cfg.slippage_warn_pct > 0 and slip > self.cfg.slippage_warn_pct:
                 self.notifier.send(Messages.warning(
                     f"{signal.symbol} alış fiyatı beklenenden %{slip:.2f} yüksek gerçekleşti (kayma)."))
+            self._track_slippage(slip)
         self._register_position(signal.symbol, fill, signal.note(), signal.score, dict(signal.metrics),
                                  context, slots, client_order_id)
         return True
@@ -717,8 +749,8 @@ class TradingBot:
         backup_line = self._place_backup(pos)
         self.store.save(self.state)
         self._sync_stream_symbols()
-        self.notifier.send(Messages.buy(pos, self.levels(pos), note, self.cfg, len(self.state.positions), slots,
-                                        backup_line))
+        self.notifier.notify(Messages.buy(pos, self.levels(pos), note, self.cfg, len(self.state.positions), slots,
+                                          backup_line), "open")
         return pos
 
     def levels(self, pos: Position) -> dict:
@@ -816,14 +848,15 @@ class TradingBot:
         if update_trailing(pos, mark.pnl_pct, cfg):
             floor = trailing_floor_pct(pos, cfg)
             if announce:
-                self.notifier.send(Messages.trailing_activated(
-                    pos, mark.pnl_pct, price_for_pnl(floor, pos.cost_usdt, sellable, cfg.fee_rate), floor, cfg))
+                self.notifier.notify(Messages.trailing_activated(
+                    pos, mark.pnl_pct, price_for_pnl(floor, pos.cost_usdt, sellable, cfg.fee_rate), floor, cfg),
+                    "update")
             changed = True
         if update_breakeven(pos, cfg):
             if announce:
-                self.notifier.send(Messages.breakeven_activated(
+                self.notifier.notify(Messages.breakeven_activated(
                     pos, mark.pnl_pct, price_for_pnl(cfg.breakeven_floor_pct, pos.cost_usdt, sellable, cfg.fee_rate),
-                    cfg))
+                    cfg), "update")
             changed = True
         if changed or pos.peak_pnl_pct > old_peak + 0.25:
             self.store.save(self.state)
@@ -1103,10 +1136,11 @@ class TradingBot:
                 f"Kapattığınızda bekleyen kayıtlar otomatik yazılacak."), cooldown_sec=3600)
         self._sync_stream_symbols()
 
-        self.notifier.send(Messages.sell(
+        self.notifier.notify(Messages.sell(
             reason.value, pos, exit_price, proceeds, sell_fee, pnl, pct, now - pos.opened_at,
             state.capital, state.realized_pnl, state.trades, state.wins, state.losses, self.cfg, estimated,
-            open_positions=len(state.positions)), critical=reason.value in CRITICAL_EXITS)
+            open_positions=len(state.positions)), "close", critical=reason.value in CRITICAL_EXITS)
+        self._after_close(pos.symbol, pnl, reason, now)
 
     # ================================================================ kill-switch
     def trigger_kill(self, total_pnl: float) -> None:
@@ -1456,24 +1490,27 @@ class TradingBot:
         if target and self.state.last_daily_report < target.isoformat():
             start, end = self._report_window(target, self._report_minute(), 1)
             label = (end - timedelta(hours=12)).date()  # Pencerenin büyük kısmının düştüğü gün
-            self.notifier.send(self.period_report(start, end, f"📅 Günlük Özet ({label:%d.%m.%Y})"), silent=True)
+            self.notifier.notify(self.period_report(start, end, f"📅 Günlük Özet ({label:%d.%m.%Y})"), "routine",
+                                 silent=True)
             self.state.last_daily_report = target.isoformat()
             self.store.save(self.state)
         sunday = self._weekly_target(now)
         if sunday and self.state.last_weekly_report < _week_key(sunday):
             start, end = self._report_window(sunday, self._report_minute(weekly=True), 7)
             first_day = (end - timedelta(days=6, hours=12)).date()
-            self.notifier.send(self.period_report(start, end,
-                                                  f"🗓️ Haftalık Özet ({first_day:%d.%m} – {sunday:%d.%m.%Y})"),
-                               silent=True)
+            self.notifier.notify(self.period_report(start, end,
+                                                    f"🗓️ Haftalık Özet ({first_day:%d.%m} – {sunday:%d.%m.%Y})"),
+                                 "routine", silent=True)
             self.state.last_weekly_report = _week_key(sunday)
             self.store.save(self.state)
 
     def _periodic(self, now: float) -> None:
         if now >= self.next_status_at:
             self.next_status_at = now + self.cfg.status_report_minutes * 60
-            self.send_status()
+            self.send_status(routine=True)
         self._maybe_reports(now)
+        self._check_freeze_end(now)
+        self._check_ip()
         if self.equity_log is not None and now >= self.next_equity_at:
             self.next_equity_at = now + self.cfg.equity_log_minutes * 60
             self.equity_log.append(now, self.state.capital, self.unrealized(), len(self.state.positions))
@@ -1491,7 +1528,7 @@ class TradingBot:
             self.state.last_alive = now
             self.store.save(self.state)
 
-    def send_status(self, silent: bool = True) -> None:
+    def send_status(self, silent: bool = True, routine: bool = False) -> None:
         state = self.state
         lines = []
         for pos in state.positions.values():
@@ -1502,9 +1539,127 @@ class TradingBot:
                              f"{fmt_duration(self.time_fn() - pos.opened_at)}")
         unrealized = self.unrealized()
         total = state.realized_pnl + unrealized
-        self.notifier.send(Messages.status(
+        text = Messages.status(
             state.capital + unrealized, total, state.trades, state.wins, state.losses, self.cfg,
-            "\n".join(lines), self.loss_limit + total, len(state.positions), self.target_slots()), silent=silent)
+            "\n".join(lines), self.loss_limit + total, len(state.positions), self.target_slots())
+        if routine:   # Periyodik rapor bildirim moduna tabidir; /durum cevabı her zaman gider
+            self.notifier.notify(text, "routine", silent=silent)
+        else:
+            self.notifier.send(text, silent=silent)
+
+    # ================================================================ risk sigortaları
+    def entries_frozen(self, now: float) -> bool:
+        return self.state.freeze_until > now
+
+    def freeze_note(self) -> str:
+        """Alımlar sigorta nedeniyle dondurulmuşsa açıklaması, değilse ''."""
+        if not self.entries_frozen(self.time_fn()):
+            return ""
+        until = datetime.fromtimestamp(self.state.freeze_until)
+        return f"🧊 Yeni alımlar donduruldu (bitiş {until:%d.%m %H:%M}): {self.state.freeze_reason}"
+
+    def unfreeze(self) -> None:
+        self.state.freeze_until = 0.0
+        self.state.freeze_reason = ""
+        self.state.sl_streak = 0
+        self.store.save(self.state)
+
+    def _freeze(self, until: float, reason: str) -> None:
+        state = self.state
+        if until <= state.freeze_until:
+            return
+        state.freeze_until, state.freeze_reason = until, reason
+        self.store.save(state)
+        log.warning("Yeni alımlar donduruldu (bitiş %s): %s", datetime.fromtimestamp(until), reason)
+        self.notifier.send(
+            f"🧊 <b>Yeni alımlar donduruldu</b> (bitiş {datetime.fromtimestamp(until):%d.%m %H:%M}): {esc(reason)}.\n"
+            f"Açık pozisyonların takibi sürüyor. Erken açmak için /menu → Risk → Dondurmayı kaldır.")
+
+    def _check_freeze_end(self, now: float) -> None:
+        state = self.state
+        if state.freeze_until and now >= state.freeze_until:
+            state.freeze_until, state.freeze_reason = 0.0, ""
+            self.store.save(state)
+            self.notifier.send("▶️ Alım dondurması sona erdi; bot yeniden fırsat arıyor.")
+
+    def _day_key(self, now: float) -> str:
+        return datetime.fromtimestamp(now).strftime("%Y-%m-%d")
+
+    def today_pnl(self) -> float:
+        """Bugünkü (yerel saat) gerçekleşen net K/Z."""
+        return self.state.day_pnl if self.state.day_key == self._day_key(self.time_fn()) else 0.0
+
+    def daily_loss_usdt(self) -> float:
+        return self.state.start_capital * self.cfg.daily_loss_limit_pct / 100
+
+    def _after_close(self, symbol: str, pnl: float, reason: ExitReason, now: float) -> None:
+        """Kapanan işlemden sonra: günlük limit, zarar serisi sigortası ve coin karnesi."""
+        state, cfg = self.state, self.cfg
+        if is_rotation(cfg.strategy):   # Rotasyon kendi takvimiyle alır; sigortalar 5 dk / swing taraması içindir
+            return
+        day = self._day_key(now)
+        if state.day_key != day:
+            state.day_key, state.day_pnl = day, 0.0
+        state.day_pnl += pnl
+        midnight = (datetime.fromtimestamp(now).replace(hour=0, minute=0, second=0, microsecond=0)
+                    + timedelta(days=1)).timestamp()
+        q = cfg.quote_asset
+        if cfg.daily_loss_limit_pct > 0 and state.day_pnl <= -self.daily_loss_usdt() + 1e-9:
+            self._freeze(midnight, f"günlük zarar limiti (bugün {state.day_pnl:+.2f} {q}, sınır "
+                                   f"-%{cfg.daily_loss_limit_pct:g})")
+        if (cfg.daily_profit_target_pct > 0
+                and state.day_pnl >= state.start_capital * cfg.daily_profit_target_pct / 100):
+            self._freeze(midnight, f"günlük kâr hedefine ulaşıldı (bugün {state.day_pnl:+.2f} {q}); kâr korunuyor")
+        if reason in STOP_EXITS:
+            state.sl_streak += 1
+            state.coin_sl_streak[symbol] = state.coin_sl_streak.get(symbol, 0) + 1
+        elif reason not in NEUTRAL_EXITS:
+            state.sl_streak = 0
+            state.coin_sl_streak.pop(symbol, None)
+        if cfg.loss_streak_limit > 0 and state.sl_streak >= cfg.loss_streak_limit:
+            streak, state.sl_streak = state.sl_streak, 0
+            self._freeze(now + cfg.loss_streak_pause_hours * 3600,
+                         f"üst üste {streak} zarar kes (piyasa stratejiye uygun değil olabilir)")
+        if cfg.coin_sl_limit > 0 and state.coin_sl_streak.get(symbol, 0) >= cfg.coin_sl_limit:
+            count = state.coin_sl_streak.pop(symbol)
+            self.notifier.send_menu(
+                f"📒 <b>Coin karnesi:</b> {esc(symbol)} son {count} işlemde üst üste zarar kesle kapandı.\n"
+                f"24 saat kara listeye alınsın mı? (Bu sürede {esc(symbol)} alınmaz.)",
+                [[("⛔ Evet, 24 saat", f"bl:{symbol}"), ("Hayır", f"nobl:{symbol}")]])
+        self.store.save(state)
+
+    def _track_slippage(self, slip_pct: float) -> None:
+        """Kayma alarmı: son SLIPPAGE_WINDOW alımın ortalama kayması SLIPPAGE_ALERT_PCT'yi aşarsa uyarır."""
+        hist = self.state.slippage_hist
+        hist.append(round(slip_pct, 4))
+        del hist[:-SLIPPAGE_WINDOW]
+        limit = self.cfg.slippage_alert_pct
+        if limit <= 0 or len(hist) < SLIPPAGE_MIN_SAMPLES:
+            return
+        avg = sum(hist) / len(hist)
+        if avg > limit:
+            self.notifier.send_error("slippage-avg", Messages.warning(
+                f"Son {len(hist)} alımda ortalama kayma %{avg:.2f} (alışlar beklenen fiyattan pahalı gerçekleşiyor, "
+                f"sınır %{limit:g}). Sığ emir defterli coinlerde olur: MAX_SPREAD_PCT'yi düşürmeyi, "
+                f"MIN_QUOTE_VOLUME_24H'yi artırmayı veya /menu → Filtreler'den defter filtrelerini açmayı düşünün."),
+                cooldown_sec=SLIPPAGE_ALERT_COOLDOWN_SEC)
+
+    def _check_ip(self) -> None:
+        """IP izleyicisinin bulduğu yeni dış IP'yi kayıtlı olanla karşılaştırır; değiştiyse alarm."""
+        if self.ip_monitor is None:
+            return
+        for family, ip in self.ip_monitor.poll():
+            old = self.state.public_ips.get(family)
+            self.state.public_ips[family] = ip
+            self.store.save(self.state)
+            if old is None:
+                log.info("Sunucunun dış %s adresi: %s", family, ip)
+            elif old != ip:
+                log.warning("Sunucunun dış %s adresi değişti: %s → %s", family, old, ip)
+                self.notifier.send(
+                    f"🚨 <b>Sunucunun dış IP adresi değişti</b> ({family}): <code>{esc(old)}</code> → "
+                    f"<code>{esc(ip)}</code>\nBinance API anahtarında IP kısıtlaması varsa yeni adresi Binance → "
+                    f"API Yönetimi'nde ekleyin; yoksa emirler -2015 hatasıyla reddedilir.", critical=True)
 
     # ================================================================ yardımcılar
     def _next_sleep(self) -> float:

@@ -120,12 +120,34 @@ kilitli kalır (`--reset-state` ile açılır).
 | ↔️ Spread / ATR / BTC filtresi | Alış-satış farkı geniş, çok sakin ya da aşırı oynak coinlere ve BTC sert düşerken alım yapmaz |
 | 🪙 BNB komisyon takibi | Gerçek komisyon oranını ve BNB bakiyesini izler, `FEE_RATE` yanlışsa uyarır (BNB almaz) |
 | 🔐 Gizli bilgi koruması | Token ve API anahtarları loglara ve mesajlara açık yazılmaz |
+| 🌐 IP alarmı | Sunucunun dış IP'sini 10 dk'da bir kontrol eder (api.ipify.org); değişirse uyarır (Binance IP kısıtlaması) |
+| 🧯 Risk sigortaları | Üst üste 3 zarar keste 4 saat, günlük zarar limitinde gün sonuna kadar yeni alım yapmaz; aynı coinde 3 zarar keste kara liste önerir; ortalama kayma artarsa uyarır |
+| 🛡️ Ek giriş filtreleri | Sahte yükseliş (üst fitil), VWAP, aşırı ısınma; canlıda satış duvarı, emir defteri dengesizliği, tape teyidi (varsayılan kapalı, `/menu` → Filtreler) |
 
 ---
 
 ## 📱 Telegram komutları
 
-Bot **yalnızca sizin sohbetinizden** (`TELEGRAM_CHAT_ID`) gelen komutları kabul eder.
+Bot **yalnızca sizin sohbetinizden** (`TELEGRAM_CHAT_ID`) gelen komutları ve menü düğmelerini kabul eder.
+
+### 🎛️ Kontrol paneli: `/menu`
+`/menu` yazınca düğmeli bir panel açılır:
+
+| Düğme | Ne yapar? |
+|---|---|
+| 📊 Durum · ⏸️ Durdur / ▶️ Devam | `/durum`, `/durdur`, `/devam` ile aynı |
+| ⚙️ Ayarlar | Kâr Al, Zarar Kes, izleyen stop (±0.5) ve en fazla pozisyon (±1); hemen uygulanır |
+| 💰 Sermaye (yedek akçe) | İlk giriş yüzdesi: %100 (kapalı) / %75 / %50 / %33 — kalan pay USDT olarak yedekte bekler |
+| 🧭 Strateji | Hazır stratejiler arasında geçiş (onay ister, bot yeniden başlar; grubun çıkış ayarları yüklenir, eski grubunkiler saklanır) |
+| 🔔 Bildirim | Tümü / Sadece Kapanışlar / Sessiz Mod (komut cevapları ve acil uyarılar her zaman gelir) |
+| 🛡️ Filtreler · 🧯 Risk | Ek giriş filtrelerini ve risk sigortalarını açar / kapatır |
+| 🔎 Piyasayı Tara | En hacimli 40 coinde "dipte olup hacmi artan"ları listeler (bilgi amaçlı, alım yapmaz) |
+| 📶 Gecikme · 📜 Son Loglar · 🌐 IP | Binance'e ms gecikme, son 15 log satırı, sunucunun dış IP'si |
+| 🔄 Sunucu Reset | Bot servisini yeniden başlatır (onay ister; ayrıntı VPS_KURULUM.md) |
+
+Menüden değiştirilen her ayar doğrulanır, hemen uygulanır ve sunucudaki `.env`'nin sonuna yazılır (bot yeniden
+başlasa da kalır; `.env`, `ayarlar.env`'yi ezer). Diğer ayarlar için `/ayar ANAHTAR DEĞER` (örn. `/ayar tp 2.5`,
+`/ayar DAILY_LOSS_LIMIT_PCT 3`). API anahtarları, mod, sermaye ve kill-switch Telegram'dan değiştirilemez.
 
 | Komut | Ne yapar? |
 |---|---|
@@ -138,8 +160,11 @@ Bot **yalnızca sizin sohbetinizden** (`TELEGRAM_CHAT_ID`) gelen komutları kabu
 | `/kapat` | Botu güvenle kapatır (onay ister; servis yeniden başlatmaz) |
 | `/sermayeekle 10` | Hesaba eklediğiniz parayı bota tanıtır (onay ister) |
 | `/ayarlar` · `/ping` · `/yardim` | Ayarlar, "çalışıyor musun?", komut listesi |
+| `/menu` · `/ayar tp 2.5` | Kontrol paneli; tek bir ayarı değiştirme |
+| `/piyasa` · `/gecikme` · `/loglar` · `/ip` | Piyasa taraması, ağ gecikmesi, son loglar, dış IP |
 
-Riskli komutlar 60 sn içinde `/evet` onayı ister (`COMMAND_PIN` ayarlıysa `/evet PIN`). Her gece günlük, pazar
+Riskli komutlar 60 sn içinde `/evet` (veya ✅ düğmesi) onayı ister (`COMMAND_PIN` ayarlıysa düğme gösterilmez,
+`/evet PIN` yazılır). Her gece günlük, pazar
 günleri haftalık özet gelir.
 
 ---
@@ -192,6 +217,11 @@ ettirir; kararı "İşl.başı" sütunu verir. Seçilen birleşimi `--bitis` ile
 
 - **Teşhis bölümü:** işlem başına fiyat hareketiyle komisyon + spread maliyetini ayırır, işlemlerin ne kadarının
   hedefe ulaştığını ve dönemin iki yarısının ayrı sonuçlarını gösterir.
+- **K/Z dağılım grafiği:** normal backtest her işlemin net K/Z'sini nokta grafiği olarak `data/backtest_grafik_*.png`
+  dosyasına çizer (matplotlib gerekir) ve Telegram ayarlıysa grafiği + raporu Telegram'a gönderir (`--grafiksiz` ile kapanır).
+- **A/B filtre testi** (`--tara-ab`): her giriş filtresini / risk sigortasını (BTC sigortası, piyasa rejimi, üst
+  fitil, VWAP, aşırı ısınma, zarar serisi, günlük limit) tek tek açıp kapatarak aynı veriyle kazanma oranına ve net
+  kâra etkisini gösterir. Emir defteri / tape filtreleri geçmiş veriyle denenemez.
 - **Taramalar** (`--tara`, `--tara-giris`, `--tara-filtre`): veri bir kez indirilir, ayarlar aynı veriyle denenir;
   karşılaştırma adil olsun diye kill-switch kapalıdır. Çok ayar denendiğinde birkaçı tesadüfen kârlı çıkar:
   yalnızca **iki yarıda da kârlı (✅) ve ≥30 işlemli** satırları ciddiye alın, sonra çakışmayan daha eski bir
@@ -224,6 +254,12 @@ tradebot/
 ├── price_stream.py    # Anlık fiyat akışı (WebSocket)
 ├── telegram_bot.py    # Telegram bildirimleri
 ├── commands.py        # Telegram komutları
+├── control_panel.py   # Telegram kontrol paneli (/menu): düğmeler, ayar değiştirme, strateji seçimi, reset
+├── runtime_settings.py  # Telegram'dan değiştirilebilen ayarlar ve .env'ye güvenli yazma
+├── entry_filters.py   # Ek giriş filtreleri (fitil, VWAP, aşırı ısınma, emir defteri, tape)
+├── ip_monitor.py      # Sunucunun dış IP'sini izler, değişirse alarm
+├── market_scan.py     # "Piyasayı Tara": dipte olup hacmi artan coinler
+├── charts.py          # Backtest K/Z dağılım grafiği (matplotlib)
 ├── stats.py           # İstatistikler ve raporlar
 ├── backtest.py        # Geçmiş veriyle strateji testi ve taramalar
 ├── state.py           # Kalıcı durum ve işlem kayıtları (data/)

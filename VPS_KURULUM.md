@@ -441,6 +441,70 @@ sudo -iu tradebot bash -c 'cd ~/tradebot && git pull && .venv/bin/pip install -r
 sudo systemctl start tradebot
 ```
 
+### Telegram'dan ayar değiştirme ve yeniden başlatma
+
+Telegram'da `/menu` yazın: Kâr Al, Zarar Kes, pozisyon sayısı, filtreler, bildirimler ve risk sigortaları
+düğmelerle değişir. Değişiklik hemen uygulanır ve `.env`'nin sonuna yazılır (sunucuya bağlanmanız gerekmez).
+Strateji değişikliği ve **🔄 Sunucu Reset** botu yeniden başlatır (~20 sn).
+
+**Sunucu Reset nasıl çalışır?** Bot önce `sudo systemctl restart tradebot.service` komutunu **şifresiz** çalıştırmayı
+dener. Bu izin yoksa (varsayılan) kendini "yeniden başlat" koduyla kapatır ve systemd onu 15 sn sonra yeniden açar.
+Yani düğme **hiçbir ek ayar yapmadan da çalışır**; aşağıdaki adımlar yalnızca gerçek
+`systemctl restart` komutunun kullanılmasını isterseniz gereklidir.
+
+#### (İsteğe bağlı) Şifresiz `systemctl restart` izni — visudo
+
+> ⚠️ Bu izin, bot kullanıcısına (tradebot) **yalnızca bu tek komutu** root olarak çalıştırma hakkı verir. Satırı
+> aşağıdakinden farklı yazmayın: `ALL` gibi geniş bir izin, bota (veya bot hesabını ele geçiren birine) sunucunun
+> tamamını verir.
+
+1. Sunucuya bağlanın ve izin dosyasını **visudo ile** açın (visudo, hatalı satırı kaydetmenize izin vermez;
+   sudoers dosyasını başka bir düzenleyiciyle açmak sudo'yu tamamen bozabilir):
+
+   ```
+   sudo visudo -f /etc/sudoers.d/tradebot
+   ```
+
+2. Açılan boş dosyaya **tek satır** olarak şunu yapıştırın:
+
+   ```
+   tradebot ALL=(root) NOPASSWD: /usr/bin/systemctl --no-block restart tradebot.service
+   ```
+
+   Kaydedip çıkın: nano açıldıysa **Ctrl+O**, **Enter**, **Ctrl+X**. ("vi" açıldıysa **Esc**, sonra `:wq` ve
+   **Enter**.) Hata varsa visudo `What now?` diye sorar: **e** ile düzeltin.
+
+3. Dosya iznini ayarlayın ve denetleyin (`parsed OK` görmelisiniz):
+
+   ```
+   sudo chmod 440 /etc/sudoers.d/tradebot && sudo visudo -c
+   ```
+
+4. Servis dosyasındaki `NoNewPrivileges=true` satırı, servis içinden sudo çalıştırılmasını **engeller** (bir
+   güvenlik önlemidir). İzni kullanmak için bu satırı kapatmanız gerekir:
+
+   ```
+   sudo nano /etc/systemd/system/tradebot.service
+   ```
+
+   `NoNewPrivileges=true` satırının başına `#` koyun → `#NoNewPrivileges=true`. Kaydedin (**Ctrl+O**, **Enter**,
+   **Ctrl+X**), sonra:
+
+   ```
+   sudo systemctl daemon-reload && sudo systemctl restart tradebot
+   ```
+
+5. Deneyin: `sudo -iu tradebot sudo -n /usr/bin/systemctl --no-block restart tradebot.service` komutu şifre
+   sormadan çalışmalı (bot yeniden başlar). Telegram'da `/menu` → 🔄 Sunucu Reset → ✅ Evet ile de deneyebilirsiniz;
+   mesajda "sudo systemctl restart" yazıyorsa izin çalışıyor demektir.
+
+Geri almak için: `sudo rm /etc/sudoers.d/tradebot`, servis dosyasındaki `#`'i kaldırıp
+`sudo systemctl daemon-reload && sudo systemctl restart tradebot`. **Öneri:** ek bir izin gerektirmeyen varsayılan
+yöntem aynı işi görür; bu adımları yalnızca gerçekten `systemctl restart` istiyorsanız yapın.
+
+> Not: systemd, 15 dakikada 5'ten fazla yeniden başlatmada servisi durdurur (`StartLimitBurst`). Düğmeye arka arkaya
+> çok basarsanız: `sudo systemctl reset-failed tradebot && sudo systemctl start tradebot`.
+
 ### Kill-switch tetiklenirse
 
 Bot her şeyi satar, kapanır ve kendiliğinden açılmaz. Nedenini anladıktan sonra:
@@ -460,6 +524,15 @@ Bot çalışmaya devam ederken de yapılabilir (90 günlük filtre taraması bir
 ```
 sudo -iu tradebot bash -c 'cd ~/tradebot && .venv/bin/python main.py --backtest --gun 90 --sermaye 32 --tara-filtre'
 ```
+
+Ek filtrelerin (üst fitil, VWAP, aşırı ısınma) ve risk sigortalarının kâra etkisini görmek için (A/B testi):
+
+```
+sudo -iu tradebot bash -c 'cd ~/tradebot && .venv/bin/python main.py --backtest --gun 90 --sermaye 32 --tara-ab'
+```
+
+Normal backtest (`--tara` gibi bir ek olmadan) her işlemin kâr / zararını gösteren grafiği çizer ve Telegram'a
+gönderir (sunucuda resim açamadığınız için grafiği Telegram'dan görürsünüz).
 
 ---
 

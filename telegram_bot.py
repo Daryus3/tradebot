@@ -82,6 +82,12 @@ def _strip_html(text: str) -> str:
 # ---------------------------------------------------------------- gönderici
 _OK, _DROP, _RETRY = "ok", "drop", "retry"
 _RETRY_DELAYS = (2, 5, 10, 30)
+# Bildirim modu (NOTIFY_MODE) → gönderilmeyen mesaj türleri. Komut cevapları, uyarılar ve kritik mesajlar her zaman gider.
+#   open: alım | update: izleyen stop / başabaş devreye girdi | routine: periyodik durum, günlük / haftalık rapor
+#   close: pozisyon kapanışı
+MUTED_CATEGORIES = {"all": frozenset(), "closes": frozenset({"open", "update", "routine"}),
+                    "silent": frozenset({"open", "update", "routine", "close"})}
+Keyboard = List[List[Tuple[str, str]]]   # Satırlar halinde (düğme yazısı, callback verisi)
 
 
 class TelegramNotifier:
@@ -96,7 +102,7 @@ class TelegramNotifier:
 
     def __init__(self, token: str, chat_id: str, prefix: str = "", timeout: float = 10.0,
                  async_mode: bool = True, quiet_window: Optional[Tuple[int, int]] = None,
-                 max_queue: int = 300, now_fn=None):
+                 max_queue: int = 300, now_fn=None, mode: str = "all"):
         self.token = token
         self.chat_id = chat_id
         self.prefix = prefix
@@ -105,9 +111,10 @@ class TelegramNotifier:
         self.quiet_window = quiet_window
         self.max_queue = max_queue
         self.now_fn = now_fn or time.time
+        self.mode = mode
         self.session = requests.Session()
         self._last_error_sent: Dict[str, float] = {}
-        self._items: Deque[Tuple[str, str, bool, bool]] = deque()  # (tür, içerik, sessiz, kritik)
+        self._items: Deque[tuple] = deque()  # (tür, içerik, sessiz, kritik, ek: düğmeler / düzenlenecek mesaj)
         self._cond = threading.Condition()
         self._busy = False
         self._worker: Optional[threading.Thread] = None
@@ -132,7 +139,35 @@ class TelegramNotifier:
             silent = True
         if not self.async_mode:
             return self._deliver_text(full, silent) == _OK
-        self._enqueue(("text", full, silent, critical))
+        self._enqueue(("text", full, silent, critical, None))
+        return True
+
+    def notify(self, text: str, category: str, silent: bool = False, critical: bool = False) -> bool:
+        """Bildirim moduna (NOTIFY_MODE) tabi mesaj: susturulan türdeyse yalnızca loga yazılır."""
+        if not critical and category in MUTED_CATEGORIES.get(self.mode, frozenset()):
+            log.info("🔕 (bildirim modu: %s) %s", self.mode, _strip_html(redact(text)).replace("\n", " | "))
+            return False
+        return self.send(text, silent=silent, critical=critical)
+
+    def send_menu(self, text: str, keyboard: Optional[Keyboard] = None, message_id: Optional[int] = None) -> bool:
+        """Altında düğmeler olan mesaj. message_id verilirse o mesaj (menü) yerinde güncellenir."""
+        full = redact(f"{self.prefix}{text}")
+        log.info("📨 %s", _strip_html(full).replace("\n", " | "))
+        if not self.enabled:
+            return False
+        extra = {"keyboard": keyboard or [], "edit": message_id}
+        if not self.async_mode:
+            return self._deliver_text(full, False, extra) == _OK
+        self._enqueue(("text", full, False, False, extra))
+        return True
+
+    def send_photo(self, path, caption: str = "") -> bool:
+        """Resim gönderir (örn. backtest grafiği)."""
+        if not self.enabled:
+            return False
+        if not self.async_mode:
+            return self._deliver_document(str(path), redact(caption), "sendPhoto", "photo") == _OK
+        self._enqueue(("photo", f"{path}\n{redact(caption)}", False, False, None))
         return True
 
     def send_document(self, path, caption: str = "") -> bool:
@@ -141,7 +176,7 @@ class TelegramNotifier:
             return False
         if not self.async_mode:
             return self._deliver_document(str(path), redact(caption)) == _OK
-        self._enqueue(("doc", f"{path}\n{redact(caption)}", False, False))
+        self._enqueue(("doc", f"{path}\n{redact(caption)}", False, False, None))
         return True
 
     def send_error(self, key: str, text: str, cooldown_sec: int = 600) -> bool:
@@ -193,13 +228,14 @@ class TelegramNotifier:
                     self._cond.wait()
                 item = self._items[0]
                 self._busy = True
-            kind, payload, silent, _ = item
+            kind, payload, silent, _, extra = item
             try:
-                if kind == "doc":
+                if kind in ("doc", "photo"):
                     path, caption = payload.split("\n", 1)
-                    result = self._deliver_document(path, caption)
+                    result = (self._deliver_document(path, caption, "sendPhoto", "photo") if kind == "photo"
+                              else self._deliver_document(path, caption))
                 else:
-                    result = self._deliver_text(payload, silent)
+                    result = self._deliver_text(payload, silent, extra)
             except Exception as exc:  # noqa: BLE001 - gönderici iş parçacığı asla ölmesin
                 log.warning("Telegram gönderim hatası: %s", redact(str(exc)))
                 result = _DROP
@@ -225,12 +261,20 @@ class TelegramNotifier:
                     log.info(note)
                     self._deliver_text(f"{self.prefix}{note}", True)
 
-    def _deliver_text(self, full: str, silent: bool) -> str:
+    def _deliver_text(self, full: str, silent: bool, extra: Optional[dict] = None) -> str:
         if len(full) > MAX_LEN:
             full = full[: MAX_LEN - 20] + "\n…(kısaltıldı)"
         payload = {"chat_id": self.chat_id, "text": full, "parse_mode": "HTML",
                    "disable_web_page_preview": True, "disable_notification": silent}
-        url = API_URL.format(token=self.token, method="sendMessage")
+        method = "sendMessage"
+        if extra is not None and (extra["keyboard"] or extra.get("edit")):   # Boş düğme listesi: düz mesaj
+            payload["reply_markup"] = {"inline_keyboard": [
+                [{"text": label, "callback_data": data} for label, data in row] for row in extra["keyboard"]]}
+        if extra is not None and extra.get("edit"):
+            method = "editMessageText"
+            payload["message_id"] = extra["edit"]
+            payload.pop("disable_notification")
+        url = API_URL.format(token=self.token, method=method)
         for _ in range(3):
             try:
                 resp = self.session.post(url, json=payload, timeout=self.timeout)
@@ -243,6 +287,15 @@ class TelegramNotifier:
                 continue
             if resp.ok:
                 return _OK
+            if method == "editMessageText" and resp.status_code == 400:
+                if "not modified" in resp.text.lower():   # Menü zaten bu halde
+                    return _OK
+                # Eski / silinmiş mesaj düzenlenemez: menüyü yeni mesaj olarak gönder
+                method = "sendMessage"
+                payload.pop("message_id", None)
+                payload["disable_notification"] = silent
+                url = API_URL.format(token=self.token, method=method)
+                continue
             if resp.status_code == 400 and "parse" in resp.text.lower():
                 # HTML biçimlendirme hatası: düz metin olarak tekrar dene
                 payload.pop("parse_mode", None)
@@ -254,12 +307,12 @@ class TelegramNotifier:
             return _DROP
         return _RETRY
 
-    def _deliver_document(self, path: str, caption: str) -> str:
-        url = API_URL.format(token=self.token, method="sendDocument")
+    def _deliver_document(self, path: str, caption: str, method: str = "sendDocument", field: str = "document") -> str:
+        url = API_URL.format(token=self.token, method=method)
         try:
             with open(path, "rb") as fh:
                 resp = self.session.post(url, data={"chat_id": self.chat_id, "caption": caption[:1000]},
-                                         files={"document": fh}, timeout=max(self.timeout, 30))
+                                         files={field: fh}, timeout=max(self.timeout, 30))
         except FileNotFoundError:
             log.warning("Gönderilecek dosya bulunamadı: %s", path)
             return _DROP

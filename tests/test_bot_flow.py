@@ -33,9 +33,15 @@ class CaptureNotifier(TelegramNotifier):
     def __init__(self):
         super().__init__("", "")
         self.messages = []
+        self.menus = []
 
     def send(self, text, silent=False, critical=False):
         self.messages.append(text)
+        return True
+
+    def send_menu(self, text, keyboard=None, message_id=None):
+        self.messages.append(text)
+        self.menus.append((text, keyboard or [], message_id))
         return True
 
 

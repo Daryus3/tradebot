@@ -139,6 +139,14 @@ class BinanceClient:
     def book_ticker(self, symbol: str) -> Dict[str, Any]:
         return self._request("GET", "/api/v3/ticker/bookTicker", {"symbol": symbol})
 
+    def depth(self, symbol: str, limit: int = 100) -> Dict[str, Any]:
+        """Emir defteri: {"bids": [[fiyat, miktar], ...], "asks": [...]} (limit 100 → ağırlık 5)."""
+        return self._request("GET", "/api/v3/depth", {"symbol": symbol, "limit": limit})
+
+    def agg_trades(self, symbol: str, limit: int = 500) -> List[Dict[str, Any]]:
+        """Son gerçekleşen işlemler (p: fiyat, q: miktar, T: zaman ms, m: alıcı piyasa yapıcı mı → True = satış)."""
+        return self._request("GET", "/api/v3/aggTrades", {"symbol": symbol, "limit": limit})
+
     def price(self, symbol: str) -> float:
         return float(self._request("GET", "/api/v3/ticker/price", {"symbol": symbol})["price"])
 
