@@ -16,7 +16,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Dict, Optional, Sequence, Tuple
 
-from config import NOTIFY_MODES, Config, ConfigError, _setting_notes
+from config import ACTION_MODES, NOTIFY_MODES, SIGNAL_APPROVAL_MODES, Config, ConfigError, _setting_notes
 
 
 @dataclass(frozen=True)
@@ -58,6 +58,27 @@ EDITABLE: Dict[str, Setting] = {
     "LOSS_STREAK_PAUSE_HOURS": Setting("loss_streak_pause_hours", "float", "Sigorta bekleme süresi (saat)"),
     "COIN_SL_LIMIT": Setting("coin_sl_limit", "int", "Coin karnesi: kara liste teklifi (0 = kapalı)"),
     "SLIPPAGE_ALERT_PCT": Setting("slippage_alert_pct", "float", "Kayma alarmı (ortalama %, 0 = kapalı)"),
+    # Akıllı pozisyon yönetimi ve giriş
+    "ATR_TARGETS": Setting("atr_targets", "bool", "ATR hedefleri"),
+    "ATR_TP_MULT": Setting("atr_tp_mult", "float", "ATR Kâr Al çarpanı"),
+    "ATR_SL_MULT": Setting("atr_sl_mult", "float", "ATR Zarar Kes çarpanı"),
+    "TP_EXTEND": Setting("tp_extend", "bool", "Hedef uzatma"),
+    "TP_EXTEND_GAP_PCT": Setting("tp_extend_gap_pct", "float", "Hedef uzatma geri dönüş payı (%)"),
+    "DCA_MODE": Setting("dca_mode", "choice", "DCA (ortalama düşürme)", ACTION_MODES),
+    "DCA_TRIGGER_PCT": Setting("dca_trigger_pct", "float", "DCA tetiği (net zarar %)"),
+    "PYRAMID_MODE": Setting("pyramid_mode", "choice", "Piramit", ACTION_MODES),
+    "PYRAMID_TRIGGER_PCT": Setting("pyramid_trigger_pct", "float", "Piramit tetiği (net kâr %)"),
+    "TIME_EXIT_MODE": Setting("time_exit_mode", "choice", "Süre sorusu", ACTION_MODES),
+    "TIME_EXIT_MINUTES": Setting("time_exit_minutes", "int", "Süre sorusu (dk)"),
+    "ESCAPE_MODE": Setting("escape_mode", "choice", "Erken kaçış", ACTION_MODES),
+    "ESCAPE_TRIGGER_PCT": Setting("escape_trigger_pct", "float", "Erken kaçış tetiği (net zarar %)"),
+    "TRAILING_BUY": Setting("trailing_buy", "bool", "Kademeli alım"),
+    "TRAILING_BUY_PCT": Setting("trailing_buy_pct", "float", "Kademeli alım dönüş payı (%)"),
+    "SIGNAL_APPROVAL": Setting("signal_approval", "choice", "Sinyal onayı", SIGNAL_APPROVAL_MODES),
+    "LIQ_FEED": Setting("liq_feed", "bool", "Likidasyon akışı"),
+    "LIQ_ALERT_USDT": Setting("liq_alert_usdt", "float", "Likidasyon uyarı eşiği (USDT, 0 = kapalı)"),
+    "RSI_DIV_ALERTS": Setting("rsi_div_alerts", "bool", "RSI uyumsuzluğu bildirimi"),
+    "BNB_TOPUP_USDT": Setting("bnb_topup_usdt", "float", "BNB takviye tutarı (USDT, 0 = sorma)"),
 }
 
 _TRUE = {"1", "true", "yes", "on", "evet", "e", "acik", "açık"}

@@ -85,8 +85,9 @@ _RETRY_DELAYS = (2, 5, 10, 30)
 # Bildirim modu (NOTIFY_MODE) → gönderilmeyen mesaj türleri. Komut cevapları, uyarılar ve kritik mesajlar her zaman gider.
 #   open: alım | update: izleyen stop / başabaş devreye girdi | routine: periyodik durum, günlük / haftalık rapor
 #   close: pozisyon kapanışı
-MUTED_CATEGORIES = {"all": frozenset(), "closes": frozenset({"open", "update", "routine"}),
-                    "silent": frozenset({"open", "update", "routine", "close"})}
+#   info: bilgi amaçlı sinyaller (RSI uyumsuzluğu, likidasyon dalgası)
+MUTED_CATEGORIES = {"all": frozenset(), "closes": frozenset({"open", "update", "routine", "info"}),
+                    "silent": frozenset({"open", "update", "routine", "close", "info"})}
 Keyboard = List[List[Tuple[str, str]]]   # Satırlar halinde (düğme yazısı, callback verisi)
 
 
@@ -149,16 +150,23 @@ class TelegramNotifier:
             return False
         return self.send(text, silent=silent, critical=critical)
 
-    def send_menu(self, text: str, keyboard: Optional[Keyboard] = None, message_id: Optional[int] = None) -> bool:
-        """Altında düğmeler olan mesaj. message_id verilirse o mesaj (menü) yerinde güncellenir."""
+    def send_menu(self, text: str, keyboard: Optional[Keyboard] = None, message_id: Optional[int] = None,
+                  on_sent=None, quiet_log: bool = False, silent: bool = False) -> bool:
+        """Altında düğmeler olan mesaj. message_id verilirse o mesaj (menü) yerinde güncellenir.
+
+        on_sent(message_id): mesaj gönderilince (gönderici iş parçacığında) çağrılır; sonradan düzenlemek için.
+        quiet_log: sık güncellenen mesajlar (canlı pano) loga her seferinde yazılmasın.
+        """
         full = redact(f"{self.prefix}{text}")
-        log.info("📨 %s", _strip_html(full).replace("\n", " | "))
+        if not quiet_log:
+            log.info("📨 %s", _strip_html(full).replace("\n", " | "))
         if not self.enabled:
             return False
-        extra = {"keyboard": keyboard or [], "edit": message_id}
+        extra = {"keyboard": keyboard or [], "edit": message_id, "on_sent": on_sent}
+        silent = silent or self.is_quiet_now()
         if not self.async_mode:
-            return self._deliver_text(full, False, extra) == _OK
-        self._enqueue(("text", full, False, False, extra))
+            return self._deliver_text(full, silent, extra) == _OK
+        self._enqueue(("text", full, silent, False, extra))
         return True
 
     def send_photo(self, path, caption: str = "") -> bool:
@@ -286,6 +294,8 @@ class TelegramNotifier:
                 time.sleep(min(float(wait), 30))
                 continue
             if resp.ok:
+                if extra is not None and extra.get("on_sent"):
+                    _report_message_id(resp, extra["on_sent"])
                 return _OK
             if method == "editMessageText" and resp.status_code == 400:
                 if "not modified" in resp.text.lower():   # Menü zaten bu halde
@@ -327,6 +337,16 @@ class TelegramNotifier:
         return _DROP
 
 
+def _report_message_id(resp, callback) -> None:
+    """Gönderilen / düzenlenen mesajın kimliğini geri bildirir (hata olursa sessizce geçer)."""
+    try:
+        result = resp.json().get("result")
+        if isinstance(result, dict) and result.get("message_id"):
+            callback(int(result["message_id"]))
+    except Exception as exc:  # noqa: BLE001 - geri bildirim hatası gönderimi etkilemesin
+        log.debug("Telegram mesaj kimliği okunamadı: %s", exc)
+
+
 def discover_chat_ids(token: str) -> List[Tuple[str, str]]:
     """Bota mesaj atmış kişilerin/grupların chat ID'lerini bulur (TELEGRAM_CHAT_ID kurulumu için)."""
     resp = requests.get(API_URL.format(token=token, method="getUpdates"), timeout=15)
@@ -358,6 +378,10 @@ _EXIT_HEADERS = {
     "BACKUP_STOP": "🧷 <b>BINANCE YEDEK STOP EMRİ ÇALIŞTI</b>",
     "ROTATION": "🔄 <b>ROTASYON: COİN SIRALAMADAN DÜŞTÜ</b>",
     "TREND_FILTER": "📉 <b>BTC TREND FİLTRESİ: USDT'YE GEÇİLDİ</b>",
+    "TP_EXTENDED": "🚀 <b>UZATILMIŞ KÂR AL (zirveden geri dönünce satıldı)</b>",
+    "ESCAPE": "🏃 <b>ERKEN KAÇIŞ: HACİMLİ SATIŞ BASKISI</b>",
+    "TIME_EXIT": "⏳ <b>SÜRE SORUSU: BAŞABAŞTA SATILDI</b>",
+    "PROFIT_LOCK": "🔐 <b>PİRAMİT KİLİDİ: ZARARA DÖNMEDEN SATILDI</b>",
 }
 
 # Kritik mesajlar sessiz saatlerde de sesli gelir
@@ -421,12 +445,16 @@ class Messages:
             f"🪙 Miktar: {fmt_qty(pos.qty)} {esc(pos.base_asset)}\n"
             f"🏷️ Ort. alış fiyatı: {fmt_price(pos.entry_price)}\n"
             f"💸 Alış komisyonu: {pos.buy_fee_usdt:.4f} {q}\n{LINE}\n"
-            f"🎯 Kâr Al (+%{cfg.take_profit_pct:g}): {fmt_price(levels['tp'])} → ≈{fmt_usdt(levels['tp_value'])} {q}\n"
+            f"🎯 Kâr Al (+%{levels.get('tp_pct', cfg.take_profit_pct):g}"
+            f"{' ATR' if getattr(pos, 'tp_pct', None) is not None else ''}): {fmt_price(levels['tp'])} → "
+            f"≈{fmt_usdt(levels['tp_value'])} {q}\n"
             f"📈 İzleyen stop başlar (+%{cfg.trailing_activation_pct:g}): {fmt_price(levels['trail_on'])}\n"
             f"🛡️ İzleyen stop satış (+%{cfg.trailing_floor_pct:g}): {fmt_price(levels['trail_floor'])}"
             f" → ≈{fmt_usdt(levels['trail_value'])} {q}\n"
-            f"🛑 Zarar Kes (-%{cfg.stop_loss_pct:g}): {fmt_price(levels['sl'])} → ≈{fmt_usdt(levels['sl_value'])} {q}"
-            f"{extra}\n"
+            f"🛑 Zarar Kes (-%{levels.get('sl_pct', cfg.stop_loss_pct):g}): {fmt_price(levels['sl'])} → "
+            f"≈{fmt_usdt(levels['sl_value'])} {q}"
+            + (f"\n💰 Yedek akçe: {fmt_usdt(pos.reserve_usdt)} {q}" if getattr(pos, "reserve_usdt", 0) else "")
+            + f"{extra}\n"
             f"🔍 Sinyal: {esc(note)}"
         )
 

@@ -72,6 +72,10 @@ ROTATION_STRATEGIES = frozenset({"rotation"})
 # Telegram bildirim modu: all = hepsi | closes = yalnızca pozisyon kapanışları | silent = yalnızca acil durumlar.
 # Komut cevapları, hatalar ve kritik uyarılar (zarar kes, kill-switch...) her modda gelir.
 NOTIFY_MODES = ("all", "closes", "silent")
+# Akıllı pozisyon yönetimi modları: off = kapalı | ask = Telegram'dan sorar | auto = sormadan uygular
+# (backtest yalnızca "auto"yu simüle edebilir; "ask" orada kapalı sayılır)
+ACTION_MODES = ("off", "ask", "auto")
+SIGNAL_APPROVAL_MODES = ("off", "volatile", "all")
 
 # Uzun vadeli (swing) stratejiler için önerilen çıkış ayarları ve stratejiye özel giriş eşikleri (.env anahtarı →
 # değer). 5 dk stratejilerine göre ayarlanmış çıkışlar (örn. 4 saatlik maks. süre, +%1 başabaş) swing işlemlerini
@@ -341,6 +345,41 @@ class Config:
     loss_streak_pause_hours: float = 4.0
     coin_sl_limit: int = 3                 # Aynı coinde üst üste bu kadar zarar kes olursa 24 saat kara liste teklifi
     slippage_alert_pct: float = 0.3        # Son 10 alımın ortalama kayması bunu aşarsa uyar (0 = kapalı)
+    # 42) Akıllı pozisyon yönetimi (hepsi varsayılan kapalı; --tara-ab ile "auto" halleri denenebilir)
+    atr_targets: bool = False              # Kâr Al / Zarar Kes'i coinin 1 saatlik ATR'sine göre belirle
+    atr_tp_mult: float = 3.0               # Kâr Al = ATR% × bu (ATR_TP_MIN_PCT…ATR_TP_MAX_PCT arası)
+    atr_sl_mult: float = 2.0               # Zarar Kes = ATR% × bu (ATR_SL_MIN_PCT…STOP_LOSS_PCT arası: yalnızca daraltır)
+    atr_tp_min_pct: float = 1.0
+    atr_tp_max_pct: float = 15.0
+    atr_sl_min_pct: float = 1.0
+    tp_extend: bool = False                # Kâr Al'da momentum güçlüyse satma, zirveden TP_EXTEND_GAP_PCT izle
+    tp_extend_gap_pct: float = 0.5
+    dca_mode: str = "off"                  # Zarardaki pozisyona yedek akçeyle ekleme (ortalama düşürme)
+    dca_trigger_pct: float = 5.0           # Net zarar bu yüzdeye inince
+    pyramid_mode: str = "off"              # Kârdaki pozisyona yedek akçeyle ekleme
+    pyramid_trigger_pct: float = 3.0       # Net kâr bu yüzdeye çıkınca (momentum da güçlü olmalı)
+    time_exit_mode: str = "off"            # TIME_EXIT_MINUTES dolunca pozisyon yataysa "başabaşta satılsın mı?"
+    time_exit_minutes: int = 180
+    time_exit_band_pct: float = 0.5        # Net K/Z ±bu aralıktaysa "yatay"
+    escape_mode: str = "off"               # Hacimli satış baskısında zarar kesi beklemeden çıkış
+    escape_trigger_pct: float = 4.0        # Net zarar bu yüzdeye inmiş olmalı
+    escape_volume_ratio: float = 1.5       # Son kırmızı mumun hacmi ortalamanın en az bu katı
+    # 43) Akıllı giriş
+    trailing_buy: bool = False             # Sinyalden sonra fiyat düştükçe bekle, dipten TRAILING_BUY_PCT dönünce al
+    trailing_buy_pct: float = 0.3
+    trailing_buy_minutes: int = 15         # Bu sürede dönüş olmazsa sinyal iptal
+    signal_approval: str = "off"           # off | volatile (yalnızca oynak / likidasyonlu piyasada sor) | all
+    approval_atr_pct: float = 3.0          # 1 saatlik ATR% bunu aşarsa "oynak"
+    approval_liq_usdt: float = 100_000.0   # Son 5 dk'da coinde bu kadar long likidasyonu varsa "oynak"
+    approval_timeout_sec: int = 120        # Onay bu sürede gelmezse alım yapılmaz
+    liq_feed: bool = False                 # Binance vadeli işlemler likidasyon akışını dinle (WebSocket)
+    liq_alert_usdt: float = 0.0            # Bir coinde 5 dk'da bu kadar long likidasyonu olursa bildir (0 = kapalı)
+    rsi_div_alerts: bool = False           # En hacimli coinlerde 1 saatlik pozitif RSI uyumsuzluğu bildirimi
+    rsi_div_scan_minutes: int = 60
+    # 44) Araçlar
+    pnl_board_sec: int = 5                 # /pano: canlı K/Z mesajı bu aralıkla güncellenir
+    pnl_board_minutes: int = 30            # ...ve bu süre sonra kendiliğinden durur
+    bnb_topup_usdt: float = 6.0            # BNB azalınca "şu kadar USDT'lik BNB alınsın mı?" (0 = sorma)
     # Eski sabit USDT kill-switch ayarı (MAX_TOTAL_LOSS_USDT). Yalnızca MAX_TOTAL_LOSS_PCT yazılmamışsa dolu.
     legacy_loss_usdt: Optional[float] = None
     # Ayar okunurken oluşan uyarılar (eski ayar adı, işe yaramayan değer...). Bot açılırken gösterilir.
@@ -490,6 +529,37 @@ class Config:
                           "sıfırdan büyük olmalı")
         if self.slippage_alert_pct < 0:
             errors.append("SLIPPAGE_ALERT_PCT 0 (kapalı) veya pozitif olmalı")
+        for name in ("dca_mode", "pyramid_mode", "time_exit_mode", "escape_mode"):
+            if getattr(self, name) not in ACTION_MODES:
+                errors.append(f"{name.upper()} şunlardan biri olmalı: " + ", ".join(ACTION_MODES))
+        if self.signal_approval not in SIGNAL_APPROVAL_MODES:
+            errors.append("SIGNAL_APPROVAL şunlardan biri olmalı: " + ", ".join(SIGNAL_APPROVAL_MODES))
+        if not (0 < self.atr_tp_min_pct < self.atr_tp_max_pct and 0 < self.atr_sl_min_pct
+                and self.atr_tp_mult > 0 and self.atr_sl_mult > 0):
+            errors.append("ATR_TP_MIN_PCT < ATR_TP_MAX_PCT, ATR_SL_MIN_PCT ve ATR çarpanları sıfırdan büyük olmalı")
+        if self.tp_extend_gap_pct <= 0:
+            errors.append("TP_EXTEND_GAP_PCT sıfırdan büyük olmalı")
+        # Tetik zarar kesten önce gelmeli (yalnızca özellik açıkken: kapalıyken eski ayarlar hata vermesin)
+        if self.dca_mode != "off" and not 0 < self.dca_trigger_pct < self.stop_loss_pct:
+            errors.append("DCA_TRIGGER_PCT sıfırdan büyük ve STOP_LOSS_PCT'den küçük olmalı")
+        if self.escape_mode != "off" and not 0 < self.escape_trigger_pct < self.stop_loss_pct:
+            errors.append("ESCAPE_TRIGGER_PCT sıfırdan büyük ve STOP_LOSS_PCT'den küçük olmalı")
+        if self.escape_volume_ratio <= 0:
+            errors.append("ESCAPE_VOLUME_RATIO sıfırdan büyük olmalı")
+        if self.pyramid_trigger_pct <= 0 or self.time_exit_minutes <= 0 or self.time_exit_band_pct < 0:
+            errors.append("PYRAMID_TRIGGER_PCT ve TIME_EXIT_MINUTES sıfırdan büyük, TIME_EXIT_BAND_PCT negatif "
+                          "olmamalı")
+        if not 0 < self.trailing_buy_pct < 10 or self.trailing_buy_minutes <= 0:
+            errors.append("TRAILING_BUY_PCT 0-10 arasında, TRAILING_BUY_MINUTES sıfırdan büyük olmalı")
+        if self.approval_atr_pct <= 0 or self.approval_liq_usdt < 0 or not 10 <= self.approval_timeout_sec <= 3600:
+            errors.append("APPROVAL_ATR_PCT pozitif, APPROVAL_LIQ_USDT negatif olmayan, APPROVAL_TIMEOUT_SEC 10-3600 "
+                          "arasında olmalı")
+        if self.liq_alert_usdt < 0 or self.rsi_div_scan_minutes < 5:
+            errors.append("LIQ_ALERT_USDT negatif olamaz, RSI_DIV_SCAN_MINUTES en az 5 olmalı")
+        if self.pnl_board_sec < 3 or self.pnl_board_minutes <= 0:
+            errors.append("PNL_BOARD_SEC en az 3, PNL_BOARD_MINUTES sıfırdan büyük olmalı")
+        if self.bnb_topup_usdt < 0:
+            errors.append("BNB_TOPUP_USDT 0 (kapalı) veya pozitif olmalı")
         if errors:
             raise ConfigError("Ayar hataları:\n  - " + "\n  - ".join(errors))
 
@@ -634,6 +704,38 @@ def load_config(env_file: Optional[str] = None, mode_override: Optional[str] = N
         loss_streak_pause_hours=_env_float("LOSS_STREAK_PAUSE_HOURS", 4.0),
         coin_sl_limit=_env_int("COIN_SL_LIMIT", 3),
         slippage_alert_pct=_env_float("SLIPPAGE_ALERT_PCT", 0.3),
+        atr_targets=_env_bool("ATR_TARGETS", False),
+        atr_tp_mult=_env_float("ATR_TP_MULT", 3.0),
+        atr_sl_mult=_env_float("ATR_SL_MULT", 2.0),
+        atr_tp_min_pct=_env_float("ATR_TP_MIN_PCT", 1.0),
+        atr_tp_max_pct=_env_float("ATR_TP_MAX_PCT", 15.0),
+        atr_sl_min_pct=_env_float("ATR_SL_MIN_PCT", 1.0),
+        tp_extend=_env_bool("TP_EXTEND", False),
+        tp_extend_gap_pct=_env_float("TP_EXTEND_GAP_PCT", 0.5),
+        dca_mode=_env_str("DCA_MODE", "off").lower(),
+        dca_trigger_pct=_env_float("DCA_TRIGGER_PCT", 5.0),
+        pyramid_mode=_env_str("PYRAMID_MODE", "off").lower(),
+        pyramid_trigger_pct=_env_float("PYRAMID_TRIGGER_PCT", 3.0),
+        time_exit_mode=_env_str("TIME_EXIT_MODE", "off").lower(),
+        time_exit_minutes=_env_int("TIME_EXIT_MINUTES", 180),
+        time_exit_band_pct=_env_float("TIME_EXIT_BAND_PCT", 0.5),
+        escape_mode=_env_str("ESCAPE_MODE", "off").lower(),
+        escape_trigger_pct=_env_float("ESCAPE_TRIGGER_PCT", 4.0),
+        escape_volume_ratio=_env_float("ESCAPE_VOLUME_RATIO", 1.5),
+        trailing_buy=_env_bool("TRAILING_BUY", False),
+        trailing_buy_pct=_env_float("TRAILING_BUY_PCT", 0.3),
+        trailing_buy_minutes=_env_int("TRAILING_BUY_MINUTES", 15),
+        signal_approval=_env_str("SIGNAL_APPROVAL", "off").lower(),
+        approval_atr_pct=_env_float("APPROVAL_ATR_PCT", 3.0),
+        approval_liq_usdt=_env_float("APPROVAL_LIQ_USDT", 100_000.0),
+        approval_timeout_sec=_env_int("APPROVAL_TIMEOUT_SEC", 120),
+        liq_feed=_env_bool("LIQ_FEED", False),
+        liq_alert_usdt=_env_float("LIQ_ALERT_USDT", 0.0),
+        rsi_div_alerts=_env_bool("RSI_DIV_ALERTS", False),
+        rsi_div_scan_minutes=_env_int("RSI_DIV_SCAN_MINUTES", 60),
+        pnl_board_sec=_env_int("PNL_BOARD_SEC", 5),
+        pnl_board_minutes=_env_int("PNL_BOARD_MINUTES", 30),
+        bnb_topup_usdt=_env_float("BNB_TOPUP_USDT", 6.0),
     )
     cfg.validate()
     notes += _setting_notes(cfg)

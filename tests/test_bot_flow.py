@@ -39,9 +39,11 @@ class CaptureNotifier(TelegramNotifier):
         self.messages.append(text)
         return True
 
-    def send_menu(self, text, keyboard=None, message_id=None):
+    def send_menu(self, text, keyboard=None, message_id=None, on_sent=None, quiet_log=False, silent=False):
         self.messages.append(text)
         self.menus.append((text, keyboard or [], message_id))
+        if on_sent is not None:
+            on_sent(1000 + len(self.menus))   # Telegram'ın verdiği mesaj kimliği yerine
         return True
 
 

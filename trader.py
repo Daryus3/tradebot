@@ -30,7 +30,8 @@ from entry_filters import live_reject
 from exchange import BaseExchange, FeeInfo, Fill, OrderError, combine_fills
 from logger import get_logger
 from risk import (ExitReason, Position, evaluate_exit, kill_switch_hit, net_exit_value, plan_entry, pnl_pct,
-                  position_slots, price_for_pnl, trailing_floor_pct, update_breakeven, update_trailing)
+                  position_sl, position_slots, position_tp, price_for_pnl, trailing_floor_pct, update_breakeven,
+                  update_trailing)
 from state import BotState, EquityLog, StateStore, TradeLog
 from strategy import ReboundStrategy, ScanResult, Signal
 from telegram_bot import (CRITICAL_EXITS, Messages, TelegramNotifier, esc, fmt_duration, fmt_qty, fmt_rate,
@@ -58,7 +59,7 @@ SLOW_TICK_SEC = 20           # Döngü bundan uzun sürerse adım adım süreler
 # Tarama sürerken de hemen cevaplanan, yalnızca bilgi gösteren komutlar (diğerleri tarama bitince çalışır)
 READ_ONLY_COMMANDS = frozenset({"durum", "pozisyon", "bakiye", "islemler", "csv", "istatistik", "rapor", "tarama",
                                 "ayarlar", "ping", "yardim", "help", "start", "menu", "panel", "piyasa", "gecikme",
-                                "loglar", "log", "ip"})
+                                "loglar", "log", "ip", "pano", "toz"})
 # Risk sigortaları: zarar serisine sayılan çıkışlar; seriyi ne bozan ne artıran (elle / bot dışı) çıkışlar
 STOP_EXITS = frozenset({ExitReason.STOP_LOSS, ExitReason.BACKUP_STOP})
 NEUTRAL_EXITS = frozenset({ExitReason.MANUAL, ExitReason.KILL_SWITCH, ExitReason.EXTERNAL})
@@ -106,7 +107,11 @@ class TradingBot:
         self.time_fn = time_fn
         notifier.mode = cfg.notify_mode
         from commands import CommandProcessor  # döngüsel içe aktarmayı önlemek için
+        from market_scan import DivergenceWatcher
+        from smart_manager import SmartManager
         self.commands = CommandProcessor(self, time_fn=time_fn)
+        self.smart = SmartManager(self)        # Akıllı pozisyon yönetimi / giriş, canlı pano
+        self.divergence = DivergenceWatcher(self.commands.panel._client_for_scan, time_fn=time_fn)
         self._deferred_commands: list = []   # Tarama sırasında gelen, tarama bitince çalışacak komutlar
         self._scan_deadline = 0.0
 
@@ -182,6 +187,8 @@ class TradingBot:
                 self.command_listener.stop()
             if self.ip_monitor is not None:
                 self.ip_monitor.stop()
+            if self.smart.liq_feed is not None:
+                self.smart.liq_feed.stop()
             if self.price_stream is not None:
                 self.price_stream.stop()
             if not self.state.killed or self.state.positions:
@@ -218,6 +225,22 @@ class TradingBot:
             self.command_listener.start()
         if self.ip_monitor is not None:
             self.ip_monitor.start()
+        self._sync_liq_feed()
+
+    def _sync_liq_feed(self) -> None:
+        """LIQ_FEED açıksa likidasyon akışını başlatır, kapatıldıysa durdurur."""
+        smart = self.smart
+        if self.cfg.liq_feed and smart.liq_feed is None:
+            from liquidations import LiquidationFeed
+            feed = LiquidationFeed()
+            if feed.available:
+                smart.liq_feed = feed
+                feed.start()
+            else:
+                log.warning("websocket-client kurulu değil; likidasyon akışı başlatılamadı")
+        elif not self.cfg.liq_feed and smart.liq_feed is not None:
+            smart.liq_feed.stop()
+            smart.liq_feed = None
 
     def _announce_startup(self, pairs: int, now: float) -> None:
         cfg = self.cfg
@@ -251,6 +274,8 @@ class TradingBot:
             if part is not None and hasattr(part, "cfg"):
                 part.cfg = cfg
         self.notifier.mode = cfg.notify_mode
+        if self.running:
+            self._sync_liq_feed()
 
     # ================================================================ ana adım
     def tick(self) -> None:
@@ -277,6 +302,7 @@ class TradingBot:
             if not self.running:
                 return
             self._process_pending_orders(now)
+            self.smart.process_entries(now)
 
             if self.state.positions:
                 self.manage_positions(now)
@@ -336,7 +362,8 @@ class TradingBot:
         return position_slots(self.state.capital, self.exchange.typical_min_notional(), self.cfg)
 
     def free_slots(self) -> int:
-        return max(0, self.slots() - len(self.state.positions))
+        """Boş yer: onayı / dipten dönüşü beklenen girişler de yer tutar."""
+        return max(0, self.slots() - len(self.state.positions) - self.smart.pending_count())
 
     # ================================================================ sermaye / kill-switch limiti
     @property
@@ -405,7 +432,7 @@ class TradingBot:
     def _sync_stream_symbols(self) -> None:
         if self.price_stream is None:
             return
-        symbols = set(self.state.positions)
+        symbols = set(self.state.positions) | {s for s, e in self.smart.entries.items() if e.kind == "trail"}
         if symbols and self.cfg.btc_crash_exit:
             symbols.add("BTCUSDT")
         self.price_stream.set_symbols(symbols)
@@ -415,13 +442,14 @@ class TradingBot:
         state, cfg = self.state, self.cfg
         state.cooldowns = {s: t for s, t in state.cooldowns.items() if t > now}
         slots = self.slots()
-        free_slots = slots - len(state.positions)
+        free_slots = slots - len(state.positions) - self.smart.pending_count()
         if free_slots <= 0:
             return
 
         capital = state.capital
         target = capital / slots  # Sermaye pozisyonlara eşit bölünür
-        excluded = set(state.cooldowns) | set(state.positions) | {p["symbol"] for p in state.pending_orders.values()}
+        excluded = (set(state.cooldowns) | set(state.positions) | {p["symbol"] for p in state.pending_orders.values()}
+                    | set(self.smart.entries))
         if self.fee_info is not None and self.fee_info.bnb_enabled:
             # Komisyon BNB'den kesilirken BNB'nin kendisini almak, pozisyon miktarının komisyonlarla
             # erimesine ve komisyon için ayrılan BNB'nin satılmasına yol açar
@@ -475,10 +503,14 @@ class TradingBot:
                 continue
             context = {"spread_pct": spread, "btc_1h_pct": result.btc_1h_pct, "regime": result.regime,
                        "expected_ask": ask}
-            if self.open_position(signal, plan.quote_amount, slots, context):
+            # Onay (SIGNAL_APPROVAL), dipten dönüş (TRAILING_BUY) ve ATR hedefleri burada devreye girer
+            outcome = self.smart.enter(signal, min(budget, free), slots, context, ask)
+            if outcome == "opened":
                 opened += 1
-                self.day_stats.buys += 1
                 free -= state.positions[signal.symbol].cost_usdt
+            elif outcome == "pending":
+                opened += 1
+                free -= plan.quote_amount
 
     # ================================================================ momentum rotasyonu
     @staticmethod
@@ -733,7 +765,8 @@ class TradingBot:
                        entry_price=fill.avg_price, cost_usdt=fill.usdt, opened_at=self.time_fn(),
                        buy_fee_usdt=fill.fee_usdt, signal_note=note, score=score, metrics=metrics,
                        spread_pct=float(context.get("spread_pct") or 0.0), btc_1h_pct=context.get("btc_1h_pct"),
-                       regime=str(context.get("regime") or ""))
+                       regime=str(context.get("regime") or ""), tp_pct=context.get("tp_pct"),
+                       sl_pct=context.get("sl_pct"), reserve_usdt=float(context.get("reserve_usdt") or 0.0))
         if not self.exchange.is_paper:
             try:  # Cüzdandaki gerçek miktar daha azsa onu esas al
                 held = self.exchange.free_balance(rules.base_asset)
@@ -758,11 +791,13 @@ class TradingBot:
         cfg = self.cfg
         qty = self.exchange.sellable_qty(pos.symbol, pos.qty)
         cost = pos.cost_usdt
+        tp, sl = position_tp(pos, cfg), position_sl(pos, cfg)   # ATR_TARGETS ile pozisyona özel olabilir
         return {
-            "tp": price_for_pnl(cfg.take_profit_pct, cost, qty, cfg.fee_rate),
-            "tp_value": cost * (1 + cfg.take_profit_pct / 100),
-            "sl": price_for_pnl(-cfg.stop_loss_pct, cost, qty, cfg.fee_rate),
-            "sl_value": cost * (1 - cfg.stop_loss_pct / 100),
+            "tp_pct": tp, "sl_pct": sl,
+            "tp": price_for_pnl(tp, cost, qty, cfg.fee_rate),
+            "tp_value": cost * (1 + tp / 100),
+            "sl": price_for_pnl(-sl, cost, qty, cfg.fee_rate),
+            "sl_value": cost * (1 - sl / 100),
             "trail_on": price_for_pnl(cfg.trailing_activation_pct, cost, qty, cfg.fee_rate),
             "trail_floor": price_for_pnl(cfg.trailing_floor_pct, cost, qty, cfg.fee_rate),
             "trail_value": cost * (1 + cfg.trailing_floor_pct / 100),
@@ -896,7 +931,13 @@ class TradingBot:
                 mark = self.marks.get(pos.symbol)
                 if mark is None:
                     continue
-                reason = evaluate_exit(pos, mark.pnl_pct, now, cfg)
+                # Akıllı yönetim: hedef uzatma, süre / kaçış soruları, DCA / piramit (pozisyonu değiştirebilir)
+                reason = self.smart.check_position(pos, mark, now)
+                if pos.symbol not in self.state.positions:
+                    continue   # Yedek stop ekleme sırasında çalıştı: pozisyon kapandı
+                if reason is None:
+                    mark = self.marks.get(pos.symbol) or mark   # Ekleme yapıldıysa yeni maliyete göre değerleme
+                    reason = evaluate_exit(pos, mark.pnl_pct, now, cfg)
                 if reason:
                     log.info("%s çıkış koşulu: %s (net K/Z %%%.2f)", pos.symbol, reason.value, mark.pnl_pct)
                     self.close_position(pos, reason)
@@ -1300,7 +1341,8 @@ class TradingBot:
         if left is None or left >= self.cfg.bnb_min_trades:
             self._bnb_empty_noted = False
             return
-        hint = " Bot otomatik BNB almaz. (Bu bildirimi kapatmak için .env: BNB_MIN_TRADES=0)"
+        hint = (" Bot otomatik BNB almaz (canlı modda BNB_TOPUP_USDT > 0 ise düğmeyle sorar). (Bu bildirimi "
+                "kapatmak için .env: BNB_MIN_TRADES=0)")
         if not info.covers(size):
             if info.status_for(self.cfg.fee_rate, size) == "optimistic":
                 return  # FEE_RATE uyarısı BNB'nin bittiğini zaten söyledi
@@ -1308,10 +1350,10 @@ class TradingBot:
                 return
             self._bnb_empty_noted = True
             what = "Spot'ta BNB yok" if info.bnb_free <= 0 else "Spot'taki BNB bir işlemin komisyonuna yetmiyor"
-            self.notifier.send(Messages.info(
+            self.smart.notice_with_bnb_offer(Messages.info(
                 f"Binance'te BNB ile komisyon ödeme açık ama {what}: "
                 f"komisyon şu an {fmt_rate(info.taker)} olarak kesiliyor (bot da böyle hesaplıyor, sorun yok). "
-                f"%25 indirim isterseniz Binance'te biraz BNB alın." + hint), silent=True)
+                f"%25 indirim isterseniz Binance'te biraz BNB alın." + hint))
             return
         self._bnb_empty_noted = False
         now = self.time_fn()
@@ -1320,10 +1362,10 @@ class TradingBot:
         self._next_bnb_low_notice = now + BNB_LOW_NOTICE_SEC
         enough = f"yaklaşık {int(left)} işlemlik (alış + satış) kaldı" if left >= 1 else "bir al-sata yetmiyor"
         after = (f" O zaman .env'de FEE_RATE={info.taker:g} yapın." if self.cfg.fee_rate < info.taker - 1e-9 else "")
-        self.notifier.send(Messages.warning(
+        self.smart.notice_with_bnb_offer(Messages.warning(
             f"BNB bakiyeniz ({fmt_qty(info.bnb_free)} BNB ≈ {fmt_usdt(info.bnb_value)} {self.cfg.quote_asset}) "
             f"{enough}; bitince komisyon {fmt_rate(info.taker)}'a döner.{after} Devam etmesini isterseniz "
-            f"Binance'te biraz BNB alın." + hint), silent=True)
+            f"Binance'te biraz BNB alın." + hint))
 
     def fee_status_line(self) -> str:
         """/ayarlar için BNB indirimi durumu (son kontrolden; yoksa bir kez okunur)."""
@@ -1511,6 +1553,9 @@ class TradingBot:
         self._maybe_reports(now)
         self._check_freeze_end(now)
         self._check_ip()
+        self.smart.update_board(now)
+        self.smart.check_liquidations(now)
+        self.divergence.maybe_start(self.cfg, self.exchange.rules, self.notifier, now)
         if self.equity_log is not None and now >= self.next_equity_at:
             self.next_equity_at = now + self.cfg.equity_log_minutes * 60
             self.equity_log.append(now, self.state.capital, self.unrealized(), len(self.state.positions))
@@ -1663,7 +1708,7 @@ class TradingBot:
 
     # ================================================================ yardımcılar
     def _next_sleep(self) -> float:
-        if self.state.positions:
+        if self.state.positions or self.smart.entries:
             if self.price_stream is not None and self.price_stream.connected:
                 return self.cfg.ws_position_check_sec
             return self.cfg.position_check_sec

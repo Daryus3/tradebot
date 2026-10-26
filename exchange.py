@@ -380,6 +380,14 @@ class BaseExchange:
         """client_order_id: önceden kaydedilmiş emir kimliği (bot emir sırasında kapanırsa sonucu sorgulanabilsin)."""
         raise NotImplementedError
 
+    def dust_assets(self) -> List[Tuple[str, float, float]]:
+        """BNB'ye çevrilebilecek tozlar: [(coin, miktar, BNB karşılığı)] (yalnızca canlı modda)."""
+        raise OrderError("Toz dönüştürme yalnızca canlı modda (gerçek Binance hesabında) yapılabilir", "PAPER")
+
+    def convert_dust(self, assets: List[str]) -> Tuple[float, float]:
+        """Tozları BNB'ye çevirir: (alınan BNB, kesilen ücret BNB)."""
+        raise OrderError("Toz dönüştürme yalnızca canlı modda (gerçek Binance hesabında) yapılabilir", "PAPER")
+
     def market_sell(self, symbol: str, qty: float) -> Fill:
         raise NotImplementedError
 
@@ -500,6 +508,15 @@ class LiveExchange(BaseExchange):
             if b.get("asset") == asset:
                 return float(b.get("free") or 0) + float(b.get("locked") or 0)
         return 0.0
+
+    def dust_assets(self) -> List[Tuple[str, float, float]]:
+        data = self.client.dust_assets() or {}
+        return [(str(d.get("asset", "")), float(d.get("amountFree") or 0), float(d.get("toBNB") or 0))
+                for d in data.get("details") or [] if d.get("asset")]
+
+    def convert_dust(self, assets: List[str]) -> Tuple[float, float]:
+        data = self.client.dust_to_bnb(assets) or {}
+        return float(data.get("totalTransfered") or 0), float(data.get("totalServiceCharge") or 0)
 
     def check_trading_enabled(self) -> None:
         acc = self.client.account()

@@ -10,12 +10,14 @@ ayrı bir iş parçacığında çalışır: tarama sürerken bot pozisyonları i
 """
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 from binance_client import RateLimitError
 from indicators import rsi
 from logger import get_logger
+from position_rules import bullish_divergence
 from strategy import LEVERAGED_SUFFIXES
 from telegram_bot import LINE, esc
 
@@ -113,3 +115,71 @@ def _line(c: CoinView) -> str:
     rsi_text = f" | RSI {c.rsi:.0f}" if c.rsi is not None else ""
     return (f"• <b>{esc(c.symbol)}</b> dip konumu %{c.position_pct:.0f} | hacim x{c.volume_ratio:.1f} | "
             f"24s %{c.change_24h:+.1f}{rsi_text}")
+
+
+# ================================================================ pozitif RSI uyumsuzluğu bildirimi
+DIV_COOLDOWN_SEC = 12 * 3600      # Aynı coin için en fazla 12 saatte bir bildirim
+DIV_MAX_LINES = 8
+
+
+def scan_divergences(client, rules: Dict[str, object], cfg, top: int = SCAN_TOP) -> List[Tuple[str, dict, float]]:
+    """En hacimli coinlerde 1 saatlik pozitif RSI uyumsuzluğu: [(parite, ayrıntı, fiyat)]."""
+    hits = []
+    for t in universe(client.tickers_24h(), rules, cfg, top):
+        try:
+            rows = client.klines(t["symbol"], "1h", 80)
+        except RateLimitError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log.debug("%s uyumsuzluk taraması: %s", t.get("symbol"), exc)
+            continue
+        found = bullish_divergence(rows[:-1], cfg.rsi_period) if len(rows) > 1 else None
+        if found:
+            hits.append((t["symbol"], found, float(rows[-1][4])))
+    return hits
+
+
+def format_divergences(hits: List[Tuple[str, dict, float]]) -> str:
+    lines = ["📐 <b>Pozitif RSI uyumsuzluğu</b> (1 saatlik mumlar)",
+             "Fiyat daha düşük dip yaptı ama RSI daha yüksek dip yaptı: satış gücü azalıyor olabilir."]
+    for symbol, d, _price in hits[:DIV_MAX_LINES]:
+        lines.append(f"• <b>{esc(symbol)}</b>: dip %{d['price_drop_pct']:+.1f}, RSI {d['rsi_prev']:.0f} → "
+                     f"{d['rsi_now']:.0f} ({d['bars_apart']} saat arayla)")
+    lines.append("<i>Bilgi amaçlıdır, alım sinyali değildir; dönüş teyidi (yeşil mum, hacim) beklenmeli.</i>")
+    return "\n".join(lines)
+
+
+class DivergenceWatcher:
+    """RSI_DIV_ALERTS: RSI_DIV_SCAN_MINUTES aralıkla arka planda tarar, yeni uyumsuzlukları bildirir."""
+
+    def __init__(self, client_factory: Callable, scan_fn: Callable = scan_divergences, time_fn=None):
+        import time
+        self.client_factory = client_factory
+        self.scan_fn = scan_fn
+        self.time_fn = time_fn or time.time
+        self.next_at = 0.0
+        self.notified: Dict[str, float] = {}
+        self._thread: Optional[threading.Thread] = None
+
+    def maybe_start(self, cfg, rules: Dict[str, object], notifier, now: float) -> bool:
+        if not cfg.rsi_div_alerts or now < self.next_at or (self._thread and self._thread.is_alive()):
+            return False
+        self.next_at = now + cfg.rsi_div_scan_minutes * 60
+        client = self.client_factory(cfg)
+        self._thread = threading.Thread(target=self._run, args=(client, dict(rules), cfg, notifier),
+                                        name="rsi-divergence", daemon=True)
+        self._thread.start()
+        return True
+
+    def _run(self, client, rules, cfg, notifier) -> None:
+        try:
+            hits = self.scan_fn(client, rules, cfg)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("RSI uyumsuzluk taraması başarısız: %s", exc)
+            return
+        now = self.time_fn()
+        fresh = [h for h in hits if now - self.notified.get(h[0], 0.0) >= DIV_COOLDOWN_SEC]
+        for symbol, _d, _p in fresh:
+            self.notified[symbol] = now
+        if fresh:
+            notifier.notify(format_divergences(fresh), "info")

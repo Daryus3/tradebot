@@ -61,6 +61,8 @@ COMMAND_MENU = [
     ("gecikme", "Binance'e ağ gecikmesi (ms)"),
     ("loglar", "Son 15 log satırı"),
     ("ip", "Sunucunun dış IP adresi"),
+    ("pano", "Canlı K/Z panosu (aç / kapat)"),
+    ("toz", "Küçük bakiyeleri (toz) BNB'ye çevir"),
     ("ping", "Bot çalışıyor mu?"),
     ("yardim", "Komut listesi"),
 ]
@@ -526,6 +528,16 @@ class CommandProcessor:
     def cmd_ip(self, args) -> None:
         self.panel.ip_info()
 
+    def cmd_pano(self, args) -> None:
+        smart = self.bot.smart
+        if smart.board is not None or (args and ascii_tr(args[0]) in ("kapat", "off", "dur")):
+            smart.board_off()
+        else:
+            smart.board_on()
+
+    def cmd_toz(self, args) -> None:
+        self.bot.smart.show_dust()
+
     # ------------------------------------------------------------ kontrol komutları
     def cmd_durdur(self, args) -> None:
         self.bot.set_paused(True)
@@ -647,6 +659,9 @@ class CommandProcessor:
             self.panel.restart("Telegram'dan yeniden başlatma istendi")
         elif pending.action == "strategy":
             self.panel.apply_strategy(pending.symbol)
+        elif pending.action == "question":
+            token, _, choice = pending.symbol.partition(":")
+            self.bot.smart.answer(token, choice, confirmed=True)
         elif pending.action == "addcap":
             bot, q = self.bot, self.bot.cfg.quote_asset
             problem = self._capital_problem(pending.amount)  # Onay beklerken bakiye değişmiş olabilir

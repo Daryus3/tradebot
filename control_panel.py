@@ -34,7 +34,7 @@ LOG_TAIL_LINES = 15
 BLACKLIST_HOURS = 24
 # Tarama sürerken de hemen çalışan (yalnızca bilgi gösteren / menüde gezinen) düğmeler
 READ_ONLY_CALLBACKS = frozenset({"menu", "st", "cfg", "cap", "strat", "ntf", "flt", "risk", "scan", "lat", "log",
-                                 "ip", "x", "rst"})
+                                 "ip", "x", "rst", "smart", "board", "dust"})
 NOTIFY_LABELS = {"all": "Tümü", "closes": "Sadece Kapanışlar", "silent": "Sessiz Mod"}
 NOTIFY_HELP = {"all": "her alım, satış, izleyen stop ve rapor",
                "closes": "yalnızca pozisyon kapanışları (alım ve periyodik raporlar gelmez)",
@@ -45,6 +45,9 @@ STEPS = {"TP": ("TAKE_PROFIT_PCT", 0.5), "SL": ("STOP_LOSS_PCT", 0.5), "TR": ("T
 CAPITAL_CHOICES = (100, 75, 50, 33)
 FILTER_KEYS = ("BTC_FILTER", "SPREAD_FILTER", "FAKEOUT_FILTER", "VWAP_FILTER", "OVERHEAT_FILTER",
                "OB_WALL_FILTER", "OB_IMBALANCE_FILTER", "TAPE_FILTER")
+SMART_BOOL_KEYS = ("ATR_TARGETS", "TP_EXTEND", "TRAILING_BUY", "LIQ_FEED", "RSI_DIV_ALERTS")
+SMART_MODE_KEYS = ("DCA_MODE", "PYRAMID_MODE", "TIME_EXIT_MODE", "ESCAPE_MODE", "SIGNAL_APPROVAL")
+MODE_LABELS = {"off": "kapalı", "ask": "sorarak", "auto": "otomatik", "volatile": "oynak piyasada", "all": "her sinyalde"}
 DAILY_LIMIT_CHOICES = (0, 2, 3, 5)
 STREAK_CHOICES = (0, 2, 3, 4)
 STRATEGY_SHORT = {"rebound": "Rebound (5 dk dip)", "trend": "Trend (5 dk)", "breakout": "Breakout (5 dk)",
@@ -137,6 +140,10 @@ class ControlPanel:
             "yes": lambda: self._confirm(arg, True),
             "no": lambda: self._confirm(arg, False),
             "unfreeze": lambda: self._unfreeze(mid),
+            "smart": lambda: self.show_smart(mid),
+            "board": lambda: self.bot.smart.board_off(mid) if arg == "off" else self.bot.smart.board_on(),
+            "dust": self.bot.smart.show_dust,
+            "q": lambda: self.bot.smart.answer(arg, args[1] if len(args) > 1 else "", mid),
         }
         if action in simple:
             simple[action]()
@@ -146,8 +153,13 @@ class ControlPanel:
             self._choose("CAPITAL_USAGE_PCT", arg, self.show_capital, mid)
         elif action == "ntfset":
             self._choose("NOTIFY_MODE", arg, self.show_notify, mid)
-        elif action == "tg" and arg in FILTER_KEYS:
-            self._choose(arg, format_value(not getattr(self.bot.cfg, EDITABLE[arg].attr)), self.show_filters, mid)
+        elif action == "tg" and arg in FILTER_KEYS + SMART_BOOL_KEYS:
+            view = self.show_smart if arg in SMART_BOOL_KEYS else self.show_filters
+            self._choose(arg, format_value(not getattr(self.bot.cfg, EDITABLE[arg].attr)), view, mid)
+        elif action == "cy" and arg in SMART_MODE_KEYS:
+            choices = EDITABLE[arg].choices
+            current = getattr(self.bot.cfg, EDITABLE[arg].attr)
+            self._choose(arg, choices[(choices.index(current) + 1) % len(choices)], self.show_smart, mid)
         elif action == "dl":
             self._choose("DAILY_LOSS_LIMIT_PCT", arg, self.show_risk, mid)
         elif action == "ls":
@@ -180,9 +192,11 @@ class ControlPanel:
             [("⚙️ Ayarlar", "cfg"), ("💰 Sermaye", "cap")],
             [("🧭 Strateji", "strat"), ("🔔 Bildirim", "ntf")],
             [("🛡️ Filtreler", "flt"), ("🧯 Risk", "risk")],
+            [("🧠 Akıllı Yönetim", "smart"), ("📈 Canlı Pano", "board")],
             [("🔎 Piyasayı Tara", "scan"), ("📶 Gecikme", "lat")],
             [("📜 Son Loglar", "log"), ("🌐 IP", "ip")],
-            [("🔄 Sunucu Reset", "rst"), ("✖️ Kapat", "x")],
+            [("🧹 Toz → BNB", "dust"), ("🔄 Sunucu Reset", "rst")],
+            [("✖️ Kapat", "x")],
         ]
         self.proc.reply_menu(text, keyboard, mid)
 
@@ -289,7 +303,7 @@ class ControlPanel:
                 f"başına pay ~{fmt_usdt(per)}, girişte ~{fmt_usdt(per * pct / 100)} {cfg.quote_asset}\n"
                 "<i>Yedek, riski azaltır. Yüzde düştükçe pozisyon tutarı küçülür; Binance'in en küçük emir tutarının "
                 "(~5 USDT) altına inecekse bot pozisyon sayısını azaltır.</i>" + (f"\n\n{note}" if note else ""))
-        row = [((f"✅ " if abs(pct - c) < 0.01 else "") + ("Kapalı (%100)" if c == 100 else f"%{c}"), f"capset:{c}")
+        row = [(("✅ " if abs(pct - c) < 0.01 else "") + ("Kapalı (%100)" if c == 100 else f"%{c}"), f"capset:{c}")
                for c in CAPITAL_CHOICES]
         self.proc.reply_menu(text, [row[:2], row[2:], self._back()], mid)
 
@@ -347,14 +361,54 @@ class ControlPanel:
                 f"{frozen or '▶️ Alımlar dondurulmamış'}\n{LINE}\n"
                 "<i>Sigortalar yalnızca YENİ alımları durdurur; açık pozisyonların takibi sürer. Diğerleri için: "
                 "/ayar DAILY_PROFIT_TARGET_PCT 3, /ayar COIN_SL_LIMIT 0 ...</i>" + (f"\n\n{note}" if note else ""))
-        dl = [((f"✅ " if abs(cfg.daily_loss_limit_pct - c) < 0.01 else "") + ("Limit yok" if c == 0 else f"Gün -%{c}"),
+        dl = [(("✅ " if abs(cfg.daily_loss_limit_pct - c) < 0.01 else "") + ("Limit yok" if c == 0 else f"Gün -%{c}"),
                f"dl:{c}") for c in DAILY_LIMIT_CHOICES]
-        ls = [((f"✅ " if cfg.loss_streak_limit == c else "") + ("Seri yok" if c == 0 else f"{c} SL"), f"ls:{c}")
+        ls = [(("✅ " if cfg.loss_streak_limit == c else "") + ("Seri yok" if c == 0 else f"{c} SL"), f"ls:{c}")
               for c in STREAK_CHOICES]
         keyboard = [dl, ls]
         if frozen:
             keyboard.append([("▶️ Dondurmayı kaldır", "unfreeze")])
         self.proc.reply_menu(text, keyboard + [self._back()], mid)
+
+    def show_smart(self, mid: Optional[int] = None, note: str = "") -> None:
+        cfg = self.bot.cfg
+        mode = lambda key: MODE_LABELS.get(getattr(cfg, EDITABLE[key].attr), "?")  # noqa: E731
+        reserve_note = ("\n⚠️ Yedek akçe kapalı (ilk giriş %100): DCA ve piramit için /menu → Sermaye'den ilk giriş "
+                        "yüzdesini düşürün." if cfg.capital_usage_pct >= 100
+                        and (cfg.dca_mode != "off" or cfg.pyramid_mode != "off") else "")
+        liq = (f", uyarı eşiği {cfg.liq_alert_usdt:,.0f} USDT".replace(",", ".") if cfg.liq_alert_usdt > 0
+               else ", uyarı kapalı")
+        text = (f"🧠 <b>Akıllı Yönetim</b>\n{LINE}\n"
+                f"{_on(cfg.atr_targets)} <b>ATR hedefleri</b>: Kâr Al = 1 saatlik ATR × {cfg.atr_tp_mult:g}, Zarar Kes = "
+                f"ATR × {cfg.atr_sl_mult:g} (en fazla -%{cfg.stop_loss_pct:g})\n"
+                f"{_on(cfg.tp_extend)} <b>Hedef uzatma</b>: Kâr Al'da momentum güçlüyse satma, zirveden "
+                f"%{cfg.tp_extend_gap_pct:g} dönünce sat\n"
+                f"➕ <b>DCA</b> ({mode('DCA_MODE')}): net -%{cfg.dca_trigger_pct:g}'de yedek akçeyle ekle\n"
+                f"🔺 <b>Piramit</b> ({mode('PYRAMID_MODE')}): net +%{cfg.pyramid_trigger_pct:g} ve momentum güçlüyse "
+                f"yedekle ekle, sonra zarara döndürmeden sat\n"
+                f"⏳ <b>Süre sorusu</b> ({mode('TIME_EXIT_MODE')}): {cfg.time_exit_minutes} dk dolunca yataysa "
+                f"başabaşta sat\n"
+                f"🏃 <b>Erken kaçış</b> ({mode('ESCAPE_MODE')}): net -%{cfg.escape_trigger_pct:g}'de hacimli satış "
+                f"baskısı varsa zarar kesi beklemeden çık\n"
+                f"{_on(cfg.trailing_buy)} <b>Kademeli alım</b>: sinyalden sonra fiyat düştükçe bekle, dipten "
+                f"%{cfg.trailing_buy_pct:g} dönünce al (en fazla {cfg.trailing_buy_minutes} dk)\n"
+                f"🔔 <b>Sinyal onayı</b> ({mode('SIGNAL_APPROVAL')}): almadan önce Telegram'dan sor\n"
+                f"{_on(cfg.liq_feed)} <b>Likidasyon akışı</b> (vadeli işlemler){liq}\n"
+                f"{_on(cfg.rsi_div_alerts)} <b>RSI uyumsuzluğu bildirimi</b> (en hacimli 40 coin, 1 saatlik)"
+                f"{reserve_note}\n{LINE}\n"
+                "<i>sorarak = Telegram'dan sorar; otomatik = sormadan yapar. Otomatik hallerin geçmiş veriyle etkisi: "
+                "python main.py --backtest --tara-ab</i>" + (f"\n\n{note}" if note else ""))
+        mode_btn = lambda key, icon, name: (f"{icon} {name}: {mode(key)}", f"cy:{key}")  # noqa: E731
+        bool_btn = lambda key, name: (f"{_on(getattr(cfg, EDITABLE[key].attr))} {name}", f"tg:{key}")  # noqa: E731
+        keyboard = [
+            [bool_btn("ATR_TARGETS", "ATR hedefleri"), bool_btn("TP_EXTEND", "Hedef uzatma")],
+            [mode_btn("DCA_MODE", "➕", "DCA"), mode_btn("PYRAMID_MODE", "🔺", "Piramit")],
+            [mode_btn("TIME_EXIT_MODE", "⏳", "Süre"), mode_btn("ESCAPE_MODE", "🏃", "Kaçış")],
+            [bool_btn("TRAILING_BUY", "Kademeli alım"), mode_btn("SIGNAL_APPROVAL", "🔔", "Onay")],
+            [bool_btn("LIQ_FEED", "Likidasyon"), bool_btn("RSI_DIV_ALERTS", "RSI uyumsuzluk")],
+            self._back(),
+        ]
+        self.proc.reply_menu(text, keyboard, mid)
 
     def _unfreeze(self, mid: Optional[int]) -> None:
         self.bot.unfreeze()

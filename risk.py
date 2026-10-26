@@ -17,7 +17,7 @@ from __future__ import annotations
 import math
 from dataclasses import asdict, dataclass, field, fields
 from enum import Enum
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from config import is_rotation, strategy_family
 from exchange import SymbolRules, floor_decimals, to_dec
@@ -36,6 +36,10 @@ class ExitReason(str, Enum):
     BACKUP_STOP = "BACKUP_STOP"  # Binance'teki yedek zarar-kes emri çalıştı
     ROTATION = "ROTATION"        # Momentum rotasyonu: coin sıralamadan düştü (yerine daha güçlüsü alınır)
     TREND_FILTER = "TREND_FILTER"  # Momentum rotasyonu: BTC düşüş trendine girdi, her şey USDT'ye çevrildi
+    TP_EXTENDED = "TP_EXTENDED"    # Kâr Al'da momentum güçlüydü, hedef uzatıldı; zirveden geri dönünce satıldı
+    ESCAPE = "ESCAPE"              # Hacimli satış baskısında zarar kes beklenmeden çıkıldı
+    TIME_EXIT = "TIME_EXIT"        # Süre sorusu: yatay kalan pozisyon başabaşta satıldı
+    PROFIT_LOCK = "PROFIT_LOCK"    # Piramit sonrası kilit: birleşik pozisyon zarara dönmeden satıldı
 
 
 @dataclass
@@ -63,6 +67,15 @@ class Position:
     spread_pct: float = 0.0
     btc_1h_pct: Optional[float] = None
     regime: str = ""
+    # Akıllı pozisyon yönetimi
+    tp_pct: Optional[float] = None    # Pozisyona özel Kâr Al (ATR_TARGETS); None = TAKE_PROFIT_PCT
+    sl_pct: Optional[float] = None    # Pozisyona özel Zarar Kes (ATR_TARGETS); None = STOP_LOSS_PCT
+    tp_extended: bool = False         # Kâr Al aşıldı, momentum güçlü: zirveden TP_EXTEND_GAP_PCT geri dönünce satılır
+    reserve_usdt: float = 0.0         # Bu pozisyon için yedekte bekleyen USDT (CAPITAL_USAGE_PCT < 100)
+    adds: int = 0                     # Yedek akçeyle kaç kez eklendi (DCA / piramit)
+    lock_pct: Optional[float] = None  # Piramit sonrası: net K/Z bunun altına inerse sat (zarara dönmesin)
+    exit_at_breakeven: bool = False   # Süre sorusu "başabaşta sat": net K/Z ≥ 0 olunca satılır
+    asked: List[str] = field(default_factory=list)   # Sorulan sorular (her biri pozisyon başına bir kez)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -156,14 +169,40 @@ def update_breakeven(pos: Position, cfg) -> bool:
     return False
 
 
+def position_tp(pos: Position, cfg) -> float:
+    """Pozisyonun Kâr Al yüzdesi (ATR_TARGETS ile pozisyona özel olabilir)."""
+    return pos.tp_pct if getattr(pos, "tp_pct", None) is not None else cfg.take_profit_pct
+
+
+def position_sl(pos: Position, cfg) -> float:
+    """Pozisyonun Zarar Kes yüzdesi (ATR_TARGETS ile pozisyona özel olabilir)."""
+    return pos.sl_pct if getattr(pos, "sl_pct", None) is not None else cfg.stop_loss_pct
+
+
+def extension_floor(pos: Position, cfg) -> float:
+    """Hedefi uzatılmış pozisyonun satış eşiği: görülen zirve net kârın TP_EXTEND_GAP_PCT altı."""
+    return pos.peak_pnl_pct - cfg.tp_extend_gap_pct
+
+
 def evaluate_exit(pos: Position, current_pnl_pct: float, now: float, cfg) -> Optional[ExitReason]:
-    """Pozisyonun kapatılması gerekiyorsa nedenini, gerekmiyorsa None döndürür."""
+    """Pozisyonun kapatılması gerekiyorsa nedenini, gerekmiyorsa None döndürür.
+
+    Kâr Al'da hedef uzatma (TP_EXTEND) kararı ÇAĞIRAN tarafta verilir (pos.tp_extended); burada yalnızca uygulanır.
+    """
+    sl = position_sl(pos, cfg)
     if not target_exits(cfg):   # Rotasyon: yalnızca felaket koruması
-        return ExitReason.STOP_LOSS if current_pnl_pct <= -cfg.stop_loss_pct else None
-    if current_pnl_pct >= cfg.take_profit_pct:
+        return ExitReason.STOP_LOSS if current_pnl_pct <= -sl else None
+    if pos.tp_extended:
+        if current_pnl_pct <= extension_floor(pos, cfg):
+            return ExitReason.TP_EXTENDED
+    elif current_pnl_pct >= position_tp(pos, cfg):
         return ExitReason.TAKE_PROFIT
-    if current_pnl_pct <= -cfg.stop_loss_pct:
+    if current_pnl_pct <= -sl:
         return ExitReason.STOP_LOSS
+    if pos.lock_pct is not None and current_pnl_pct <= pos.lock_pct:
+        return ExitReason.PROFIT_LOCK
+    if pos.exit_at_breakeven and current_pnl_pct >= 0:
+        return ExitReason.TIME_EXIT
     if pos.trailing_active and current_pnl_pct <= trailing_floor_pct(pos, cfg):
         return ExitReason.TRAILING_STOP
     if (getattr(cfg, "breakeven_enabled", False) and pos.breakeven_active

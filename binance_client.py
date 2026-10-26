@@ -80,11 +80,11 @@ class BinanceClient:
                 raise BinanceAPIError(0, None, "Binance API anahtarı/secret tanımlı değil (.env dosyasını kontrol edin)")
             params["timestamp"] = int(time.time() * 1000 + self.time_offset_ms)
             params["recvWindow"] = self.recv_window
-            query = urlencode(params)
+            query = urlencode(params, doseq=True)   # Liste değerler tekrarlanan parametre olur (asset=A&asset=B)
             signature = hmac.new(self.api_secret.encode(), query.encode(), hashlib.sha256).hexdigest()
             query = f"{query}&signature={signature}"
         else:
-            query = urlencode(params)
+            query = urlencode(params, doseq=True)
 
         url = f"{self.base_url}{path}"
         if query:
@@ -207,3 +207,11 @@ class BinanceClient:
 
     def commission_rates(self, symbol: str) -> Dict[str, Any]:
         return self._request("GET", "/api/v3/account/commission", {"symbol": symbol}, signed=True)
+
+    def dust_assets(self) -> Dict[str, Any]:
+        """BNB'ye çevrilebilecek küçük bakiyeler ("toz"): {"details": [{"asset", "amountFree", "toBNB"...}]}."""
+        return self._request("POST", "/sapi/v1/asset/dust-btc", signed=True)
+
+    def dust_to_bnb(self, assets: List[str]) -> Dict[str, Any]:
+        """Verilen coinlerin tozunu BNB'ye çevirir (Binance'in "Küçük bakiyeleri BNB'ye dönüştür" özelliği)."""
+        return self._request("POST", "/sapi/v1/asset/dust", {"asset": list(assets)}, signed=True)

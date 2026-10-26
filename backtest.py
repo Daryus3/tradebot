@@ -37,9 +37,10 @@ from binance_client import RateLimitError
 from config import DATA_DIR
 from exchange import SymbolRules, parse_symbol_rules, to_dec
 from market_regime import COKUS, KLINE_1D_LIMIT, KLINE_4H_LIMIT, ZAYIF, classify
-from risk import (ExitReason, Position, breakeven_effective, evaluate_exit, kill_switch_hit, net_exit_value,
-                  plan_entry, pnl_pct, position_slots, price_for_pnl, target_exits, trailing_floor_pct,
-                  update_breakeven, update_trailing)
+from position_rules import atr_pct, atr_targets, is_flat, momentum_strong, trailing_buy_trigger, volume_breakdown
+from risk import (ExitReason, Position, breakeven_effective, evaluate_exit, extension_floor, kill_switch_hit,
+                  net_exit_value, plan_entry, pnl_pct, position_sl, position_slots, position_tp, price_for_pnl,
+                  target_exits, trailing_floor_pct, update_breakeven, update_trailing)
 from rotation import btc_trend, momentum_pct, plan_rotation, pump_pct
 from config import (PROFILE_ATTRS, PROFILES, ConfigError, is_long_horizon, is_mean_reversion, is_rotation,
                     strategy_family)
@@ -72,6 +73,10 @@ REASON_LABELS = {
     ExitReason.KILL_SWITCH.value: "☠️ Kill-switch",
     ExitReason.ROTATION.value: "🔄 Rotasyon (sıralamadan düştü)",
     ExitReason.TREND_FILTER.value: "📉 BTC trend filtresi",
+    ExitReason.TP_EXTENDED.value: "🚀 Uzatılmış Kâr Al",
+    ExitReason.ESCAPE.value: "🏃 Erken kaçış (hacimli satış)",
+    ExitReason.TIME_EXIT.value: "⏳ Süre: başabaşta satış",
+    ExitReason.PROFIT_LOCK.value: "🔐 Piramit kilidi",
     END_REASON: "🏁 Dönem Sonu",
 }
 
@@ -515,6 +520,15 @@ class _OpenPos:
     room: Optional[float] = None
 
 
+@dataclass
+class _PendingBuy:
+    """TRAILING_BUY: sinyalden sonra dipten dönüş bekleyen alım."""
+    signal: Signal
+    available: float
+    low: float          # Sinyalden beri görülen en düşük piyasa fiyatı
+    expires_ms: int
+
+
 class _Simulator:
     def __init__(self, cfg, series: Dict[str, _Series], btc: Optional[_Series],
                  min_notional: float, spread_pct: float, progress: Progress,
@@ -553,6 +567,7 @@ class _Simulator:
         self.day = -1
         self.day_pnl = 0.0
         self.sl_streak = 0
+        self.pending_buys: Dict[str, _PendingBuy] = {}
 
     # ------------------------------------------------------------ yardımcılar
     def _market_level(self, target_pct: float, op: _OpenPos) -> float:
@@ -584,6 +599,7 @@ class _Simulator:
             if self.strategy.is_rotation:
                 self._rotation_step(k, t_close)
             else:
+                self._process_pending_buys(k, t_close)
                 self._scan_and_enter(k, t_close)
             self._record_equity(k, t_close)
             done = (k - k_start + 1) / total
@@ -595,31 +611,49 @@ class _Simulator:
 
     # ------------------------------------------------------------ 1) pozisyon takibi
     def _bar_exit(self, op: _OpenPos, o: float, h: float, low: float, c: float,
-                  now_sec: float) -> Optional[Tuple[float, str]]:
+                  now_sec: float, k: int = -1) -> Optional[Tuple[float, str]]:
         """KÖTÜMSER mum içi sıralama: önce düşük taraf (SL / izleyen stop tabanı), sonra TP."""
         cfg, pos = self.cfg, op.pos
+        sl_pct = position_sl(pos, cfg)
         # Teşhis: işlemin gördüğü en iyi / en kötü an (çıkış mumu dahil; karar mantığını etkilemez)
         hi_pct, lo_pct = self._pnl_at(op, h), self._pnl_at(op, low)
         if hi_pct > op.peak:
             op.peak, op.peak_ms = hi_pct, int(now_sec * 1000)
         op.trough = min(op.trough, lo_pct)
         # a) Düşük taraf: en yüksek koruma seviyesi (SL / izleyen stop tabanı / başabaş tabanı)
-        level, reason, level_pct = op.sl_price, ExitReason.STOP_LOSS, -cfg.stop_loss_pct
+        level, reason, level_pct = op.sl_price, ExitReason.STOP_LOSS, -sl_pct
         if pos.trailing_active:
             floor = trailing_floor_pct(pos, cfg)
             if floor > level_pct:
                 level, reason, level_pct = self._market_level(floor, op), ExitReason.TRAILING_STOP, floor
         if pos.breakeven_active and cfg.breakeven_floor_pct > level_pct:
             # Canlıda izleyen stop önce kontrol edilir; başabaş yalnızca tabanı daha yüksekse önce tetiklenir
-            level, reason = self._market_level(cfg.breakeven_floor_pct, op), ExitReason.BREAKEVEN
+            level, reason, level_pct = (self._market_level(cfg.breakeven_floor_pct, op), ExitReason.BREAKEVEN,
+                                        cfg.breakeven_floor_pct)
+        if pos.tp_extended and extension_floor(pos, cfg) > level_pct:   # Uzatılmış hedef: zirveden geri dönüş
+            level_pct = extension_floor(pos, cfg)
+            level, reason = self._market_level(level_pct, op), ExitReason.TP_EXTENDED
+        if pos.lock_pct is not None and pos.lock_pct > level_pct:        # Piramit kilidi
+            level_pct = pos.lock_pct
+            level, reason = self._market_level(level_pct, op), ExitReason.PROFIT_LOCK
         if low <= level:
             price = min(level, o)  # Açılış zaten eşiğin altındaysa açılıştan
-            if reason is not ExitReason.STOP_LOSS and self._pnl_at(op, price) <= -cfg.stop_loss_pct:
+            if reason is not ExitReason.STOP_LOSS and self._pnl_at(op, price) <= -sl_pct:
                 reason = ExitReason.STOP_LOSS  # Canlı evaluate_exit de SL'yi önce kontrol eder
             return price, reason.value
         # b) Yüksek taraf
-        if h >= op.tp_price:
-            return max(op.tp_price, o), ExitReason.TAKE_PROFIT.value
+        if pos.exit_at_breakeven:   # Süre kuralı: başabaşa gelince sat
+            even = self._market_level(0.0, op)
+            if h >= even:
+                return max(even, o), ExitReason.TIME_EXIT.value
+        if not pos.tp_extended and h >= op.tp_price:
+            if not (cfg.tp_extend and "tp_ext" not in pos.asked and self._extend_tp(op, k)):
+                return max(op.tp_price, o), ExitReason.TAKE_PROFIT.value
+            # Hedef bu mumda uzatıldı: kötümser varsayım, fiyat zirveden sonra kapanışa iner
+            update_trailing(pos, self._pnl_at(op, h), cfg)
+            floor = extension_floor(pos, cfg)
+            if self._pnl_at(op, c) <= floor:
+                return self._market_level(floor, op), ExitReason.TP_EXTENDED.value
         # c) Zirve güncellemesi (düşük taraf kontrolünden SONRA); canlıdaki gibi önce izleyen stop, sonra başabaş
         update_trailing(pos, self._pnl_at(op, h), cfg)
         update_breakeven(pos, cfg)
@@ -636,9 +670,144 @@ class _Simulator:
                 if k > s.last:  # Veri bitti (işlem durmuş/delist): son kapanıştan kapat, slotu boşalt
                     self._close(symbol, s.c[s.last], END_REASON, s.t0 + (s.last + 1) * s.step_ms)
                 continue
-            hit = self._bar_exit(self.open[symbol], s.o[k], s.h[k], s.l[k], s.c[k], t_close / 1000)
+            hit = self._bar_exit(self.open[symbol], s.o[k], s.h[k], s.l[k], s.c[k], t_close / 1000, k)
             if hit:
                 self._close(symbol, hit[0], hit[1], t_close)
+            else:
+                self._smart_step(symbol, k, t_close)
+
+    # ------------------------------------------------------------ 1b) akıllı yönetim ("auto" modları)
+    def _closed_rows(self, symbol: str, k: int, count: int) -> List[list]:
+        """k. mum dahil son `count` kapanmış mum (canlıda o an görülen kapanmış mumlar)."""
+        if k < 0:
+            return []
+        return self.series[symbol].window(k, count + 1)[:-1]
+
+    def _extend_tp(self, op: _OpenPos, k: int) -> bool:
+        """TP_EXTEND: Kâr Al'a gelindi; son kapanmış mumlarda momentum güçlüyse hedef uzatılır (pozisyon başına bir
+        kez bakılır, canlıdaki gibi)."""
+        op.pos.asked.append("tp_ext")
+        if momentum_strong(self._closed_rows(op.pos.symbol, k - 1, 40)):
+            op.pos.tp_extended = True
+            self.stats["hedef_uzatma"] += 1
+            return True
+        return False
+
+    def _smart_step(self, symbol: str, k: int, t_close: int) -> None:
+        """Mum kapanışında süre / kaçış / DCA / piramit kuralları (yalnızca "auto" modlar simüle edilir)."""
+        cfg = self.cfg
+        if not target_exits(cfg):
+            return
+        op = self.open[symbol]
+        pos = op.pos
+        c = self.series[symbol].c[k]
+        pnl = self._pnl_at(op, c)
+        if (cfg.time_exit_mode == "auto" and "time" not in pos.asked
+                and t_close / 1000 - pos.opened_at >= cfg.time_exit_minutes * 60 and is_flat(pnl, cfg.time_exit_band_pct)):
+            pos.asked.append("time")
+            pos.exit_at_breakeven = True
+            self.stats["sure_kurali"] += 1
+        if cfg.escape_mode == "auto" and "escape" not in pos.asked and pnl <= -cfg.escape_trigger_pct:
+            if volume_breakdown(self._closed_rows(symbol, k, 30), cfg.escape_volume_ratio):
+                pos.asked.append("escape")
+                self.stats["erken_kacis"] += 1
+                self._close(symbol, c, ExitReason.ESCAPE.value, t_close)
+                return
+        if pos.adds or pos.reserve_usdt < float(op.rules.min_notional) * cfg.min_notional_safety:
+            return
+        if cfg.dca_mode == "auto" and "dca" not in pos.asked and pnl <= -cfg.dca_trigger_pct:
+            pos.asked.append("dca")
+            self._add(symbol, k, "dca")
+        elif (cfg.pyramid_mode == "auto" and "pyramid" not in pos.asked and not pos.tp_extended
+              and pnl >= cfg.pyramid_trigger_pct and momentum_strong(self._closed_rows(symbol, k, 40))):
+            pos.asked.append("pyramid")
+            self._add(symbol, k, "pyramid")
+
+    def _add(self, symbol: str, k: int, kind: str) -> None:
+        """Yedek akçeyle pozisyona ekleme (canlı SmartManager.add_to_position ile aynı birleştirme)."""
+        cfg = self.cfg
+        op = self.open[symbol]
+        pos, rules = op.pos, op.rules
+        price = self.series[symbol].c[k] * self.entry_factor
+        spend = min(pos.reserve_usdt, self.cash)
+        qty = rules.floor_market_qty(to_dec(spend) / to_dec(price))
+        if qty <= 0 or qty < rules.market_min_qty:
+            return
+        qty_f = float(qty)
+        notional = qty_f * price
+        if notional < float(rules.min_notional) or notional > self.cash + 1e-9:
+            return
+        fee_base = qty_f * cfg.fee_rate
+        net_qty = qty_f - fee_base
+        pos.entry_price = (pos.entry_price * pos.qty + price * net_qty) / (pos.qty + net_qty)
+        pos.qty += net_qty
+        pos.cost_usdt += notional
+        pos.buy_fee_usdt += fee_base * price
+        pos.reserve_usdt = round(max(0.0, pos.reserve_usdt - notional), 2)
+        pos.adds += 1
+        op.buy_fee += fee_base * price
+        sell_q = rules.floor_market_qty(pos.qty)
+        op.sellable = float(sell_q) if sell_q >= rules.market_min_qty else 0.0
+        op.tp_price = self._market_level(position_tp(pos, cfg), op)
+        op.sl_price = self._market_level(-position_sl(pos, cfg), op)
+        pos.peak_pnl_pct = self._pnl_at(op, self.series[symbol].c[k])   # Korumalar yeni maliyete göre baştan
+        pos.trailing_active = pos.breakeven_active = False
+        if kind == "pyramid":
+            pos.lock_pct = max(0.1, cfg.breakeven_floor_pct)
+        self.cash -= notional
+        self.fees += fee_base * price
+        self.stats["ekleme_dca" if kind == "dca" else "ekleme_piramit"] += 1
+
+    def _hourly_atr(self, symbol: str, k: int, price: float) -> Optional[float]:
+        """k. mumun kapanışında görülen son 29 kapanmış 1 saatlik mumun ATR'si (canlı: 1h klines, 30 mum)."""
+        s = self.series[symbol]
+        if s.step_ms >= DAY_MS:
+            return None
+        per = max(1, HOUR_MS // s.step_ms)
+        last_end = (s.t0 + (k + 1) * s.step_ms) // HOUR_MS * HOUR_MS
+        rows = []
+        for i in range(29, 0, -1):
+            start = last_end - i * HOUR_MS
+            j0 = (start - s.t0) // s.step_ms
+            j1 = j0 + per - 1
+            if j0 < max(0, s.first) or j1 > k:
+                continue
+            rows.append([start, s.o[j0], max(s.h[j0:j1 + 1]), min(s.l[j0:j1 + 1]), s.c[j1]])
+        return atr_pct(rows, price)
+
+    def _process_pending_buys(self, k: int, t_close: int) -> None:
+        """TRAILING_BUY: fiyat düştükçe dip izlenir, dipten TRAILING_BUY_PCT dönünce alınır.
+
+        Kötümser mum içi sıralama: önce eski dibe göre dönüş (yükseliş) aranır, sonra yeni dip; yeni dipten dönüş
+        ancak kapanışta görülürse kapanıştan alınır.
+        """
+        cfg = self.cfg
+        for symbol, pb in list(self.pending_buys.items()):
+            s = self.series[symbol]
+            if self.killed or t_close < self.freeze_until or not s.has(k) or t_close > pb.expires_ms:
+                del self.pending_buys[symbol]
+                self.stats["kademeli_iptal"] += 1
+                continue
+            price = None
+            trigger = trailing_buy_trigger(pb.low, cfg.trailing_buy_pct)
+            if s.h[k] >= trigger:
+                price = max(trigger, s.o[k])
+            else:
+                pb.low = min(pb.low, s.l[k])
+                if s.c[k] >= trailing_buy_trigger(pb.low, cfg.trailing_buy_pct):
+                    price = s.c[k]
+            if price is None:
+                continue
+            del self.pending_buys[symbol]
+            rules = s.rules
+            entry_price = price * self.entry_factor
+            plan = plan_entry(min(pb.available, self.cash), rules, entry_price, cfg)
+            if not plan.ok:
+                self.stats["plan_red"] += 1
+                continue
+            reserve = round(max(0.0, pb.available - plan.quote_amount), 2) if cfg.capital_usage_pct < 100 else 0.0
+            if self._open(pb.signal, rules, plan.quote_amount, entry_price, t_close, k=k, reserve=reserve):
+                self.stats["kademeli_alim"] += 1
 
     def _close(self, symbol: str, market_price: float, reason: str, t_ms: int) -> None:
         op = self.open.pop(symbol)
@@ -730,7 +899,7 @@ class _Simulator:
         cfg = self.cfg
         capital = cfg.start_capital + self.realized
         slots = position_slots(capital, self.min_notional, cfg)
-        free_slots = slots - len(self.open)
+        free_slots = slots - len(self.open) - len(self.pending_buys)
         if free_slots <= 0:
             return
         if t_close < self.freeze_until:      # Canlıda da risk sigortası tetiklenince yeni alım yapılmaz
@@ -751,7 +920,8 @@ class _Simulator:
         target = capital / slots
         candidates: List[Tuple[float, str]] = []
         for symbol, s in self.series.items():
-            if s.rules is None or symbol in self.open or self.cooldown.get(symbol, 0) > t_close:
+            if (s.rules is None or symbol in self.open or symbol in self.pending_buys
+                    or self.cooldown.get(symbol, 0) > t_close):
                 continue
             if not s.has(k):
                 continue
@@ -799,19 +969,27 @@ class _Simulator:
             if opened >= free_slots:
                 break
             rules = self.series[signal.symbol].rules
-            committed = sum(op.pos.cost_usdt for op in self.open.values())
+            committed = (sum(op.pos.cost_usdt for op in self.open.values())
+                         + sum(pb.available for pb in self.pending_buys.values()))   # Bekleyen alımlara ayrılan
             remaining = capital - committed
-            is_last_slot = len(self.open) + 1 >= slots
+            is_last_slot = len(self.open) + len(self.pending_buys) + 1 >= slots
             # Son slot artanı kullanır (yedek akçe açıkken, CAPITAL_USAGE_PCT < 100, kullanmaz: canlıdaki gibi)
             budget = remaining if is_last_slot and cfg.capital_usage_pct >= 100 else min(target, remaining)
             entry_price = signal.price * self.entry_factor
-            plan = plan_entry(min(budget, self.cash), rules, entry_price, cfg)
+            available = min(budget, self.cash)
+            plan = plan_entry(available, rules, entry_price, cfg)
             if not plan.ok:
                 self.stats["plan_red"] += 1
                 if "bakiye" in plan.reason.lower():
                     return
                 continue
-            if self._open(signal, rules, plan.quote_amount, entry_price, t_close):
+            if cfg.trailing_buy:   # Canlıdaki gibi: hemen alma, dipten dönüşü bekle (en az bir mum)
+                wait_ms = max(cfg.trailing_buy_minutes * 60_000, self.step_ms)
+                self.pending_buys[signal.symbol] = _PendingBuy(signal, available, signal.price, t_close + wait_ms)
+                opened += 1
+                continue
+            reserve = round(max(0.0, available - plan.quote_amount), 2) if cfg.capital_usage_pct < 100 else 0.0
+            if self._open(signal, rules, plan.quote_amount, entry_price, t_close, k=k, reserve=reserve):
                 opened += 1
 
     # ------------------------------------------------------------ 3b) momentum rotasyonu
@@ -914,7 +1092,8 @@ class _Simulator:
         self.signal_cache[key] = signal
         return signal
 
-    def _open(self, signal, rules: SymbolRules, quote_amount: float, ask: float, t_close: int) -> bool:
+    def _open(self, signal, rules: SymbolRules, quote_amount: float, ask: float, t_close: int,
+              k: Optional[int] = None, reserve: float = 0.0) -> bool:
         """PaperExchange.market_buy ile aynı hesap: komisyon alınan coinden kesilir."""
         cfg = self.cfg
         spend = min(quote_amount, self.cash)
@@ -935,11 +1114,14 @@ class _Simulator:
         pos = Position(symbol=signal.symbol, base_asset=rules.base_asset, qty=net_qty, entry_price=ask,
                        cost_usdt=notional, opened_at=t_close / 1000, buy_fee_usdt=fee_base * ask,
                        signal_note=signal.note())
+        pos.reserve_usdt = reserve
+        if k is not None and cfg.atr_targets:   # Canlıdaki gibi: girişte coinin 1 saatlik ATR'sine göre hedefler
+            pos.tp_pct, pos.sl_pct = atr_targets(cfg, self._hourly_atr(signal.symbol, k, ask / self.entry_factor))
         op = _OpenPos(pos=pos, rules=rules, sellable=sellable, score=signal.score, open_ms=t_close,
                       tp_price=0.0, sl_price=0.0, market_entry=ask / self.entry_factor, buy_fee=fee_base * ask,
                       room=signal.metrics.get("room_pct"))
-        op.tp_price = self._market_level(cfg.take_profit_pct, op) if target_exits(cfg) else math.inf
-        op.sl_price = self._market_level(-cfg.stop_loss_pct, op)
+        op.tp_price = self._market_level(position_tp(pos, cfg), op) if target_exits(cfg) else math.inf
+        op.sl_price = self._market_level(-position_sl(pos, cfg), op)
         op.peak = op.trough = self._pnl_at(op, op.market_entry)   # Girişte: -(komisyon + spread)
         op.peak_ms = t_close
         self.open[signal.symbol] = op
@@ -1300,6 +1482,14 @@ SWEEP_FIELDS: Dict[str, Tuple[str, type, Optional[str]]] = {
     "OVERHEAT_FILTER": ("overheat_filter", bool, None),
     "LOSS_STREAK_LIMIT": ("loss_streak_limit", int, None),
     "DAILY_LOSS_LIMIT_PCT": ("daily_loss_limit_pct", float, None),
+    "ATR_TARGETS": ("atr_targets", bool, None),
+    "TP_EXTEND": ("tp_extend", bool, None),
+    "TRAILING_BUY": ("trailing_buy", bool, None),
+    "TIME_EXIT_MODE": ("time_exit_mode", str, None),
+    "ESCAPE_MODE": ("escape_mode", str, None),
+    "DCA_MODE": ("dca_mode", str, None),
+    "PYRAMID_MODE": ("pyramid_mode", str, None),
+    "CAPITAL_USAGE_PCT": ("capital_usage_pct", float, None),
 }
 # Filtre gevşetme taraması (rebound): her satırda TEK filtre bir adım gevşetilir. (.env anahtarı, yön: +1 = değeri
 # büyütmek gevşetir / -1 = küçültmek gevşetir, adımlar hafiften güçlüye; mevcut değerden gevşek olan ilki denenir)
@@ -1756,7 +1946,16 @@ AB_TESTS: Tuple[Tuple[str, str, Union[bool, int, float], Union[bool, int, float]
     ("OVERHEAT_FILTER", "Aşırı ısınma", True, False),
     ("LOSS_STREAK_LIMIT", "Zarar serisi sigortası", 3, 0),
     ("DAILY_LOSS_LIMIT_PCT", "Günlük zarar limiti", 3.0, 0.0),
+    # Akıllı yönetim: "sorarak" (ask) modu geçmiş veriyle denenemez; "otomatik" hali denenir
+    ("ATR_TARGETS", "ATR hedefleri", True, False),
+    ("TP_EXTEND", "Hedef uzatma", True, False),
+    ("TRAILING_BUY", "Kademeli alım", True, False),
+    ("TIME_EXIT_MODE", "Süre kuralı (başabaşta sat)", "auto", "off"),
+    ("ESCAPE_MODE", "Erken kaçış", "auto", "off"),
 )
+# Yedek akçe gerektirenler: ilk giriş %100 ise yedek %50 ile denenir (ve kıyas için yalnızca yedek %50)
+AB_RESERVE_TESTS = (("DCA_MODE", "DCA"), ("PYRAMID_MODE", "Piramit"))
+AB_RESERVE_PCT = 50.0
 AB_CANDLE_KEYS = ("FAKEOUT_FILTER", "VWAP_FILTER", "OVERHEAT_FILTER")
 AB_LIVE_ONLY = "Satış duvarı radarı, emir defteri dengesizliği ve tape teyidi"
 
@@ -1764,9 +1963,18 @@ AB_LIVE_ONLY = "Satış duvarı radarı, emir defteri dengesizliği ve tape teyi
 def _ab_state(key: str, value) -> str:
     if isinstance(value, bool):
         return "açık" if value else "kapalı"
+    if isinstance(value, str):
+        return {"off": "kapalı", "ask": "sorarak", "auto": "otomatik"}.get(value, value)
     if not value:
         return "kapalı"
     return f"{value:g} SL" if key == "LOSS_STREAK_LIMIT" else f"-%{value:g}"
+
+
+def _ab_flip(current, on, off):
+    """Mevcut durumun tersi: açık / otomatik ise kapalı, değilse açık / otomatik ("sorarak" kapalı sayılır)."""
+    if isinstance(on, str):
+        return off if current == on else on
+    return off if current else on
 
 
 def ab_combos(cfg, regime_available: bool = True) -> List[Combo]:
@@ -1779,13 +1987,21 @@ def ab_combos(cfg, regime_available: bool = True) -> List[Combo]:
             continue   # Rejim verisi yalnızca filtre açıkken hazırlanır: kapalıyken "açık" hali denenemez
         if is_rotation(cfg.strategy) and key != "REGIME_FILTER":
             continue
-        value = off if current else on
+        value = _ab_flip(current, on, off)
         if _valid(replace(cfg, **{attr: SWEEP_FIELDS[key][1](value)})):
             combos.append(({key: value}, False))
     if not is_rotation(cfg.strategy):
         together = {k: True for k in AB_CANDLE_KEYS if not getattr(cfg, SWEEP_FIELDS[k][0])}
         if len(together) > 1:
             combos.append((together, False))
+        reserve = {} if cfg.capital_usage_pct < 100 else {"CAPITAL_USAGE_PCT": AB_RESERVE_PCT}
+        if reserve:
+            combos.append((dict(reserve), False))   # Kıyas: yalnızca yedek akçe (ekleme yok)
+        for key, _label in AB_RESERVE_TESTS:
+            value = _ab_flip(getattr(cfg, SWEEP_FIELDS[key][0]), "auto", "off")
+            settings = {**reserve, key: value} if value == "auto" else {key: value}
+            if _valid(_apply(cfg, settings)):
+                combos.append((settings, False))
     return combos
 
 
@@ -1798,11 +2014,19 @@ def run_ab_test(cfg, data: BacktestData, spread_pct: float = 0.05, progress: Pro
 def _ab_label(cfg, settings: Settings) -> str:
     if not settings:
         return "mevcut ayarlar"
-    if len(settings) > 1:
-        return "3 mum filtresi birden açık"
-    (key, value), = settings.items()
-    name = next(label for k, label, _on, _off in AB_TESTS if k == key)
-    return f"{name}: {_ab_state(key, getattr(cfg, SWEEP_FIELDS[key][0]))} → {_ab_state(key, value)}"
+    names = {k: label for k, label, _on, _off in AB_TESTS}
+    names.update(dict(AB_RESERVE_TESTS))
+    parts = []
+    usage = settings.get("CAPITAL_USAGE_PCT")
+    if usage is not None:
+        parts.append(f"Yedek akçe %{100 - usage:g}")
+    for key, value in settings.items():
+        if key == "CAPITAL_USAGE_PCT":
+            continue
+        if key in AB_CANDLE_KEYS and len(settings) > 1:
+            return "3 mum filtresi birden açık"
+        parts.append(f"{names[key]}: {_ab_state(key, getattr(cfg, SWEEP_FIELDS[key][0]))} → {_ab_state(key, value)}")
+    return " + ".join(parts)
 
 
 def format_ab_report(rows: Sequence[SweepRow], cfg, data: BacktestData, spread_pct: float = 0.05) -> str:
@@ -1869,6 +2093,10 @@ def format_ab_report(rows: Sequence[SweepRow], cfg, data: BacktestData, spread_p
                      "ama stratejiyi kârlı yapmıyor (bkz. --turnuva).")
     lines.append(f"📝 {AB_LIVE_ONLY} geçmiş emir defteri verisi olmadığı için backtest edilemez; test modunda canlı "
                  "verilerle /tarama raporundaki elenme sayılarına bakın.")
+    lines.append("📝 Akıllı yönetimin \"sorarak\" modu (Telegram'dan sorar) geçmiş veriyle denenemez; tabloda sormadan "
+                 "uygulanan \"otomatik\" hali var. DCA / piramit yedek akçe ister: ilk giriş %100 ise yedek "
+                 f"%{AB_RESERVE_PCT:g} ile denenir, \"Yedek akçe %{AB_RESERVE_PCT:g}\" satırı eklemesiz kıyastır. "
+                 "Ekleme ve süre kuralları mum kapanışında, kademeli alım mumlarla yaklaşık simüle edilir.")
     lines.append("📝 Günlük zarar limiti backtest'te UTC gün sınırıyla, canlıda yerel saatle hesaplanır. Kayma yok, "
                  "geçmiş sonuçlar geleceği garanti etmez.")
     return "\n".join(lines)
@@ -2560,6 +2788,12 @@ def format_backtest_report(result: BacktestResult, cfg) -> str:
             lines.append("🛡️ Ek filtrelere takılan sinyal: " + ", ".join(f"{k}: {v}" for k, v in filtered.items()))
         if st.get("dondurma"):
             lines.append(f"🧊 Risk sigortası (zarar serisi / günlük limit) alımları {st['dondurma']} kez dondurdu")
+        smart = {"hedef_uzatma": "hedef uzatma", "ekleme_dca": "DCA ekleme", "ekleme_piramit": "piramit ekleme",
+                 "erken_kacis": "erken kaçış", "sure_kurali": "süre kuralı", "kademeli_alim": "kademeli alım",
+                 "kademeli_iptal": "dönmeyen kademeli alım"}
+        used = [f"{label}: {st[key]}" for key, label in smart.items() if st.get(key)]
+        if used:
+            lines.append("🧠 Akıllı yönetim: " + ", ".join(used))
 
     lines.append(LINE)
     if trades:

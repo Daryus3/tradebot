@@ -123,6 +123,7 @@ kilitli kalır (`--reset-state` ile açılır).
 | 🌐 IP alarmı | Sunucunun dış IP'sini 10 dk'da bir kontrol eder (api.ipify.org); değişirse uyarır (Binance IP kısıtlaması) |
 | 🧯 Risk sigortaları | Üst üste 3 zarar keste 4 saat, günlük zarar limitinde gün sonuna kadar yeni alım yapmaz; aynı coinde 3 zarar keste kara liste önerir; ortalama kayma artarsa uyarır |
 | 🛡️ Ek giriş filtreleri | Sahte yükseliş (üst fitil), VWAP, aşırı ısınma; canlıda satış duvarı, emir defteri dengesizliği, tape teyidi (varsayılan kapalı, `/menu` → Filtreler) |
+| 🧠 Akıllı yönetim | ATR'ye göre hedefler, Kâr Al'da hedef uzatma, DCA / piramit (yedek akçeyle), süre sorusu, erken kaçış, kademeli alım, sinyal onayı (varsayılan kapalı, `/menu` → Akıllı Yönetim) |
 
 ---
 
@@ -141,6 +142,8 @@ Bot **yalnızca sizin sohbetinizden** (`TELEGRAM_CHAT_ID`) gelen komutları ve m
 | 🧭 Strateji | Hazır stratejiler arasında geçiş (onay ister, bot yeniden başlar; grubun çıkış ayarları yüklenir, eski grubunkiler saklanır) |
 | 🔔 Bildirim | Tümü / Sadece Kapanışlar / Sessiz Mod (komut cevapları ve acil uyarılar her zaman gelir) |
 | 🛡️ Filtreler · 🧯 Risk | Ek giriş filtrelerini ve risk sigortalarını açar / kapatır |
+| 🧠 Akıllı Yönetim | Aşağıdaki tablodaki özellikleri açar / kapatır; DCA, piramit, süre ve kaçış için kapalı / sorarak / otomatik |
+| 📈 Canlı Pano · 🧹 Toz → BNB | 5 sn'de bir güncellenen tek K/Z mesajı; küçük bakiyeleri BNB'ye çevirme (canlı mod) |
 | 🔎 Piyasayı Tara | En hacimli 40 coinde "dipte olup hacmi artan"ları listeler (bilgi amaçlı, alım yapmaz) |
 | 📶 Gecikme · 📜 Son Loglar · 🌐 IP | Binance'e ms gecikme, son 15 log satırı, sunucunun dış IP'si |
 | 🔄 Sunucu Reset | Bot servisini yeniden başlatır (onay ister; ayrıntı VPS_KURULUM.md) |
@@ -162,10 +165,30 @@ başlasa da kalır; `.env`, `ayarlar.env`'yi ezer). Diğer ayarlar için `/ayar 
 | `/ayarlar` · `/ping` · `/yardim` | Ayarlar, "çalışıyor musun?", komut listesi |
 | `/menu` · `/ayar tp 2.5` | Kontrol paneli; tek bir ayarı değiştirme |
 | `/piyasa` · `/gecikme` · `/loglar` · `/ip` | Piyasa taraması, ağ gecikmesi, son loglar, dış IP |
+| `/pano` · `/toz` | Canlı K/Z panosu (aç / kapat); tozları BNB'ye çevir |
 
 Riskli komutlar 60 sn içinde `/evet` (veya ✅ düğmesi) onayı ister (`COMMAND_PIN` ayarlıysa düğme gösterilmez,
 `/evet PIN` yazılır). Her gece günlük, pazar
 günleri haftalık özet gelir.
+
+### 🧠 Akıllı yönetim (`/menu` → Akıllı Yönetim, hepsi varsayılan kapalı)
+
+| Özellik | Ne yapar? | Backtest |
+|---|---|---|
+| 📏 ATR hedefleri | Kâr Al / Zarar Kes'i coinin 1 saatlik ATR'sine göre belirler (zarar kes yalnızca daralır) | ✅ |
+| 🚀 Hedef uzatma | Kâr Al'da momentum güçlüyse satmaz, zirveden %0.5 geri dönünce satar | ✅ |
+| ➕ DCA | Net -%5'te pozisyonun yedek akçesiyle bir kez ekler (sorarak / otomatik) | ✅ otomatik |
+| 🔺 Piramit | Net +%3 ve momentum güçlüyse yedekle ekler; sonra birleşik pozisyon zarara dönmeden satılır | ✅ otomatik |
+| ⏳ Süre sorusu | 3 saat yatay kalan pozisyonda "başabaşta satılsın mı?" (Başabaşta sat / Hemen sat / Bekle) | ✅ otomatik |
+| 🏃 Erken kaçış | Net -%4'te hacimli satış baskısı varsa zarar kesi beklemeden çıkış | ✅ otomatik |
+| 🪜 Kademeli alım | Sinyalden sonra fiyat düştükçe bekler, dipten %0.3 dönünce alır | ✅ (mumlarla yaklaşık) |
+| 🔔 Sinyal onayı | Oynak piyasada (1s ATR yüksek / likidasyon dalgası) veya her sinyalde almadan önce sorar | — |
+| 💥 Likidasyon · 📐 RSI uyumsuzluğu | Vadeli işlemler likidasyon dalgası ve pozitif RSI uyumsuzluğu bildirimleri (bilgi amaçlı) | — |
+| 🪙 BNB takviyesi | BNB azalınca "6 USDT'lik BNB alınsın mı?" (bota ayrılmamış bakiyeden; Binance'in en küçük emri ~5 USDT) | — |
+
+DCA ve piramit **yedek akçe** ister (`/menu` → Sermaye → ilk giriş %50 gibi). Sorular pozisyon başına bir kez
+sorulur, 15 dk sonra geçersiz olur; `COMMAND_PIN` ayarlıysa düğme yetmez, `/evet PIN` istenir. "Otomatik" hallerin
+geçmiş veriyle etkisini `--tara-ab` gösterir; "sorarak" hali geçmiş veriyle denenemez.
 
 ---
 
@@ -258,7 +281,10 @@ tradebot/
 ├── runtime_settings.py  # Telegram'dan değiştirilebilen ayarlar ve .env'ye güvenli yazma
 ├── entry_filters.py   # Ek giriş filtreleri (fitil, VWAP, aşırı ısınma, emir defteri, tape)
 ├── ip_monitor.py      # Sunucunun dış IP'sini izler, değişirse alarm
-├── market_scan.py     # "Piyasayı Tara": dipte olup hacmi artan coinler
+├── market_scan.py     # "Piyasayı Tara" ve pozitif RSI uyumsuzluğu taraması
+├── smart_manager.py   # Akıllı yönetim (canlı): hedef uzatma, DCA, piramit, sorular, kademeli alım, pano
+├── position_rules.py  # Akıllı yönetim kuralları (canlı ve backtest ortak)
+├── liquidations.py    # Binance vadeli işlemler likidasyon akışı
 ├── charts.py          # Backtest K/Z dağılım grafiği (matplotlib)
 ├── stats.py           # İstatistikler ve raporlar
 ├── backtest.py        # Geçmiş veriyle strateji testi ve taramalar
