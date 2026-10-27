@@ -62,6 +62,7 @@ COMMAND_MENU = [
     ("loglar", "Son 15 log satırı"),
     ("ip", "Sunucunun dış IP adresi"),
     ("pano", "Canlı K/Z panosu (aç / kapat)"),
+    ("backtest", "Backtest menüsü: ayarla, başlat, sonuçları al"),
     ("toz", "Küçük bakiyeleri (toz) BNB'ye çevir"),
     ("ping", "Bot çalışıyor mu?"),
     ("yardim", "Komut listesi"),
@@ -537,6 +538,11 @@ class CommandProcessor:
 
     def cmd_toz(self, args) -> None:
         self.bot.smart.show_dust()
+
+    def cmd_backtest(self, args) -> None:
+        self.panel.backtest.show()
+
+    cmd_bt = cmd_backtest
 
     # ------------------------------------------------------------ kontrol komutları
     def cmd_durdur(self, args) -> None:

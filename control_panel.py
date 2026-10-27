@@ -34,7 +34,7 @@ LOG_TAIL_LINES = 15
 BLACKLIST_HOURS = 24
 # Tarama sürerken de hemen çalışan (yalnızca bilgi gösteren / menüde gezinen) düğmeler
 READ_ONLY_CALLBACKS = frozenset({"menu", "st", "cfg", "cap", "strat", "ntf", "flt", "risk", "scan", "lat", "log",
-                                 "ip", "x", "rst", "smart", "board", "dust"})
+                                 "ip", "x", "rst", "smart", "board", "dust", "bt"})
 NOTIFY_LABELS = {"all": "Tümü", "closes": "Sadece Kapanışlar", "silent": "Sessiz Mod"}
 NOTIFY_HELP = {"all": "her alım, satış, izleyen stop ve rapor",
                "closes": "yalnızca pozisyon kapanışları (alım ve periyodik raporlar gelmez)",
@@ -104,8 +104,10 @@ class ControlPanel:
     def __init__(self, proc: "CommandProcessor"):
         self.proc = proc
         self._scan_thread: Optional[threading.Thread] = None
+        from backtest_runner import BacktestMenu
         from market_scan import scan_market
         self.scan_fn = scan_market               # Testlerde değiştirilebilir
+        self.backtest = BacktestMenu(proc)       # /backtest düğmeleri
 
     @property
     def bot(self):
@@ -144,6 +146,7 @@ class ControlPanel:
             "board": lambda: self.bot.smart.board_off(mid) if arg == "off" else self.bot.smart.board_on(),
             "dust": self.bot.smart.show_dust,
             "q": lambda: self.bot.smart.answer(arg, args[1] if len(args) > 1 else "", mid),
+            "bt": lambda: self.backtest.handle(args, mid),
         }
         if action in simple:
             simple[action]()
@@ -193,6 +196,7 @@ class ControlPanel:
             [("🧭 Strateji", "strat"), ("🔔 Bildirim", "ntf")],
             [("🛡️ Filtreler", "flt"), ("🧯 Risk", "risk")],
             [("🧠 Akıllı Yönetim", "smart"), ("📈 Canlı Pano", "board")],
+            [("🧪 Backtest", "bt")],
             [("🔎 Piyasayı Tara", "scan"), ("📶 Gecikme", "lat")],
             [("📜 Son Loglar", "log"), ("🌐 IP", "ip")],
             [("🧹 Toz → BNB", "dust"), ("🔄 Sunucu Reset", "rst")],

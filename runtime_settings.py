@@ -98,20 +98,25 @@ def find_key(text: str) -> Optional[str]:
 def parse_value(key: str, raw) -> object:
     """Metni ayarın türüne çevirir; geçersizse ConfigError."""
     s = EDITABLE[key]
+    return cast_value(s.kind, raw, key, s.choices)
+
+
+def cast_value(kind: str, raw, key: str, choices: Tuple[str, ...] = ()) -> object:
+    """Metni türüne (float | int | bool | choice) çevirir; geçersizse ConfigError."""
     if not isinstance(raw, str):
         return raw
     text = raw.strip().replace(",", ".")
     try:
-        if s.kind == "float":
+        if kind == "float":
             value = float(text)
             if value != value or value in (float("inf"), float("-inf")):
                 raise ValueError(text)
             return value
-        if s.kind == "int":
+        if kind == "int":
             return int(float(text))
     except ValueError:
         raise ConfigError(f"{key} için sayı girin (girilen: {raw!r})") from None
-    if s.kind == "bool":
+    if kind == "bool":
         low = text.lower()
         if low in _TRUE:
             return True
@@ -119,9 +124,58 @@ def parse_value(key: str, raw) -> object:
             return False
         raise ConfigError(f"{key} için açık / kapalı (true / false) yazın")
     low = text.lower()
-    if low not in s.choices:
-        raise ConfigError(f"{key} şunlardan biri olmalı: {', '.join(s.choices)}")
+    if low not in choices:
+        raise ConfigError(f"{key} şunlardan biri olmalı: {', '.join(choices)}")
     return low
+
+
+# ================================================================ yalnızca backtest için ayar değişikliği
+# (python main.py --backtest --ayar KEY=DEĞER ...; Telegram → /backtest → Test ayarları). Botun ayarları değişmez.
+OVERRIDE_BLOCKED = frozenset({
+    "binance_api_key", "binance_api_secret", "binance_base_url", "binance_ws_url", "telegram_bot_token",
+    "telegram_chat_id", "trading_mode", "log_level", "command_pin", "service_name", "notes", "legacy_loss_usdt",
+    "excluded_assets", "strategy", "kline_interval", "quote_asset",
+})
+OVERRIDE_CHOICES = {"dca_mode": ACTION_MODES, "pyramid_mode": ACTION_MODES, "time_exit_mode": ACTION_MODES,
+                    "escape_mode": ACTION_MODES, "signal_approval": SIGNAL_APPROVAL_MODES, "notify_mode": NOTIFY_MODES}
+
+
+def override_spec(key: str) -> Optional[Tuple[str, str, Tuple[str, ...]]]:
+    """Backtest'te değiştirilebilen ayarın (Config alanı, tür, seçenekler); değiştirilemiyorsa None."""
+    attr = key.strip().lower()
+    f = Config.__dataclass_fields__.get(attr)
+    if f is None or attr in OVERRIDE_BLOCKED:
+        return None
+    if f.type in ("float", "int", "bool"):
+        return attr, f.type, ()
+    if f.type == "str" and attr in OVERRIDE_CHOICES:
+        return attr, "choice", OVERRIDE_CHOICES[attr]
+    return None
+
+
+def apply_overrides(cfg: Config, values: Dict[str, object]) -> Config:
+    """Backtest'e özel ayar değişikliklerini uygular ve doğrular (geçersizse ConfigError)."""
+    changes = {}
+    for key, raw in values.items():
+        spec = override_spec(key)
+        if spec is None:
+            raise ConfigError(f"{key} backtest ayarı olarak değiştirilemez")
+        attr, kind, choices = spec
+        changes[attr] = cast_value(kind, raw, key.upper(), choices)
+    new = replace(cfg, **changes)
+    new.validate()
+    return new
+
+
+def parse_override_args(items: Sequence[str]) -> Dict[str, str]:
+    """['TAKE_PROFIT_PCT=3', 'VWAP_FILTER=true'] → {'TAKE_PROFIT_PCT': '3', ...}; biçim hatalıysa ConfigError."""
+    out: Dict[str, str] = {}
+    for item in items or ():
+        key, sep, value = str(item).partition("=")
+        if not sep or not key.strip() or not value.strip():
+            raise ConfigError(f"--ayar ANAHTAR=DEĞER biçiminde olmalı (girilen: {item!r})")
+        out[key.strip().upper()] = value.strip()
+    return out
 
 
 def format_value(value) -> str:

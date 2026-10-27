@@ -21,6 +21,8 @@ Kullanım:
     python main.py --backtest --strateji mean_revert   # Büyük coinlerde trend içi aşırı satım alımı (küçük hedef)
     python main.py --backtest --turnuva             # Tüm strateji türleri × çıkış profilleri aynı yılda, sıralı tablo
     python main.py --backtest --gun 90 --tara-ab    # Her giriş filtresini açıp / kapatıp kâra etkisini karşılaştırır
+    python main.py --backtest --ayar TAKE_PROFIT_PCT=3 --ayar VWAP_FILTER=true  # Ayarı yalnızca bu test için değiştirir
+Telegram'dan da çalıştırılabilir: /backtest (düğmeli menü; ayrı süreçte çalışır, sonuçlar Telegram'a gelir).
     python main.py --telegram-chat-id  # Telegram chat ID'nizi bulur
     python main.py --reset-state       # Kayıtlı durumu (K/Z, kill-switch) sıfırlar
 
@@ -41,7 +43,7 @@ import time
 from datetime import datetime
 from typing import Optional
 
-from config import (BASE_DIR, DATA_DIR, STRATEGY_NAMES, ConfigError, is_long_horizon, is_mean_reversion,
+from config import (BASE_DIR, DATA_DIR, LOG_DIR, STRATEGY_NAMES, ConfigError, is_long_horizon, is_mean_reversion,
                     is_rotation, load_config)
 from logger import redact, register_secrets, setup_logging
 
@@ -99,6 +101,12 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--sure", default=None,
                         help="--tara için maks. tutma süreleri (dk), örn. 60,120,240 (swing: 1440,4320,7200)")
     parser.add_argument("--alan", default=None, help="--tara için MIN_ROOM_RATIO değerleri, örn. 0,1")
+    parser.add_argument("--ayar", action="append", default=[], metavar="ANAHTAR=DEĞER",
+                        help="Backtest: bir ayarı YALNIZCA bu test için değiştirir (birden çok kez yazılabilir), örn. "
+                             "--ayar TAKE_PROFIT_PCT=3 --ayar VWAP_FILTER=true. .env / ayarlar.env değişmez")
+    parser.add_argument("--cikti-klasoru", default=None,
+                        help="Backtest: CSV dosyalarını ve grafiği bu klasöre yazar, Telegram'a kendisi göndermez "
+                             "(Telegram'dan başlatılan backtest'ler için)")
     parser.add_argument("--reset-state", action="store_true", help="Kayıtlı durumu sıfırlar (kill-switch dahil)")
     parser.add_argument("--telegram-chat-id", action="store_true", help="Telegram chat ID'nizi bulmanıza yardım eder")
     parser.add_argument("--yes", action="store_true", help="Onay sorularını atlar")
@@ -145,7 +153,8 @@ def main(argv=None) -> int:
         return EXIT_CONFIG
 
     register_secrets(cfg.binance_api_key, cfg.binance_api_secret, cfg.telegram_bot_token)
-    log = setup_logging(cfg.log_level)
+    # Backtest ayrı log dosyasına yazar: bot çalışırken aynı dosyayı iki süreç döndürmesin (RotatingFileHandler)
+    log = setup_logging(cfg.log_level, LOG_DIR / ("backtest.log" if args.backtest else "bot.log"))
     for note in cfg.notes:
         log.warning("⚠️ %s", note)
 
@@ -250,6 +259,11 @@ def run_backtest_cli(cfg, args) -> int:
     from binance_client import BinanceClient
     from config import PROFILE_ATTRS, PROFILES, short_entry_filters, strategy_family, with_strategy
 
+    from pathlib import Path
+
+    from runtime_settings import apply_overrides, parse_override_args
+
+    out_dir = Path(args.cikti_klasoru) if args.cikti_klasoru else DATA_DIR
     if args.sermaye is not None:
         if args.sermaye <= 0:
             print("❌ --sermaye sıfırdan büyük olmalı")
@@ -275,6 +289,14 @@ def run_backtest_cli(cfg, args) -> int:
         if strategy_family(env_strategy) != "short" and strategy_family(cfg.strategy) == "short":
             print(f"⚠️ .env'deki çıkış ayarları {env_strategy} stratejisi içindir; {cfg.strategy} (5 dk) bu "
                   f"çıkışlarla deneniyor.")
+    if args.ayar:   # Strateji profilinden SONRA: kullanıcının yazdığı değer her zaman geçerli
+        try:
+            overrides = parse_override_args(args.ayar)
+            cfg = apply_overrides(cfg, overrides)
+        except ConfigError as exc:
+            print(f"❌ {exc}")
+            return EXIT_CONFIG
+        print("⚙️ Yalnızca bu test için değiştirilen ayarlar: " + " ".join(f"{k}={v}" for k, v in overrides.items()))
     days = args.gun if args.gun is not None else (
         1095 if is_rotation(cfg.strategy) and not args.turnuva else
         365 if args.turnuva or is_long_horizon(cfg.strategy) or is_mean_reversion(cfg.strategy) else 30)
@@ -310,7 +332,7 @@ def run_backtest_cli(cfg, args) -> int:
         print(backtest.format_tournament_report(result, cfg))
         try:
             stamp = datetime.now().strftime("%Y%m%d-%H%M")
-            path = backtest.save_sweep_csv([t.row for t in result.rows], DATA_DIR / f"turnuva_{stamp}.csv")
+            path = backtest.save_sweep_csv([t.row for t in result.rows], out_dir / f"turnuva_{stamp}.csv")
             print(f"📄 Tüm {len(result.rows)} satır Excel ile açılabilir dosyada: {path}")
         except OSError as exc:
             print(f"⚠️ Turnuva dosyası yazılamadı: {exc}")
@@ -328,7 +350,7 @@ def run_backtest_cli(cfg, args) -> int:
             report = backtest.format_backtest_report(result, cfg)
             print(report)
             if not args.grafiksiz and getattr(result, "trades", None):
-                _send_backtest_chart(cfg, result, report)
+                _send_backtest_chart(cfg, result, report, out_dir, send=not args.cikti_klasoru)
             return EXIT_OK
         data = backtest.prepare_backtest(cfg, client, days=days, max_symbols=args.coin_sayisi, end_time_ms=end_ms)
         cache: dict = {}   # Giriş analizleri taramalar arasında da paylaşılır (anahtar stratejiyi içerir)
@@ -370,7 +392,7 @@ def run_backtest_cli(cfg, args) -> int:
               else backtest.format_ab_report(rows, cfg, data) if kind == "ab"
               else backtest.format_sweep_report(rows, cfg, data, kind=kind))
         try:
-            path = backtest.save_sweep_csv(rows, DATA_DIR / f"tarama_{kind}_{stamp}.csv")
+            path = backtest.save_sweep_csv(rows, out_dir / f"tarama_{kind}_{stamp}.csv")
             print(f"📄 Tüm {len(rows)} satır Excel ile açılabilir dosyada: {path}")
         except OSError as exc:
             print(f"⚠️ Tarama dosyası yazılamadı: {exc}")
@@ -378,9 +400,10 @@ def run_backtest_cli(cfg, args) -> int:
     return EXIT_OK
 
 
-def _send_backtest_chart(cfg, result, report: str) -> None:
-    """K/Z dağılım grafiğini data/ klasörüne kaydeder; Telegram ayarlıysa rapor ve grafiği oraya da gönderir
-    (sunucuda resim açılamadığı için grafiği telefondan görmenin en kolay yolu)."""
+def _send_backtest_chart(cfg, result, report: str, out_dir=DATA_DIR, send: bool = True) -> None:
+    """K/Z dağılım grafiğini `out_dir` klasörüne kaydeder; Telegram ayarlıysa (ve send) rapor ve grafiği oraya da
+    gönderir (sunucuda resim açılamadığı için grafiği telefondan görmenin en kolay yolu). Telegram'dan başlatılan
+    backtest'te (send=False) gönderimi bot yapar."""
     from charts import matplotlib_available, save_pnl_chart
 
     if not matplotlib_available():
@@ -389,7 +412,7 @@ def _send_backtest_chart(cfg, result, report: str) -> None:
     stamp = datetime.now().strftime("%Y%m%d-%H%M")
     rotation = is_rotation(cfg.strategy)
     try:
-        path = save_pnl_chart(result.trades, DATA_DIR / f"backtest_grafik_{stamp}.png",
+        path = save_pnl_chart(result.trades, out_dir / f"backtest_grafik_{stamp}.png",
                               f"Backtest: {cfg.strategy} — {result.days:g} gün",
                               None if rotation else cfg.take_profit_pct, cfg.stop_loss_pct)
     except Exception as exc:  # noqa: BLE001 - grafik hatası raporu engellemesin
@@ -398,7 +421,7 @@ def _send_backtest_chart(cfg, result, report: str) -> None:
     if path is None:
         return
     print(f"🖼️ K/Z dağılım grafiği: {path}")
-    if not cfg.has_telegram:
+    if not send or not cfg.has_telegram:
         return
     from telegram_bot import TelegramNotifier
     notifier = TelegramNotifier(cfg.telegram_bot_token, cfg.telegram_chat_id, async_mode=False)

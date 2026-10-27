@@ -144,6 +144,7 @@ Bot **yalnızca sizin sohbetinizden** (`TELEGRAM_CHAT_ID`) gelen komutları ve m
 | 🛡️ Filtreler · 🧯 Risk | Ek giriş filtrelerini ve risk sigortalarını açar / kapatır |
 | 🧠 Akıllı Yönetim | Aşağıdaki tablodaki özellikleri açar / kapatır; DCA, piramit, süre ve kaçış için kapalı / sorarak / otomatik |
 | 📈 Canlı Pano · 🧹 Toz → BNB | 5 sn'de bir güncellenen tek K/Z mesajı; küçük bakiyeleri BNB'ye çevirme (canlı mod) |
+| 🧪 Backtest | Backtest'i Telegram'dan düğmelerle kurup başlatır, sonuçları (rapor, grafik, CSV) Telegram'a gönderir (aşağıda) |
 | 🔎 Piyasayı Tara | En hacimli 40 coinde "dipte olup hacmi artan"ları listeler (bilgi amaçlı, alım yapmaz) |
 | 📶 Gecikme · 📜 Son Loglar · 🌐 IP | Binance'e ms gecikme, son 15 log satırı, sunucunun dış IP'si |
 | 🔄 Sunucu Reset | Bot servisini yeniden başlatır (onay ister; ayrıntı VPS_KURULUM.md) |
@@ -166,10 +167,31 @@ başlasa da kalır; `.env`, `ayarlar.env`'yi ezer). Diğer ayarlar için `/ayar 
 | `/menu` · `/ayar tp 2.5` | Kontrol paneli; tek bir ayarı değiştirme |
 | `/piyasa` · `/gecikme` · `/loglar` · `/ip` | Piyasa taraması, ağ gecikmesi, son loglar, dış IP |
 | `/pano` · `/toz` | Canlı K/Z panosu (aç / kapat); tozları BNB'ye çevir |
+| `/backtest` | Backtest menüsü (düğmelerle ayarla, başlat, sonuçları al) |
 
 Riskli komutlar 60 sn içinde `/evet` (veya ✅ düğmesi) onayı ister (`COMMAND_PIN` ayarlıysa düğme gösterilmez,
 `/evet PIN` yazılır). Her gece günlük, pazar
 günleri haftalık özet gelir.
+
+### 🧪 Telegram'dan backtest (`/backtest` veya `/menu` → 🧪 Backtest)
+
+Sunucuya bağlanmadan, düğmelerle:
+
+| Düğme | Seçenekler |
+|---|---|
+| 📋 Tür | Normal backtest, çıkış taraması (`--tara`), giriş taraması, filtre gevşetme, A/B filtre testi, strateji karşılaştırma, strateji turnuvası, tüm taramalar birden |
+| 🧭 Strateji | Botun stratejisi veya herhangi bir strateji (yalnızca bu test için) |
+| 🗓️ Süre · 📅 Bitiş | 7 günden 3 yıla; bitiş bugün, N gün önce veya **önceki dönem** (bulunan ayarları başka bir dönemde doğrulamak için) |
+| 💼 Sermaye · 🪙 Coin | Ayardaki / botun güncel sermayesi veya 11-1000 USDT; en hacimli 10-100 coin |
+| ⚙️ Test ayarları | Kâr Al, Zarar Kes, izleyen stop, başabaş, maks. süre, pozisyon sayısı, ilk giriş %, filtreler, sigortalar, akıllı yönetim — **yalnızca bu test için**, botun ayarları değişmez |
+| 🎚️ Tarama değerleri | Çıkış taramasında denenecek Kâr Al / Zarar Kes / izleyen stop / süre / alan değerleri |
+| ▶️ Başlat · ⏹ Durdur · 📄 Son sonuç | Çalıştırır (ilerleme mesajı güncellenir), durdurur, son sonucu tekrar gönderir |
+
+Backtest botun içinde değil **ayrı bir süreçte, düşük öncelikle** çalışır: bot bu sırada pozisyonları izlemeye
+devam eder, bellek yetmezse önce backtest kapanır. Aynı anda bir backtest çalışır, 3 saatte bitmezse durdurulur.
+Sonuçta rapor Telegram'da eşit aralıklı yazıyla (tablolar düzgün görünür), tamamı `rapor.txt` dosyası olarak,
+grafik resim, tablolar CSV olarak gelir; son 5 sonuç `data/backtest_runs/` klasöründe saklanır. Aynı şeyi komut
+satırında yapmak için: `--ayar ANAHTAR=DEĞER` (örn. `--ayar TAKE_PROFIT_PCT=3 --ayar VWAP_FILTER=true`).
 
 ### 🧠 Akıllı yönetim (`/menu` → Akıllı Yönetim, hepsi varsayılan kapalı)
 
@@ -286,6 +308,7 @@ tradebot/
 ├── position_rules.py  # Akıllı yönetim kuralları (canlı ve backtest ortak)
 ├── liquidations.py    # Binance vadeli işlemler likidasyon akışı
 ├── charts.py          # Backtest K/Z dağılım grafiği (matplotlib)
+├── backtest_runner.py # Telegram'dan backtest: düğmeli menü, ayrı süreçte çalıştırma, sonuçları gönderme
 ├── stats.py           # İstatistikler ve raporlar
 ├── backtest.py        # Geçmiş veriyle strateji testi ve taramalar
 ├── state.py           # Kalıcı durum ve işlem kayıtları (data/)

@@ -491,7 +491,7 @@ def test_cli_ab_test_and_chart(cfg, monkeypatch, capsys, tmp_path):
     assert "A/B filtre testi" in out and "AB RAPOR ['satır']" in out
 
     sent = []
-    monkeypatch.setattr(main, "_send_backtest_chart", lambda c, result, report: sent.append(report))
+    monkeypatch.setattr(main, "_send_backtest_chart", lambda c, result, report, *a, **k: sent.append(report))
     monkeypatch.setattr(backtest, "run_backtest", lambda *a, **k: type("R", (), {"trades": [1]})())
     monkeypatch.setattr(backtest, "format_backtest_report", lambda *a, **k: "RAPOR")
     assert main.main(["--backtest"]) == 0 and sent == ["RAPOR"]

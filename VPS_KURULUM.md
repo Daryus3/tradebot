@@ -519,7 +519,10 @@ sudo systemctl start tradebot
 
 ### Sunucuda backtest
 
-Bot çalışmaya devam ederken de yapılabilir (90 günlük filtre taraması birkaç dakika sürer):
+**En kolayı Telegram'dan:** `/backtest` yazın; tür, strateji, süre, bitiş, sermaye ve teste özel ayarları
+düğmelerle seçip ▶️ Başlat'a basın. Sonuç (rapor, grafik, CSV) Telegram'a gelir; sunucuya bağlanmanız gerekmez.
+
+Terminalden isterseniz (bot çalışmaya devam ederken de yapılabilir; 90 günlük filtre taraması birkaç dakika sürer):
 
 ```
 sudo -iu tradebot bash -c 'cd ~/tradebot && .venv/bin/python main.py --backtest --gun 90 --sermaye 32 --tara-filtre'

@@ -64,6 +64,7 @@ class BotState:
     public_ips: Dict[str, str] = field(default_factory=dict)      # Sunucunun bilinen dış IP'leri (IPv4 / IPv6)
     # Telegram'dan strateji değiştirilirken eski grubun çıkış ayarları (geri dönünce aynen yüklenir)
     family_settings: Dict[str, Dict[str, str]] = field(default_factory=dict)
+    backtest_draft: Dict[str, object] = field(default_factory=dict)   # Telegram /backtest menüsünde seçilenler
 
     @property
     def capital(self) -> float:

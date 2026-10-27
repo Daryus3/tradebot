@@ -59,7 +59,7 @@ SLOW_TICK_SEC = 20           # Döngü bundan uzun sürerse adım adım süreler
 # Tarama sürerken de hemen cevaplanan, yalnızca bilgi gösteren komutlar (diğerleri tarama bitince çalışır)
 READ_ONLY_COMMANDS = frozenset({"durum", "pozisyon", "bakiye", "islemler", "csv", "istatistik", "rapor", "tarama",
                                 "ayarlar", "ping", "yardim", "help", "start", "menu", "panel", "piyasa", "gecikme",
-                                "loglar", "log", "ip", "pano", "toz"})
+                                "loglar", "log", "ip", "pano", "toz", "backtest", "bt"})
 # Risk sigortaları: zarar serisine sayılan çıkışlar; seriyi ne bozan ne artıran (elle / bot dışı) çıkışlar
 STOP_EXITS = frozenset({ExitReason.STOP_LOSS, ExitReason.BACKUP_STOP})
 NEUTRAL_EXITS = frozenset({ExitReason.MANUAL, ExitReason.KILL_SWITCH, ExitReason.EXTERNAL})
@@ -107,11 +107,13 @@ class TradingBot:
         self.time_fn = time_fn
         notifier.mode = cfg.notify_mode
         from commands import CommandProcessor  # döngüsel içe aktarmayı önlemek için
+        from backtest_runner import BacktestRunner
         from market_scan import DivergenceWatcher
         from smart_manager import SmartManager
         self.commands = CommandProcessor(self, time_fn=time_fn)
         self.smart = SmartManager(self)        # Akıllı pozisyon yönetimi / giriş, canlı pano
         self.divergence = DivergenceWatcher(self.commands.panel._client_for_scan, time_fn=time_fn)
+        self.backtests = BacktestRunner(self)  # Telegram'dan başlatılan backtest (ayrı süreç)
         self._deferred_commands: list = []   # Tarama sırasında gelen, tarama bitince çalışacak komutlar
         self._scan_deadline = 0.0
 
@@ -189,6 +191,7 @@ class TradingBot:
                 self.ip_monitor.stop()
             if self.smart.liq_feed is not None:
                 self.smart.liq_feed.stop()
+            self.backtests.shutdown()
             if self.price_stream is not None:
                 self.price_stream.stop()
             if not self.state.killed or self.state.positions:
@@ -1556,6 +1559,7 @@ class TradingBot:
         self.smart.update_board(now)
         self.smart.check_liquidations(now)
         self.divergence.maybe_start(self.cfg, self.exchange.rules, self.notifier, now)
+        self.backtests.poll(now)
         if self.equity_log is not None and now >= self.next_equity_at:
             self.next_equity_at = now + self.cfg.equity_log_minutes * 60
             self.equity_log.append(now, self.state.capital, self.unrealized(), len(self.state.positions))
