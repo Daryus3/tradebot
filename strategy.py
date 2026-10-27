@@ -49,6 +49,12 @@ ortalamasının MR_BAND_STD standart sapma altına inince (aşırı satım) alı
 bağlıdır:
     python main.py --backtest --strateji mean_revert
 
+Pozitif RSI uyumsuzluğu ("rsi_divergence", 1 SAATLİK mumlar, aynı çıkış grubu): en hacimli RSI_DIV_UNIVERSE coinde
+fiyat daha düşük dip yaparken RSI daha yüksek dip yapınca (satış gücü azalıyor; bkz. position_rules.bullish_divergence)
+ve son kapanan saatlik mum dönüşü teyit edince (yeşil, dipten beri görülen en yüksek seviyenin üstünde, ortalamanın
+üstünde hacimle) alır. RSI_DIV_TREND_FILTER=true ise yalnızca fiyat 1 saatlik EMA200'ün üstündeyken:
+    python main.py --backtest --strateji rsi_divergence
+
 Haftalık momentum rotasyonu ("rotation", günlük mumlar): sinyal/kâr al mantığı yerine en güçlü birkaç coini tutar ve
 her hafta yeniden dengeler (bkz. rotation.py). Canlı botta TradingBot.rotation_tick, backtest'te
 _Simulator._rotation_step aynı rotation.plan_rotation fonksiyonunu kullanır:
@@ -69,6 +75,7 @@ from exchange import SymbolRules
 from entry_filters import candle_reject
 from indicators import atr, ema, mean, rsi
 from logger import get_logger
+from position_rules import bullish_divergence
 
 log = get_logger()
 
@@ -111,6 +118,11 @@ SWING_WARMUP_DAYS = 18.0         # Backtest ısınması: 400 saatlik analiz geç
 MR_BAND_BARS = 20                # Ortalama ve standart sapma son 20 saatlik kapanıştan
 MR_STRICT_BAND_EXTRA = 0.5       # Zayıf piyasada aşırı satım eşiği bu kadar standart sapma daha derin
 MR_MAX_CHASE_PCT = 0.5           # Fiyat sinyal mumunun kapanışından bu kadar yükseldiyse alınmaz (dönüşün çoğu kaçmış)
+
+# Pozitif RSI uyumsuzluğu (rsi_divergence): 1 saatlik mumlar, en hacimli coinler, dönüş teyidiyle
+DIV_MAX_RETRACE = 0.6            # Dipten iki dip arasındaki tepeye kadarki yolun en fazla %60'ı alınmış olmalı
+DIV_STRICT_OVERSOLD = 5.0        # Zayıf piyasada ilk dipteki RSI bu kadar daha düşük olmalı
+DIV_STRICT_RISE = 2.0            # ...ve ikinci dipte RSI bu kadar daha fazla yükselmiş olmalı
 
 # Haftalık momentum rotasyonu: günlük mumlar
 ROTATION_INTERVAL = "1d"
@@ -161,6 +173,10 @@ class Signal:
             return (f"Aşırı satım {m.get('z', 0):.1f}σ (20 saatlik ortalamanın altında) | Ortalamaya "
                     f"%{m.get('room_pct', 0):.1f} | Trend %{m.get('trend_pct', 0):+.1f} (1s EMA50/200) | "
                     f"RSI {m.get('rsi', 0):.0f}")
+        if kind == "rsi_divergence":
+            return (f"RSI uyumsuzluğu: dip %{m.get('price_drop_pct', 0):+.1f}, RSI {m.get('rsi_prev', 0):.0f}→"
+                    f"{m.get('rsi_low', 0):.0f} ({int(m.get('bars_apart', 0))} saat arayla) | Dönüş mumu hacmi "
+                    f"x{m.get('vol_ratio', 0):.1f} | Tepeye %{m.get('room_pct', 0):.1f} | RSI {m.get('rsi', 0):.0f}")
         if kind == "swing_pullback":
             return (f"Trend %{m.get('trend_pct', 0):+.1f} (1s EMA50/200) | Zirveden geri çekilme "
                     f"%{m.get('pullback_pct', 0):.1f} | RSI {m.get('rsi_min', 0):.0f}→{m.get('rsi', 0):.0f} | "
@@ -965,6 +981,89 @@ class MeanRevertStrategy(_SwingBase):
         return Signal(symbol, price, score, metrics), ""
 
 
+class RsiDivergenceStrategy(_SwingBase):
+    """En hacimli coinlerde 1 saatlik pozitif RSI uyumsuzluğunu dönüş teyidiyle al: fiyat daha düşük dip yaptı ama RSI
+    daha yüksek dip yaptı (satış gücü azalıyor) ve son kapanan saatlik mum yeşil, dipten beri görülen en yüksek
+    seviyenin üstünde ve ortalamanın üstünde hacimle kapandı. Çıkışlar ortalamaya dönüşle aynı gruptadır
+    (MEAN_REVERSION_PROFILE). Canlı botta RSI_DIV_TRADE de ana stratejinin yanında bu sınıfla tarar."""
+    name = "rsi_divergence"
+    # Hedef alanı = iki dip arasındaki tepeye (boyun) kalan mesafe: MIN_ROOM_RATIO "dönüşe yer var mı?" ölçer
+    uses_room = True
+    analysis_fields = ("rsi_period", "rsi_div_oversold", "rsi_div_rise", "rsi_div_trend_filter", "min_volume_ratio")
+
+    @property
+    def candidate_limit(self) -> int:
+        return self.cfg.rsi_div_universe
+
+    def change_ok(self, change_24h_pct: float) -> bool:
+        return -self.cfg.max_24h_drop_pct <= change_24h_pct <= self.cfg.max_24h_gain_pct
+
+    def candidate_key(self, change_24h_pct: float, quote_volume_24h: float = 0.0) -> float:
+        return -quote_volume_24h   # En hacimli (en likit, en büyük) coinler önce
+
+    def analyze(self, symbol: str, raw_klines: List[list], strict: bool = False) -> Tuple[Optional[Signal], str]:
+        cfg = self.cfg
+        if len(raw_klines) < SWING_MIN_BARS:
+            return None, "veri az"
+        # 1) Uyumsuzluk (en seçici kontrol önce; mum nesneleri yalnızca uyumsuzluk varsa oluşturulur). Zayıf piyasada
+        #    daha derin aşırı satım ve daha belirgin RSI yükselişi istenir.
+        div = bullish_divergence(raw_klines[:-1], cfg.rsi_period,
+                                 oversold=cfg.rsi_div_oversold - (DIV_STRICT_OVERSOLD if strict else 0.0),
+                                 rise=cfg.rsi_div_rise + (DIV_STRICT_RISE if strict else 0.0))
+        if div is None:
+            return None, "uyumsuzluk yok"
+        current, closed, closes, highs, lows, vols = self._series(raw_klines)
+        price, last = current.close, closed[-1]
+        p2 = len(closed) - 1 - int(div["bars_since_low"])
+        low, peak = div["low"], div["peak"]
+        if min(lows[p2:]) < low or current.low < low:
+            return None, "dip sürüyor"   # Uyumsuz dipten sonra yeni (uyumsuzluksuz) bir dip geldi
+
+        # 2) Dönüş teyidi: son kapanan mum yeşil ve dipten beri görülen en yüksek seviyenin üstünde kapandı
+        if last.close <= last.open:
+            return None, "son mum kırmızı"
+        if last.close <= max(highs[p2:-1]):
+            return None, "dönüş teyidi yok"
+        if self._chased(last, price):
+            return None, "fiyat kaçtı"
+        if peak <= low or price <= 0:
+            return None, "veri hatalı"
+        retrace = (price - low) / (peak - low)
+        if retrace > DIV_MAX_RETRACE:
+            return None, "toparlanma bitmiş"
+
+        # 3) Hacim: dönüş mumunun hacmi son 24 saatin ortalamasının en az MIN_VOLUME_RATIO katı
+        base_vol = mean(vols[-25:-1])
+        vol_ratio = vols[-1] / base_vol if base_vol > 0 else 0.0
+        if vol_ratio < cfg.min_volume_ratio * (1.3 if strict else 1.0):
+            return None, "hacim zayıf"
+
+        # 4) İsteğe bağlı trend filtresi: düşüş trendinde uyumsuzluk sık sık bozulur ("düşen bıçak")
+        e200 = ema(closes, 200)[-1]
+        if e200 is None:
+            return None, "veri az"
+        if cfg.rsi_div_trend_filter and price <= e200:
+            return None, "trend yok"
+
+        rsi_now = rsi(closes, cfg.rsi_period)[-1]
+        if rsi_now is None:
+            return None, "veri az"
+        atr_vals = atr(highs, lows, closes, 14)
+        atr_pct = atr_vals[-1] / price * 100 if atr_vals[-1] else 0.0
+        room_pct = (peak - price) / price * 100
+        trend_pct = (price / e200 - 1) * 100
+        # RSI'daki güçlenme, ilk dipteki aşırı satımın derinliği, tepeye kalan alan ve dönüş hacmi
+        score = ((div["rsi_now"] - div["rsi_prev"]) / 2 + (cfg.rsi_div_oversold - div["rsi_prev"]) / 5
+                 + min(room_pct, 5) * 2 + min(vol_ratio, 4) * 2 + (1 - retrace) * 3)
+        metrics = {
+            "kind": "rsi_divergence", "price_drop_pct": div["price_drop_pct"], "rsi_prev": div["rsi_prev"],
+            "rsi_low": div["rsi_now"], "bars_apart": float(div["bars_apart"]),
+            "bars_since_low": float(div["bars_since_low"]), "rsi": rsi_now, "vol_ratio": vol_ratio,
+            "atr_pct": atr_pct, "retrace": retrace, "room_pct": room_pct, "trend_pct": trend_pct,
+        }
+        return Signal(symbol, price, score, metrics), ""
+
+
 # ================================================================ haftalık momentum rotasyonu
 class RotationStrategy(ReboundStrategy):
     """En hacimli coinler arasında son ROTATION_LOOKBACK_DAYS günün en güçlü ROTATION_TOP_N'ini tutar.
@@ -1077,7 +1176,8 @@ class RotationStrategy(ReboundStrategy):
 
 STRATEGY_CLASSES = {"rebound": ReboundStrategy, "trend": TrendPullbackStrategy, "breakout": BreakoutStrategy,
                     "swing": SwingBreakoutStrategy, "swing_pullback": SwingPullbackStrategy,
-                    "mean_revert": MeanRevertStrategy, "rotation": RotationStrategy}
+                    "mean_revert": MeanRevertStrategy, "rsi_divergence": RsiDivergenceStrategy,
+                    "rotation": RotationStrategy}
 assert tuple(STRATEGY_CLASSES) == STRATEGIES
 
 

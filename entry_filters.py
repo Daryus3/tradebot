@@ -5,6 +5,8 @@ Mum filtreleri — canlı tarama ve backtest AYNI fonksiyonu kullanır (`--tara-
   - FAKEOUT_FILTER: son kapanmış mumun üst fitili gövdesinden uzunsa (satıcılar yükselişi geri itti) alma.
   - VWAP_FILTER: fiyat son VWAP_BARS mumun hacim ağırlıklı ortalama fiyatının (VWAP) altındaysa alma.
   - OVERHEAT_FILTER: fiyat son OVERHEAT_MINUTES dakikanın en düşüğünden OVERHEAT_PCT'den fazla yükseldiyse alma.
+  - RSI_DIV_FILTER: son DIV_FILTER_RECENT_BARS mumda pozitif RSI uyumsuzluğu (daha düşük dip + daha yüksek RSI dibi;
+    bkz. position_rules.bullish_divergence) yoksa alma — satış gücünün azaldığı teyidi (stratejinin kendi mumlarıyla).
 
 Emir defteri / işlem akışı filtreleri yalnızca canlı taramada çalışır (geçmiş emir defteri verisi yoktur,
 backtest edilemez):
@@ -23,6 +25,7 @@ from typing import List, Optional, Sequence, Tuple
 
 from binance_client import RateLimitError
 from logger import get_logger
+from position_rules import bullish_divergence
 
 log = get_logger()
 
@@ -30,14 +33,16 @@ log = get_logger()
 FAKEOUT = "üst fitil uzun"
 BELOW_VWAP = "VWAP altında"
 OVERHEAT = "aşırı ısınmış"
+NO_DIVERGENCE = "RSI uyumsuzluğu yok"
 SELL_WALL = "satış duvarı"
 BOOK_IMBALANCE = "defterde satıcı baskısı"
 WEAK_TAPE = "piyasa alımı zayıf"
+DIV_FILTER_RECENT_BARS = 24   # RSI_DIV_FILTER: ikinci dip son 24 mum içinde olmalı (5 dk: 2 saat, 1 saat: 1 gün)
 
 
 def candle_filters_on(cfg) -> bool:
     return bool(getattr(cfg, "fakeout_filter", False) or getattr(cfg, "vwap_filter", False)
-                or getattr(cfg, "overheat_filter", False))
+                or getattr(cfg, "overheat_filter", False) or getattr(cfg, "rsi_div_filter", False))
 
 
 def vwap(rows: Sequence[Sequence]) -> Optional[float]:
@@ -80,6 +85,9 @@ def candle_reject(cfg, raw_klines: Sequence[Sequence]) -> str:
         low = min(lows + [price])
         if (price - low) / low * 100 >= cfg.overheat_pct:
             return OVERHEAT
+    if getattr(cfg, "rsi_div_filter", False) and bullish_divergence(
+            closed, cfg.rsi_period, cfg.rsi_div_oversold, cfg.rsi_div_rise, recent=DIV_FILTER_RECENT_BARS) is None:
+        return NO_DIVERGENCE
     return ""
 
 

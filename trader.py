@@ -17,14 +17,14 @@ from __future__ import annotations
 
 import time
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 
 import requests
 
 from binance_client import BinanceAPIError, RateLimitError
-from config import is_rotation, parse_hhmm
+from config import divergence_trading, is_rotation, parse_hhmm
 from control_panel import READ_ONLY_CALLBACKS
 from entry_filters import live_reject
 from exchange import BaseExchange, FeeInfo, Fill, OrderError, combine_fills
@@ -33,7 +33,7 @@ from risk import (ExitReason, Position, evaluate_exit, kill_switch_hit, net_exit
                   position_sl, position_slots, position_tp, price_for_pnl, trailing_floor_pct, update_breakeven,
                   update_trailing)
 from state import BotState, EquityLog, StateStore, TradeLog
-from strategy import ReboundStrategy, ScanResult, Signal
+from strategy import ReboundStrategy, RsiDivergenceStrategy, ScanResult, Signal
 from telegram_bot import (CRITICAL_EXITS, Messages, TelegramNotifier, esc, fmt_duration, fmt_qty, fmt_rate,
                           fmt_signed, fmt_usdt)
 
@@ -55,6 +55,8 @@ BNB_LOW_NOTICE_SEC = 24 * 3600   # "BNB azalıyor" bilgisi en fazla günde bir
 UNSELLABLE_CODES = {"MIN_NOTIONAL", "LOT_SIZE", "NO_BALANCE"}
 ROTATION_DELAY_SEC = 300     # Rotasyon kararları günlük mum kapandıktan (UTC 00:00) 5 dk sonra verilir
 SCAN_TIME_BUDGET_SEC = 45     # Bir tarama en fazla bu kadar sürer (Binance yavaşsa kalan adaylar sonraki taramaya)
+DIV_SCAN_DELAY_SEC = 60      # RSI_DIV_TRADE: saatlik mum kapandıktan bu kadar sonra taranır (Binance'te yerleşsin)
+DIV_RETRY_SEC = 300          # RSI_DIV_TRADE taraması hata verirse aynı saat içinde bu kadar sonra tekrar denenir
 SLOW_TICK_SEC = 20           # Döngü bundan uzun sürerse adım adım süreler loga yazılır
 # Tarama sürerken de hemen cevaplanan, yalnızca bilgi gösteren komutlar (diğerleri tarama bitince çalışır)
 READ_ONLY_COMMANDS = frozenset({"durum", "pozisyon", "bakiye", "islemler", "csv", "istatistik", "rapor", "tarama",
@@ -146,6 +148,10 @@ class TradingBot:
         self._next_kill_notice = 0.0
         self._error_streak = 0
         self._next_rotation_sell = 0.0
+        self._div_hour = -1                        # RSI_DIV_TRADE: en son taranan saatlik mum (UTC saat sayısı)
+        self._next_div_try = 0.0
+        self.last_div_scan: Optional[ScanResult] = None   # RSI_DIV_TRADE'in son taraması (/tarama)
+        self.last_div_scan_at = 0.0
         self.last_rotation: Optional[str] = None   # Son yeniden dengeleme özeti (/tarama)
         self.last_rotation_at = 0.0
 
@@ -315,11 +321,16 @@ class TradingBot:
             if not self.running:
                 return
 
+            # Uyumsuzluk alımı (saatte bir) taradığı döngüde ana tarama bir sonraki döngüye kalır: ikisi aynı döngüde
+            # yapılıp döngüyü uzatmasın
+            div_scanned = divergence_trading(self.cfg) and self.divergence_tick(now)
+            if div_scanned:
+                lap("uyumsuzluk taraması")
             if getattr(self.strategy, "is_rotation", False):
                 if not self.state.killed:
                     self.rotation_tick(now)
                 lap("rotasyon")
-            elif (not self.state.paused and not self.state.killed and now >= self.next_scan_at
+            elif (not div_scanned and not self.state.paused and not self.state.killed and now >= self.next_scan_at
                     and self.free_slots() > 0 and not self.entries_frozen(now)):
                 self.next_scan_at = now + self.cfg.scan_interval_sec
                 self.scan_and_enter(now)
@@ -442,29 +453,78 @@ class TradingBot:
 
     # ================================================================ giriş
     def scan_and_enter(self, now: float) -> None:
-        state, cfg = self.state, self.cfg
+        state = self.state
         state.cooldowns = {s: t for s, t in state.cooldowns.items() if t > now}
         slots = self.slots()
         free_slots = slots - len(state.positions) - self.smart.pending_count()
         if free_slots <= 0:
             return
+        result = self._run_scan(self.strategy, slots)
+        self._record_scan(result, now)
+        log.info("%s | pozisyon %d/%d", result.summary(), len(state.positions), slots)
+        self._enter_signals(result, slots, free_slots)
 
-        capital = state.capital
-        target = capital / slots  # Sermaye pozisyonlara eşit bölünür
+    def divergence_tick(self, now: float) -> bool:
+        """RSI_DIV_TRADE: ana stratejinin YANINDA, her saatlik mum kapandıktan sonra bir kez pozitif RSI uyumsuzluğu +
+        dönüş teyidi taraması (STRATEGY=rsi_divergence ile aynı kurallar; geçmiş veriyle: --strateji rsi_divergence).
+        Sinyaller ana taramayla aynı giriş adımlarından geçer (spread, canlı filtreler, bakiye, onay, kademeli alım);
+        "ask" modunda her alım Telegram'dan sorulur. O saat boş pozisyon yeri yoksa yer açılınca taranır.
+        Tarama yapıldıysa True."""
+        state, cfg = self.state, self.cfg
+        hour = int(now // 3600)
+        if hour <= self._div_hour or now - hour * 3600 < DIV_SCAN_DELAY_SEC or now < self._next_div_try:
+            return False
+        if state.paused or state.killed or self.entries_frozen(now):
+            return False
+        state.cooldowns = {s: t for s, t in state.cooldowns.items() if t > now}
+        slots = self.slots()
+        free_slots = slots - len(state.positions) - self.smart.pending_count()
+        if free_slots <= 0:
+            return False
+        self._next_div_try = now + DIV_RETRY_SEC   # Tarama hata verirse (ağ, istek limiti) bu saat yeniden denenir
+        # Ana stratejinin puan / hedef alanı eşikleri ve art arda tarama teyidi bu taramaya uymaz (saatte bir tarar)
+        div_cfg = replace(cfg, strategy="rsi_divergence", signal_confirm_scans=1, min_signal_score=0.0,
+                          min_room_ratio=0.0)
+        strategy = RsiDivergenceStrategy(self.exchange.client, div_cfg,
+                                         coin_filter=getattr(self.strategy, "coin_filter", None),
+                                         regime=getattr(self.strategy, "regime", None))
+        result = self._run_scan(strategy, slots)
+        self._div_hour = hour
+        self.last_div_scan, self.last_div_scan_at = result, now
+        log.info("RSI uyumsuzluğu taraması (RSI_DIV_TRADE=%s): %s", cfg.rsi_div_trade, result.summary())
+        extra: dict = {}
+        if cfg.rsi_div_tp_pct > 0:
+            extra["tp_pct"] = cfg.rsi_div_tp_pct
+        if cfg.rsi_div_sl_pct > 0:
+            extra["sl_pct"] = cfg.rsi_div_sl_pct
+        if cfg.rsi_div_trade == "ask":
+            extra["approval"] = "RSI uyumsuzluğu alımı (RSI_DIV_TRADE=ask)"
+        self._enter_signals(result, slots, free_slots, extra)
+        return True
+
+    def _scan_excluded(self) -> Set[str]:
+        state = self.state
         excluded = (set(state.cooldowns) | set(state.positions) | {p["symbol"] for p in state.pending_orders.values()}
                     | set(self.smart.entries))
         if self.fee_info is not None and self.fee_info.bnb_enabled:
             # Komisyon BNB'den kesilirken BNB'nin kendisini almak, pozisyon miktarının komisyonlarla
             # erimesine ve komisyon için ayrılan BNB'nin satılmasına yol açar
-            excluded.add(f"BNB{cfg.quote_asset}")
+            excluded.add(f"BNB{self.cfg.quote_asset}")
+        return excluded
+
+    def _run_scan(self, strategy, slots: int) -> ScanResult:
+        """Taramayı süre sınırıyla yapar; aday aralarında bilgi komutları cevaplanır (bkz. _during_scan)."""
         self._scan_deadline = time.monotonic() + SCAN_TIME_BUDGET_SEC
-        self.strategy.between_candidates = self._during_scan
+        strategy.between_candidates = self._during_scan
         try:
-            result = self.strategy.scan(self.exchange.rules, excluded, target)
+            # Sermaye pozisyonlara eşit bölünür (toz kontrolü bu tutara göre)
+            return strategy.scan(self.exchange.rules, self._scan_excluded(), self.state.capital / slots)
         finally:
-            self.strategy.between_candidates = None
-        self._record_scan(result, now)
-        log.info("%s | pozisyon %d/%d", result.summary(), len(state.positions), slots)
+            strategy.between_candidates = None
+
+    def _enter_signals(self, result: ScanResult, slots: int, free_slots: int, extra: Optional[dict] = None) -> None:
+        """Tarama sinyallerinden alım. `extra`: girişe eklenecek bilgiler (pozisyona özel Kâr Al / Zarar Kes, onay)."""
+        state, cfg = self.state, self.cfg
         if not result.signals:
             return
         if result.regime == "ZAYIF":  # Zayıf piyasada aynı anda en fazla 1 pozisyon
@@ -472,6 +532,8 @@ class TradingBot:
             if free_slots <= 0:
                 return
 
+        capital = state.capital
+        target = capital / slots  # Sermaye pozisyonlara eşit bölünür
         free = self.exchange.free_balance(cfg.quote_asset)
         opened = 0
         for signal in result.signals[: free_slots + 3]:
@@ -505,7 +567,7 @@ class TradingBot:
                     return
                 continue
             context = {"spread_pct": spread, "btc_1h_pct": result.btc_1h_pct, "regime": result.regime,
-                       "expected_ask": ask}
+                       "expected_ask": ask, **(extra or {})}
             # Onay (SIGNAL_APPROVAL), dipten dönüş (TRAILING_BUY) ve ATR hedefleri burada devreye girer
             outcome = self.smart.enter(signal, min(budget, free), slots, context, ask)
             if outcome == "opened":
@@ -1437,7 +1499,7 @@ class TradingBot:
             return f"{self.last_rotation}\n<i>({age:.0f} saat önce)</i>"
         r = self.last_scan
         if r is None:
-            return "🔍 Henüz tarama yapılmadı."
+            return "🔍 Henüz tarama yapılmadı." + self._div_scan_line()
         age = self.time_fn() - self.last_scan_at
         lines = [f"🔍 <b>Son Tarama</b> ({age:.0f} sn önce)"]
         if self.state.paused:
@@ -1462,7 +1524,26 @@ class TradingBot:
             lines.append(f"\n📅 Bugün: {d.scans} tarama, {d.signals} sinyal, {d.buys} alım")
             if d.rejects:
                 lines.append("Bugün en sık: " + ", ".join(f"{esc(k)}: {v}" for k, v in d.rejects.most_common(3)))
-        return "\n".join(lines)
+        return "\n".join(lines) + self._div_scan_line()
+
+    def _div_scan_line(self) -> str:
+        """RSI_DIV_TRADE açıksa son uyumsuzluk taramasının özeti (ana stratejinin yanında, saatte bir)."""
+        if not divergence_trading(self.cfg):
+            return ""
+        mode = "sorarak" if self.cfg.rsi_div_trade == "ask" else "otomatik"
+        r = self.last_div_scan
+        if r is None:
+            return f"\n\n📐 Uyumsuzluk alımı ({mode}): bu oturumda henüz taranmadı (saatlik mum kapanışından sonra)."
+        age = (self.time_fn() - self.last_div_scan_at) / 60
+        text = (f"\n\n📐 <b>Uyumsuzluk alımı</b> ({mode}, {age:.0f} dk önce): aday {r.candidates}, analiz "
+                f"{r.analyzed}, sinyal {len(r.signals)}")
+        if not r.market_ok:
+            text += f" — ⛔ {esc(r.market_note)}"
+        elif r.signals:
+            text += " (" + ", ".join(esc(sig.symbol) for sig in r.signals[:3]) + ")"
+        elif r.rejects:
+            text += " | eleme: " + ", ".join(f"{esc(k)}: {v}" for k, v in r.rejects.most_common(3))
+        return text
 
     def stats_text(self) -> str:
         import stats

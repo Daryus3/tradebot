@@ -45,6 +45,7 @@ EDITABLE: Dict[str, Setting] = {
     "FAKEOUT_FILTER": Setting("fakeout_filter", "bool", "Sahte yükseliş (fitil) filtresi"),
     "VWAP_FILTER": Setting("vwap_filter", "bool", "VWAP filtresi"),
     "OVERHEAT_FILTER": Setting("overheat_filter", "bool", "Aşırı ısınma filtresi"),
+    "RSI_DIV_FILTER": Setting("rsi_div_filter", "bool", "RSI uyumsuzluğu teyidi"),
     "OB_WALL_FILTER": Setting("ob_wall_filter", "bool", "Satış duvarı radarı"),
     "OB_IMBALANCE_FILTER": Setting("ob_imbalance_filter", "bool", "Emir defteri dengesizliği"),
     "TAPE_FILTER": Setting("tape_filter", "bool", "Tape okuma teyidi"),
@@ -78,6 +79,12 @@ EDITABLE: Dict[str, Setting] = {
     "LIQ_FEED": Setting("liq_feed", "bool", "Likidasyon akışı"),
     "LIQ_ALERT_USDT": Setting("liq_alert_usdt", "float", "Likidasyon uyarı eşiği (USDT, 0 = kapalı)"),
     "RSI_DIV_ALERTS": Setting("rsi_div_alerts", "bool", "RSI uyumsuzluğu bildirimi"),
+    "RSI_DIV_TRADE": Setting("rsi_div_trade", "choice", "RSI uyumsuzluğu alımı (ana stratejinin yanında)",
+                             ACTION_MODES),
+    "RSI_DIV_TP_PCT": Setting("rsi_div_tp_pct", "float", "Uyumsuzluk alımı Kâr Al (%, 0 = genel ayar)"),
+    "RSI_DIV_SL_PCT": Setting("rsi_div_sl_pct", "float", "Uyumsuzluk alımı Zarar Kes (%, 0 = genel ayar)"),
+    "RSI_DIV_OVERSOLD": Setting("rsi_div_oversold", "float", "Uyumsuzluk: ilk dipte RSI en fazla"),
+    "RSI_DIV_TREND_FILTER": Setting("rsi_div_trend_filter", "bool", "Uyumsuzlukta trend filtresi (EMA200 üstü)"),
     "BNB_TOPUP_USDT": Setting("bnb_topup_usdt", "float", "BNB takviye tutarı (USDT, 0 = sorma)"),
 }
 

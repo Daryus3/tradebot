@@ -36,6 +36,8 @@ STRATEGY_LABELS = {"rebound": "rebound (düşen coinde dip)", "trend": "trend (y
                    "swing": "swing (uzun vade: çok günlük zirve kırılımı, 1 saatlik mumlar)",
                    "swing_pullback": "swing_pullback (uzun vade: trendde geri çekilme, 1 saatlik mumlar)",
                    "mean_revert": "mean_revert (büyük coinlerde trend içi aşırı satım alımı, küçük hedef, 1 saatlik mumlar)",
+                   "rsi_divergence": "rsi_divergence (büyük coinlerde pozitif RSI uyumsuzluğu + dönüş teyidi, küçük hedef, "
+                                     "1 saatlik mumlar)",
                    "rotation": "rotation (haftalık momentum rotasyonu, günlük mumlar)"}
 
 # Telegram'ın "/" menüsünde görünecek komutlar

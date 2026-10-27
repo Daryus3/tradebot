@@ -41,6 +41,7 @@ QUESTION_TTL_SEC = 900            # Telegram soruları bu süre sonra geçersiz
 MOMENTUM_RECHECK_SEC = 300        # Piramit için momentum en fazla bu sıklıkla kontrol edilir
 ESCAPE_RECHECK_SEC = 60           # Kaçış için hacim en fazla bu sıklıkla kontrol edilir
 APPROVAL_MAX_DRIFT_PCT = 1.0      # Onay gelene kadar fiyat bundan fazla yükseldiyse alınmaz
+FORCED_APPROVAL_MIN_SEC = 900     # Saatlik sinyalin onayı (RSI_DIV_TRADE=ask) en az bu kadar beklenir
 LIQ_WINDOW_SEC = 300
 LIQ_CHECK_SEC = 60
 LIQ_ALERT_COOLDOWN_SEC = 3600
@@ -248,17 +249,24 @@ class SmartManager:
         self.bot.state.cooldowns[symbol] = max(self.bot.state.cooldowns.get(symbol, 0.0), until)
 
     def enter(self, signal, available: float, slots: int, context: dict, ask: float) -> str:
-        """Tarama sinyalinden sonraki giriş adımı: 'opened' | 'pending' (onay / dönüş bekleniyor) | 'failed'."""
+        """Tarama sinyalinden sonraki giriş adımı: 'opened' | 'pending' (onay / dönüş bekleniyor) | 'failed'.
+
+        context["approval"] doluysa (örn. RSI_DIV_TRADE=ask) sinyal her durumda Telegram'dan sorulur; context'te
+        pozisyona özel tp_pct / sl_pct varsa ATR hedefleri yalnızca eksik olanı tamamlar.
+        """
         cfg = self.cfg
+        forced = context.pop("approval", "")
         atr_value = None
         if cfg.atr_targets or cfg.signal_approval == "volatile":
             atr_value = self._safe(self.hourly_atr, signal.symbol, ask)
         tp, sl = atr_targets(cfg, atr_value)
         if tp is not None:
-            context["tp_pct"], context["sl_pct"] = tp, sl
-        why = self._approval_reason(signal.symbol, atr_value)
+            context.setdefault("tp_pct", tp)
+            context.setdefault("sl_pct", sl)
+        why = forced or self._approval_reason(signal.symbol, atr_value)
         if why:
-            self._ask_approval(signal, available, slots, context, why, ask, atr_value)
+            ttl = max(cfg.approval_timeout_sec, FORCED_APPROVAL_MIN_SEC) if forced else cfg.approval_timeout_sec
+            self._ask_approval(signal, available, slots, context, why, ask, atr_value, ttl)
             return "pending"
         return self._start_or_buy(signal, available, slots, context, ask)
 
@@ -277,7 +285,7 @@ class SmartManager:
                 reasons.append(f"son 5 dk'da {long_usdt:,.0f} USDT long likidasyonu".replace(",", "."))
         return ", ".join(reasons)
 
-    def _ask_approval(self, signal, available, slots, context, why, ask, atr_value) -> None:
+    def _ask_approval(self, signal, available, slots, context, why, ask, atr_value, ttl: int) -> None:
         cfg, symbol = self.cfg, signal.symbol
         context["expected_ask"] = ask
         tp = context.get("tp_pct", cfg.take_profit_pct)
@@ -294,11 +302,11 @@ class SmartManager:
                 f"{cfg.quote_asset}\n🎯 Kâr Al +%{tp:g} | 🛑 Zarar Kes -%{sl:g}"
                 + (f" | 📏 1s ATR %{atr_value:.1f}" if atr_value else "") + liq)
         question = Question("buy", symbol, data={})
-        token = self.ask(question, text, [("✅ Al", "yes"), ("❌ Geç", "no")], ttl=cfg.approval_timeout_sec)
+        token = self.ask(question, text, [("✅ Al", "yes"), ("❌ Geç", "no")], ttl=ttl)
         question.data["token"] = token
         now = self.now()
-        self.entries[symbol] = PendingEntry("approval", signal, available, slots, context, now,
-                                            now + cfg.approval_timeout_sec, token=token)
+        self.entries[symbol] = PendingEntry("approval", signal, available, slots, context, now, now + ttl,
+                                            token=token)
 
     def _start_or_buy(self, signal, available: float, slots: int, context: dict, ask: float) -> str:
         if self.cfg.trailing_buy:

@@ -130,7 +130,7 @@ def test_mean_revert_sweeps_use_small_target_grids(cfg):
     entries = entry_combos(mr, [0.0])
     assert {c["MR_BAND_STD"] for c, _ in entries} == {1.5, 2.0, 2.5}
     # Karşılaştırma yalnızca aynı çıkış mantıklı stratejilerle (turnuva kendi çıkışlarıyla karşılaştırır)
-    assert [st["STRATEGY"] for st, _ in strategy_combos(mr)] == ["mean_revert"]
+    assert [st["STRATEGY"] for st, _ in strategy_combos(mr)] == ["mean_revert", "rsi_divergence"]
     swing, _ = with_strategy(cfg, "swing")
     assert "mean_revert" not in [st["STRATEGY"] for st, _ in strategy_combos(swing)]
 

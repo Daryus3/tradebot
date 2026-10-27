@@ -13,8 +13,9 @@ from indicators import atr, ema, mean, rsi
 MOMENTUM_VOLUME_RATIO = 1.2     # Momentum: son 3 mumun hacmi önceki 20 mumun ortalamasının en az bu katı
 DIV_LOOKBACK = 40               # RSI uyumsuzluğu: son kaç mumda dip aranır
 DIV_MIN_GAP, DIV_MAX_GAP = 5, 30
-DIV_RSI_OVERSOLD = 35.0         # İlk dipte RSI en fazla bu olmalı
-DIV_RSI_RISE = 3.0              # İkinci dipte RSI en az bu kadar yüksek olmalı
+DIV_RSI_OVERSOLD = 35.0         # İlk dipte RSI en fazla bu olmalı (varsayılan; ayar: RSI_DIV_OVERSOLD)
+DIV_RSI_RISE = 3.0              # İkinci dipte RSI en az bu kadar yüksek olmalı (varsayılan; ayar: RSI_DIV_RISE)
+DIV_RECENT_BARS = 5             # İkinci dip son kaç mum içinde aranır (yeni oluşmuş: son 4 kapanmış mum)
 
 
 def _col(rows: Sequence[Sequence], i: int):
@@ -78,33 +79,40 @@ def is_flat(pnl_pct: float, band_pct: float) -> bool:
     return abs(pnl_pct) <= band_pct
 
 
-def bullish_divergence(rows: Sequence[Sequence], period: int = 14) -> Optional[dict]:
+def bullish_divergence(rows: Sequence[Sequence], period: int = 14, oversold: float = DIV_RSI_OVERSOLD,
+                       rise: float = DIV_RSI_RISE, recent: int = DIV_RECENT_BARS) -> Optional[dict]:
     """Pozitif RSI uyumsuzluğu: fiyat daha düşük dip yaparken RSI daha yüksek dip yapıyor (satış gücü azalıyor).
 
-    Son dip son 4 mum içinde olmalı (yeni oluşmuş); önceki dip 5-30 mum önce ve RSI'ı aşırı satımda (≤35).
-    Bulursa {"price_drop_pct", "rsi_prev", "rsi_now", "bars_apart"}, yoksa None.
+    Son dip son `recent` mum içinde olmalı (varsayılan son 4 kapanmış mum: yeni oluşmuş); önceki dip 5-30 mum önce
+    ve RSI'ı aşırı satımda (≤ `oversold`), ikinci dipte RSI en az `rise` puan yüksek. Birden çok yeni dip varsa en
+    yeniden başlanır. Bildirim (market_scan), strateji (rsi_divergence) ve teyit filtresi (RSI_DIV_FILTER) bunu
+    kullanır. Bulursa {"price_drop_pct", "rsi_prev", "rsi_now", "bars_apart", "bars_since_low", "low", "peak"}
+    (peak = iki dip arasındaki en yüksek fiyat), yoksa None.
     """
     n = len(rows)
     if n < max(DIV_LOOKBACK, period + 10):
         return None
-    lows = _col(rows, 3)
-    values = rsi(_col(rows, 4), period)
-    pivots = [i for i in range(max(2, n - DIV_LOOKBACK), n - 1)
-              if lows[i] <= min(lows[i - 2:i]) and lows[i] < lows[i + 1] and values[i] is not None]
-    recent = [i for i in pivots if i >= n - 5]
-    if not recent:
+    first = max(2, n - DIV_LOOKBACK, period)        # RSI'ın ilk `period` değeri yoktur
+    off = first - 2
+    lows = _col(rows[off:], 3)                      # Yalnızca bakılan pencere: backtest'te her mumda çağrılır
+    pivots = [i for i in range(first, n - 1)
+              if lows[i - off] <= min(lows[i - off - 2], lows[i - off - 1]) and lows[i - off] < lows[i - off + 1]]
+    fresh = [i for i in pivots if i >= n - recent]
+    if not fresh:
         return None
-    p2 = recent[-1]
-    for p1 in reversed(pivots):
-        gap = p2 - p1
-        if gap < DIV_MIN_GAP:
-            continue
-        if gap > DIV_MAX_GAP:
-            break
-        if (lows[p2] < lows[p1] and values[p1] <= DIV_RSI_OVERSOLD
-                and values[p2] >= values[p1] + DIV_RSI_RISE):
-            return {"price_drop_pct": (lows[p2] / lows[p1] - 1) * 100, "rsi_prev": values[p1],
-                    "rsi_now": values[p2], "bars_apart": gap}
+    values = rsi(_col(rows, 4), period)             # RSI tüm geçmişle (Wilder ortalaması başlangıca bağlıdır)
+    for p2 in reversed(fresh):
+        for p1 in reversed(pivots):
+            gap = p2 - p1
+            if gap < DIV_MIN_GAP:
+                continue
+            if gap > DIV_MAX_GAP:
+                break
+            low1, low2 = lows[p1 - off], lows[p2 - off]
+            if low2 < low1 and values[p1] <= oversold and values[p2] >= values[p1] + rise:
+                return {"price_drop_pct": (low2 / low1 - 1) * 100, "rsi_prev": values[p1], "rsi_now": values[p2],
+                        "bars_apart": gap, "bars_since_low": n - 1 - p2, "low": low2,
+                        "peak": max(float(r[2]) for r in rows[p1:p2 + 1])}
     return None
 
 

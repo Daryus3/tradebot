@@ -91,11 +91,14 @@ PRESETS: Dict[str, Tuple[str, Tuple[Dict[str, str], ...]]] = {
                                                      ("0", "15", "30", "60", "120", "240"))),
     "streak": ("🔁 Zarar serisi sigortası (SL)", tuple({"LOSS_STREAK_LIMIT": v} for v in ("0", "2", "3", "4", "5"))),
     "daily": ("📉 Günlük zarar limiti %", tuple({"DAILY_LOSS_LIMIT_PCT": v} for v in ("0", "2", "3", "5"))),
+    "div": ("📐 Uyumsuzluk RSI eşiği (ilk dipte RSI en fazla)", tuple({"RSI_DIV_OVERSOLD": v} for v in
+                                                                  ("25", "30", "35", "40", "45"))),
 }
 TOGGLES: Tuple[Tuple[str, str], ...] = (
     ("VWAP_FILTER", "VWAP"), ("FAKEOUT_FILTER", "Fitil"), ("OVERHEAT_FILTER", "Isınma"), ("BTC_FILTER", "BTC sig."),
     ("REGIME_FILTER", "Rejim"), ("REGIME_SKIP_WEAK", "Zayıfta alma"), ("TRAILING_DYNAMIC", "Dinamik iz."),
     ("ATR_TARGETS", "ATR hedef"), ("TP_EXTEND", "Hedef uzatma"), ("TRAILING_BUY", "Kademeli alım"),
+    ("RSI_DIV_FILTER", "Uyumsuzluk teyidi"), ("RSI_DIV_TREND_FILTER", "Uyumsuzlukta trend"),
 )
 MODES: Tuple[Tuple[str, str], ...] = (("DCA_MODE", "DCA"), ("PYRAMID_MODE", "Piramit"),
                                       ("TIME_EXIT_MODE", "Süre kuralı"), ("ESCAPE_MODE", "Erken kaçış"))
@@ -782,6 +785,11 @@ class BacktestMenu:
                  + (f"-%{eff.daily_loss_limit_pct:g}" if eff.daily_loss_limit_pct else "kapalı"),
                  "<i>✏️ = bu test için değiştirildi. Akıllı yönetim modları backtest'te yalnızca kapalı / otomatik "
                  "olabilir.</i>"]
+        if eff.strategy == "rsi_divergence" or eff.rsi_div_filter:
+            lines.insert(-1, f"📐 Uyumsuzluk: ilk dipte RSI ≤ {eff.rsi_div_oversold:g}, ikinci dipte en az "
+                             f"+{eff.rsi_div_rise:g} puan | trend filtresi "
+                             f"{'açık' if eff.rsi_div_trend_filter else 'kapalı'}"
+                             + (" | teyit filtresi açık" if eff.rsi_div_filter else ""))
         if note:
             lines += ["", note]
         preset_buttons = [(f"{mark(PRESETS[g][1][0].keys())}{PRESETS[g][0].split(' (')[0]}", f"bt:ovp:{g}")

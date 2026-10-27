@@ -18,8 +18,9 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
-from config import (LOG_DIR, PROFILE_ATTRS, PROFILES, STRATEGY_NAMES, Config, ConfigError, is_rotation,
-                    strategy_family, with_strategy)
+from config import (LOG_DIR, PROFILE_ATTRS, PROFILES, STRATEGY_NAMES, Config, ConfigError, divergence_trading,
+                    is_rotation, strategy_family, with_strategy)
+from entry_filters import DIV_FILTER_RECENT_BARS
 from logger import get_logger, redact
 from runtime_settings import EDITABLE, apply_settings, env_values, find_key, format_value, write_env_values
 from telegram_bot import LINE, Messages, esc, fmt_duration, fmt_signed, fmt_usdt
@@ -43,16 +44,17 @@ NOTIFY_HELP = {"all": "her alım, satış, izleyen stop ve rapor",
 STEPS = {"TP": ("TAKE_PROFIT_PCT", 0.5), "SL": ("STOP_LOSS_PCT", 0.5), "TR": ("TRAILING_ACTIVATION_PCT", 0.5),
          "POS": ("MAX_OPEN_POSITIONS", 1)}
 CAPITAL_CHOICES = (100, 75, 50, 33)
-FILTER_KEYS = ("BTC_FILTER", "SPREAD_FILTER", "FAKEOUT_FILTER", "VWAP_FILTER", "OVERHEAT_FILTER",
+FILTER_KEYS = ("BTC_FILTER", "SPREAD_FILTER", "FAKEOUT_FILTER", "VWAP_FILTER", "OVERHEAT_FILTER", "RSI_DIV_FILTER",
                "OB_WALL_FILTER", "OB_IMBALANCE_FILTER", "TAPE_FILTER")
 SMART_BOOL_KEYS = ("ATR_TARGETS", "TP_EXTEND", "TRAILING_BUY", "LIQ_FEED", "RSI_DIV_ALERTS")
-SMART_MODE_KEYS = ("DCA_MODE", "PYRAMID_MODE", "TIME_EXIT_MODE", "ESCAPE_MODE", "SIGNAL_APPROVAL")
+SMART_MODE_KEYS = ("DCA_MODE", "PYRAMID_MODE", "TIME_EXIT_MODE", "ESCAPE_MODE", "SIGNAL_APPROVAL", "RSI_DIV_TRADE")
 MODE_LABELS = {"off": "kapalı", "ask": "sorarak", "auto": "otomatik", "volatile": "oynak piyasada", "all": "her sinyalde"}
 DAILY_LIMIT_CHOICES = (0, 2, 3, 5)
 STREAK_CHOICES = (0, 2, 3, 4)
 STRATEGY_SHORT = {"rebound": "Rebound (5 dk dip)", "trend": "Trend (5 dk)", "breakout": "Breakout (5 dk)",
                   "swing": "Swing kırılım (1 saat)", "swing_pullback": "Swing geri çekilme (1 saat)",
-                  "mean_revert": "Ortalamaya dönüş (1 saat)", "rotation": "Rotasyon (haftalık)"}
+                  "mean_revert": "Ortalamaya dönüş (1 saat)", "rsi_divergence": "RSI uyumsuzluğu (1 saat)",
+                  "rotation": "Rotasyon (haftalık)"}
 
 
 def _on(flag: bool) -> str:
@@ -329,6 +331,8 @@ class ControlPanel:
             "FAKEOUT_FILTER": "son mumun üst fitili gövdesinden uzunsa alınmaz",
             "VWAP_FILTER": f"fiyat VWAP'ın (son {cfg.vwap_bars} mum) altındaysa alınmaz",
             "OVERHEAT_FILTER": f"son {cfg.overheat_minutes} dk'da çok yükseldiyse alınmaz (sınır +%{cfg.overheat_pct:g})",
+            "RSI_DIV_FILTER": f"stratejinin son {DIV_FILTER_RECENT_BARS} mumunda pozitif RSI uyumsuzluğu (satış gücü "
+                              f"azalıyor) yoksa alınmaz",
             "OB_WALL_FILTER": f"ilk +%{cfg.ob_band_pct:g}'de dev satış duvarı varsa alınmaz (canlı)",
             "OB_IMBALANCE_FILTER": f"defterde satış emirleri alışların {cfg.ob_imbalance_ratio:g} katıysa alınmaz "
                                    f"(canlı)",
@@ -382,6 +386,11 @@ class ControlPanel:
                         and (cfg.dca_mode != "off" or cfg.pyramid_mode != "off") else "")
         liq = (f", uyarı eşiği {cfg.liq_alert_usdt:,.0f} USDT".replace(",", ".") if cfg.liq_alert_usdt > 0
                else ", uyarı kapalı")
+        targets = [f"Kâr Al +%{cfg.rsi_div_tp_pct:g}" if cfg.rsi_div_tp_pct > 0 else "",
+                   f"Zarar Kes -%{cfg.rsi_div_sl_pct:g}" if cfg.rsi_div_sl_pct > 0 else ""]
+        div_note = (f" ({', '.join(t for t in targets if t)})" if any(targets) else "")
+        if cfg.rsi_div_trade != "off" and not divergence_trading(cfg):
+            div_note += " — ⚠️ bu stratejide çalışmaz (rotasyon / rsi_divergence)"
         text = (f"🧠 <b>Akıllı Yönetim</b>\n{LINE}\n"
                 f"{_on(cfg.atr_targets)} <b>ATR hedefleri</b>: Kâr Al = 1 saatlik ATR × {cfg.atr_tp_mult:g}, Zarar Kes = "
                 f"ATR × {cfg.atr_sl_mult:g} (en fazla -%{cfg.stop_loss_pct:g})\n"
@@ -398,8 +407,10 @@ class ControlPanel:
                 f"%{cfg.trailing_buy_pct:g} dönünce al (en fazla {cfg.trailing_buy_minutes} dk)\n"
                 f"🔔 <b>Sinyal onayı</b> ({mode('SIGNAL_APPROVAL')}): almadan önce Telegram'dan sor\n"
                 f"{_on(cfg.liq_feed)} <b>Likidasyon akışı</b> (vadeli işlemler){liq}\n"
-                f"{_on(cfg.rsi_div_alerts)} <b>RSI uyumsuzluğu bildirimi</b> (en hacimli 40 coin, 1 saatlik)"
-                f"{reserve_note}\n{LINE}\n"
+                f"{_on(cfg.rsi_div_alerts)} <b>RSI uyumsuzluğu bildirimi</b> (en hacimli 40 coin, 1 saatlik)\n"
+                f"📐 <b>Uyumsuzluk alımı</b> ({mode('RSI_DIV_TRADE')}): ana stratejinin yanında, her saat en hacimli "
+                f"{cfg.rsi_div_universe} coinde uyumsuzluk + dönüş teyidi (yeşil mum, hacim) görülünce al"
+                f"{div_note}{reserve_note}\n{LINE}\n"
                 "<i>sorarak = Telegram'dan sorar; otomatik = sormadan yapar. Otomatik hallerin geçmiş veriyle etkisi: "
                 "python main.py --backtest --tara-ab</i>" + (f"\n\n{note}" if note else ""))
         mode_btn = lambda key, icon, name: (f"{icon} {name}: {mode(key)}", f"cy:{key}")  # noqa: E731
@@ -410,6 +421,7 @@ class ControlPanel:
             [mode_btn("TIME_EXIT_MODE", "⏳", "Süre"), mode_btn("ESCAPE_MODE", "🏃", "Kaçış")],
             [bool_btn("TRAILING_BUY", "Kademeli alım"), mode_btn("SIGNAL_APPROVAL", "🔔", "Onay")],
             [bool_btn("LIQ_FEED", "Likidasyon"), bool_btn("RSI_DIV_ALERTS", "RSI uyumsuzluk")],
+            [mode_btn("RSI_DIV_TRADE", "📐", "Uyumsuzluk alımı")],
             self._back(),
         ]
         self.proc.reply_menu(text, keyboard, mid)

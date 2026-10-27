@@ -19,6 +19,7 @@ Kullanım:
     python main.py --backtest --strateji swing --strateji-karsilastir  # swing / swing_pullback karşılaştırması
     python main.py --backtest --strateji rotation  # Haftalık momentum rotasyonu: günlük mumlar, 3 yıllık veri
     python main.py --backtest --strateji mean_revert   # Büyük coinlerde trend içi aşırı satım alımı (küçük hedef)
+    python main.py --backtest --strateji rsi_divergence   # Pozitif RSI uyumsuzluğu + dönüş teyidiyle alım (1 saat)
     python main.py --backtest --turnuva             # Tüm strateji türleri × çıkış profilleri aynı yılda, sıralı tablo
     python main.py --backtest --gun 90 --tara-ab    # Her giriş filtresini açıp / kapatıp kâra etkisini karşılaştırır
     python main.py --backtest --ayar TAKE_PROFIT_PCT=3 --ayar VWAP_FILTER=true  # Ayarı yalnızca bu test için değiştirir
@@ -94,7 +95,8 @@ def parse_args(argv=None) -> argparse.Namespace:
                              "(5 dk → swing / rotation) geçilirse çıkışlar o tür için önerilen değerlerle denenir")
     parser.add_argument("--strateji-karsilastir", action="store_true",
                         help="Backtest: aynı mum aralığındaki stratejileri aynı veriyle karşılaştırır "
-                             "(5 dk: rebound / trend / breakout, 1 saat: swing / swing_pullback)")
+                             "(5 dk: rebound / trend / breakout, 1 saat: swing / swing_pullback, "
+                             "mean_revert / rsi_divergence)")
     parser.add_argument("--tp", default=None, help="--tara için Kâr Al değerleri, örn. 2,3,5")
     parser.add_argument("--sl", default=None, help="--tara için Zarar Kes değerleri, örn. 2,3.5")
     parser.add_argument("--iz", default=None, help="--tara için izleyen stop başlangıçları, örn. 1,2")
@@ -274,7 +276,7 @@ def run_backtest_cli(cfg, args) -> int:
         cfg, profile = with_strategy(cfg, args.strateji)
         if profile:
             kind = ("haftalarca tutulan rotasyon işlemleri" if is_rotation(cfg.strategy) else
-                    "saatler-2 gün süren küçük hedefli ortalamaya dönüş işlemleri" if is_mean_reversion(cfg.strategy)
+                    "saatler-2 gün süren küçük hedefli dönüş işlemleri" if is_mean_reversion(cfg.strategy)
                     else "1-5 gün süren işlemler")
             print(f"ℹ️ .env'deki çıkış ayarları {env_strategy} stratejisi içindir; {cfg.strategy}, {kind} "
                   f"için önerilen ayarlarla deneniyor:")

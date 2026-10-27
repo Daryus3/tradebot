@@ -77,7 +77,8 @@ Normal durdurma, Telegram `/kapat`, ayar hatası ve kill-switch'te bot yeniden *
 | `python main.py --backtest --gun 90 --tara` | Aynı veriyle onlarca Kâr Al / Zarar Kes / süre ayarını karşılaştırır |
 | `python main.py --backtest --gun 90 --tara-giris` | Giriş filtrelerini (piyasa rejimi, 24s düşüş, sinyal puanı, hedef alanı) karşılaştırır |
 | `python main.py --backtest --gun 90 --tara-filtre` | rebound filtrelerini tek tek gevşetip işlem sayısına ve işlem başı sonuca etkisini gösterir |
-| `python main.py --backtest --turnuva` | Ortalamaya dönüş / swing / rotasyon stratejilerini farklı çıkış kurallarıyla aynı yılda dener, sıralar |
+| `python main.py --backtest --turnuva` | Ortalamaya dönüş / RSI uyumsuzluğu / swing / rotasyon stratejilerini farklı çıkış kurallarıyla aynı yılda dener, sıralar |
+| `python main.py --backtest --strateji rsi_divergence` | Pozitif RSI uyumsuzluğu + dönüş teyidiyle alım stratejisini dener (1 saatlik mumlar, 365 gün) |
 | `python main.py --backtest --gun 90 --strateji-karsilastir` | rebound / trend / breakout stratejilerini karşılaştırır |
 | `python main.py --backtest --gun 90 --bitis 2026-07-01` | O tarihte biten (daha eski) bir dönemi dener: bulunan ayarı bağımsız dönemde doğrulamak için |
 | `python main.py --telegram-chat-id` | Telegram chat ID'nizi bulur |
@@ -122,7 +123,7 @@ kilitli kalır (`--reset-state` ile açılır).
 | 🔐 Gizli bilgi koruması | Token ve API anahtarları loglara ve mesajlara açık yazılmaz |
 | 🌐 IP alarmı | Sunucunun dış IP'sini 10 dk'da bir kontrol eder (api.ipify.org); değişirse uyarır (Binance IP kısıtlaması) |
 | 🧯 Risk sigortaları | Üst üste 3 zarar keste 4 saat, günlük zarar limitinde gün sonuna kadar yeni alım yapmaz; aynı coinde 3 zarar keste kara liste önerir; ortalama kayma artarsa uyarır |
-| 🛡️ Ek giriş filtreleri | Sahte yükseliş (üst fitil), VWAP, aşırı ısınma; canlıda satış duvarı, emir defteri dengesizliği, tape teyidi (varsayılan kapalı, `/menu` → Filtreler) |
+| 🛡️ Ek giriş filtreleri | Sahte yükseliş (üst fitil), VWAP, aşırı ısınma, RSI uyumsuzluğu teyidi; canlıda satış duvarı, emir defteri dengesizliği, tape teyidi (varsayılan kapalı, `/menu` → Filtreler) |
 | 🧠 Akıllı yönetim | ATR'ye göre hedefler, Kâr Al'da hedef uzatma, DCA / piramit (yedek akçeyle), süre sorusu, erken kaçış, kademeli alım, sinyal onayı (varsayılan kapalı, `/menu` → Akıllı Yönetim) |
 
 ---
@@ -206,6 +207,7 @@ satırında yapmak için: `--ayar ANAHTAR=DEĞER` (örn. `--ayar TAKE_PROFIT_PCT
 | 🪜 Kademeli alım | Sinyalden sonra fiyat düştükçe bekler, dipten %0.3 dönünce alır | ✅ (mumlarla yaklaşık) |
 | 🔔 Sinyal onayı | Oynak piyasada (1s ATR yüksek / likidasyon dalgası) veya her sinyalde almadan önce sorar | — |
 | 💥 Likidasyon · 📐 RSI uyumsuzluğu | Vadeli işlemler likidasyon dalgası ve pozitif RSI uyumsuzluğu bildirimleri (bilgi amaçlı) | — |
+| 📐 Uyumsuzluk alımı | Ana stratejinin **yanında**, her saatlik mum kapanışından sonra en hacimli 30 coinde uyumsuzluk + dönüş teyidi görülünce alır (sorarak = "✅ Al" düğmesiyle, 15 dk; otomatik = sormadan). İsterseniz bu işlemlere ayrı Kâr Al / Zarar Kes: `RSI_DIV_TP_PCT`, `RSI_DIV_SL_PCT` | `--strateji rsi_divergence` (aynı kurallar) |
 | 🪙 BNB takviyesi | BNB azalınca "6 USDT'lik BNB alınsın mı?" (bota ayrılmamış bakiyeden; Binance'in en küçük emri ~5 USDT) | — |
 
 DCA ve piramit **yedek akçe** ister (`/menu` → Sermaye → ilk giriş %50 gibi). Sorular pozisyon başına bir kez
@@ -232,11 +234,13 @@ geçmiş veriyle etkisini `--tara-ab` gösterir; "sorarak" hali geçmiş veriyle
 | `breakout` | Yükselen trendde son 4 saatin zirvesi yüksek hacimle kırılınca alır |
 | `swing` / `swing_pullback` | 1 saatlik mumlarla 1-5 günlük, %8-15'lik hareketler (çıkış ayarları da uzun vadeye göre olmalı: örn. TP 12, SL 6, süre 7200 dk) |
 | `mean_revert` | **Ortalamaya dönüş:** yalnızca en hacimli `MR_UNIVERSE` (20) coinde, yükseliş trendindeki (1 saatlik EMA50 > EMA200) coinin saatlik kapanışı 20 saatlik ortalamanın `MR_BAND_STD` (2) standart sapma altına inince alır; küçük hedefle satar (önerilen: TP 1.5, SL 5, süre 2880 dk, izleyen stop 1 → 0.5, başabaş 0.7 → 0.2). Kazanma oranı yüksek olur; kâr, kayıpların kazançları silmemesine bağlıdır |
+| `rsi_divergence` | **Pozitif RSI uyumsuzluğu:** en hacimli `RSI_DIV_UNIVERSE` (30) coinde fiyat daha düşük dip yaparken RSI daha yüksek dip yapınca (ilk dipte RSI ≤ `RSI_DIV_OVERSOLD`, ikinci dipte en az `RSI_DIV_RISE` puan yüksek) ve son saatlik mum dönüşü **teyit edince** (yeşil, dipten beri görülen en yüksek seviyenin üstünde, ortalamanın üstünde hacimle) alır. `RSI_DIV_TREND_FILTER=true`: yalnızca fiyat 1 saatlik EMA200'ün üstündeyken. Çıkışlar `mean_revert` ile aynı grup (küçük hedef, 2 gün) |
 | `rotation` | Haftalık momentum rotasyonu: en hacimli 30 coinden son 4 haftanın en güçlü 3'ünü tutar, BTC 50 günlük ortalamasının altına inince USDT'ye geçer (`STOP_LOSS_PCT=20`, `BACKUP_STOP_PCT=25` önerilir) |
 
-`--strateji` yalnızca o backtest için geçerlidir; botun kullandığı strateji `STRATEGY` ayarıdır. Swing ve
-mean_revert'te backtest varsayılanı 365 gün, rotasyonda 3 yıldır (`--strateji swing --strateji-karsilastir`,
-`--strateji mean_revert`, `--strateji rotation`). Rotasyon sonucu her zaman "BTC'yi alıp tutmak"la kıyaslanır.
+`--strateji` yalnızca o backtest için geçerlidir; botun kullandığı strateji `STRATEGY` ayarıdır. Swing,
+mean_revert ve rsi_divergence'ta backtest varsayılanı 365 gün, rotasyonda 3 yıldır (`--strateji swing
+--strateji-karsilastir`, `--strateji mean_revert --strateji-karsilastir` = mean_revert / rsi_divergence,
+`--strateji rotation`). Rotasyon sonucu her zaman "BTC'yi alıp tutmak"la kıyaslanır.
 
 ### 🏆 Strateji turnuvası (`--turnuva`)
 Hangi strateji türünün sizin dönemde işe yaradığını **tek komutla** görmek için:
@@ -245,7 +249,7 @@ python main.py --backtest --turnuva --sermaye 32
 ```
 Aynı bir yılda (varsayılan 365 gün; `--gun`, `--bitis` ile değişir) şu birleşimleri, her biri kendi çıkış
 kurallarıyla dener ve kazanma oranı, ortalama kazanç / kayıp, işlem başı sonuç ve dönemin iki yarısıyla sıralar:
-- **Giriş:** `mean_revert`, `swing_pullback`, `swing` (1 saatlik mumlar)
+- **Giriş:** `mean_revert`, `rsi_divergence`, `swing_pullback`, `swing` (1 saatlik mumlar)
 - **Çıkış:** küçük hedef (+%1.5 / −%5, 2 gün — kazanma oranı yüksek), dengeli (+%3 / −%3, 3 gün),
   trend (+%12 / −%6, izleyen stop, 5 gün)
 - **Piyasa filtresi:** zayıf piyasada alım yap / yapma (`REGIME_SKIP_WEAK`)
@@ -265,8 +269,8 @@ ettirir; kararı "İşl.başı" sütunu verir. Seçilen birleşimi `--bitis` ile
 - **K/Z dağılım grafiği:** normal backtest her işlemin net K/Z'sini nokta grafiği olarak `data/backtest_grafik_*.png`
   dosyasına çizer (matplotlib gerekir) ve Telegram ayarlıysa grafiği + raporu Telegram'a gönderir (`--grafiksiz` ile kapanır).
 - **A/B filtre testi** (`--tara-ab`): her giriş filtresini / risk sigortasını (BTC sigortası, piyasa rejimi, üst
-  fitil, VWAP, aşırı ısınma, zarar serisi, günlük limit) tek tek açıp kapatarak aynı veriyle kazanma oranına ve net
-  kâra etkisini gösterir. Emir defteri / tape filtreleri geçmiş veriyle denenemez.
+  fitil, VWAP, aşırı ısınma, RSI uyumsuzluğu teyidi, zarar serisi, günlük limit; rsi_divergence'ta trend filtresi)
+  tek tek açıp kapatarak aynı veriyle kazanma oranına ve net kâra etkisini gösterir. Emir defteri / tape filtreleri geçmiş veriyle denenemez.
 - **Taramalar** (`--tara`, `--tara-giris`, `--tara-filtre`): veri bir kez indirilir, ayarlar aynı veriyle denenir;
   karşılaştırma adil olsun diye kill-switch kapalıdır. Çok ayar denendiğinde birkaçı tesadüfen kârlı çıkar:
   yalnızca **iki yarıda da kârlı (✅) ve ≥30 işlemli** satırları ciddiye alın, sonra çakışmayan daha eski bir
@@ -301,11 +305,11 @@ tradebot/
 ├── commands.py        # Telegram komutları
 ├── control_panel.py   # Telegram kontrol paneli (/menu): düğmeler, ayar değiştirme, strateji seçimi, reset
 ├── runtime_settings.py  # Telegram'dan değiştirilebilen ayarlar ve .env'ye güvenli yazma
-├── entry_filters.py   # Ek giriş filtreleri (fitil, VWAP, aşırı ısınma, emir defteri, tape)
+├── entry_filters.py   # Ek giriş filtreleri (fitil, VWAP, aşırı ısınma, RSI uyumsuzluğu, emir defteri, tape)
 ├── ip_monitor.py      # Sunucunun dış IP'sini izler, değişirse alarm
 ├── market_scan.py     # "Piyasayı Tara" ve pozitif RSI uyumsuzluğu taraması
 ├── smart_manager.py   # Akıllı yönetim (canlı): hedef uzatma, DCA, piramit, sorular, kademeli alım, pano
-├── position_rules.py  # Akıllı yönetim kuralları (canlı ve backtest ortak)
+├── position_rules.py  # Akıllı yönetim kuralları ve RSI uyumsuzluğu tespiti (canlı ve backtest ortak)
 ├── liquidations.py    # Binance vadeli işlemler likidasyon akışı
 ├── charts.py          # Backtest K/Z dağılım grafiği (matplotlib)
 ├── backtest_runner.py # Telegram'dan backtest: düğmeli menü, ayrı süreçte çalıştırma, sonuçları gönderme

@@ -1415,12 +1415,13 @@ SWING_SWEEP_SL = (4.0, 6.0, 8.0)
 SWING_SWEEP_TRAIL = (6.0, 10.0)
 SWING_SWEEP_HOLD = (2880, 7200)
 SWING_SWEEP_LOOKBACK = (48, 72, 168)  # Giriş taraması: SWING_LOOKBACK_HOURS (2 / 3 / 7 gün)
-# Ortalamaya dönüş (mean_revert): küçük hedef, saatler-2 gün (süre dakika: 12 saat / 1 gün / 2 gün)
+# Ortalamaya dönüş grubu (mean_revert, rsi_divergence): küçük hedef, saatler-2 gün (süre dk: 12 saat / 1 gün / 2 gün)
 MR_SWEEP_TP = (1.0, 1.5, 2.5)
 MR_SWEEP_SL = (3.0, 5.0, 8.0)
 MR_SWEEP_TRAIL = (0.7, 1.0)
 MR_SWEEP_HOLD = (720, 1440, 2880)
 MR_SWEEP_BAND = (1.5, 2.0, 2.5)       # Giriş taraması: MR_BAND_STD (aşırı satım eşiği, standart sapma)
+DIV_SWEEP_OVERSOLD = (30.0, 35.0, 40.0)   # rsi_divergence giriş taraması: RSI_DIV_OVERSOLD (ilk dipte RSI en fazla)
 # Momentum rotasyonu: "çıkış" = felaket zarar kesi ve yeniden dengeleme sıklığı, "giriş" = momentum süresi,
 # BTC trend filtresi ve tutulan coin sayısı
 ROTATION_SWEEP_SL = (10.0, 20.0, 30.0)
@@ -1460,6 +1461,8 @@ SWEEP_FIELDS: Dict[str, Tuple[str, type, Optional[str]]] = {
     "ROTATION_UNIVERSE": ("rotation_universe", int, None),
     "MR_BAND_STD": ("mr_band_std", float, "Bant"),
     "MR_UNIVERSE": ("mr_universe", int, None),
+    "RSI_DIV_OVERSOLD": ("rsi_div_oversold", float, "RSIdip"),
+    "RSI_DIV_UNIVERSE": ("rsi_div_universe", int, None),
     # Filtre gevşetme taraması (--tara-filtre); kendi tablosunda gösterilir
     "MIN_24H_DROP_PCT": ("min_24h_drop_pct", float, None),
     "MIN_24H_RANGE_PCT": ("min_24h_range_pct", float, None),
@@ -1480,6 +1483,8 @@ SWEEP_FIELDS: Dict[str, Tuple[str, type, Optional[str]]] = {
     "FAKEOUT_FILTER": ("fakeout_filter", bool, None),
     "VWAP_FILTER": ("vwap_filter", bool, None),
     "OVERHEAT_FILTER": ("overheat_filter", bool, None),
+    "RSI_DIV_FILTER": ("rsi_div_filter", bool, None),
+    "RSI_DIV_TREND_FILTER": ("rsi_div_trend_filter", bool, None),
     "LOSS_STREAK_LIMIT": ("loss_streak_limit", int, None),
     "DAILY_LOSS_LIMIT_PCT": ("daily_loss_limit_pct", float, None),
     "ATR_TARGETS": ("atr_targets", bool, None),
@@ -1520,15 +1525,24 @@ ENTRY_KEYS = ("REGIME_SKIP_WEAK", "MAX_24H_DROP_PCT", "MIN_SIGNAL_SCORE", "MIN_R
 SWEEP_MAX_GAIN = (12.0, 6.0)          # trend / breakout: + .env'deki MAX_24H_GAIN_PCT
 
 
+def _range_key(strategy: str) -> str:
+    """Giriş taramasında stratejiye göre denenen eşik ayarı."""
+    if strategy == "rebound":
+        return "MAX_24H_DROP_PCT"
+    if strategy == "rsi_divergence":
+        return "RSI_DIV_OVERSOLD"
+    if is_long_horizon(strategy):
+        return "SWING_LOOKBACK_HOURS"
+    return "MR_BAND_STD" if is_mean_reversion(strategy) else "MAX_24H_GAIN_PCT"
+
+
 def entry_keys(cfg) -> Tuple[str, ...]:
     """Giriş taramasının değiştirdiği ayarlar: rebound düşüş aralığını, trend/breakout yükseliş aralığını,
-    swing stratejileri zirve penceresini (SWING_LOOKBACK_HOURS)."""
-    if cfg.strategy == "rebound":
-        return ENTRY_KEYS
+    swing stratejileri zirve penceresini (SWING_LOOKBACK_HOURS), mean_revert aşırı satım bandını, rsi_divergence ilk
+    dipteki RSI eşiğini."""
     if is_rotation(cfg.strategy):
         return ROTATION_ENTRY_KEYS
-    range_key = ("SWING_LOOKBACK_HOURS" if is_long_horizon(cfg.strategy) else "MR_BAND_STD"
-                 if is_mean_reversion(cfg.strategy) else "MAX_24H_GAIN_PCT")
+    range_key = _range_key(cfg.strategy)
     return tuple(range_key if k == "MAX_24H_DROP_PCT" else k for k in ENTRY_KEYS)
 
 Settings = Dict[str, Union[float, int, bool, str]]
@@ -1607,7 +1621,7 @@ def sweep_combos(cfg, tps: Optional[Sequence[float]] = None, sls: Optional[Seque
     """Çıkış taraması kombinasyonları; ilk satır .env'deki mevcut ayarlardır.
 
     Verilmeyen listeler stratejinin vadesine göre seçilir (5 dk: TP %2-5 / süre 1-4 saat, swing: TP %8-15 / 2-5 gün,
-    mean_revert: TP %1-2.5 / süre 12 saat-2 gün).
+    mean_revert / rsi_divergence: TP %1-2.5 / süre 12 saat-2 gün).
     Rotasyonda yalnızca felaket zarar kesi (--sl) ve yeniden dengeleme sıklığı denenir.
     """
     if is_rotation(cfg.strategy):
@@ -1674,17 +1688,16 @@ def entry_combos(cfg, scores: Sequence[float], max_drops: Sequence[float] = SWEE
                     if st != base:
                         combos.append((st, False))
         return combos
-    if cfg.strategy == "rebound":
-        range_key = "MAX_24H_DROP_PCT"
+    range_key = _range_key(cfg.strategy)
+    if range_key == "MAX_24H_DROP_PCT":
         ranges = sorted({cfg.max_24h_drop_pct, *(d for d in max_drops if d > cfg.min_24h_drop_pct)}, reverse=True)
-    elif is_long_horizon(cfg.strategy):
-        range_key = "SWING_LOOKBACK_HOURS"
+    elif range_key == "SWING_LOOKBACK_HOURS":
         ranges = sorted({cfg.swing_lookback_hours, *SWING_SWEEP_LOOKBACK})
-    elif is_mean_reversion(cfg.strategy):
-        range_key = "MR_BAND_STD"
+    elif range_key == "MR_BAND_STD":
         ranges = sorted({cfg.mr_band_std, *MR_SWEEP_BAND})
+    elif range_key == "RSI_DIV_OVERSOLD":
+        ranges = sorted({cfg.rsi_div_oversold, *DIV_SWEEP_OVERSOLD})
     else:
-        range_key = "MAX_24H_GAIN_PCT"
         ranges = sorted({cfg.max_24h_gain_pct, *(g for g in SWEEP_MAX_GAIN if g > cfg.min_24h_gain_pct)},
                         reverse=True)
     skips = (False, True) if cfg.regime_filter and regime_available else (bool(cfg.regime_skip_weak),)
@@ -1952,7 +1965,12 @@ AB_TESTS: Tuple[Tuple[str, str, Union[bool, int, float], Union[bool, int, float]
     ("TRAILING_BUY", "Kademeli alım", True, False),
     ("TIME_EXIT_MODE", "Süre kuralı (başabaşta sat)", "auto", "off"),
     ("ESCAPE_MODE", "Erken kaçış", "auto", "off"),
+    ("RSI_DIV_FILTER", "RSI uyumsuzluğu teyidi", True, False),
+    ("RSI_DIV_TREND_FILTER", "Uyumsuzlukta trend filtresi", True, False),
 )
+# Yalnızca bir stratejide anlamlı A/B satırları (diğerlerinde hiçbir şeyi değiştirmez ya da hep aynı sonucu verir)
+AB_ONLY_FOR = {"RSI_DIV_TREND_FILTER": frozenset({"rsi_divergence"})}
+AB_NOT_FOR = {"RSI_DIV_FILTER": frozenset({"rsi_divergence"})}   # Strateji zaten uyumsuzlukla alıyor
 # Yedek akçe gerektirenler: ilk giriş %100 ise yedek %50 ile denenir (ve kıyas için yalnızca yedek %50)
 AB_RESERVE_TESTS = (("DCA_MODE", "DCA"), ("PYRAMID_MODE", "Piramit"))
 AB_RESERVE_PCT = 50.0
@@ -1986,6 +2004,8 @@ def ab_combos(cfg, regime_available: bool = True) -> List[Combo]:
         if key == "REGIME_FILTER" and not (current and regime_available):
             continue   # Rejim verisi yalnızca filtre açıkken hazırlanır: kapalıyken "açık" hali denenemez
         if is_rotation(cfg.strategy) and key != "REGIME_FILTER":
+            continue
+        if cfg.strategy not in AB_ONLY_FOR.get(key, (cfg.strategy,)) or cfg.strategy in AB_NOT_FOR.get(key, ()):
             continue
         value = _ab_flip(current, on, off)
         if _valid(replace(cfg, **{attr: SWEEP_FIELDS[key][1](value)})):
@@ -2106,7 +2126,7 @@ def format_ab_report(rows: Sequence[SweepRow], cfg, data: BacktestData, spread_p
 # Aynı dönemde farklı giriş stratejileri × çıkış profilleri × piyasa filtresi (1 saatlik veri) + momentum rotasyonu
 # (günlük veri). Her satır kendi çıkışlarıyla denenir; amaç "işlem başı kârı pozitif, mümkünse kazanma oranı yüksek"
 # bir birleşim bulmaktır. Kazanma oranı tek başına yetmez: küçük kazançları büyük kayıplar silebilir.
-TOURNAMENT_ENTRIES = ("mean_revert", "swing_pullback", "swing")
+TOURNAMENT_ENTRIES = ("mean_revert", "rsi_divergence", "swing_pullback", "swing")
 _EXIT_PROFILE_KEYS = ("TAKE_PROFIT_PCT", "STOP_LOSS_PCT", "TRAILING_ACTIVATION_PCT", "TRAILING_FLOOR_PCT",
                       "MAX_HOLD_MINUTES", "BREAKEVEN_TRIGGER_PCT", "BREAKEVEN_FLOOR_PCT")
 TOURNAMENT_EXITS: Dict[str, Settings] = {
@@ -2243,8 +2263,9 @@ def format_tournament_report(result: TournamentResult, cfg, spread_pct: float = 
         "   Zayıf: al = piyasa zayıfken sıkı kurallarla alır, atla = zayıf piyasada hiç almaz (REGIME_SKIP_WEAK=true)",
         "   Kaz% = kazanma oranı | Ort.kazanç / Ort.kayıp = kazanan / kaybeden işlemlerin ortalama net sonucu",
         "   İşl.başı = işlem başına ortalama net K/Z — kârlılığı bu belirler, kazanma oranı değil",
-        "   Strateji: mean_revert = büyük coinlerde trend içi aşırı satım alımı | swing_pullback = trendde geri "
-        "çekilmede alım",
+        "   Strateji: mean_revert = büyük coinlerde trend içi aşırı satım alımı | rsi_divergence = pozitif RSI "
+        "uyumsuzluğu + dönüş teyidi",
+        "             swing_pullback = trendde geri çekilmede alım",
         "             swing = çok günlük zirve kırılımı | rotation = haftalık momentum rotasyonu (günlük mumlar)",
     ]
     lines += [f"   Çıkış: {name} = {note}" for name, note in TOURNAMENT_EXIT_NOTES.items()]
@@ -2469,9 +2490,15 @@ def format_sweep_report(rows: Sequence[SweepRow], cfg, data: BacktestData, sprea
     elif compare and swing:
         legend += ["   swing = çok günlük yükseliş trendinde son günlerin zirvesinin hacimle kırılmasında alım |",
                    "   swing_pullback = aynı trendde zirveden geri çekilip EMA50'den dönüşte alım (1 saatlik mumlar)"]
+    elif compare and is_mean_reversion(cfg.strategy):
+        legend += ["   mean_revert = trend içi aşırı satımda (20 saatlik ortalamanın altı) alım | rsi_divergence = pozitif",
+                   "   RSI uyumsuzluğu + dönüş teyidiyle alım (en hacimli coinler, 1 saatlik mumlar, aynı çıkışlar)"]
     elif compare:
         legend += ["   rebound = düşen coinde dip alımı | trend = yükselen trendde EMA20'ye geri çekilmede alım |",
                    "   breakout = yükselen trendde 4 saatlik zirvenin hacimle kırılmasında alım"]
+    elif entry and cfg.strategy == "rsi_divergence":
+        legend += ["   Zayıf = REGIME_SKIP_WEAK (true: piyasa zayıfken alım yok), RSIdip = RSI_DIV_OVERSOLD (ilk dipte RSI",
+                   "   en fazla; küçük = daha derin aşırı satım), Puan = MIN_SIGNAL_SCORE, Alan = MIN_ROOM_RATIO (0 = kapalı)"]
     elif entry and is_mean_reversion(cfg.strategy):
         legend += ["   Zayıf = REGIME_SKIP_WEAK (true: piyasa zayıfken alım yok), Bant = MR_BAND_STD (kapanış 20 saatlik",
                    "   ortalamanın kaç standart sapma altında olmalı), Puan = MIN_SIGNAL_SCORE, Alan = MIN_ROOM_RATIO (0 = kapalı)"]

@@ -63,11 +63,13 @@ class ConfigError(Exception):
 
 # Giriş stratejileri. İlk üçü 5 dakikalık mumlarla dakikalar-saatler süren işlemler içindir; swing stratejileri
 # 1 saatlik mumlarla 1-5 gün süren işlemler içindir; mean_revert 1 saatlik mumlarla en hacimli coinlerde trend içi
-# aşırı satımı alıp küçük hedefle (saatler-2 gün) satar; rotation günlük mumlarla haftalık momentum rotasyonudur
-# (en güçlü birkaç coini tutar, her hafta yeniden dengeler; bkz. strategy.py ve rotation.py).
-STRATEGY_NAMES = ("rebound", "trend", "breakout", "swing", "swing_pullback", "mean_revert", "rotation")
+# aşırı satımı alıp küçük hedefle (saatler-2 gün) satar; rsi_divergence aynı coinlerde pozitif RSI uyumsuzluğunu
+# dönüş teyidiyle alır (aynı çıkış grubu); rotation günlük mumlarla haftalık momentum rotasyonudur (en güçlü birkaç
+# coini tutar, her hafta yeniden dengeler; bkz. strategy.py ve rotation.py).
+STRATEGY_NAMES = ("rebound", "trend", "breakout", "swing", "swing_pullback", "mean_revert", "rsi_divergence",
+                  "rotation")
 LONG_HORIZON_STRATEGIES = frozenset({"swing", "swing_pullback"})
-MEAN_REVERSION_STRATEGIES = frozenset({"mean_revert"})
+MEAN_REVERSION_STRATEGIES = frozenset({"mean_revert", "rsi_divergence"})
 ROTATION_STRATEGIES = frozenset({"rotation"})
 # Telegram bildirim modu: all = hepsi | closes = yalnızca pozisyon kapanışları | silent = yalnızca acil durumlar.
 # Komut cevapları, hatalar ve kritik uyarılar (zarar kes, kill-switch...) her modda gelir.
@@ -100,8 +102,8 @@ ROTATION_PROFILE = {
     "MIN_SIGNAL_SCORE": 0.0,
     "MIN_ROOM_RATIO": 0.0,
 }
-# Ortalamaya dönüş (mean_revert): küçük hedef + daha geniş zarar kes + süre sınırı. Kazanma oranı yüksek olur ama
-# kâr ancak kazananlar kaybedenleri karşılıyorsa çıkar (backtest'te işlem başı sonuca bakın).
+# Ortalamaya dönüş (mean_revert, rsi_divergence): küçük hedef + daha geniş zarar kes + süre sınırı. Kazanma oranı
+# yüksek olur ama kâr ancak kazananlar kaybedenleri karşılıyorsa çıkar (backtest'te işlem başı sonuca bakın).
 MEAN_REVERSION_PROFILE = {
     "TAKE_PROFIT_PCT": 1.5,
     "STOP_LOSS_PCT": 5.0,
@@ -131,7 +133,8 @@ def is_long_horizon(strategy: str) -> bool:
 
 
 def is_mean_reversion(strategy: str) -> bool:
-    """1 saatlik mumlarla en hacimli coinlerde trend içi aşırı satımı alan, küçük hedefli strateji mi?"""
+    """1 saatlik mumlarla en hacimli coinlerde düşüş sonrası dönüşü alan (ortalamaya dönüş / RSI uyumsuzluğu), küçük
+    hedefli strateji mi?"""
     return strategy in MEAN_REVERSION_STRATEGIES
 
 
@@ -140,9 +143,15 @@ def is_rotation(strategy: str) -> bool:
     return strategy in ROTATION_STRATEGIES
 
 
+def divergence_trading(cfg) -> bool:
+    """RSI_DIV_TRADE ana stratejinin yanında çalışıyor mu? (Rotasyonda ve rsi_divergence'ın kendisinde çalışmaz.)"""
+    return (getattr(cfg, "rsi_div_trade", "off") != "off" and not is_rotation(cfg.strategy)
+            and cfg.strategy != "rsi_divergence")
+
+
 def strategy_family(strategy: str) -> str:
     """Aynı çıkış mantığını ve mum aralığını paylaşan strateji grubu: 'short' (5 dk), 'swing' (1 saat, günler),
-    'mr' (1 saat, ortalamaya dönüş), 'rotation' (günlük)."""
+    'mr' (1 saat, ortalamaya dönüş / RSI uyumsuzluğu), 'rotation' (günlük)."""
     if is_rotation(strategy):
         return "rotation"
     if is_mean_reversion(strategy):
@@ -376,6 +385,16 @@ class Config:
     liq_alert_usdt: float = 0.0            # Bir coinde 5 dk'da bu kadar long likidasyonu olursa bildir (0 = kapalı)
     rsi_div_alerts: bool = False           # En hacimli coinlerde 1 saatlik pozitif RSI uyumsuzluğu bildirimi
     rsi_div_scan_minutes: int = 60
+    # Pozitif RSI uyumsuzluğuyla alım: STRATEGY=rsi_divergence (ana strateji), RSI_DIV_TRADE (ana stratejinin yanında)
+    # ve RSI_DIV_FILTER (diğer stratejilere teyit). Uyumsuzluk eşikleri bildirim için de geçerlidir.
+    rsi_div_oversold: float = 35.0         # İlk dipte RSI en fazla bu olmalı
+    rsi_div_rise: float = 3.0              # İkinci (daha düşük) dipte RSI en az bu kadar yüksek olmalı
+    rsi_div_universe: int = 30             # rsi_divergence / RSI_DIV_TRADE: yalnızca en hacimli bu kadar coin
+    rsi_div_trend_filter: bool = False     # true: yalnızca fiyat 1 saatlik EMA200'ün (≈ 8 gün) üstündeyken al
+    rsi_div_trade: str = "off"             # Ana stratejinin yanında uyumsuzluk + teyitle alım: off | ask | auto
+    rsi_div_tp_pct: float = 0.0            # RSI_DIV_TRADE işlemlerinin Kâr Al'ı (0 = TAKE_PROFIT_PCT)
+    rsi_div_sl_pct: float = 0.0            # ...ve Zarar Kes'i (0 = STOP_LOSS_PCT; ondan büyük olamaz)
+    rsi_div_filter: bool = False           # Diğer stratejilere teyit: yakın zamanda pozitif uyumsuzluk yoksa alma
     # 44) Araçlar
     pnl_board_sec: int = 5                 # /pano: canlı K/Z mesajı bu aralıkla güncellenir
     pnl_board_minutes: int = 30            # ...ve bu süre sonra kendiliğinden durur
@@ -556,6 +575,18 @@ class Config:
                           "arasında olmalı")
         if self.liq_alert_usdt < 0 or self.rsi_div_scan_minutes < 5:
             errors.append("LIQ_ALERT_USDT negatif olamaz, RSI_DIV_SCAN_MINUTES en az 5 olmalı")
+        if not 10 <= self.rsi_div_oversold <= 50 or not 0 <= self.rsi_div_rise <= 30:
+            errors.append("RSI_DIV_OVERSOLD 10 ile 50, RSI_DIV_RISE 0 ile 30 arasında olmalı")
+        if not 1 <= self.rsi_div_universe <= 200:
+            errors.append("RSI_DIV_UNIVERSE 1 ile 200 arasında olmalı")
+        if self.rsi_div_trade not in ACTION_MODES:
+            errors.append("RSI_DIV_TRADE şunlardan biri olmalı: " + ", ".join(ACTION_MODES))
+        # Yalnızca özellik açıkken (kapalıyken eski ayarlar hata vermesin); zarar kes yalnızca daralabilir: pozisyon
+        # boyutu ve Binance yedek stop'u STOP_LOSS_PCT'ye göre hesaplanır
+        if self.rsi_div_trade != "off" and (self.rsi_div_tp_pct < 0
+                                            or not 0 <= self.rsi_div_sl_pct <= self.stop_loss_pct):
+            errors.append("RSI_DIV_TP_PCT negatif olamaz; RSI_DIV_SL_PCT 0 (= STOP_LOSS_PCT) ile STOP_LOSS_PCT "
+                          "arasında olmalı")
         if self.pnl_board_sec < 3 or self.pnl_board_minutes <= 0:
             errors.append("PNL_BOARD_SEC en az 3, PNL_BOARD_MINUTES sıfırdan büyük olmalı")
         if self.bnb_topup_usdt < 0:
@@ -733,6 +764,14 @@ def load_config(env_file: Optional[str] = None, mode_override: Optional[str] = N
         liq_alert_usdt=_env_float("LIQ_ALERT_USDT", 0.0),
         rsi_div_alerts=_env_bool("RSI_DIV_ALERTS", False),
         rsi_div_scan_minutes=_env_int("RSI_DIV_SCAN_MINUTES", 60),
+        rsi_div_oversold=_env_float("RSI_DIV_OVERSOLD", 35.0),
+        rsi_div_rise=_env_float("RSI_DIV_RISE", 3.0),
+        rsi_div_universe=_env_int("RSI_DIV_UNIVERSE", 30),
+        rsi_div_trend_filter=_env_bool("RSI_DIV_TREND_FILTER", False),
+        rsi_div_trade=_env_str("RSI_DIV_TRADE", "off").lower(),
+        rsi_div_tp_pct=_env_float("RSI_DIV_TP_PCT", 0.0),
+        rsi_div_sl_pct=_env_float("RSI_DIV_SL_PCT", 0.0),
+        rsi_div_filter=_env_bool("RSI_DIV_FILTER", False),
         pnl_board_sec=_env_int("PNL_BOARD_SEC", 5),
         pnl_board_minutes=_env_int("PNL_BOARD_MINUTES", 30),
         bnb_topup_usdt=_env_float("BNB_TOPUP_USDT", 6.0),
@@ -776,6 +815,11 @@ def _setting_notes(cfg: Config) -> List[str]:
     """Hata sayılmayan ama işe yaramayan ayar birleşimleri için uyarılar."""
     notes: List[str] = []
     from risk import breakeven_effective  # risk config'i içe aktarmaz; döngüsel bağımlılık yok
+    if cfg.rsi_div_trade != "off" and (is_rotation(cfg.strategy) or cfg.strategy == "rsi_divergence"):
+        why = ("rotasyon pozisyonları haftalık sıralamaya göre yönetir" if is_rotation(cfg.strategy)
+               else "strateji zaten uyumsuzlukla alıyor")
+        notes.append(f"RSI_DIV_TRADE={cfg.rsi_div_trade} ana stratejinin YANINDA uyumsuzluk alımı içindir; "
+                     f"STRATEGY={cfg.strategy} iken etkisi yok ({why}).")
     if is_long_horizon(cfg.strategy):
         short = short_exit_settings(cfg)
         if short:
@@ -795,7 +839,7 @@ def _setting_notes(cfg: Config) -> List[str]:
         if cfg.max_hold_minutes <= 0:
             odd.append("MAX_HOLD_MINUTES=0 (süre sınırı yok)")
         if odd:
-            notes.append(f"STRATEGY=mean_revert düşüşün ortalamaya dönüşünü küçük hedefle (saatler-2 gün) alır; şu "
+            notes.append(f"STRATEGY={cfg.strategy} düşüş sonrası dönüşü küçük hedefle (saatler-2 gün) alır; şu "
                          f"ayarlar ona uymuyor: {', '.join(odd)}. Önerilen: " + " ".join(
                              f"{k}={v:g}" for k, v in MEAN_REVERSION_PROFILE.items()))
     if is_rotation(cfg.strategy):

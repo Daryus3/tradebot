@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
 
 from binance_client import RateLimitError
+from config import divergence_trading
 from indicators import rsi
 from logger import get_logger
 from position_rules import bullish_divergence
@@ -133,19 +134,28 @@ def scan_divergences(client, rules: Dict[str, object], cfg, top: int = SCAN_TOP)
         except Exception as exc:  # noqa: BLE001
             log.debug("%s uyumsuzluk taraması: %s", t.get("symbol"), exc)
             continue
-        found = bullish_divergence(rows[:-1], cfg.rsi_period) if len(rows) > 1 else None
+        found = (bullish_divergence(rows[:-1], cfg.rsi_period, cfg.rsi_div_oversold, cfg.rsi_div_rise)
+                 if len(rows) > 1 else None)
         if found:
             hits.append((t["symbol"], found, float(rows[-1][4])))
     return hits
 
 
-def format_divergences(hits: List[Tuple[str, dict, float]]) -> str:
+def format_divergences(hits: List[Tuple[str, dict, float]], cfg=None) -> str:
     lines = ["📐 <b>Pozitif RSI uyumsuzluğu</b> (1 saatlik mumlar)",
              "Fiyat daha düşük dip yaptı ama RSI daha yüksek dip yaptı: satış gücü azalıyor olabilir."]
     for symbol, d, _price in hits[:DIV_MAX_LINES]:
         lines.append(f"• <b>{esc(symbol)}</b>: dip %{d['price_drop_pct']:+.1f}, RSI {d['rsi_prev']:.0f} → "
                      f"{d['rsi_now']:.0f} ({d['bars_apart']} saat arayla)")
-    lines.append("<i>Bilgi amaçlıdır, alım sinyali değildir; dönüş teyidi (yeşil mum, hacim) beklenmeli.</i>")
+    mode = getattr(cfg, "rsi_div_trade", "off") if cfg is not None and divergence_trading(cfg) else "off"
+    if mode != "off":
+        lines.append(f"<i>Bu bir uyarıdır. Uyumsuzluk alımı açık ({'sorarak' if mode == 'ask' else 'otomatik'}): en "
+                     f"hacimli {cfg.rsi_div_universe} coinde dönüş teyidi (yeşil mum, hacim) gelince bot "
+                     f"{'alım için sorar' if mode == 'ask' else 'alım yapar'}.</i>")
+    else:
+        lines.append("<i>Bilgi amaçlıdır, alım sinyali değildir; dönüş teyidi (yeşil mum, hacim) beklenmeli. Bunu "
+                     "alım yapan bir kurala çevirmek için: /menu → Akıllı Yönetim → Uyumsuzluk alımı veya "
+                     "STRATEGY=rsi_divergence.</i>")
     return "\n".join(lines)
 
 
@@ -182,4 +192,4 @@ class DivergenceWatcher:
         for symbol, _d, _p in fresh:
             self.notified[symbol] = now
         if fresh:
-            notifier.notify(format_divergences(fresh), "info")
+            notifier.notify(format_divergences(fresh, cfg), "info")
