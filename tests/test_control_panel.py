@@ -456,6 +456,31 @@ def test_backtest_candle_filter_and_ab_report(cfg, make_client, tmp_path):
     assert "A/B FİLTRE TESTİ" in text and "VWAP filtresi: kapalı → açık" in text and "backtest edilemez" in text
 
 
+def test_ab_report_recommends_only_consistent_changes(cfg):
+    """Yalnızca iki yarıda da kârı artıran değişiklik önerilir; DCA yedek akçe satırıyla kıyaslanır; küçük fark önemsiz."""
+    from types import SimpleNamespace
+    import backtest
+    from backtest import SweepRow
+    big = replace(cfg, start_capital=1000.0, vwap_filter=True, trailing_buy=True)
+    spec = [({}, 86, 22.5, 0.06, 30.0, -7.5),
+            ({"BTC_FILTER": False}, 86, 23.2, 0.06, 30.4, -7.2),              # +0.7 USDT: önemsiz
+            ({"VWAP_FILTER": False}, 206, 180.7, 0.12, 200.0, -19.3),          # Bir yarıda kötüleşti: tutarsız
+            ({"TRAILING_BUY": False}, 90, 138.4, 0.19, 120.0, 18.4),           # İki yarıda da arttı
+            ({"CAPITAL_USAGE_PCT": 50.0}, 86, 16.7, 0.05, 20.0, -3.3),         # Kıyas satırı
+            ({"CAPITAL_USAGE_PCT": 50.0, "DCA_MODE": "auto"}, 85, 75.3, 0.41, 50.0, 25.3)]
+    rows = [SweepRow(st, not st, n, 70.0, net, pct, 20.0, first, second, None, 0.3)
+            for st, n, net, pct, first, second in spec]
+    data = SimpleNamespace(sim_start_ms=1_785_000_000_000, end_ms=1_792_800_000_000, days=90, interval="5m",
+                           series={})
+    text = backtest.format_ab_report(rows, big, data)
+    advice = text.split("iki yarısında da kârı artıranlar")[1].split("🟡")[0]
+    assert "TRAILING_BUY=false" in advice and "DCA_MODE=auto" in advice
+    assert "VWAP_FILTER" not in advice and "BTC_FILTER" not in advice
+    assert "+58.6000 USDT" in advice                                      # DCA farkı yedek akçe satırına göre
+    assert "Tutarsız" in text and "VWAP filtresi: açık → kapalı" in text.split("Tutarsız")[1]
+    assert "≈  BTC sigortası" in text and "⚪ Yedek akçe %50 " in text and "kendi başına kâr artırmaz" in text
+
+
 def test_backtest_loss_streak_freeze(cfg, make_client, tmp_path):
     import backtest
     from test_backtest import DAYS, END_TIME_MS, btc_flat, scenario, trend

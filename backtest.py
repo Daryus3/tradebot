@@ -1974,6 +1974,7 @@ AB_NOT_FOR = {"RSI_DIV_FILTER": frozenset({"rsi_divergence"})}   # Strateji zate
 # Yedek akçe gerektirenler: ilk giriş %100 ise yedek %50 ile denenir (ve kıyas için yalnızca yedek %50)
 AB_RESERVE_TESTS = (("DCA_MODE", "DCA"), ("PYRAMID_MODE", "Piramit"))
 AB_RESERVE_PCT = 50.0
+AB_MIN_EFFECT_PCT = 0.5   # Net kâr farkı başlangıç sermayesinin bu %'sinden küçükse "önemsiz" (öneri yapılmaz)
 AB_CANDLE_KEYS = ("FAKEOUT_FILTER", "VWAP_FILTER", "OVERHEAT_FILTER")
 AB_LIVE_ONLY = "Satış duvarı radarı, emir defteri dengesizliği ve tape teyidi"
 
@@ -2049,10 +2050,27 @@ def _ab_label(cfg, settings: Settings) -> str:
     return " + ".join(parts)
 
 
+def _ab_reference(row: SweepRow, base: SweepRow, reserve: Optional[SweepRow]) -> SweepRow:
+    """Satırın kıyaslandığı satır: yedek akçeyle denenen DCA / piramit, yalnızca yedek akçe satırıyla kıyaslanır
+    (yedek akçe pozisyonları küçülttüğü için mevcut ayarla farkın çoğu eklemeden değil, küçülmeden gelir)."""
+    if reserve is not None and row is not reserve and "CAPITAL_USAGE_PCT" in row.settings:
+        return reserve
+    return base
+
+
+def _halves(d_first: float, d_second: float) -> str:
+    return "".join("=" if abs(d) < 1e-9 else "+" if d > 0 else "-" for d in (d_first, d_second))
+
+
 def format_ab_report(rows: Sequence[SweepRow], cfg, data: BacktestData, spread_pct: float = 0.05) -> str:
-    """A/B raporu: her filtrenin kazanma oranına ve net kâra etkisi."""
+    """A/B raporu: her filtrenin kazanma oranına ve net kâra etkisi.
+
+    Yalnızca dönemin İKİ yarısında da kârı artıran değişiklik önerilir: tek bir yarıdaki fark çoğu zaman şanstır
+    (aynı filtre başka bir dönemde ters sonuç verebilir).
+    """
     q = cfg.quote_asset
     base = next(r for r in rows if r.baseline)
+    reserve = next((r for r in rows if r.settings == {"CAPITAL_USAGE_PCT": AB_RESERVE_PCT}), None)
     width = max([26] + [len(_ab_label(cfg, r.settings)) for r in rows])
     label = INTERVAL_LABELS.get(data.interval, data.interval)
     lines = [
@@ -2064,19 +2082,26 @@ def format_ab_report(rows: Sequence[SweepRow], cfg, data: BacktestData, spread_p
         f"⚙️ Çıkışlar (tüm satırlarda): {_exit_summary(cfg)}",
         "   (Karşılaştırma adil olsun diye kill-switch kapalıdır; maks. düşüşe bakın.)",
         LINE,
-        f"   {'Değişen filtre':<{width}} | İşlem  Fark  Kaz%  ΔKaz  İşl.başı   Net USDT     ΔNet  MaksDD",
+        f"   {'Değişen filtre':<{width}} | İşlem  Fark  Kaz%  ΔKaz  İşl.başı   Net USDT     ΔNet Yarı  MaksDD",
     ]
     better: List[SweepRow] = []
+    mixed: List[SweepRow] = []
     worse: List[SweepRow] = []
     for r in rows:
-        d_net = r.net - base.net
+        ref = _ab_reference(r, base, reserve)
+        d_net = r.net - ref.net
+        halves = _halves(r.first_net - ref.first_net, r.second_net - ref.second_net)
         if r.baseline:
-            mark = "⭐"
-        elif r.trades == base.trades and abs(d_net) < 1e-9:
+            mark, halves = "⭐", ""
+        elif r is reserve:
+            mark = "⚪"
+        elif r.trades == ref.trades and abs(d_net) < 1e-9:
             mark = "· "
         elif not r.enough_trades:
             mark = "? "
-        elif d_net > 0 and r.mean_net_pct >= base.mean_net_pct:
+        elif abs(d_net) < cfg.start_capital * AB_MIN_EFFECT_PCT / 100:
+            mark = "≈ "
+        elif d_net > 0 and r.mean_net_pct >= ref.mean_net_pct and halves == "++":
             mark = "🟢"
             better.append(r)
         elif d_net < 0:
@@ -2084,30 +2109,44 @@ def format_ab_report(rows: Sequence[SweepRow], cfg, data: BacktestData, spread_p
             worse.append(r)
         else:
             mark = "🟡"
+            mixed.append(r)
         lines.append(
-            f"{mark} {_ab_label(cfg, r.settings):<{width}} | {r.trades:>5d} {r.trades - base.trades:>+5d} "
-            f"{r.win_rate:>5.1f} {r.win_rate - base.win_rate:>+5.1f} {r.mean_net_pct:>+8.2f}% {r.net:>+10.4f} "
-            f"{d_net:>+8.4f} {r.max_dd_pct:>6.1f}%")
+            f"{mark} {_ab_label(cfg, r.settings):<{width}} | {r.trades:>5d} {r.trades - ref.trades:>+5d} "
+            f"{r.win_rate:>5.1f} {r.win_rate - ref.win_rate:>+5.1f} {r.mean_net_pct:>+8.2f}% {r.net:>+10.4f} "
+            f"{d_net:>+8.4f} {halves:>4} {r.max_dd_pct:>6.1f}%")
     lines += [
         "   ⭐ = .env'deki mevcut ayarlarınız | Fark / ΔKaz / ΔNet = mevcut ayara göre işlem sayısı, kazanma oranı",
-        "   (puan) ve net kâr farkı | 🟢 = net kâr arttı ve işlem başı sonuç kötüleşmedi | 🔴 = net kâr azaldı",
-        f"   🟡 = net kâr arttı ama işlem başı sonuç kötüleşti | ? = {MIN_TRADES_FOR_EVIDENCE}'dan az işlem (şans olabilir)",
-        "   · = sonuç değişmedi (bu dönemde filtre hiçbir sinyale takılmadı)",
+        "   (puan) ve net kâr farkı" + (f"; DCA / piramit: \"Yedek akçe %{100 - AB_RESERVE_PCT:g}\" satırına göre"
+                                     if reserve is not None else "") + " | Yarı = ΔNet dönemin 1. ve 2. yarısında",
+        "   🟢 = net kâr arttı, işlem başı kötüleşmedi ve İKİ yarıda da arttı | 🟡 = arttı ama tutarsız (şans olabilir)",
+        f"   🔴 = net kâr azaldı | ≈ = fark önemsiz (sermayenin %{AB_MIN_EFFECT_PCT:g}'inden az) | ? = "
+        f"{MIN_TRADES_FOR_EVIDENCE}'dan az işlem",
+        "   · = sonuç değişmedi (filtre hiçbir sinyale takılmadı)" + (" | ⚪ = kıyas satırı" if reserve is not None
+                                                                     else ""),
         LINE,
     ]
+
+    def advice(r: SweepRow) -> str:
+        ref = _ab_reference(r, base, reserve)
+        return f"   {_ab_label(cfg, r.settings)} ({r.net - ref.net:+.4f} {q}) → " + "  ".join(
+            f"{k}={_fmt_setting(k, v)}" for k, v in r.settings.items())
     if better:
-        lines.append("🟢 Bu dönemde kârı artıranlar (.env'de bu satırları yazın):")
-        for r in sorted(better, key=lambda r: r.net, reverse=True):
-            lines.append(f"   {_ab_label(cfg, r.settings)} ({r.net - base.net:+.4f} {q}) → " + "  ".join(
-                f"{k}={_fmt_setting(k, v)}" for k, v in r.settings.items()))
-        lines += [
-            "   Fark küçükse şans olabilir. Önce daha önceki bir dönemde de aynı sonucu verdiğini görün:",
-            f"   python main.py --backtest --gun {data.days:g} --tara-ab --bitis {_fmt_date(data.sim_start_ms)}",
-        ]
+        lines.append("🟢 Dönemin iki yarısında da kârı artıranlar (.env'ye yazmadan önce aşağıdaki komutla daha önceki "
+                     "bir dönemde de doğrulayın):")
+        lines += [advice(r) for r in sorted(better, key=lambda r: r.net, reverse=True)]
     else:
-        lines.append("ℹ️ Bu dönemde hiçbir filtre değişikliği net kârı (yeterli işlemle) artırmadı.")
+        lines.append("ℹ️ Hiçbir değişiklik net kârı dönemin iki yarısında da (yeterli işlemle) artırmadı.")
+    if mixed:
+        lines.append("🟡 Tutarsız, ayar değiştirmek için yeterli değil (bir yarıda zarar ettirdi ya da işlem başı "
+                     "sonucu kötüleştirdi): " + ", ".join(_ab_label(cfg, r.settings) for r in mixed))
     if worse:
         lines.append("🔴 Kârı azaltanlar: " + ", ".join(_ab_label(cfg, r.settings) for r in worse))
+    lines.append(f"🔁 Aynı testi önceki dönemde yapmak için: python main.py --backtest --gun {data.days:g} --tara-ab "
+                 f"--bitis {_fmt_date(data.sim_start_ms)}")
+    if reserve is not None:
+        lines.append(f"⚪ Yedek akçe %{100 - AB_RESERVE_PCT:g} kendi başına kâr artırmaz: pozisyonları küçültür (zarar eden "
+                     "stratejide zararı, kâr edende kârı azaltır) ve küçük pozisyonda LOT adımı büyük coinler (örn. "
+                     "BTC) toz kontrolüne takılıp elenebilir. DCA / piramit satırları bu satırla kıyaslanır.")
     if base.mean_net_pct < 0 and not any(r.mean_net_pct > 0 for r in better):
         lines.append(f"❗ Mevcut ayarlarla işlem başı sonuç {fmt_signed(base.mean_net_pct)}%: filtreler zararı azaltabilir "
                      "ama stratejiyi kârlı yapmıyor (bkz. --turnuva).")
@@ -2115,8 +2154,8 @@ def format_ab_report(rows: Sequence[SweepRow], cfg, data: BacktestData, spread_p
                  "verilerle /tarama raporundaki elenme sayılarına bakın.")
     lines.append("📝 Akıllı yönetimin \"sorarak\" modu (Telegram'dan sorar) geçmiş veriyle denenemez; tabloda sormadan "
                  "uygulanan \"otomatik\" hali var. DCA / piramit yedek akçe ister: ilk giriş %100 ise yedek "
-                 f"%{AB_RESERVE_PCT:g} ile denenir, \"Yedek akçe %{AB_RESERVE_PCT:g}\" satırı eklemesiz kıyastır. "
-                 "Ekleme ve süre kuralları mum kapanışında, kademeli alım mumlarla yaklaşık simüle edilir.")
+                 f"%{AB_RESERVE_PCT:g} ile denenir. Ekleme ve süre kuralları mum kapanışında, kademeli alım mumlarla "
+                 "yaklaşık simüle edilir.")
     lines.append("📝 Günlük zarar limiti backtest'te UTC gün sınırıyla, canlıda yerel saatle hesaplanır. Kayma yok, "
                  "geçmiş sonuçlar geleceği garanti etmez.")
     return "\n".join(lines)

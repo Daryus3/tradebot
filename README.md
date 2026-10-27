@@ -270,7 +270,9 @@ ettirir; kararı "İşl.başı" sütunu verir. Seçilen birleşimi `--bitis` ile
   dosyasına çizer (matplotlib gerekir) ve Telegram ayarlıysa grafiği + raporu Telegram'a gönderir (`--grafiksiz` ile kapanır).
 - **A/B filtre testi** (`--tara-ab`): her giriş filtresini / risk sigortasını (BTC sigortası, piyasa rejimi, üst
   fitil, VWAP, aşırı ısınma, RSI uyumsuzluğu teyidi, zarar serisi, günlük limit; rsi_divergence'ta trend filtresi)
-  tek tek açıp kapatarak aynı veriyle kazanma oranına ve net kâra etkisini gösterir. Emir defteri / tape filtreleri geçmiş veriyle denenemez.
+  tek tek açıp kapatarak aynı veriyle kazanma oranına ve net kâra etkisini gösterir. Yalnızca dönemin **iki
+  yarısında da** kârı artıran değişikliği önerir (🟢); tek yarıda işe yarayan 🟡 (şans olabilir), sermayenin
+  %0.5'inden küçük fark ≈ (önemsiz) işaretlenir. "Yedek akçe %50" yalnızca kıyas satırıdır: DCA / piramit ona göre ölçülür. Emir defteri / tape filtreleri geçmiş veriyle denenemez.
 - **Taramalar** (`--tara`, `--tara-giris`, `--tara-filtre`): veri bir kez indirilir, ayarlar aynı veriyle denenir;
   karşılaştırma adil olsun diye kill-switch kapalıdır. Çok ayar denendiğinde birkaçı tesadüfen kârlı çıkar:
   yalnızca **iki yarıda da kârlı (✅) ve ≥30 işlemli** satırları ciddiye alın, sonra çakışmayan daha eski bir
