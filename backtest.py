@@ -1562,6 +1562,7 @@ class SweepRow:
     second_net: float
     profit_factor: Optional[float]
     se_net_pct: float = 0.0  # mean_net_pct'nin standart hatası
+    kill_ms: Optional[int] = None  # Taramada kill-switch kapalıdır; canlıda tetikleneceği an (None = tetiklenmezdi)
 
     @property
     def consistent(self) -> bool:
@@ -1587,6 +1588,36 @@ class SweepRow:
     def profitable(self) -> bool:
         """Hem toplam USDT hem işlem başı ortalama pozitif (pozisyon büyüklüğü değiştiği için ikisi ayrışabilir)."""
         return self.net > 0 and self.mean_net_pct > 0
+
+
+def _kill_time(cfg, result) -> Optional[int]:
+    """Kill-switch kapalı simülasyonun özkaynak eğrisinde, `cfg`'deki kill-switch'in (MAX_TOTAL_LOSS_PCT) canlıda
+    tetikleneceği ilk an. Canlıdaki gibi gerçekleşmiş + açık K/Z (mum kapanışlarında) ölçülür; tetiklenmezse None."""
+    floor = cfg.start_capital - cfg.loss_limit(cfg.start_capital)
+    return next((t for t, equity in result.equity_curve if equity <= floor + 1e-9), None)
+
+
+def _dd_cell(r: SweepRow) -> str:
+    """Maks. düşüş hücresi; '!' = bu ayarla canlıda kill-switch tetiklenirdi."""
+    return f"{r.max_dd_pct:>6.1f}%" + ("!" if r.kill_ms is not None else " ")
+
+
+def _kill_lines(rows: Sequence[SweepRow], cfg, noun: str = "ayarda") -> List[str]:
+    """Tablolar kill-switch kapalıyken hesaplanır; canlıda kill-switch'e takılacak satırları açıkça söyler."""
+    hit = [r for r in rows if r.kill_ms is not None]
+    if not hit:
+        return []
+    pct = cfg.loss_pct(cfg.start_capital)
+    lines = []
+    base = next((r for r in rows if r.baseline), None)
+    if base is not None and base.kill_ms is not None:
+        lines.append(f"☠️ Mevcut ayarlarınızla kill-switch (-%{pct:g}) tetiklenirdi ({_fmt_time(base.kill_ms)}): canlıda "
+                     "bot orada durur, tablodaki sonraki kâr / zarar hiç gerçekleşmezdi.")
+    others = sum(1 for r in hit if not r.baseline)
+    if others:
+        lines.append(f"☠️ {others} {noun} daha kill-switch tetiklenirdi (MaksDD yanında !). Tablo, karşılaştırma tüm "
+                     "dönemi kapsasın diye kill-switch kapalıyken hesaplandı.")
+    return lines
 
 
 def sweep_z(tested: int) -> float:
@@ -1747,7 +1778,7 @@ def run_sweep(cfg, data: BacktestData, spread_pct: float = 0.05, progress: Progr
         first, second = split_halves(res.trades, res.start_ms, res.end_ms)
         rows.append(SweepRow(dict(settings), is_base, sm.count, sm.win_rate, sm.net, sm.mean_net_pct,
                              res.max_drawdown_pct, sum(t.pnl for t in first), sum(t.pnl for t in second),
-                             sm.profit_factor, sm.se_net_pct))
+                             sm.profit_factor, sm.se_net_pct, _kill_time(cfg, res)))
         if i == 1 or i % 10 == 0 or i == len(combos):
             say(f"   ⏳ Tarama {i}/{len(combos)} ayar denendi")
     return rows
@@ -1827,7 +1858,7 @@ def run_filter_sweep(cfg, data: BacktestData, spread_pct: float = 0.05, progress
             first, second = split_halves(res.trades, res.start_ms, res.end_ms)
             rows.append(SweepRow(dict(settings), is_base, sm.count, sm.win_rate, sm.net, sm.mean_net_pct,
                                  res.max_drawdown_pct, sum(t.pnl for t in first), sum(t.pnl for t in second),
-                                 sm.profit_factor, sm.se_net_pct))
+                                 sm.profit_factor, sm.se_net_pct, _kill_time(cfg, res)))
             say(f"   ⏳ Filtre taraması {i}/{len(combos)} ayar denendi")
     finally:
         if prepared != cfg.min_24h_range_pct:
@@ -1860,7 +1891,7 @@ def format_filter_report(rows: Sequence[SweepRow], cfg, data: BacktestData, spre
         f"⚙️ Çıkışlar (tüm satırlarda): {_exit_summary(cfg)}",
         "   (Karşılaştırma adil olsun diye taramada kill-switch kapalıdır; maks. düşüşe bakın.)",
         LINE,
-        f"   {'Gevşetilen ayar':<{width}} | İşlem  Fark  Gün.  Kaz%  İşl.başı   Net USDT  MaksDD |  1.yarı  2.yarı "
+        f"   {'Gevşetilen ayar':<{width}} | İşlem  Fark  Gün.  Kaz%  İşl.başı   Net USDT  MaksDD  |  1.yarı  2.yarı "
         f"Yarı",
     ]
     more: List[SweepRow] = []     # İşlem sayısını artıranlar
@@ -1894,7 +1925,7 @@ def format_filter_report(rows: Sequence[SweepRow], cfg, data: BacktestData, spre
             mixed.append(r)
         lines.append(
             f"{mark} {_filter_label(cfg, r.settings):<{width}} | {r.trades:>5d} {diff:>+5d} {r.trades / days:>5.1f} "
-            f"{r.win_rate:>5.1f} {r.mean_net_pct:>+8.2f}% {r.net:>+10.4f} {r.max_dd_pct:>6.1f}% | "
+            f"{r.win_rate:>5.1f} {r.mean_net_pct:>+8.2f}% {r.net:>+10.4f} {_dd_cell(r)}| "
             f"{r.first_net:>+7.3f} {r.second_net:>+7.3f} {halves:>4}")
     lines += [
         "   ⭐ = .env'deki mevcut ayarlarınız | Fark = mevcut ayara göre işlem farkı | Gün. = günde ortalama işlem",
@@ -1906,7 +1937,7 @@ def format_filter_report(rows: Sequence[SweepRow], cfg, data: BacktestData, spre
         f"(%{FILTER_MIN_MORE_PCT:g}'den az; bu filtre şu an işlemleri kısıtlamıyor)",
         "   İşl.başı = işlem başına ortalama net K/Z (komisyon dahil)",
         LINE,
-    ]
+    ] + _kill_lines(rows, cfg)
     if not base.enough_trades:
         lines.append(f"ℹ️ Mevcut ayarlarla yalnızca {base.trades} işlem var: işlem başı sonucu şans olabileceği için "
                      "satırlar sıfırla (kâr / zarar sınırı) kıyaslandı.")
@@ -2130,7 +2161,7 @@ def format_ab_report(rows: Sequence[SweepRow], cfg, data: BacktestData, spread_p
         lines.append(
             f"{mark} {_ab_label(cfg, r.settings):<{width}} | {r.trades:>5d} {r.trades - ref.trades:>+5d} "
             f"{r.win_rate:>5.1f} {r.win_rate - ref.win_rate:>+5.1f} {r.mean_net_pct:>+8.2f}% {r.net:>+10.4f} "
-            f"{d_net:>+8.4f} {halves:>4} {r.max_dd_pct:>6.1f}%")
+            f"{d_net:>+8.4f} {halves:>4} {_dd_cell(r)}")
     lines += [
         "   ⭐ = .env'deki mevcut ayarlarınız | Fark / ΔKaz / ΔNet = mevcut ayara göre işlem sayısı, kazanma oranı",
         "   (puan) ve net kâr farkı" + (f"; DCA / piramit: \"Yedek akçe %{100 - AB_RESERVE_PCT:g}\" satırına göre"
@@ -2141,7 +2172,7 @@ def format_ab_report(rows: Sequence[SweepRow], cfg, data: BacktestData, spread_p
         "   · = sonuç değişmedi (filtre hiçbir sinyale takılmadı)" + (" | ⚪ = kıyas satırı" if reserve is not None
                                                                      else ""),
         LINE,
-    ]
+    ] + _kill_lines(rows, cfg)
 
     def advice(r: SweepRow) -> str:
         ref = _ab_reference(r, base, reserve)
@@ -2229,7 +2260,8 @@ def _tournament_row(cfg, data: BacktestData, settings: Settings, spread_pct: flo
     wins = [t.pnl_pct for t in res.trades if t.pnl >= 0]
     losses = [t.pnl_pct for t in res.trades if t.pnl < 0]
     row = SweepRow(dict(settings), False, sm.count, sm.win_rate, sm.net, sm.mean_net_pct, res.max_drawdown_pct,
-                   sum(t.pnl for t in first), sum(t.pnl for t in second), sm.profit_factor, sm.se_net_pct)
+                   sum(t.pnl for t in first), sum(t.pnl for t in second), sm.profit_factor, sm.se_net_pct,
+                   _kill_time(cfg, res))
     return TournamentRow(entry, exit_name, skip_weak, row, sum(wins) / len(wins) if wins else 0.0,
                          sum(losses) / len(losses) if losses else 0.0)
 
@@ -2304,7 +2336,7 @@ def format_tournament_report(result: TournamentResult, cfg, spread_pct: float = 
     width_e = max(len(t.entry) for t in rows)
     width_x = max(len(t.exit) for t in rows)
     lines.append(f"   {'Strateji':<{width_e}} {'Çıkış':<{width_x}} Zayıf | İşlem  Kaz%  Ort.kazanç Ort.kayıp "
-                 f"İşl.başı   Net USDT  Getiri  MaksDD |  1.yarı  2.yarı")
+                 f"İşl.başı   Net USDT  Getiri  MaksDD  |  1.yarı  2.yarı")
     for t in ranked:
         r = t.row
         weak = "-    " if t.skip_weak is None else ("atla " if t.skip_weak else "al   ")
@@ -2312,7 +2344,7 @@ def format_tournament_report(result: TournamentResult, cfg, spread_pct: float = 
         lines.append(
             f"{_tournament_mark(t, tested)} {t.entry:<{width_e}} {t.exit:<{width_x}} {weak} | {r.trades:>5d} "
             f"{r.win_rate:>5.1f} {t.avg_win_pct:>+9.2f}% {t.avg_loss_pct:>+8.2f}% {r.mean_net_pct:>+7.2f}% "
-            f"{r.net:>+10.4f} {gain:>+6.1f}% {r.max_dd_pct:>6.1f}% | {r.first_net:>+7.3f} {r.second_net:>+7.3f}")
+            f"{r.net:>+10.4f} {gain:>+6.1f}% {_dd_cell(r)}| {r.first_net:>+7.3f} {r.second_net:>+7.3f}")
     lines += [
         "   ✅ = aday (iki yarıda kârlı, ≥30 işlem ve denenen birleşim sayısına göre şanstan ayırt edilebiliyor)",
         "   ≈ = iki yarıda kârlı ama şans olabilir | · = 30'dan az işlem (güvenilmez)",
@@ -2327,6 +2359,7 @@ def format_tournament_report(result: TournamentResult, cfg, spread_pct: float = 
     lines += [f"   Çıkış: {name} = {note}" for name, note in TOURNAMENT_EXIT_NOTES.items()]
     lines += ["   Çıkış: haftalık rotasyon = .env'deki ROTATION_* ayarları | en hacimli coin trendi = genelde BTC; "
               "momentum pozitif ve BTC 50 günlük ortalamanın üstündeyken tutar", LINE]
+    lines += _kill_lines([t.row for t in rows], cfg, "birleşimde")
 
     enough = [t for t in rows if t.row.enough_trades]
     if enough:
@@ -2413,13 +2446,14 @@ def save_sweep_csv(rows: Sequence[SweepRow], path: Union[str, Path]) -> Path:
         writer = csv.writer(fh, delimiter=";")
         writer.writerow(keys + ["mevcut", "islem", "kazanma_yuzde", "net_usdt", "islem_basi_net_yuzde",
                                 "maks_dusus_yuzde", "ilk_yari_usdt", "ikinci_yari_usdt", "kar_faktoru",
-                                "standart_hata", "aday"])
+                                "standart_hata", "aday", "kill_switch"])
         for r in rows:
             pf = "" if r.profit_factor is None or math.isinf(r.profit_factor) else f"{r.profit_factor:.3f}"
             values = [_fmt_setting(k, r.settings[k]) if k in r.settings else "" for k in keys] + [
                 "evet" if r.baseline else "", str(r.trades), f"{r.win_rate:.1f}", f"{r.net:.4f}",
                 f"{r.mean_net_pct:.3f}", f"{r.max_dd_pct:.2f}", f"{r.first_net:.4f}", f"{r.second_net:.4f}", pf,
-                f"{r.se_net_pct:.4f}", "evet" if r.proven(len(rows)) else ""]
+                f"{r.se_net_pct:.4f}", "evet" if r.proven(len(rows)) else "",
+                _fmt_time(r.kill_ms) if r.kill_ms is not None else ""]
             writer.writerow([_csv_num(v) for v in values])
     return path
 
@@ -2515,7 +2549,7 @@ def format_sweep_report(rows: Sequence[SweepRow], cfg, data: BacktestData, sprea
         f"(sonuçları şans) en alta alındı.",
         LINE,
         "   " + " ".join(f"{SWEEP_FIELDS[k][2]:>{widths[k]}}" for k in columns)
-        + " | İşlem  Kaz%   Net USDT   Getiri  İşl.başı  MaksDD |  1.yarı  2.yarı",
+        + " | İşlem  Kaz%   Net USDT   Getiri  İşl.başı  MaksDD  |  1.yarı  2.yarı",
     ]
     for r in shown:
         if r.baseline:
@@ -2530,7 +2564,7 @@ def format_sweep_report(rows: Sequence[SweepRow], cfg, data: BacktestData, sprea
         lines.append(
             f"{mark} {cells} | {r.trades:>5d} {r.win_rate:>5.1f} {r.net:>+10.4f} "
             f"{r.net / cfg.start_capital * 100 if cfg.start_capital > 0 else 0.0:>+7.1f}% {r.mean_net_pct:>+8.2f}% "
-            f"{r.max_dd_pct:>6.1f}% | {r.first_net:>+7.3f} {r.second_net:>+7.3f}")
+            f"{_dd_cell(r)}| {r.first_net:>+7.3f} {r.second_net:>+7.3f}")
     rotation = is_rotation(cfg.strategy)
     mine = ("mevcut ayarlar (.env'de 5 dk stratejisi varsa önerilen uzun vade çıkışlarıyla)" if swing
             else "mevcut ayarlar (.env'de başka tür strateji varsa önerilen rotasyon ayarlarıyla)" if rotation
@@ -2568,7 +2602,7 @@ def format_sweep_report(rows: Sequence[SweepRow], cfg, data: BacktestData, sprea
         legend += ["   TP/SL/İz. = Kâr Al / Zarar Kes / izleyen stop başlangıcı (%), Süre = maks. tutma (dk"
                    + ("; 1440 = 1 gün" if swing or is_mean_reversion(cfg.strategy) else "") + "),",
                    "   Alan = MIN_ROOM_RATIO (0 = kapalı)"]
-    lines += legend + ["   İşl.başı = işlem başına ortalama net K/Z", LINE]
+    lines += legend + ["   İşl.başı = işlem başına ortalama net K/Z", LINE] + _kill_lines(rows, cfg)
 
     best = next((r for r in ranked if r.enough_trades), None)
     if not profitable:

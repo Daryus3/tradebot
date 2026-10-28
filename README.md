@@ -274,7 +274,8 @@ ettirir; kararı "İşl.başı" sütunu verir. Seçilen birleşimi `--bitis` ile
   yarısında da** kârı artıran değişikliği önerir (🟢); tek yarıda işe yarayan 🟡 (şans olabilir), sermayenin
   %0.5'inden küçük fark ≈ (önemsiz) işaretlenir. "Yedek akçe %50" yalnızca kıyas satırıdır: DCA / piramit ona göre ölçülür. Emir defteri / tape filtreleri geçmiş veriyle denenemez.
 - **Taramalar** (`--tara`, `--tara-giris`, `--tara-filtre`): veri bir kez indirilir, ayarlar aynı veriyle denenir;
-  karşılaştırma adil olsun diye kill-switch kapalıdır. Çok ayar denendiğinde birkaçı tesadüfen kârlı çıkar:
+  karşılaştırma adil olsun diye kill-switch kapalıdır; canlıda kill-switch'e takılacak ayarlar MaksDD yanında `!` ile
+  işaretlenir ve raporun altında ☠️ ile tarihiyle yazılır (o tarihten sonraki sonuçlar canlıda hiç gerçekleşmez). Çok ayar denendiğinde birkaçı tesadüfen kârlı çıkar:
   yalnızca **iki yarıda da kârlı (✅) ve ≥30 işlemli** satırları ciddiye alın, sonra çakışmayan daha eski bir
   dönemde (`--bitis`) doğrulayın. Tüm satırlar `data/tarama_*.csv` dosyasına yazılır.
 - **İşlem başı sonuç negatifse işlem sayısını artırmak zararı da artırır.**

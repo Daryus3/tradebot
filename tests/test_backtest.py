@@ -645,6 +645,24 @@ def test_filter_report_requires_both_halves_and_real_increase(cfg):
     assert "--ayar MAX_RETRACE=0.75" in text
 
 
+def test_sweeps_flag_rows_that_would_hit_the_kill_switch(cfg, make_client, tmp_path):
+    """Taramalar kill-switch kapalı çalışır; canlıda kill-switch'e takılacak ayarlar raporda ve CSV'de belirtilir."""
+    from backtest import format_sweep_report, prepare_backtest, run_sweep, save_sweep_csv, simulate
+    tight = replace(cfg, max_total_loss_pct=3.0)            # Tek bir zarar kes (-%10) bile sınırı aşar
+    client = make_client({"ABCUSDT": scenario(lambda p: trend(p, 0.97, 8)), "BTCUSDT": btc_flat()})
+    data = prepare_backtest(tight, client, days=DAYS, cache_dir=tmp_path / "c", progress=None,
+                            symbols=["ABCUSDT"], end_time_ms=END_TIME_MS)
+    real = simulate(tight, data)
+    assert real.killed
+    rows = run_sweep(tight, data, combos=[({}, True)])
+    assert rows[0].kill_ms is not None and abs(rows[0].kill_ms - real.killed_at_ms) <= 3_600_000
+    text = format_sweep_report(rows, tight, data)
+    assert "☠️ Mevcut ayarlarınızla kill-switch (-%3) tetiklenirdi" in text and "%!" in text
+    assert "kill_switch" in save_sweep_csv(rows, tmp_path / "k.csv").read_text(encoding="utf-8-sig")
+    safe = run_sweep(cfg, data, combos=[({}, True)])       # Varsayılan sınırda tetiklenmez: uyarı yok
+    assert safe[0].kill_ms is None and "☠️" not in format_sweep_report(safe, cfg, data)
+
+
 def test_cli_filter_sweep_only_for_rebound(cfg, monkeypatch, capsys):
     import main
     calls = []
