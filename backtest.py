@@ -1860,39 +1860,50 @@ def format_filter_report(rows: Sequence[SweepRow], cfg, data: BacktestData, spre
         f"⚙️ Çıkışlar (tüm satırlarda): {_exit_summary(cfg)}",
         "   (Karşılaştırma adil olsun diye taramada kill-switch kapalıdır; maks. düşüşe bakın.)",
         LINE,
-        f"   {'Gevşetilen ayar':<{width}} | İşlem  Fark  Gün.  Kaz%  İşl.başı   Net USDT  MaksDD |  1.yarı  2.yarı",
+        f"   {'Gevşetilen ayar':<{width}} | İşlem  Fark  Gün.  Kaz%  İşl.başı   Net USDT  MaksDD |  1.yarı  2.yarı "
+        f"Yarı",
     ]
     more: List[SweepRow] = []     # İşlem sayısını artıranlar
-    better: List[SweepRow] = []   # ... yeterli işlemle ve işlem başı sonucu kötüleştirmeden
+    better: List[SweepRow] = []   # ... yeterli işlemle, işlem başı sonucu ve iki yarının net sonucunu bozmadan
+    mixed: List[SweepRow] = []    # ... işlem başı bozulmadı ama bir yarıda net sonuç kötüleşti
     worse: List[SweepRow] = []    # ... yeterli işlemle ama işlem başı sonucu kötüleştirerek
     # Mevcut ayar çok az işlem açıyorsa onun işlem başı sonucu şanstır: kıyas sıfıra (kâr / zarar sınırına) yapılır
     reference = base.mean_net_pct if base.enough_trades else 0.0
+    min_diff = max(1, round(base.trades * FILTER_MIN_MORE_PCT / 100))   # +1-2 işlem "artış" sayılmaz
     for r in rows:
         diff = r.trades - base.trades
+        halves = "" if r.baseline else _halves(r.first_net - base.first_net, r.second_net - base.second_net)
         if r.baseline:
             mark = "⭐"
-        elif diff <= 0:
+        elif diff < min_diff:
             mark = "· "
         elif not r.enough_trades:
             mark = "? "
             more.append(r)
-        elif r.mean_net_pct >= reference:
+        elif r.mean_net_pct < reference:
+            mark = "🔴"
+            more.append(r)
+            worse.append(r)
+        elif "-" not in halves:
             mark = "🟢"
             more.append(r)
             better.append(r)
         else:
-            mark = "🔴"
+            mark = "🟡"
             more.append(r)
-            worse.append(r)
+            mixed.append(r)
         lines.append(
             f"{mark} {_filter_label(cfg, r.settings):<{width}} | {r.trades:>5d} {diff:>+5d} {r.trades / days:>5.1f} "
             f"{r.win_rate:>5.1f} {r.mean_net_pct:>+8.2f}% {r.net:>+10.4f} {r.max_dd_pct:>6.1f}% | "
-            f"{r.first_net:>+7.3f} {r.second_net:>+7.3f}")
+            f"{r.first_net:>+7.3f} {r.second_net:>+7.3f} {halves:>4}")
     lines += [
         "   ⭐ = .env'deki mevcut ayarlarınız | Fark = mevcut ayara göre işlem farkı | Gün. = günde ortalama işlem",
-        "   🟢 = daha çok işlem ve işlem başı sonuç kötüleşmedi | 🔴 = daha çok işlem ama işlem başı sonuç kötüleşti",
-        f"   ? = {MIN_TRADES_FOR_EVIDENCE}'dan az işlem (sonuç şans olabilir) | · = işlem sayısı artmadı (bu filtre "
-        "şu an işlemleri kısıtlamıyor)",
+        "   Yarı = net K/Z farkı dönemin 1. ve 2. yarısında (+ arttı, - azaldı)",
+        "   🟢 = daha çok işlem; işlem başı sonuç da, iki yarının net sonucu da kötüleşmedi",
+        "   🟡 = daha çok işlem, işlem başı kötüleşmedi ama bir yarıda net zarar arttı (tutarsız, şans olabilir)",
+        "   🔴 = daha çok işlem ama işlem başı sonuç kötüleşti",
+        f"   ? = {MIN_TRADES_FOR_EVIDENCE}'dan az işlem (sonuç şans olabilir) | · = işlem sayısı belirgin artmadı "
+        f"(%{FILTER_MIN_MORE_PCT:g}'den az; bu filtre şu an işlemleri kısıtlamıyor)",
         "   İşl.başı = işlem başına ortalama net K/Z (komisyon dahil)",
         LINE,
     ]
@@ -1918,17 +1929,22 @@ def format_filter_report(rows: Sequence[SweepRow], cfg, data: BacktestData, spre
             "   sayısını artırmak toplam zararı da artırır. Daha çok işlem ancak işlem başı sonuç da sıfırın üstüne",
             "   çıkıyorsa kâr getirir.",
         ]
+    if mixed:
+        lines.append("🟡 Tutarsız (dönemin bir yarısında net zararı artırdı; önerilmez): " + ", ".join(
+            f"{_filter_label(cfg, r.settings)} ({r.trades - base.trades:+d} işlem)" for r in mixed))
     if better:
         best = max(better, key=lambda r: r.mean_net_pct)
-        lines.append("🟢 İşlem sayısını artırıp işlem başı sonucu bozmayan filtreler (tek tek denendi):")
+        lines.append("🟢 İşlem sayısını artırıp işlem başı sonucu ve iki yarının net sonucunu bozmayan filtreler "
+                     "(tek tek denendi):")
         for r in sorted(better, key=lambda r: r.mean_net_pct, reverse=True):
             lines.append(f"   {_filter_label(cfg, r.settings)}: {r.trades - base.trades:+d} işlem, işlem başı "
                          f"{fmt_signed(r.mean_net_pct)}% → .env: " + "  ".join(
                              f"{k}={_fmt_setting(k, v)}" for k, v in r.settings.items()))
         lines += [
-            "   Fark küçükse şans olabilir. Önce en iyisini daha önceki bir dönemde sınayın: .env'de değiştirip",
+            "   Fark küçükse şans olabilir. .env'yi değiştirmeden önce en iyisini daha önceki bir dönemde sınayın:",
             f"   python main.py --backtest --gun {data.days:g} --strateji {cfg.strategy} --bitis "
-            f"{_fmt_date(data.sim_start_ms)}",
+            f"{_fmt_date(data.sim_start_ms)} " + " ".join(
+                f"--ayar {k}={_fmt_setting(k, v)}" for k, v in best.settings.items()),
         ]
         if not best.profitable:
             lines.append("   Not: bu ayarlarla da toplamda zarar var; yalnızca işlem başı zarar büyümüyor.")
@@ -1938,7 +1954,7 @@ def format_filter_report(rows: Sequence[SweepRow], cfg, data: BacktestData, spre
         else:
             lines.append("🔴 Yeterli işlemle ölçülebilen her gevşetmede işlem başı sonuç zararda: filtreler kötü")
         lines.append("   sinyalleri eliyor. Gevşetirseniz daha çok ama daha zararlı işlem beklenir.")
-    elif more:
+    elif more and not mixed:
         lines.append(f"? İşlem sayısını artıran gevşetmeler {MIN_TRADES_FOR_EVIDENCE}'dan az işlem açtı: etkileri bu veriyle "
                      "ölçülemiyor; daha uzun bir dönem deneyin (--gun 180).")
     lines.append(f"🔁 Aynı taramayı önceki {data.days:g} günde yapmak için: python main.py --backtest --gun "
@@ -1975,6 +1991,7 @@ AB_NOT_FOR = {"RSI_DIV_FILTER": frozenset({"rsi_divergence"})}   # Strateji zate
 AB_RESERVE_TESTS = (("DCA_MODE", "DCA"), ("PYRAMID_MODE", "Piramit"))
 AB_RESERVE_PCT = 50.0
 AB_MIN_EFFECT_PCT = 0.5   # Net kâr farkı başlangıç sermayesinin bu %'sinden küçükse "önemsiz" (öneri yapılmaz)
+FILTER_MIN_MORE_PCT = 1.0  # Filtre gevşetme: işlem sayısı en az bu % artmalı (+1-2 işlem "artış" sayılmaz)
 AB_CANDLE_KEYS = ("FAKEOUT_FILTER", "VWAP_FILTER", "OVERHEAT_FILTER")
 AB_LIVE_ONLY = "Satış duvarı radarı, emir defteri dengesizliği ve tape teyidi"
 

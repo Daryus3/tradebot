@@ -627,6 +627,24 @@ def test_filter_sweep_shows_which_filter_blocks_trades(cfg, make_client, tmp_pat
     assert len(content) == len(rows) + 1 and "MIN_24H_RANGE_PCT" in content[0]
 
 
+def test_filter_report_requires_both_halves_and_real_increase(cfg):
+    """Daha çok işlem + işlem başı bozulmadı + iki yarıda da net kötüleşmedi → öneri; +1 işlem artış sayılmaz."""
+    from types import SimpleNamespace
+    from backtest import SweepRow, format_filter_report
+    spec = [({}, 552, -0.01, -238.0, 169.0, -407.0),
+            ({"MIN_24H_DROP_PCT": 1.0}, 628, 0.01, -187.0, 331.0, -518.0),     # İkinci yarıda kötüleşti
+            ({"MAX_RETRACE": 0.75}, 741, 0.01, -221.0, 176.0, -397.0),         # İki yarıda da iyileşti
+            ({"BTC_MAX_1H_DROP_PCT": 2.5}, 553, -0.01, -234.0, 169.0, -403.0)]  # +1 işlem: artış sayılmaz
+    rows = [SweepRow(st, not st, n, 72.0, net, pct, 60.0, a, b, None, 0.1) for st, n, pct, net, a, b in spec]
+    data = SimpleNamespace(sim_start_ms=1_746_540_000_000, end_ms=1_793_196_000_000, days=540, interval="5m",
+                           series={})
+    text = format_filter_report(rows, cfg, data)
+    advice = text.split("bozmayan filtreler")[1]
+    assert "MAX_RETRACE=0.75" in advice and "MIN_24H_DROP_PCT=1" not in advice and "BTC_MAX_1H_DROP_PCT" not in advice
+    assert "Tutarsız" in text and "MIN_24H_DROP_PCT 2 → 1 (+76 işlem)" in text
+    assert "--ayar MAX_RETRACE=0.75" in text
+
+
 def test_cli_filter_sweep_only_for_rebound(cfg, monkeypatch, capsys):
     import main
     calls = []
