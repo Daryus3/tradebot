@@ -52,6 +52,7 @@ EDITABLE: Dict[str, Setting] = {
     "MAX_SPREAD_PCT": Setting("max_spread_pct", "float", "Maks. spread (%)"),
     "BTC_MAX_1H_DROP_PCT": Setting("btc_max_1h_drop_pct", "float", "BTC 1 saatlik düşüş sınırı (%)"),
     "OVERHEAT_PCT": Setting("overheat_pct", "float", "Aşırı ısınma eşiği (%)"),
+    "MAX_RETRACE": Setting("max_retrace", "float", "Rebound: düşüşün en fazla ne kadarı geri alınmış olabilir (0-1)"),
     # Risk sigortaları
     "DAILY_LOSS_LIMIT_PCT": Setting("daily_loss_limit_pct", "float", "Günlük zarar limiti (%, 0 = kapalı)"),
     "DAILY_PROFIT_TARGET_PCT": Setting("daily_profit_target_pct", "float", "Günlük kâr hedefi (%, 0 = kapalı)"),

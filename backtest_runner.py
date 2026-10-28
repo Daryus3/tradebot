@@ -93,6 +93,8 @@ PRESETS: Dict[str, Tuple[str, Tuple[Dict[str, str], ...]]] = {
     "daily": ("📉 Günlük zarar limiti %", tuple({"DAILY_LOSS_LIMIT_PCT": v} for v in ("0", "2", "3", "5"))),
     "div": ("📐 Uyumsuzluk RSI eşiği (ilk dipte RSI en fazla)", tuple({"RSI_DIV_OVERSOLD": v} for v in
                                                                   ("25", "30", "35", "40", "45"))),
+    "ret": ("↩️ Rebound: en fazla geri alınan (MAX_RETRACE)", tuple({"MAX_RETRACE": v} for v in
+                                                                   ("0.5", "0.6", "0.75", "0.9"))),
 }
 TOGGLES: Tuple[Tuple[str, str], ...] = (
     ("VWAP_FILTER", "VWAP"), ("FAKEOUT_FILTER", "Fitil"), ("OVERHEAT_FILTER", "Isınma"), ("BTC_FILTER", "BTC sig."),
