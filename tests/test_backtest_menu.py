@@ -209,7 +209,7 @@ def test_run_success_sends_report_and_files(bt_bot):
     assert ("doc", "rapor.txt") in sent
 
 
-def test_run_failure_cancel_and_timeout(bt_bot, monkeypatch):
+def test_run_failure_cancel_and_no_time_limit(bt_bot, monkeypatch):
     bot, notes, _ = bt_bot
     press(bot, "bt:go")
     FakeProc.last.write("❌ Backtest çalıştırılamadı: ağ yok\n")
@@ -221,7 +221,9 @@ def test_run_failure_cancel_and_timeout(bt_bot, monkeypatch):
     assert FakeProc.last.terminated and not bot.backtests.running
     assert "durduruldu" in notes.menus[-2][0] or "durduruldu" in notes.menus[-1][0]
     press(bot, "bt:go")
-    bot.backtests.poll(time.time() + br.BACKTEST_TIMEOUT_SEC + 5)
+    bot.backtests.poll(time.time() + 24 * 3600)                     # Saatler sürse de durdurulmaz
+    assert not FakeProc.last.terminated and bot.backtests.running
+    press(bot, "bt:stop")
     assert FakeProc.last.terminated and not bot.backtests.running
     bot.backtests.popen = FakeProc
     press(bot, "bt:go")

@@ -190,7 +190,8 @@ Sunucuya bağlanmadan, düğmelerle:
 | ▶️ Başlat · ⏹ Durdur · 📄 Son sonuç | Çalıştırır (ilerleme mesajı güncellenir), durdurur, son sonucu tekrar gönderir |
 
 Backtest botun içinde değil **ayrı bir süreçte, düşük öncelikle** çalışır: bot bu sırada pozisyonları izlemeye
-devam eder, bellek yetmezse önce backtest kapanır. Aynı anda bir backtest çalışır, 3 saatte bitmezse durdurulur.
+devam eder, bellek yetmezse önce backtest kapanır. Aynı anda bir backtest çalışır; süre sınırı yoktur, saatler sürse de bitene kadar çalışır (menüden elle
+durdurulabilir; bot yeniden başlatılırsa çalışan backtest de durur).
 Sonuçta rapor Telegram'da eşit aralıklı yazıyla (tablolar düzgün görünür), tamamı `rapor.txt` dosyası olarak,
 grafik resim, tablolar CSV olarak gelir; son 5 sonuç `data/backtest_runs/` klasöründe saklanır. Aynı şeyi komut
 satırında yapmak için: `--ayar ANAHTAR=DEĞER` (örn. `--ayar TAKE_PROFIT_PCT=3 --ayar VWAP_FILTER=true`).

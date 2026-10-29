@@ -7,8 +7,8 @@ Zarar Kes, filtreler, akıllı yönetim...) seçilir. Botun kendi ayarları değ
 
 Backtest botun içinde DEĞİL, ayrı bir süreçte (python main.py --backtest ...) düşük öncelikle çalışır:
   - Bot pozisyonları izlemeye devam eder. Bellek yetmezse işletim sistemi önce backtest sürecini kapatır.
-  - Aynı anda yalnızca bir backtest çalışır; BACKTEST_TIMEOUT_SEC içinde bitmezse durdurulur. Bot yeniden
-    başlarsa çalışan backtest de durur.
+  - Aynı anda yalnızca bir backtest çalışır. Süre sınırı yoktur: saatler sürse de bitene kadar çalışır (menüdeki
+    "Durdur" düğmesiyle elle durdurulabilir). Bot yeniden başlarsa çalışan backtest de durur.
 Sonuçlar: rapor Telegram mesajı olarak (tablolar düzgün görünsün diye eşit aralıklı yazıyla) ve .txt dosyası olarak,
 grafik resim, tablolar Excel ile açılabilen CSV dosyası olarak gelir. Son birkaç sonucun dosyaları
 data/backtest_runs/ klasöründe saklanır.
@@ -38,7 +38,6 @@ log = get_logger()
 
 RUNS_DIR = DATA_DIR / "backtest_runs"
 RUNS_KEPT = 5                      # En son kaç backtest'in dosyaları saklanır
-BACKTEST_TIMEOUT_SEC = 3 * 3600
 PROGRESS_EDIT_SEC = 20             # Çalışırken durum mesajı en fazla bu sıklıkla güncellenir
 CHUNK_CHARS = 3500                 # Telegram mesajı başına rapor uzunluğu (sınır ~4000)
 MAX_CHUNKS = 6                     # Daha uzun rapor yalnızca dosya olarak gelir
@@ -398,12 +397,8 @@ class BacktestRunner:
         if job is None:
             return
         code = job.proc.poll()
-        if code is None:
-            if now - job.started > BACKTEST_TIMEOUT_SEC:
-                job.stopped = f"{BACKTEST_TIMEOUT_SEC // 60} dk içinde bitmediği için durduruldu"
-                self._kill(job)
-                self._finish(job, None)
-            elif now >= job.next_progress:
+        if code is None:   # Süre sınırı yok: bitene (ya da elle durdurulana) kadar beklenir
+            if now >= job.next_progress:
                 job.next_progress = now + PROGRESS_EDIT_SEC
                 self._update_progress(job)
             return
