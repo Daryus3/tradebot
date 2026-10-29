@@ -199,3 +199,55 @@ def test_live_scan_applies_prior_trend_filter(cfg, fake_client):
     assert result.rejects.get(NO_PRIOR_TREND, 0) == 0
     blocked = make_strategy(Client(price * 1.3), on).scan(rules, set(), 0.0)
     assert blocked.rejects[NO_PRIOR_TREND] == 1
+
+
+# ------------------------------------------------------------------ zarar azaltma deneyi (--deney)
+def test_experiment_plan_skips_rows_equal_to_current_settings(cfg):
+    names = [n for n, _ in backtest.experiment_plan(cfg)]
+    assert names[0] == "Mevcut ayarlarınız" and "Önerilen liste" in names and "+ Üçü birden" in names
+    applied = replace(cfg, fakeout_filter=True, capital_usage_pct=50.0, dca_mode="auto", daily_loss_limit_pct=3.0)
+    plan = dict(backtest.experiment_plan(applied))
+    assert "Önerilen liste" not in plan                      # Zaten uygulanmış: mevcut ayarla aynı satır denenmez
+    assert plan["+ Takılan işlem 120 dk"] == {"STALE_EXIT_MINUTES": 120}
+    tight = replace(cfg, stop_loss_pct=3.0, backup_stop_pct=5.0)   # DCA tetiği (-%5) zarar kesten büyük: geçersiz
+    assert all("DCA_MODE" not in st for _, st in backtest.experiment_plan(tight))
+
+
+def test_experiment_runs_with_the_kill_switch_on(cfg, make_client, tmp_path):
+    client = make_client({"ABCUSDT": scenario(lambda p: trend(p, 0.97, 8)), "BTCUSDT": btc_flat()})
+    tight = replace(cfg, max_total_loss_pct=3.0)            # Tek bir zarar kes kill-switch'i tetikler
+    data = backtest.prepare_backtest(tight, client, days=DAYS, cache_dir=tmp_path / "c", progress=None,
+                                     symbols=["ABCUSDT"], end_time_ms=END_TIME_MS)
+    rows = backtest.run_experiment(tight, data)
+    base = rows[0].row
+    assert rows[0].name == "Mevcut ayarlarınız" and base.baseline and base.kill_ms is not None
+    assert backtest.simulate(tight, data).killed_at_ms == base.kill_ms   # Normal backtest ile aynı
+    text = backtest.format_experiment_report(rows, tight, data)
+    assert "ZARAR AZALTMA DENEYİ" in text and "kill-switch AÇIK" in text and "☠️ Mevcut ayarlarınızla" in text
+    assert "--deney --gun 2" in text
+    path = backtest.save_sweep_csv([e.row for e in rows], tmp_path / "d.csv", [e.name for e in rows])
+    content = path.read_text(encoding="utf-8-sig").splitlines()
+    assert content[0].startswith("deney;") and content[1].startswith("Mevcut ayarlarınız;")
+
+
+def test_experiment_from_cli_and_telegram(cfg, monkeypatch, capsys, tmp_path):
+    import binance_client
+    import main
+    from datetime import date
+    from types import SimpleNamespace
+    import backtest_runner as br
+    monkeypatch.setattr(binance_client, "BinanceClient", lambda *a, **k: object())
+    seen = {}
+    data = SimpleNamespace(sim_start_ms=0, end_ms=0, days=365, interval="5m", series={})
+    monkeypatch.setattr(backtest, "prepare_backtest", lambda c, client, days, **k: seen.update(days=days) or data)
+    monkeypatch.setattr(backtest, "run_experiment", lambda *a, **k: [backtest.ExperimentRow(
+        "Mevcut ayarlarınız", backtest.SweepRow({}, True, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, None))])
+    monkeypatch.setattr(backtest, "format_experiment_report", lambda rows, *a, **k: "DENEY RAPORU")
+    args = main.parse_args(["--backtest", "--deney", "--cikti-klasoru", str(tmp_path)])
+    assert main.run_backtest_cli(cfg, args) == 0
+    out = capsys.readouterr().out
+    assert seen["days"] == 365 and "DENEY RAPORU" in out and list(tmp_path.glob("tarama_deney_*.csv"))
+    draft = br.BacktestDraft(kind="deney")
+    bot = SimpleNamespace(cfg=cfg, state=SimpleNamespace(capital=11.0), settings_path=None)
+    built = br.build_args(draft, bot, tmp_path, date(2026, 10, 29))
+    assert "--deney" in built and built[built.index("--gun") + 1] == "365"

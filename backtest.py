@@ -2241,6 +2241,137 @@ def format_ab_report(rows: Sequence[SweepRow], cfg, data: BacktestData, spread_p
     return "\n".join(lines)
 
 
+# ================================================================ zarar azaltma deneyi (--deney)
+# Taramalardan farkı: kill-switch AÇIK, canlıdaki gibi tetiklenince işlem durur. Her satır aynı veriyle ayrı bir normal
+# simülasyondur: mevcut ayarlar, önerilen liste (rebound A/B testlerinde tutarlı çıkanlar) ve üzerine zarar
+# azaltıcılar tek tek ve birlikte. Amaç: canlıda kill-switch'e takılmadan zararı en çok azaltan birleşimi bulmak.
+EXPERIMENT_BASE: Settings = {"FAKEOUT_FILTER": True, "CAPITAL_USAGE_PCT": 50.0, "DCA_MODE": "auto",
+                             "DAILY_LOSS_LIMIT_PCT": 3.0, "TIME_EXIT_MODE": "off"}
+EXPERIMENT_REDUCERS: Settings = {"STALE_EXIT_MINUTES": 120, "LOSS_COOLDOWN_MINUTES": 720, "PRIOR_TREND_FILTER": True}
+EXPERIMENTS: Tuple[Tuple[str, Settings], ...] = (
+    ("Mevcut ayarlarınız", {}),
+    ("Önerilen liste", EXPERIMENT_BASE),
+    ("+ Takılan işlem 120 dk", {**EXPERIMENT_BASE, "STALE_EXIT_MINUTES": 120}),
+    ("+ Takılan işlem 240 dk", {**EXPERIMENT_BASE, "STALE_EXIT_MINUTES": 240}),
+    ("+ Zarardan sonra 12 sa", {**EXPERIMENT_BASE, "LOSS_COOLDOWN_MINUTES": 720}),
+    ("+ Önceki trend filtresi", {**EXPERIMENT_BASE, "PRIOR_TREND_FILTER": True}),
+    ("+ Üçü birden", {**EXPERIMENT_BASE, **EXPERIMENT_REDUCERS}),
+    ("Yalnızca üç yeni ayar", dict(EXPERIMENT_REDUCERS)),
+)
+
+
+@dataclass
+class ExperimentRow:
+    name: str
+    row: SweepRow           # settings = mevcut ayardan farklı olanlar; kill_ms = kill-switch'in tetiklendiği an
+
+
+def _with_settings(cfg, settings: Settings):
+    """Ayarları uygular; kill-switch'e DOKUNMAZ (taramalardaki _apply'ın aksine)."""
+    return replace(cfg, **{SWEEP_FIELDS[k][0]: SWEEP_FIELDS[k][1](v) for k, v in settings.items()})
+
+
+def experiment_plan(cfg) -> List[Tuple[str, Settings]]:
+    """Denenecek satırlar: mevcut ayarla aynı olan değerler atılır; aynı sonuca varan ya da ayar doğrulamasından
+    geçemeyen (örn. DCA tetiği zarar kesten büyük) satır denenmez."""
+    plan: List[Tuple[str, Settings]] = []
+    seen = set()
+    for name, settings in EXPERIMENTS:
+        changes = {k: v for k, v in settings.items()
+                   if getattr(cfg, SWEEP_FIELDS[k][0]) != SWEEP_FIELDS[k][1](v)}
+        key = frozenset(changes.items())
+        if key in seen or not _valid(_with_settings(cfg, changes)):
+            continue
+        seen.add(key)
+        plan.append((name, changes))
+    return plan
+
+
+def run_experiment(cfg, data: BacktestData, spread_pct: float = 0.05, progress: Progress = None,
+                   signal_cache: Optional[dict] = None) -> List[ExperimentRow]:
+    """Deney satırlarını kill-switch açık, aynı veriyle simüle eder (giriş analizleri ortak önbellekten)."""
+    say = progress or (lambda _msg: None)
+    cache = signal_cache if signal_cache is not None else {}
+    plan = experiment_plan(cfg)
+    rows: List[ExperimentRow] = []
+    for i, (name, changes) in enumerate(plan, 1):
+        res = simulate(_with_settings(cfg, changes), data, spread_pct, None, signal_cache=cache)
+        sm = summarize(res.trades)
+        first, second = split_halves(res.trades, res.start_ms, res.end_ms)
+        rows.append(ExperimentRow(name, SweepRow(
+            dict(changes), not changes, sm.count, sm.win_rate, sm.net, sm.mean_net_pct, res.max_drawdown_pct,
+            sum(t.pnl for t in first), sum(t.pnl for t in second), sm.profit_factor, sm.se_net_pct,
+            res.killed_at_ms if res.killed else None)))
+        say(f"   ⏳ Deney {i}/{len(plan)}: {name}")
+    return rows
+
+
+def format_experiment_report(rows: Sequence[ExperimentRow], cfg, data: BacktestData, spread_pct: float = 0.05) -> str:
+    q = cfg.quote_asset
+    base = next(e.row for e in rows if e.row.baseline)
+    width = max([18] + [len(e.name) for e in rows])
+    label = INTERVAL_LABELS.get(data.interval, data.interval)
+    lines = [
+        f"🧪 ZARAR AZALTMA DENEYİ — strateji: {cfg.strategy} (kill-switch AÇIK: canlıdaki gibi tetiklenince durur)",
+        LINE,
+        f"🗓️ Dönem: {_fmt_time(data.sim_start_ms)} → {_fmt_time(data.end_ms)} ({data.days:g} gün, {label} mumlar) | "
+        f"{len(data.series)} sembol | sermaye {fmt_usdt(cfg.start_capital)} {q} | komisyon {fmt_rate(cfg.fee_rate)} "
+        f"| spread %{spread_pct:g} | kill-switch -%{cfg.loss_pct(cfg.start_capital):g}",
+        f"⚙️ Çıkışlar (tüm satırlarda): {_exit_summary(cfg)}",
+        LINE,
+        f"   {'Ayar':<{width}} | İşlem  Kaz%  İşl.başı   Net USDT  Getiri  MaksDD | Kill-switch      |  1.yarı  2.yarı",
+    ]
+    better: List[ExperimentRow] = []
+    for e in rows:
+        r = e.row
+        halves = _halves(r.first_net - base.first_net, r.second_net - base.second_net)
+        if r.baseline:
+            mark = "⭐"
+        elif r.net > base.net and r.kill_ms is None and r.enough_trades and "-" not in halves:
+            mark = "🟢"
+            better.append(e)
+        elif r.net > base.net:
+            mark = "🟡"
+        else:
+            mark = "🔴"
+        killed = _fmt_time(r.kill_ms) if r.kill_ms is not None else "—"
+        gain = r.net / cfg.start_capital * 100 if cfg.start_capital > 0 else 0.0
+        lines.append(f"{mark} {e.name:<{width}} | {r.trades:>5d} {r.win_rate:>5.1f} {r.mean_net_pct:>+8.2f}% "
+                     f"{r.net:>+10.4f} {gain:>+6.1f}% {r.max_dd_pct:>6.1f}% | {killed:<16} | {r.first_net:>+7.3f} "
+                     f"{r.second_net:>+7.3f}")
+    lines += [
+        "   ⭐ = mevcut ayarlarınız | 🟢 = daha az zarar / daha çok kâr, kill-switch yok ve dönemin iki yarısında da",
+        "   mevcuttan iyi | 🟡 = net daha iyi ama kill-switch'e takıldı ya da bir yarıda kötü | 🔴 = mevcuttan kötü",
+        "   Kill-switch = canlıda botun duracağı an (sonrasında işlem yok) | İşl.başı = işlem başına ortalama net K/Z",
+        "   Önerilen liste = " + " ".join(f"{k}={_fmt_setting(k, v)}" for k, v in EXPERIMENT_BASE.items())
+        + " (rebound A/B testlerinden)",
+        "   Üç yeni ayar = takılan işlem çıkışı 120 dk (STALE_EXIT_MINUTES), zarardan sonra aynı coine 12 saat girmeme",
+        "   (LOSS_COOLDOWN_MINUTES=720), önceki trend filtresi (PRIOR_TREND_FILTER: haftalardır düşen coini alma)",
+        LINE,
+    ]
+    if base.kill_ms is not None:
+        lines.append(f"☠️ Mevcut ayarlarınızla kill-switch {_fmt_time(base.kill_ms)}'de tetikleniyor; canlıda bot orada "
+                     "dururdu.")
+    if better:
+        best = max(better, key=lambda e: e.row.net)
+        r = best.row
+        lines.append(f"🏆 En iyi: {best.name} — net {r.net:+.2f} {q} (mevcut {base.net:+.2f}), en kötü düşüş "
+                     f"%{r.max_dd_pct:.1f} (mevcut %{base.max_dd_pct:.1f}), kill-switch tetiklenmedi.")
+        lines.append("   Telegram'dan uygulamak için (önce aşağıdaki komutla daha önceki bir dönemde doğrulayın):")
+        lines += [f"   /ayar {k} {_fmt_setting(k, v)}" for k, v in r.settings.items()]
+        if not r.profitable:
+            lines.append("   Not: bu birleşim zararı azaltıyor ama hâlâ kârda değil.")
+    else:
+        lines.append("ℹ️ Hiçbir birleşim kill-switch'e takılmadan mevcut ayarları dönemin iki yarısında da geçmedi.")
+    lines += [
+        f"🔁 Bağımsız doğrulama (bu dönemle çakışmayan daha önceki {data.days:g} gün): python main.py --backtest "
+        f"--deney --gun {data.days:g} --coin-sayisi {len(data.series)} --bitis {_fmt_date(data.sim_start_ms)}",
+        "📝 Satırlar aynı veride seçildi; birkaç satırdan birinin şansla iyi çıkması mümkündür. Kayma yok, geçmiş "
+        "sonuçlar geleceği garanti etmez.",
+    ]
+    return "\n".join(lines)
+
+
 # ================================================================ strateji turnuvası (--turnuva)
 # Aynı dönemde farklı giriş stratejileri × çıkış profilleri × piyasa filtresi (1 saatlik veri) + momentum rotasyonu
 # (günlük veri). Her satır kendi çıkışlarıyla denenir; amaç "işlem başı kârı pozitif, mümkünse kazanma oranı yüksek"
@@ -2468,25 +2599,28 @@ def _csv_num(text: str) -> str:
     return text.replace(".", ",")
 
 
-def save_sweep_csv(rows: Sequence[SweepRow], path: Union[str, Path]) -> Path:
-    """Tüm tarama satırlarını Türkçe Excel'in doğrudan açabileceği CSV'ye yazar (';' ve ondalık ',')."""
+def save_sweep_csv(rows: Sequence[SweepRow], path: Union[str, Path], names: Optional[Sequence[str]] = None) -> Path:
+    """Tüm tarama satırlarını Türkçe Excel'in doğrudan açabileceği CSV'ye yazar (';' ve ondalık ',').
+    `names`: satır adları (deney raporunda) — verilirse ilk sütun olur."""
     import csv
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     keys = list(dict.fromkeys(k for r in rows for k in r.settings))
     with path.open("w", newline="", encoding="utf-8-sig") as fh:
         writer = csv.writer(fh, delimiter=";")
-        writer.writerow(keys + ["mevcut", "islem", "kazanma_yuzde", "net_usdt", "islem_basi_net_yuzde",
+        writer.writerow((["deney"] if names else []) + keys + ["mevcut", "islem", "kazanma_yuzde", "net_usdt",
+                                                               "islem_basi_net_yuzde",
                                 "maks_dusus_yuzde", "ilk_yari_usdt", "ikinci_yari_usdt", "kar_faktoru",
                                 "standart_hata", "aday", "kill_switch"])
-        for r in rows:
+        for i, r in enumerate(rows):
             pf = "" if r.profit_factor is None or math.isinf(r.profit_factor) else f"{r.profit_factor:.3f}"
-            values = [_fmt_setting(k, r.settings[k]) if k in r.settings else "" for k in keys] + [
+            values = ([names[i]] if names else []) + [_fmt_setting(k, r.settings[k]) if k in r.settings else ""
+                                                      for k in keys] + [
                 "evet" if r.baseline else "", str(r.trades), f"{r.win_rate:.1f}", f"{r.net:.4f}",
                 f"{r.mean_net_pct:.3f}", f"{r.max_dd_pct:.2f}", f"{r.first_net:.4f}", f"{r.second_net:.4f}", pf,
                 f"{r.se_net_pct:.4f}", "evet" if r.proven(len(rows)) else "",
                 _fmt_time(r.kill_ms) if r.kill_ms is not None else ""]
-            writer.writerow([_csv_num(v) for v in values])
+            writer.writerow([_csv_num(v) if j or not names else v for j, v in enumerate(values)])
     return path
 
 

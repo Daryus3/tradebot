@@ -54,6 +54,8 @@ KINDS: Dict[str, Tuple[str, Tuple[str, ...], str]] = {
     "karsilastir": ("Strateji karşılaştırma", ("--strateji-karsilastir",),
                     "aynı mum aralığındaki stratejiler aynı veriyle"),
     "turnuva": ("Strateji turnuvası", ("--turnuva",), "tüm strateji türleri × çıkış kuralları (varsayılan 1 yıl)"),
+    "deney": ("Zarar azaltma deneyi", ("--deney",),
+              "önerilen ayarlar + takılan işlem / zarar sonrası bekleme / önceki trend, kill-switch açık"),
     "hepsi": ("Tüm taramalar", ("--tara", "--tara-giris", "--tara-filtre", "--tara-ab"),
               "çıkış + giriş + filtre + A/B; veri bir kez indirilir"),
 }
@@ -151,7 +153,7 @@ def default_days(kind: str, strategy: str) -> int:
     """Komut satırındaki varsayılanla aynı (main.run_backtest_cli)."""
     if is_rotation(strategy) and kind != "turnuva":
         return 1095
-    if kind == "turnuva" or is_long_horizon(strategy) or is_mean_reversion(strategy):
+    if kind in ("turnuva", "deney") or is_long_horizon(strategy) or is_mean_reversion(strategy):
         return 365
     return 30
 
@@ -668,7 +670,7 @@ class BacktestMenu:
         warnings = []
         if draft.kind == "filtre" and strategy != "rebound":
             warnings.append("Filtre gevşetme yalnızca rebound için çalışır.")
-        if draft.kind in ("ab", "filtre", "karsilastir") and is_rotation(strategy):
+        if draft.kind in ("ab", "filtre", "karsilastir", "deney") and is_rotation(strategy):
             warnings.append("Rotasyonda bu tür yerine Giriş taraması kullanın.")
         if draft.kind == "turnuva":
             warnings.append("Turnuva tüm stratejileri kendi çıkış kurallarıyla dener; strateji ve çıkış ayarı "

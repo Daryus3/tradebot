@@ -79,6 +79,7 @@ Normal durdurma, Telegram `/kapat`, ayar hatası ve kill-switch'te bot yeniden *
 | `python main.py --backtest --gun 90 --tara-filtre` | rebound filtrelerini tek tek gevşetip işlem sayısına ve işlem başı sonuca etkisini gösterir |
 | `python main.py --backtest --turnuva` | Ortalamaya dönüş / RSI uyumsuzluğu / swing / rotasyon stratejilerini farklı çıkış kurallarıyla aynı yılda dener, sıralar |
 | `python main.py --backtest --strateji rsi_divergence` | Pozitif RSI uyumsuzluğu + dönüş teyidiyle alım stratejisini dener (1 saatlik mumlar, 365 gün) |
+| `python main.py --backtest --deney --gun 540 --coin-sayisi 100` | **Zarar azaltma deneyi:** mevcut ayarlar, önerilen ayar listesi ve takılan işlem / zarardan sonra bekleme / önceki trend birleşimlerini **kill-switch açıkken** (canlıdaki gibi) aynı veriyle dener; en iyisi için `/ayar` satırlarını verir |
 | `python main.py --backtest --gun 90 --strateji-karsilastir` | rebound / trend / breakout stratejilerini karşılaştırır |
 | `python main.py --backtest --gun 90 --bitis 2026-07-01` | O tarihte biten (daha eski) bir dönemi dener: bulunan ayarı bağımsız dönemde doğrulamak için |
 | `python main.py --telegram-chat-id` | Telegram chat ID'nizi bulur |
@@ -180,7 +181,7 @@ Sunucuya bağlanmadan, düğmelerle:
 
 | Düğme | Seçenekler |
 |---|---|
-| 📋 Tür | Normal backtest, çıkış taraması (`--tara`), giriş taraması, filtre gevşetme, A/B filtre testi, strateji karşılaştırma, strateji turnuvası, tüm taramalar birden |
+| 📋 Tür | Normal backtest, çıkış taraması (`--tara`), giriş taraması, filtre gevşetme, A/B filtre testi, strateji karşılaştırma, strateji turnuvası, zarar azaltma deneyi, tüm taramalar birden |
 | 🧭 Strateji | Botun stratejisi veya herhangi bir strateji (yalnızca bu test için) |
 | 🗓️ Süre · 📅 Bitiş | 7 günden 3 yıla; bitiş bugün, N gün önce veya **önceki dönem** (bulunan ayarları başka bir dönemde doğrulamak için) |
 | 💼 Sermaye · 🪙 Coin | Ayardaki / botun güncel sermayesi veya 11-1000 USDT; en hacimli 10-100 coin |

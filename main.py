@@ -22,6 +22,7 @@ Kullanım:
     python main.py --backtest --strateji rsi_divergence   # Pozitif RSI uyumsuzluğu + dönüş teyidiyle alım (1 saat)
     python main.py --backtest --turnuva             # Tüm strateji türleri × çıkış profilleri aynı yılda, sıralı tablo
     python main.py --backtest --gun 90 --tara-ab    # Her giriş filtresini açıp / kapatıp kâra etkisini karşılaştırır
+    python main.py --backtest --deney --gun 540     # Zarar azaltma deneyi: önerilen ayar birleşimleri, kill-switch açık
     python main.py --backtest --ayar TAKE_PROFIT_PCT=3 --ayar VWAP_FILTER=true  # Ayarı yalnızca bu test için değiştirir
 Telegram'dan da çalıştırılabilir: /backtest (düğmeli menü; ayrı süreçte çalışır, sonuçlar Telegram'a gelir).
     python main.py --telegram-chat-id  # Telegram chat ID'nizi bulur
@@ -84,6 +85,10 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--tara-ab", action="store_true",
                         help="A/B filtre testi: her giriş filtresini / risk sigortasını tek tek açıp kapatarak kazanma "
                              "oranına ve net kâra etkisini aynı veriyle karşılaştırır")
+    parser.add_argument("--deney", action="store_true",
+                        help="Zarar azaltma deneyi: mevcut ayarlar, önerilen ayar listesi ve takılan işlem çıkışı / "
+                             "zarardan sonra bekleme / önceki trend birleşimleri aynı veriyle, kill-switch AÇIK "
+                             "(canlıdaki gibi) denenir (varsayılan 365 gün)")
     parser.add_argument("--grafiksiz", action="store_true",
                         help="Backtest K/Z dağılım grafiğini çizme / Telegram'a gönderme")
     parser.add_argument("--turnuva", action="store_true",
@@ -301,7 +306,8 @@ def run_backtest_cli(cfg, args) -> int:
         print("⚙️ Yalnızca bu test için değiştirilen ayarlar: " + " ".join(f"{k}={v}" for k, v in overrides.items()))
     days = args.gun if args.gun is not None else (
         1095 if is_rotation(cfg.strategy) and not args.turnuva else
-        365 if args.turnuva or is_long_horizon(cfg.strategy) or is_mean_reversion(cfg.strategy) else 30)
+        365 if args.turnuva or args.deney or is_long_horizon(cfg.strategy) or is_mean_reversion(cfg.strategy)
+        else 30)
     if days <= 0:
         print("❌ --gun sıfırdan büyük olmalı")
         return EXIT_CONFIG
@@ -347,7 +353,10 @@ def run_backtest_cli(cfg, args) -> int:
         ab = args.tara_ab and not is_rotation(cfg.strategy)
         if args.tara_ab and not ab:
             print("ℹ️ --tara-ab giriş filtrelerini dener; rotasyonda bu filtreler kullanılmaz (--tara-giris kullanın).")
-        if not (args.tara or args.tara_giris or compare or filters or ab):
+        experiment = args.deney and not is_rotation(cfg.strategy)
+        if args.deney and not experiment:
+            print("ℹ️ --deney giriş filtrelerini ve çıkış kurallarını dener; rotasyonda bunlar kullanılmaz.")
+        if not (args.tara or args.tara_giris or compare or filters or ab or experiment):
             result = backtest.run_backtest(cfg, client, days=days, max_symbols=args.coin_sayisi, end_time_ms=end_ms)
             report = backtest.format_backtest_report(result, cfg)
             print(report)
@@ -385,16 +394,25 @@ def run_backtest_cli(cfg, args) -> int:
         if ab:
             print("🧪 A/B filtre testi: her filtre / sigorta tek tek açılıp kapatılarak aynı veriyle deneniyor...")
             reports.append(("ab", backtest.run_ab_test(cfg, data, progress=print, signal_cache=cache)))
+        if experiment:
+            print("🧪 Zarar azaltma deneyi: ayar birleşimleri kill-switch açıkken aynı veriyle deneniyor...")
+            reports.append(("deney", backtest.run_experiment(cfg, data, progress=print, signal_cache=cache)))
     except Exception as exc:  # noqa: BLE001
         print(f"❌ Backtest çalıştırılamadı: {exc}")
         return EXIT_CONFIG
     stamp = datetime.now().strftime("%Y%m%d-%H%M")
     for kind, rows in reports:
-        print(backtest.format_filter_report(rows, cfg, data) if kind == "filtre"
-              else backtest.format_ab_report(rows, cfg, data) if kind == "ab"
-              else backtest.format_sweep_report(rows, cfg, data, kind=kind))
+        names = None
+        if kind == "deney":
+            print(backtest.format_experiment_report(rows, cfg, data))
+            rows, names = [e.row for e in rows], [e.name for e in rows]
+        else:
+            print(backtest.format_filter_report(rows, cfg, data) if kind == "filtre"
+                  else backtest.format_ab_report(rows, cfg, data) if kind == "ab"
+                  else backtest.format_sweep_report(rows, cfg, data, kind=kind))
         try:
-            path = backtest.save_sweep_csv(rows, out_dir / f"tarama_{kind}_{stamp}.csv")
+            target = out_dir / f"tarama_{kind}_{stamp}.csv"
+            path = backtest.save_sweep_csv(rows, target, names) if names else backtest.save_sweep_csv(rows, target)
             print(f"📄 Tüm {len(rows)} satır Excel ile açılabilir dosyada: {path}")
         except OSError as exc:
             print(f"⚠️ Tarama dosyası yazılamadı: {exc}")
