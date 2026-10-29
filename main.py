@@ -404,8 +404,9 @@ def run_backtest_cli(cfg, args) -> int:
     for kind, rows in reports:
         names = None
         if kind == "deney":
-            print(backtest.format_experiment_report(rows, cfg, data))
-            rows, names = [e.row for e in rows], [e.name for e in rows]
+            print(backtest.format_experiment_report(rows, cfg, data, overridden=bool(args.ayar)))
+            tried = [e for e in rows if e.row is not None]
+            rows, names = [e.row for e in tried], [e.name for e in tried]
         else:
             print(backtest.format_filter_report(rows, cfg, data) if kind == "filtre"
                   else backtest.format_ab_report(rows, cfg, data) if kind == "ab"

@@ -202,15 +202,21 @@ def test_live_scan_applies_prior_trend_filter(cfg, fake_client):
 
 
 # ------------------------------------------------------------------ zarar azaltma deneyi (--deney)
-def test_experiment_plan_skips_rows_equal_to_current_settings(cfg):
-    names = [n for n, _ in backtest.experiment_plan(cfg)]
-    assert names[0] == "Mevcut ayarlarınız" and "Önerilen liste" in names and "+ Üçü birden" in names
+def test_experiment_plan_fits_the_rows_to_current_settings(cfg):
+    plan = {name: (changes, why) for name, changes, why in backtest.experiment_plan(cfg)}
+    assert list(plan)[0] == "Mevcut ayarlarınız" and plan["+ Takılan işlem 120 dk"] == ({"STALE_EXIT_MINUTES": 120}, "")
+    assert "+ Takılan işlem 240 dk" in plan and "Önerilen liste" in plan and "Önerilen liste + üç yeni ayar" in plan
     applied = replace(cfg, fakeout_filter=True, capital_usage_pct=50.0, dca_mode="auto", daily_loss_limit_pct=3.0)
-    plan = dict(backtest.experiment_plan(applied))
-    assert "Önerilen liste" not in plan                      # Zaten uygulanmış: mevcut ayarla aynı satır denenmez
-    assert plan["+ Takılan işlem 120 dk"] == {"STALE_EXIT_MINUTES": 120}
-    tight = replace(cfg, stop_loss_pct=3.0, backup_stop_pct=5.0)   # DCA tetiği (-%5) zarar kesten büyük: geçersiz
-    assert all("DCA_MODE" not in st for _, st in backtest.experiment_plan(tight))
+    same = dict((n, w) for n, _c, w in backtest.experiment_plan(applied))
+    assert same["Önerilen liste"] == "mevcut ayarlarınızla aynı"     # Zaten uygulanmış: denenmez, nedeni yazılır
+    # Zarar kes -%4 iken DCA tetiği (-%5) hiç çalışmaz: zarar kesin yarısına çekilir; maks. süre 120 dk iken
+    # 120 / 240 dk takılan işlem anlamsız: maks. sürenin yarısı denenir
+    tight = replace(cfg, stop_loss_pct=4.0, max_hold_minutes=120)
+    rows = {n: (c, w) for n, c, w in backtest.experiment_plan(tight)}
+    assert rows["Önerilen liste"][1] == "" and rows["Önerilen liste"][0]["DCA_TRIGGER_PCT"] == 2.0
+    assert "+ Takılan işlem 60 dk" in rows and "+ Takılan işlem 120 dk" not in rows
+    broken = replace(cfg, stop_loss_pct=4.0, escape_mode="auto", escape_trigger_pct=3.0)
+    assert all(w == "" for _n, _c, w in backtest.experiment_plan(broken))   # Geçerli ayarlar: hepsi denenir
 
 
 def test_experiment_runs_with_the_kill_switch_on(cfg, make_client, tmp_path):
@@ -225,6 +231,7 @@ def test_experiment_runs_with_the_kill_switch_on(cfg, make_client, tmp_path):
     text = backtest.format_experiment_report(rows, tight, data)
     assert "ZARAR AZALTMA DENEYİ" in text and "kill-switch AÇIK" in text and "☠️ Mevcut ayarlarınızla" in text
     assert "--deney --gun 2" in text
+    assert all(e.row is not None for e in rows)
     path = backtest.save_sweep_csv([e.row for e in rows], tmp_path / "d.csv", [e.name for e in rows])
     content = path.read_text(encoding="utf-8-sig").splitlines()
     assert content[0].startswith("deney;") and content[1].startswith("Mevcut ayarlarınız;")
@@ -251,3 +258,38 @@ def test_experiment_from_cli_and_telegram(cfg, monkeypatch, capsys, tmp_path):
     bot = SimpleNamespace(cfg=cfg, state=SimpleNamespace(capital=11.0), settings_path=None)
     built = br.build_args(draft, bot, tmp_path, date(2026, 10, 29))
     assert "--deney" in built and built[built.index("--gun") + 1] == "365"
+
+
+def test_experiment_report_lists_skipped_rows(cfg, make_client, tmp_path):
+    client = make_client({"ABCUSDT": scenario(lambda p: trend(p, 1.03, 8)), "BTCUSDT": btc_flat()})
+    applied = replace(cfg, fakeout_filter=True, capital_usage_pct=50.0, dca_mode="auto", daily_loss_limit_pct=3.0)
+    data = backtest.prepare_backtest(applied, client, days=DAYS, cache_dir=tmp_path / "c", progress=None,
+                                     symbols=["ABCUSDT"], end_time_ms=END_TIME_MS)
+    rows = backtest.run_experiment(applied, data)
+    skipped = {e.name: e.skipped for e in rows if e.row is None}   # Liste zaten uygulanmış
+    assert skipped == {"Önerilen liste": "mevcut ayarlarınızla aynı",
+                       "Önerilen liste + üç yeni ayar": '"+ Üç yeni ayar birden" ile aynı'}
+    text = backtest.format_experiment_report(rows, applied, data, overridden=True)
+    assert "⚠️ Denenmeyen satırlar: Önerilen liste (mevcut ayarlarınızla aynı)" in text
+    assert "bu teste özel değişikliklerle" in text
+
+
+def test_experiment_advice_can_be_applied_in_order(cfg):
+    """Önerilen /ayar satırları yazıldığı sırayla uygulanabilmeli (DCA tetiği DCA modundan önce)."""
+    from types import SimpleNamespace
+    from runtime_settings import apply_settings
+    tight = replace(cfg, stop_loss_pct=4.0)
+    best = {"DCA_MODE": "auto", "CAPITAL_USAGE_PCT": 50.0, "DCA_TRIGGER_PCT": 2.0, "STALE_EXIT_MINUTES": 60}
+    rows = [backtest.ExperimentRow("Mevcut ayarlarınız",
+                                   backtest.SweepRow({}, True, 50, 60.0, -10.0, -0.2, 20.0, -5.0, -5.0, None)),
+            backtest.ExperimentRow("Önerilen liste",
+                                   backtest.SweepRow(best, False, 50, 62.0, -2.0, -0.04, 8.0, -1.0, -1.0, None))]
+    data = SimpleNamespace(sim_start_ms=1_785_000_000_000, end_ms=1_792_800_000_000, days=180, interval="5m",
+                           series={})
+    text = backtest.format_experiment_report(rows, tight, data)
+    commands = [line.split()[1:] for line in text.splitlines() if line.strip().startswith("/ayar ")]
+    assert [k for k, _v in commands].index("DCA_TRIGGER_PCT") < [k for k, _v in commands].index("DCA_MODE")
+    current = tight
+    for key, value in commands:                     # Telegram'da sırayla yazılınca hiçbiri reddedilmez
+        current, _notes = apply_settings(current, {key: value})
+    assert current.dca_mode == "auto" and current.dca_trigger_pct == 2.0 and current.stale_exit_minutes == 60

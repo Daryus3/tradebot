@@ -1510,6 +1510,7 @@ SWEEP_FIELDS: Dict[str, Tuple[str, type, Optional[str]]] = {
     "TIME_EXIT_MODE": ("time_exit_mode", str, None),
     "ESCAPE_MODE": ("escape_mode", str, None),
     "DCA_MODE": ("dca_mode", str, None),
+    "DCA_TRIGGER_PCT": ("dca_trigger_pct", float, None),
     "PYRAMID_MODE": ("pyramid_mode", str, None),
     "CAPITAL_USAGE_PCT": ("capital_usage_pct", float, None),
 }
@@ -2243,27 +2244,20 @@ def format_ab_report(rows: Sequence[SweepRow], cfg, data: BacktestData, spread_p
 
 # ================================================================ zarar azaltma deneyi (--deney)
 # Taramalardan farkı: kill-switch AÇIK, canlıdaki gibi tetiklenince işlem durur. Her satır aynı veriyle ayrı bir normal
-# simülasyondur: mevcut ayarlar, önerilen liste (rebound A/B testlerinde tutarlı çıkanlar) ve üzerine zarar
-# azaltıcılar tek tek ve birlikte. Amaç: canlıda kill-switch'e takılmadan zararı en çok azaltan birleşimi bulmak.
+# simülasyondur: mevcut ayarlar; üzerine üç zarar azaltıcı tek tek ve birlikte; önerilen liste (rebound A/B
+# testlerinde tutarlı çıkanlar) yalnız ve zarar azaltıcılarla. Satırlar kullanıcının ayarlarına uydurulur (bkz.
+# experiment_plan). Amaç: canlıda kill-switch'e takılmadan zararı en çok azaltan birleşimi bulmak.
 EXPERIMENT_BASE: Settings = {"FAKEOUT_FILTER": True, "CAPITAL_USAGE_PCT": 50.0, "DCA_MODE": "auto",
                              "DAILY_LOSS_LIMIT_PCT": 3.0, "TIME_EXIT_MODE": "off"}
-EXPERIMENT_REDUCERS: Settings = {"STALE_EXIT_MINUTES": 120, "LOSS_COOLDOWN_MINUTES": 720, "PRIOR_TREND_FILTER": True}
-EXPERIMENTS: Tuple[Tuple[str, Settings], ...] = (
-    ("Mevcut ayarlarınız", {}),
-    ("Önerilen liste", EXPERIMENT_BASE),
-    ("+ Takılan işlem 120 dk", {**EXPERIMENT_BASE, "STALE_EXIT_MINUTES": 120}),
-    ("+ Takılan işlem 240 dk", {**EXPERIMENT_BASE, "STALE_EXIT_MINUTES": 240}),
-    ("+ Zarardan sonra 12 sa", {**EXPERIMENT_BASE, "LOSS_COOLDOWN_MINUTES": 720}),
-    ("+ Önceki trend filtresi", {**EXPERIMENT_BASE, "PRIOR_TREND_FILTER": True}),
-    ("+ Üçü birden", {**EXPERIMENT_BASE, **EXPERIMENT_REDUCERS}),
-    ("Yalnızca üç yeni ayar", dict(EXPERIMENT_REDUCERS)),
-)
+EXPERIMENT_STALE = (120, 240)          # Takılan işlem süreleri (dk); maks. süreden kısa olanlar denenir
+EXPERIMENT_LOSS_COOLDOWN = 720         # Zarardan sonra aynı coine bekleme (dk)
 
 
 @dataclass
 class ExperimentRow:
     name: str
-    row: SweepRow           # settings = mevcut ayardan farklı olanlar; kill_ms = kill-switch'in tetiklendiği an
+    row: Optional[SweepRow]  # settings = mevcut ayardan farklı olanlar; kill_ms = kill-switch'in tetiklendiği an
+    skipped: str = ""        # Denenmediyse nedeni (row None)
 
 
 def _with_settings(cfg, settings: Settings):
@@ -2271,19 +2265,54 @@ def _with_settings(cfg, settings: Settings):
     return replace(cfg, **{SWEEP_FIELDS[k][0]: SWEEP_FIELDS[k][1](v) for k, v in settings.items()})
 
 
-def experiment_plan(cfg) -> List[Tuple[str, Settings]]:
-    """Denenecek satırlar: mevcut ayarla aynı olan değerler atılır; aynı sonuca varan ya da ayar doğrulamasından
-    geçemeyen (örn. DCA tetiği zarar kesten büyük) satır denenmez."""
-    plan: List[Tuple[str, Settings]] = []
-    seen = set()
-    for name, settings in EXPERIMENTS:
+def _stale_choices(cfg) -> List[int]:
+    """Takılan işlem süreleri: maks. süreye (MAX_HOLD_MINUTES) eşit ya da uzun olan anlamsızdır (işlem o an zaten
+    satılır); hiçbiri kalmazsa maks. sürenin yarısı (15 dk'ya yuvarlı) denenir."""
+    hold = cfg.max_hold_minutes
+    picks = [m for m in EXPERIMENT_STALE if hold <= 0 or m < hold]
+    return picks or [max(15, hold // 2 // 15 * 15)]
+
+
+def experiment_rows(cfg) -> List[Tuple[str, Settings]]:
+    """Deney satırları (ad, ayarlar), kullanıcının ayarlarına uydurulmuş: DCA tetiği zarar kesten önce gelmeli
+    (örn. zarar kes -%4 iken varsayılan -%5 tetik hiç çalışmaz: zarar kesin yarısına çekilir, A/B testlerindeki
+    5 / 10 oranı), takılan işlem süresi maks. süreden kısa olmalı."""
+    base = dict(EXPERIMENT_BASE)
+    if cfg.dca_trigger_pct >= cfg.stop_loss_pct:
+        base["DCA_TRIGGER_PCT"] = round(cfg.stop_loss_pct / 2, 2)
+    stale = _stale_choices(cfg)
+    reducers: Settings = {"STALE_EXIT_MINUTES": stale[0], "LOSS_COOLDOWN_MINUTES": EXPERIMENT_LOSS_COOLDOWN,
+                          "PRIOR_TREND_FILTER": True}
+    return ([("Mevcut ayarlarınız", {})]
+            + [(f"+ Takılan işlem {m} dk", {"STALE_EXIT_MINUTES": m}) for m in stale]
+            + [(f"+ Zarardan sonra {EXPERIMENT_LOSS_COOLDOWN // 60} sa bekleme",
+                {"LOSS_COOLDOWN_MINUTES": EXPERIMENT_LOSS_COOLDOWN}),
+               ("+ Önceki trend filtresi", {"PRIOR_TREND_FILTER": True}),
+               ("+ Üç yeni ayar birden", dict(reducers)),
+               ("Önerilen liste", base),
+               ("Önerilen liste + üç yeni ayar", {**base, **reducers})])
+
+
+def experiment_plan(cfg) -> List[Tuple[str, Settings, str]]:
+    """(ad, mevcut ayardan farklı olan değerler, atlanma nedeni). Neden boşsa satır denenir; mevcut ayarla ya da
+    önceki bir satırla aynı sonuca varan ve ayar doğrulamasından geçemeyen satır denenmez (nedeni raporda yazılır)."""
+    plan: List[Tuple[str, Settings, str]] = []
+    seen: Dict[frozenset, str] = {}
+    for name, settings in experiment_rows(cfg):
         changes = {k: v for k, v in settings.items()
                    if getattr(cfg, SWEEP_FIELDS[k][0]) != SWEEP_FIELDS[k][1](v)}
         key = frozenset(changes.items())
-        if key in seen or not _valid(_with_settings(cfg, changes)):
-            continue
-        seen.add(key)
-        plan.append((name, changes))
+        why = ""
+        if key in seen:
+            why = "mevcut ayarlarınızla aynı" if not changes else f"\"{seen[key]}\" ile aynı"
+        else:
+            try:
+                _with_settings(cfg, changes).validate()
+            except ConfigError as exc:
+                why = "ayar hatası: " + str(exc).splitlines()[-1].strip(" -")
+        if not why:
+            seen[key] = name
+        plan.append((name, changes, why))
     return plan
 
 
@@ -2294,7 +2323,10 @@ def run_experiment(cfg, data: BacktestData, spread_pct: float = 0.05, progress: 
     cache = signal_cache if signal_cache is not None else {}
     plan = experiment_plan(cfg)
     rows: List[ExperimentRow] = []
-    for i, (name, changes) in enumerate(plan, 1):
+    for i, (name, changes, why) in enumerate(plan, 1):
+        if why:
+            rows.append(ExperimentRow(name, None, why))
+            continue
         res = simulate(_with_settings(cfg, changes), data, spread_pct, None, signal_cache=cache)
         sm = summarize(res.trades)
         first, second = split_halves(res.trades, res.start_ms, res.end_ms)
@@ -2306,10 +2338,14 @@ def run_experiment(cfg, data: BacktestData, spread_pct: float = 0.05, progress: 
     return rows
 
 
-def format_experiment_report(rows: Sequence[ExperimentRow], cfg, data: BacktestData, spread_pct: float = 0.05) -> str:
+def format_experiment_report(rows: Sequence[ExperimentRow], cfg, data: BacktestData, spread_pct: float = 0.05,
+                             overridden: bool = False) -> str:
+    """`overridden`: mevcut ayarlara bu teste özel değişiklikler (--ayar / Telegram test ayarları) uygulandı."""
     q = cfg.quote_asset
-    base = next(e.row for e in rows if e.row.baseline)
-    width = max([18] + [len(e.name) for e in rows])
+    tried = [e for e in rows if e.row is not None]
+    base = next(e.row for e in tried if e.row.baseline)
+    width = max([18] + [len(e.name) for e in tried])
+    recipe = dict(experiment_rows(cfg))
     label = INTERVAL_LABELS.get(data.interval, data.interval)
     lines = [
         f"🧪 ZARAR AZALTMA DENEYİ — strateji: {cfg.strategy} (kill-switch AÇIK: canlıdaki gibi tetiklenince durur)",
@@ -2322,7 +2358,7 @@ def format_experiment_report(rows: Sequence[ExperimentRow], cfg, data: BacktestD
         f"   {'Ayar':<{width}} | İşlem  Kaz%  İşl.başı   Net USDT  Getiri  MaksDD | Kill-switch      |  1.yarı  2.yarı",
     ]
     better: List[ExperimentRow] = []
-    for e in rows:
+    for e in tried:
         r = e.row
         halves = _halves(r.first_net - base.first_net, r.second_net - base.second_net)
         if r.baseline:
@@ -2339,26 +2375,37 @@ def format_experiment_report(rows: Sequence[ExperimentRow], cfg, data: BacktestD
         lines.append(f"{mark} {e.name:<{width}} | {r.trades:>5d} {r.win_rate:>5.1f} {r.mean_net_pct:>+8.2f}% "
                      f"{r.net:>+10.4f} {gain:>+6.1f}% {r.max_dd_pct:>6.1f}% | {killed:<16} | {r.first_net:>+7.3f} "
                      f"{r.second_net:>+7.3f}")
+    reducers = recipe["+ Üç yeni ayar birden"]
     lines += [
-        "   ⭐ = mevcut ayarlarınız | 🟢 = daha az zarar / daha çok kâr, kill-switch yok ve dönemin iki yarısında da",
-        "   mevcuttan iyi | 🟡 = net daha iyi ama kill-switch'e takıldı ya da bir yarıda kötü | 🔴 = mevcuttan kötü",
-        "   Kill-switch = canlıda botun duracağı an (sonrasında işlem yok) | İşl.başı = işlem başına ortalama net K/Z",
-        "   Önerilen liste = " + " ".join(f"{k}={_fmt_setting(k, v)}" for k, v in EXPERIMENT_BASE.items())
-        + " (rebound A/B testlerinden)",
-        "   Üç yeni ayar = takılan işlem çıkışı 120 dk (STALE_EXIT_MINUTES), zarardan sonra aynı coine 12 saat girmeme",
-        "   (LOSS_COOLDOWN_MINUTES=720), önceki trend filtresi (PRIOR_TREND_FILTER: haftalardır düşen coini alma)",
+        "   ⭐ = mevcut ayarlarınız" + (" (bu teste özel değişikliklerle, yukarıdaki ⚙️ satırı)" if overridden else "")
+        + " | 🟢 = daha az zarar / daha çok kâr,",
+        "   kill-switch yok ve dönemin iki yarısında da mevcuttan iyi | 🟡 = net daha iyi ama kill-switch'e takıldı ya",
+        "   da bir yarıda kötü | 🔴 = mevcuttan kötü | Kill-switch = canlıda botun duracağı an (sonrasında işlem yok)",
+        "   Önerilen liste = " + " ".join(f"{k}={_fmt_setting(k, v)}" for k, v in recipe["Önerilen liste"].items())
+        + " (rebound A/B testlerinden"
+        + ("; DCA tetiği zarar kesinize göre ayarlandı)" if "DCA_TRIGGER_PCT" in recipe["Önerilen liste"] else ")"),
+        f"   Üç yeni ayar = takılan işlem çıkışı {reducers['STALE_EXIT_MINUTES']} dk (STALE_EXIT_MINUTES), zarardan sonra "
+        f"aynı coine {EXPERIMENT_LOSS_COOLDOWN // 60} saat",
+        f"   girmeme (LOSS_COOLDOWN_MINUTES={EXPERIMENT_LOSS_COOLDOWN}), önceki trend filtresi (PRIOR_TREND_FILTER: "
+        "haftalardır düşen coini alma)",
         LINE,
     ]
+    skipped = [e for e in rows if e.row is None]
+    if skipped:
+        lines.append("⚠️ Denenmeyen satırlar: " + "; ".join(f"{e.name} ({e.skipped})" for e in skipped))
     if base.kill_ms is not None:
-        lines.append(f"☠️ Mevcut ayarlarınızla kill-switch {_fmt_time(base.kill_ms)}'de tetikleniyor; canlıda bot orada "
+        lines.append(f"☠️ Mevcut ayarlarınızla kill-switch tetikleniyor ({_fmt_time(base.kill_ms)}): canlıda bot orada "
                      "dururdu.")
     if better:
         best = max(better, key=lambda e: e.row.net)
         r = best.row
         lines.append(f"🏆 En iyi: {best.name} — net {r.net:+.2f} {q} (mevcut {base.net:+.2f}), en kötü düşüş "
                      f"%{r.max_dd_pct:.1f} (mevcut %{base.max_dd_pct:.1f}), kill-switch tetiklenmedi.")
-        lines.append("   Telegram'dan uygulamak için (önce aşağıdaki komutla daha önceki bir dönemde doğrulayın):")
-        lines += [f"   /ayar {k} {_fmt_setting(k, v)}" for k, v in r.settings.items()]
+        lines.append("   Telegram'dan uygulamak için, bu sırayla (önce aşağıdaki komutla daha önceki bir dönemde "
+                     "doğrulayın):")
+        # Modlar en sonda: DCA_MODE=auto, tetiği (DCA_TRIGGER_PCT) zarar kesten küçük değilse reddedilir
+        ordered = sorted(r.settings.items(), key=lambda kv: kv[0].endswith("_MODE"))
+        lines += [f"   /ayar {k} {_fmt_setting(k, v)}" for k, v in ordered]
         if not r.profitable:
             lines.append("   Not: bu birleşim zararı azaltıyor ama hâlâ kârda değil.")
     else:
