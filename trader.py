@@ -29,9 +29,9 @@ from control_panel import READ_ONLY_CALLBACKS
 from entry_filters import live_reject
 from exchange import BaseExchange, FeeInfo, Fill, OrderError, combine_fills
 from logger import get_logger
-from risk import (ExitReason, Position, evaluate_exit, kill_switch_hit, net_exit_value, plan_entry, pnl_pct,
-                  position_sl, position_slots, position_tp, price_for_pnl, trailing_floor_pct, update_breakeven,
-                  update_trailing)
+from risk import (ExitReason, Position, cooldown_minutes, evaluate_exit, kill_switch_hit, net_exit_value, plan_entry,
+                  pnl_pct, position_sl, position_slots, position_tp, price_for_pnl, trailing_floor_pct,
+                  update_breakeven, update_trailing)
 from state import BotState, EquityLog, StateStore, TradeLog
 from strategy import ReboundStrategy, RsiDivergenceStrategy, ScanResult, Signal
 from telegram_bot import (CRITICAL_EXITS, Messages, TelegramNotifier, esc, fmt_duration, fmt_qty, fmt_rate,
@@ -1227,7 +1227,7 @@ class TradingBot:
             state.losses += 1
         state.total_fees += sell_fee
         state.positions.pop(pos.symbol, None)
-        state.cooldowns[pos.symbol] = now + self.cfg.symbol_cooldown_minutes * 60
+        state.cooldowns[pos.symbol] = now + cooldown_minutes(self.cfg, pnl) * 60
         self.marks.pop(pos.symbol, None)
         self._next_backup_check.pop(pos.symbol, None)
         self.store.save(state)

@@ -40,6 +40,7 @@ class ExitReason(str, Enum):
     ESCAPE = "ESCAPE"              # Hacimli satış baskısında zarar kes beklenmeden çıkıldı
     TIME_EXIT = "TIME_EXIT"        # Süre sorusu: yatay kalan pozisyon başabaşta satıldı
     PROFIT_LOCK = "PROFIT_LOCK"    # Piramit sonrası kilit: birleşik pozisyon zarara dönmeden satıldı
+    STALE = "STALE"                # Takılan işlem: STALE_EXIT_MINUTES içinde toparlanma başlamadı
 
 
 @dataclass
@@ -208,9 +209,26 @@ def evaluate_exit(pos: Position, current_pnl_pct: float, now: float, cfg) -> Opt
     if (getattr(cfg, "breakeven_enabled", False) and pos.breakeven_active
             and current_pnl_pct <= cfg.breakeven_floor_pct):
         return ExitReason.BREAKEVEN
+    if stale_exit_due(pos, now, cfg):
+        return ExitReason.STALE
     if cfg.max_hold_minutes > 0 and now - pos.opened_at >= cfg.max_hold_minutes * 60:
         return ExitReason.MAX_HOLD
     return None
+
+
+def stale_exit_due(pos: Position, now: float, cfg) -> bool:
+    """Takılan işlem (STALE_EXIT_MINUTES): bu süre dolduğu halde net kâr bir kez bile STALE_EXIT_PEAK_PCT'ye
+    çıkmadıysa toparlanma gelmemiş sayılır ve satılır (maks. süreyi beklemeden). DCA ile eklenen pozisyon ortalama
+    düşürüp dönüşü beklemek için eklendiğinden bu kurala tabi değildir."""
+    minutes = getattr(cfg, "stale_exit_minutes", 0)
+    return (minutes > 0 and not pos.adds and now - pos.opened_at >= minutes * 60
+            and pos.peak_pnl_pct < cfg.stale_exit_peak_pct)
+
+
+def cooldown_minutes(cfg, pnl: float) -> int:
+    """Kapanan coine tekrar girmeden önce beklenecek süre: zararla kapandıysa LOSS_COOLDOWN_MINUTES (daha uzunsa)."""
+    loss = getattr(cfg, "loss_cooldown_minutes", 0)
+    return max(cfg.symbol_cooldown_minutes, loss) if pnl < 0 and loss > 0 else cfg.symbol_cooldown_minutes
 
 
 def kill_switch_hit(realized_pnl: float, unrealized_pnl: float, loss_limit: float) -> bool:

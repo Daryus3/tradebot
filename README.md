@@ -122,8 +122,8 @@ kilitli kalır (`--reset-state` ile açılır).
 | 🪙 BNB komisyon takibi | Gerçek komisyon oranını ve BNB bakiyesini izler, `FEE_RATE` yanlışsa uyarır (BNB almaz) |
 | 🔐 Gizli bilgi koruması | Token ve API anahtarları loglara ve mesajlara açık yazılmaz |
 | 🌐 IP alarmı | Sunucunun dış IP'sini 10 dk'da bir kontrol eder (api.ipify.org); değişirse uyarır (Binance IP kısıtlaması) |
-| 🧯 Risk sigortaları | Üst üste 3 zarar keste 4 saat, günlük zarar limitinde gün sonuna kadar yeni alım yapmaz; aynı coinde 3 zarar keste kara liste önerir; ortalama kayma artarsa uyarır |
-| 🛡️ Ek giriş filtreleri | Sahte yükseliş (üst fitil), VWAP, aşırı ısınma, RSI uyumsuzluğu teyidi; canlıda satış duvarı, emir defteri dengesizliği, tape teyidi (varsayılan kapalı, `/menu` → Filtreler) |
+| 🧯 Risk sigortaları | Üst üste 3 zarar keste 4 saat, günlük zarar limitinde gün sonuna kadar yeni alım yapmaz; aynı coinde 3 zarar keste kara liste önerir; ortalama kayma artarsa uyarır; isterseniz zararla kapanan coine bir süre (`LOSS_COOLDOWN_MINUTES`) tekrar girmez |
+| 🛡️ Ek giriş filtreleri | Sahte yükseliş (üst fitil), VWAP, aşırı ısınma, RSI uyumsuzluğu teyidi, önceki trend (düşüşten önce de düşen coini almaz); canlıda satış duvarı, emir defteri dengesizliği, tape teyidi (varsayılan kapalı, `/menu` → Filtreler) |
 | 🧠 Akıllı yönetim | ATR'ye göre hedefler, Kâr Al'da hedef uzatma, DCA / piramit (yedek akçeyle), süre sorusu, erken kaçış, kademeli alım, sinyal onayı (varsayılan kapalı, `/menu` → Akıllı Yönetim) |
 
 ---
@@ -205,6 +205,7 @@ satırında yapmak için: `--ayar ANAHTAR=DEĞER` (örn. `--ayar TAKE_PROFIT_PCT
 | ⏳ Süre sorusu | 3 saat yatay kalan pozisyonda "başabaşta satılsın mı?" (Başabaşta sat / Hemen sat / Bekle) | ✅ otomatik |
 | 🏃 Erken kaçış | Net -%4'te hacimli satış baskısı varsa zarar kesi beklemeden çıkış | ✅ otomatik |
 | 🪜 Kademeli alım | Sinyalden sonra fiyat düştükçe bekler, dipten %0.3 dönünce alır | ✅ (mumlarla yaklaşık) |
+| 🧊 Takılan işlem çıkışı | `STALE_EXIT_MINUTES` dakikada net kâr bir kez bile +%1'i görmediyse (toparlanma gelmedi) maks. süreyi beklemeden satar | ✅ (A/B: 60 / 120 / 240 dk) |
 | 🔔 Sinyal onayı | Oynak piyasada (1s ATR yüksek / likidasyon dalgası) veya her sinyalde almadan önce sorar | — |
 | 💥 Likidasyon · 📐 RSI uyumsuzluğu | Vadeli işlemler likidasyon dalgası ve pozitif RSI uyumsuzluğu bildirimleri (bilgi amaçlı) | — |
 | 📐 Uyumsuzluk alımı | Ana stratejinin **yanında**, her saatlik mum kapanışından sonra en hacimli 30 coinde uyumsuzluk + dönüş teyidi görülünce alır (sorarak = "✅ Al" düğmesiyle, 15 dk; otomatik = sormadan). İsterseniz bu işlemlere ayrı Kâr Al / Zarar Kes: `RSI_DIV_TP_PCT`, `RSI_DIV_SL_PCT` | `--strateji rsi_divergence` (aynı kurallar) |
@@ -269,7 +270,8 @@ ettirir; kararı "İşl.başı" sütunu verir. Seçilen birleşimi `--bitis` ile
 - **K/Z dağılım grafiği:** normal backtest her işlemin net K/Z'sini nokta grafiği olarak `data/backtest_grafik_*.png`
   dosyasına çizer (matplotlib gerekir) ve Telegram ayarlıysa grafiği + raporu Telegram'a gönderir (`--grafiksiz` ile kapanır).
 - **A/B filtre testi** (`--tara-ab`): her giriş filtresini / risk sigortasını (BTC sigortası, piyasa rejimi, üst
-  fitil, VWAP, aşırı ısınma, RSI uyumsuzluğu teyidi, zarar serisi, günlük limit; rsi_divergence'ta trend filtresi)
+  fitil, VWAP, aşırı ısınma, RSI uyumsuzluğu teyidi, önceki trend, zarar serisi, günlük limit, zarardan sonra
+  bekleme, takılan işlem çıkışı; rsi_divergence'ta trend filtresi)
   tek tek açıp kapatarak aynı veriyle kazanma oranına ve net kâra etkisini gösterir. Yalnızca dönemin **iki
   yarısında da** kârı artıran değişikliği önerir (🟢); tek yarıda işe yarayan 🟡 (şans olabilir), sermayenin
   %0.5'inden küçük fark ≈ (önemsiz) işaretlenir. "Yedek akçe %50" yalnızca kıyas satırıdır: DCA / piramit ona göre ölçülür. Emir defteri / tape filtreleri geçmiş veriyle denenemez.

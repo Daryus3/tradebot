@@ -395,6 +395,11 @@ class Config:
     rsi_div_tp_pct: float = 0.0            # RSI_DIV_TRADE işlemlerinin Kâr Al'ı (0 = TAKE_PROFIT_PCT)
     rsi_div_sl_pct: float = 0.0            # ...ve Zarar Kes'i (0 = STOP_LOSS_PCT; ondan büyük olamaz)
     rsi_div_filter: bool = False           # Diğer stratejilere teyit: yakın zamanda pozitif uyumsuzluk yoksa alma
+    # 45) Zararı azaltma (hepsi varsayılan kapalı; etkileri --tara-ab ile ölçülür)
+    stale_exit_minutes: int = 0            # Takılan işlem: bu sürede net kâr hiç STALE_EXIT_PEAK_PCT'yi görmediyse sat
+    stale_exit_peak_pct: float = 1.0       # (0 = kapalı; DCA ile eklenmiş pozisyona uygulanmaz)
+    loss_cooldown_minutes: int = 0         # Zararla kapanan coine bu kadar dakika tekrar girme (0 = SYMBOL_COOLDOWN_MINUTES)
+    prior_trend_filter: bool = False       # Coin son düşüşten önce yükselişte olmalı (1 gün önceki fiyat ≥ 7 gün önceki)
     # 44) Araçlar
     pnl_board_sec: int = 5                 # /pano: canlı K/Z mesajı bu aralıkla güncellenir
     pnl_board_minutes: int = 30            # ...ve bu süre sonra kendiliğinden durur
@@ -587,6 +592,9 @@ class Config:
                                             or not 0 <= self.rsi_div_sl_pct <= self.stop_loss_pct):
             errors.append("RSI_DIV_TP_PCT negatif olamaz; RSI_DIV_SL_PCT 0 (= STOP_LOSS_PCT) ile STOP_LOSS_PCT "
                           "arasında olmalı")
+        if self.stale_exit_minutes < 0 or not 0 < self.stale_exit_peak_pct <= 50 or self.loss_cooldown_minutes < 0:
+            errors.append("STALE_EXIT_MINUTES ve LOSS_COOLDOWN_MINUTES 0 (kapalı) veya pozitif, STALE_EXIT_PEAK_PCT "
+                          "0-50 arasında olmalı")
         if self.pnl_board_sec < 3 or self.pnl_board_minutes <= 0:
             errors.append("PNL_BOARD_SEC en az 3, PNL_BOARD_MINUTES sıfırdan büyük olmalı")
         if self.bnb_topup_usdt < 0:
@@ -772,6 +780,10 @@ def load_config(env_file: Optional[str] = None, mode_override: Optional[str] = N
         rsi_div_tp_pct=_env_float("RSI_DIV_TP_PCT", 0.0),
         rsi_div_sl_pct=_env_float("RSI_DIV_SL_PCT", 0.0),
         rsi_div_filter=_env_bool("RSI_DIV_FILTER", False),
+        stale_exit_minutes=_env_int("STALE_EXIT_MINUTES", 0),
+        stale_exit_peak_pct=_env_float("STALE_EXIT_PEAK_PCT", 1.0),
+        loss_cooldown_minutes=_env_int("LOSS_COOLDOWN_MINUTES", 0),
+        prior_trend_filter=_env_bool("PRIOR_TREND_FILTER", False),
         pnl_board_sec=_env_int("PNL_BOARD_SEC", 5),
         pnl_board_minutes=_env_int("PNL_BOARD_MINUTES", 30),
         bnb_topup_usdt=_env_float("BNB_TOPUP_USDT", 6.0),

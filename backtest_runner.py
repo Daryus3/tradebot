@@ -95,12 +95,16 @@ PRESETS: Dict[str, Tuple[str, Tuple[Dict[str, str], ...]]] = {
                                                                   ("25", "30", "35", "40", "45"))),
     "ret": ("↩️ Rebound: en fazla geri alınan (MAX_RETRACE)", tuple({"MAX_RETRACE": v} for v in
                                                                    ("0.5", "0.6", "0.75", "0.9"))),
+    "stale": ("🧊 Takılan işlem çıkışı (dk)", tuple({"STALE_EXIT_MINUTES": v} for v in ("0", "60", "120", "240"))),
+    "lcool": ("⏳ Zarardan sonra coine bekleme (dk)", tuple({"LOSS_COOLDOWN_MINUTES": v} for v in
+                                                            ("0", "240", "720", "1440"))),
 }
 TOGGLES: Tuple[Tuple[str, str], ...] = (
     ("VWAP_FILTER", "VWAP"), ("FAKEOUT_FILTER", "Fitil"), ("OVERHEAT_FILTER", "Isınma"), ("BTC_FILTER", "BTC sig."),
     ("REGIME_FILTER", "Rejim"), ("REGIME_SKIP_WEAK", "Zayıfta alma"), ("TRAILING_DYNAMIC", "Dinamik iz."),
     ("ATR_TARGETS", "ATR hedef"), ("TP_EXTEND", "Hedef uzatma"), ("TRAILING_BUY", "Kademeli alım"),
     ("RSI_DIV_FILTER", "Uyumsuzluk teyidi"), ("RSI_DIV_TREND_FILTER", "Uyumsuzlukta trend"),
+    ("PRIOR_TREND_FILTER", "Önceki trend"),
 )
 MODES: Tuple[Tuple[str, str], ...] = (("DCA_MODE", "DCA"), ("PYRAMID_MODE", "Piramit"),
                                       ("TIME_EXIT_MODE", "Süre kuralı"), ("ESCAPE_MODE", "Erken kaçış"))
@@ -782,6 +786,8 @@ class BacktestMenu:
                     else "kapalı"),
                  f"⏱️ Maks. tutma: {f'{hold} dk' if hold else 'sınırsız'} | 📦 En fazla {eff.max_open_positions} "
                  f"pozisyon | 💰 İlk giriş %{eff.capital_usage_pct:g}",
+                 f"🧊 Takılan işlem çıkışı {f'{eff.stale_exit_minutes} dk' if eff.stale_exit_minutes else 'kapalı'} | "
+                 f"⏳ Zarardan sonra bekleme {max(eff.loss_cooldown_minutes, eff.symbol_cooldown_minutes)} dk",
                  f"⏳ Tekrar giriş bekleme {eff.symbol_cooldown_minutes} dk | 🔁 Zarar serisi "
                  f"{eff.loss_streak_limit or 'kapalı'} | 📉 Günlük limit "
                  + (f"-%{eff.daily_loss_limit_pct:g}" if eff.daily_loss_limit_pct else "kapalı"),

@@ -38,13 +38,13 @@ from config import DATA_DIR
 from exchange import SymbolRules, parse_symbol_rules, to_dec
 from market_regime import COKUS, KLINE_1D_LIMIT, KLINE_4H_LIMIT, ZAYIF, classify
 from position_rules import atr_pct, atr_targets, is_flat, momentum_strong, trailing_buy_trigger, volume_breakdown
-from risk import (ExitReason, Position, breakeven_effective, evaluate_exit, extension_floor, kill_switch_hit,
-                  net_exit_value, plan_entry, pnl_pct, position_sl, position_slots, position_tp, price_for_pnl,
-                  target_exits, trailing_floor_pct, update_breakeven, update_trailing)
+from risk import (ExitReason, Position, breakeven_effective, cooldown_minutes, evaluate_exit, extension_floor,
+                  kill_switch_hit, net_exit_value, plan_entry, pnl_pct, position_sl, position_slots, position_tp,
+                  price_for_pnl, target_exits, trailing_floor_pct, update_breakeven, update_trailing)
 from rotation import btc_trend, momentum_pct, plan_rotation, pump_pct
 from config import (PROFILE_ATTRS, PROFILES, ConfigError, is_long_horizon, is_mean_reversion, is_rotation,
                     strategy_family)
-from entry_filters import candle_filters_on, candle_reject
+from entry_filters import NO_PRIOR_TREND, PRIOR_TREND_DAYS, candle_filters_on, candle_reject, prior_trend_ok
 from strategy import KLINE_LIMIT, STRATEGIES, Signal, make_strategy, required_move_pct, room_ok, strategy_class
 from telegram_bot import LINE, fmt_duration, fmt_price, fmt_rate, fmt_signed, fmt_usdt
 
@@ -77,6 +77,7 @@ REASON_LABELS = {
     ExitReason.ESCAPE.value: "🏃 Erken kaçış (hacimli satış)",
     ExitReason.TIME_EXIT.value: "⏳ Süre: başabaşta satış",
     ExitReason.PROFIT_LOCK.value: "🔐 Piramit kilidi",
+    ExitReason.STALE.value: "🧊 Takılan işlem",
     END_REASON: "🏁 Dönem Sonu",
 }
 
@@ -828,7 +829,7 @@ class _Simulator:
             move_pct=(market_price / op.market_entry - 1) * 100 if op.market_entry > 0 else 0.0,
             fee_usdt=op.buy_fee + fee, peak_after_sec=max(0, op.peak_ms - op.open_ms) / 1000,
             room_pct=op.room))
-        self.cooldown[symbol] = t_ms + self.cfg.symbol_cooldown_minutes * 60_000
+        self.cooldown[symbol] = t_ms + cooldown_minutes(self.cfg, pnl) * 60_000
         self._after_close(pnl, reason, t_ms)
 
     def _after_close(self, pnl: float, reason: str, t_ms: int) -> None:
@@ -953,6 +954,9 @@ class _Simulator:
                 if why:
                     self.stats[f"filtre:{why}"] += 1
                     continue
+            if signal and cfg.prior_trend_filter and not self._prior_trend_ok(symbol, k):
+                self.stats[f"filtre:{NO_PRIOR_TREND}"] += 1
+                continue
             if signal:
                 signals.append(signal)
         if not signals:
@@ -1082,6 +1086,15 @@ class _Simulator:
                                                            "lookback_days": float(lookback)})
             if self._open(signal, s.rules, entry.quote_amount, entry_price, t_close):
                 self.stats["sinyal"] += 1
+
+    def _prior_trend_ok(self, symbol: str, k: int) -> bool:
+        """PRIOR_TREND_FILTER: k. mum kapanışında 1 gün ve 7 gün önceki kapanış (canlı: 1 saatlik mumlar). Yeterli
+        geçmiş yoksa (yeni coin, dönemin ilk haftası) engellemez."""
+        s = self.series[symbol]
+        week_k = k - PRIOR_TREND_DAYS * s.bars_24h
+        if week_k < s.first:
+            return True
+        return prior_trend_ok(s.c[week_k], s.c[k - s.bars_24h])
 
     def _analyze(self, symbol: str, k: int, strict: bool) -> Optional[Signal]:
         key = (self.strategy.name, self.analysis_key, symbol, k, strict)
@@ -1485,6 +1498,10 @@ SWEEP_FIELDS: Dict[str, Tuple[str, type, Optional[str]]] = {
     "OVERHEAT_FILTER": ("overheat_filter", bool, None),
     "RSI_DIV_FILTER": ("rsi_div_filter", bool, None),
     "RSI_DIV_TREND_FILTER": ("rsi_div_trend_filter", bool, None),
+    "PRIOR_TREND_FILTER": ("prior_trend_filter", bool, None),
+    "STALE_EXIT_MINUTES": ("stale_exit_minutes", int, None),
+    "STALE_EXIT_PEAK_PCT": ("stale_exit_peak_pct", float, None),
+    "LOSS_COOLDOWN_MINUTES": ("loss_cooldown_minutes", int, None),
     "LOSS_STREAK_LIMIT": ("loss_streak_limit", int, None),
     "DAILY_LOSS_LIMIT_PCT": ("daily_loss_limit_pct", float, None),
     "ATR_TARGETS": ("atr_targets", bool, None),
@@ -2014,7 +2031,13 @@ AB_TESTS: Tuple[Tuple[str, str, Union[bool, int, float], Union[bool, int, float]
     ("ESCAPE_MODE", "Erken kaçış", "auto", "off"),
     ("RSI_DIV_FILTER", "RSI uyumsuzluğu teyidi", True, False),
     ("RSI_DIV_TREND_FILTER", "Uyumsuzlukta trend filtresi", True, False),
+    # Zararı azaltma: düşüşten önce de düşen coini alma, zarardan sonra aynı coine bir süre girme
+    ("PRIOR_TREND_FILTER", "Önceki trend (düşen bıçak filtresi)", True, False),
+    ("LOSS_COOLDOWN_MINUTES", "Zarardan sonra coine bekleme", 720, 0),
 )
+# Birden çok değerle denenen satırlar: (anahtar, ad, değerler); mevcut değerden farklı her değer + kapalı hali
+AB_MULTI = (("STALE_EXIT_MINUTES", "Takılan işlem çıkışı", (60, 120, 240)),)
+AB_MINUTE_KEYS = frozenset({"STALE_EXIT_MINUTES", "LOSS_COOLDOWN_MINUTES"})
 # Yalnızca bir stratejide anlamlı A/B satırları (diğerlerinde hiçbir şeyi değiştirmez ya da hep aynı sonucu verir)
 AB_ONLY_FOR = {"RSI_DIV_TREND_FILTER": frozenset({"rsi_divergence"})}
 AB_NOT_FOR = {"RSI_DIV_FILTER": frozenset({"rsi_divergence"})}   # Strateji zaten uyumsuzlukla alıyor
@@ -2034,6 +2057,8 @@ def _ab_state(key: str, value) -> str:
         return {"off": "kapalı", "ask": "sorarak", "auto": "otomatik"}.get(value, value)
     if not value:
         return "kapalı"
+    if key in AB_MINUTE_KEYS:
+        return f"{value:g} dk"
     return f"{value:g} SL" if key == "LOSS_STREAK_LIMIT" else f"-%{value:g}"
 
 
@@ -2058,6 +2083,12 @@ def ab_combos(cfg, regime_available: bool = True) -> List[Combo]:
             continue
         value = _ab_flip(current, on, off)
         if _valid(replace(cfg, **{attr: SWEEP_FIELDS[key][1](value)})):
+            combos.append(({key: value}, False))
+    for key, _label, values in AB_MULTI:
+        if is_rotation(cfg.strategy):
+            break
+        current = getattr(cfg, SWEEP_FIELDS[key][0])
+        for value in [v for v in values if v != current] + ([0] if current else []):
             combos.append(({key: value}, False))
     if not is_rotation(cfg.strategy):
         together = {k: True for k in AB_CANDLE_KEYS if not getattr(cfg, SWEEP_FIELDS[k][0])}
@@ -2085,6 +2116,7 @@ def _ab_label(cfg, settings: Settings) -> str:
         return "mevcut ayarlar"
     names = {k: label for k, label, _on, _off in AB_TESTS}
     names.update(dict(AB_RESERVE_TESTS))
+    names.update({k: label for k, label, _values in AB_MULTI})
     parts = []
     usage = settings.get("CAPITAL_USAGE_PCT")
     if usage is not None:

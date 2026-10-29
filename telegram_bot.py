@@ -382,6 +382,7 @@ _EXIT_HEADERS = {
     "ESCAPE": "🏃 <b>ERKEN KAÇIŞ: HACİMLİ SATIŞ BASKISI</b>",
     "TIME_EXIT": "⏳ <b>SÜRE SORUSU: BAŞABAŞTA SATILDI</b>",
     "PROFIT_LOCK": "🔐 <b>PİRAMİT KİLİDİ: ZARARA DÖNMEDEN SATILDI</b>",
+    "STALE": "🧊 <b>TAKILAN İŞLEM: TOPARLANMA GELMEDİ, SATILDI</b>",
 }
 
 # Kritik mesajlar sessiz saatlerde de sesli gelir

@@ -8,6 +8,10 @@ Mum filtreleri — canlı tarama ve backtest AYNI fonksiyonu kullanır (`--tara-
   - RSI_DIV_FILTER: son DIV_FILTER_RECENT_BARS mumda pozitif RSI uyumsuzluğu (daha düşük dip + daha yüksek RSI dibi;
     bkz. position_rules.bullish_divergence) yoksa alma — satış gücünün azaldığı teyidi (stratejinin kendi mumlarıyla).
 
+Önceki trend filtresi (PRIOR_TREND_FILTER) — canlıda 1 saatlik mumlarla, backtest'te simülasyon mumlarıyla aynı kural:
+  coin son düşüşten ÖNCE yükselişte olmalı (1 gün önceki fiyat ≥ 7 gün önceki fiyat). Haftalardır düşen coinde
+  ("düşen bıçak") dip alınmaz; yükselen coindeki tek günlük düşüş alınır.
+
 Emir defteri / işlem akışı filtreleri yalnızca canlı taramada çalışır (geçmiş emir defteri verisi yoktur,
 backtest edilemez):
   - OB_WALL_FILTER: alış fiyatının +OB_BAND_PCT üstüne kadar (komisyonları karşılayan başabaş bölgesi) tek bir
@@ -34,6 +38,8 @@ FAKEOUT = "üst fitil uzun"
 BELOW_VWAP = "VWAP altında"
 OVERHEAT = "aşırı ısınmış"
 NO_DIVERGENCE = "RSI uyumsuzluğu yok"
+NO_PRIOR_TREND = "düşüşten önce de düşüyordu"
+PRIOR_TREND_DAYS = 7          # Önceki trend: 7 gün önceki fiyattan 1 gün önceki fiyata
 SELL_WALL = "satış duvarı"
 BOOK_IMBALANCE = "defterde satıcı baskısı"
 WEAK_TAPE = "piyasa alımı zayıf"
@@ -89,6 +95,29 @@ def candle_reject(cfg, raw_klines: Sequence[Sequence]) -> str:
             closed, cfg.rsi_period, cfg.rsi_div_oversold, cfg.rsi_div_rise, recent=DIV_FILTER_RECENT_BARS) is None:
         return NO_DIVERGENCE
     return ""
+
+
+def prior_trend_ok(price_week_ago: float, price_day_ago: float) -> bool:
+    """PRIOR_TREND_FILTER: 1 gün önceki fiyat 7 gün önceki fiyatın altında değilse geçer (veri yoksa engellemez)."""
+    return price_week_ago <= 0 or price_day_ago <= 0 or price_day_ago >= price_week_ago
+
+
+def prior_trend_reject(cfg, client, symbol: str) -> str:
+    """Önceki trend filtresi (canlı): 1 saatlik mumlarla 7 gün ve 1 gün önceki kapanış. '' = geçti / kapalı / veri yok."""
+    if not getattr(cfg, "prior_trend_filter", False):
+        return ""
+    week = PRIOR_TREND_DAYS * 24
+    try:
+        rows = client.klines(symbol, "1h", week + 2)
+    except RateLimitError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - veri yoksa filtre alımı engellemez
+        log.info("%s önceki trend için mum alınamadı, filtre atlandı: %s", symbol, exc)
+        return ""
+    if not rows or len(rows) < week + 2:
+        return ""   # Yeterli geçmişi olmayan yeni coin (MIN_LISTING_DAYS ayrıca eler)
+    # Son satır açık mum; [-2] son kapanan, [-26] 24 saat önce, [-170] 7 gün önce kapanan saatlik mum
+    return "" if prior_trend_ok(float(rows[-week - 2][4]), float(rows[-26][4])) else NO_PRIOR_TREND
 
 
 def _levels(rows) -> List[Tuple[float, float]]:

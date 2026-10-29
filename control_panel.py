@@ -45,12 +45,14 @@ STEPS = {"TP": ("TAKE_PROFIT_PCT", 0.5), "SL": ("STOP_LOSS_PCT", 0.5), "TR": ("T
          "POS": ("MAX_OPEN_POSITIONS", 1)}
 CAPITAL_CHOICES = (100, 75, 50, 33)
 FILTER_KEYS = ("BTC_FILTER", "SPREAD_FILTER", "FAKEOUT_FILTER", "VWAP_FILTER", "OVERHEAT_FILTER", "RSI_DIV_FILTER",
-               "OB_WALL_FILTER", "OB_IMBALANCE_FILTER", "TAPE_FILTER")
+               "PRIOR_TREND_FILTER", "OB_WALL_FILTER", "OB_IMBALANCE_FILTER", "TAPE_FILTER")
 SMART_BOOL_KEYS = ("ATR_TARGETS", "TP_EXTEND", "TRAILING_BUY", "LIQ_FEED", "RSI_DIV_ALERTS")
 SMART_MODE_KEYS = ("DCA_MODE", "PYRAMID_MODE", "TIME_EXIT_MODE", "ESCAPE_MODE", "SIGNAL_APPROVAL", "RSI_DIV_TRADE")
 MODE_LABELS = {"off": "kapalı", "ask": "sorarak", "auto": "otomatik", "volatile": "oynak piyasada", "all": "her sinyalde"}
 DAILY_LIMIT_CHOICES = (0, 2, 3, 5)
 STREAK_CHOICES = (0, 2, 3, 4)
+STALE_CHOICES = (0, 60, 120, 240)              # Takılan işlem çıkışı (dk)
+LOSS_COOLDOWN_CHOICES = (0, 240, 720, 1440)    # Zarardan sonra aynı coine bekleme (dk)
 STRATEGY_SHORT = {"rebound": "Rebound (5 dk dip)", "trend": "Trend (5 dk)", "breakout": "Breakout (5 dk)",
                   "swing": "Swing kırılım (1 saat)", "swing_pullback": "Swing geri çekilme (1 saat)",
                   "mean_revert": "Ortalamaya dönüş (1 saat)", "rsi_divergence": "RSI uyumsuzluğu (1 saat)",
@@ -167,6 +169,10 @@ class ControlPanel:
             self._choose(arg, choices[(choices.index(current) + 1) % len(choices)], self.show_smart, mid)
         elif action == "dl":
             self._choose("DAILY_LOSS_LIMIT_PCT", arg, self.show_risk, mid)
+        elif action == "lcd":
+            self._choose("LOSS_COOLDOWN_MINUTES", arg, self.show_risk, mid)
+        elif action == "stx":
+            self._choose("STALE_EXIT_MINUTES", arg, self.show_smart, mid)
         elif action == "ls":
             self._choose("LOSS_STREAK_LIMIT", arg, self.show_risk, mid)
         elif action == "stp":
@@ -333,6 +339,8 @@ class ControlPanel:
             "OVERHEAT_FILTER": f"son {cfg.overheat_minutes} dk'da çok yükseldiyse alınmaz (sınır +%{cfg.overheat_pct:g})",
             "RSI_DIV_FILTER": f"stratejinin son {DIV_FILTER_RECENT_BARS} mumunda pozitif RSI uyumsuzluğu (satış gücü "
                               f"azalıyor) yoksa alınmaz",
+            "PRIOR_TREND_FILTER": "coin son düşüşten önce de düşüyorduysa (1 gün önceki fiyat 7 gün öncekinin altında) "
+                                  "alınmaz",
             "OB_WALL_FILTER": f"ilk +%{cfg.ob_band_pct:g}'de dev satış duvarı varsa alınmaz (canlı)",
             "OB_IMBALANCE_FILTER": f"defterde satış emirleri alışların {cfg.ob_imbalance_ratio:g} katıysa alınmaz "
                                    f"(canlı)",
@@ -361,11 +369,14 @@ class ControlPanel:
                  if cfg.coin_sl_limit > 0 else "kapalı")
         slip = (f"son 10 alımın ortalaması sınırı aşarsa uyarır (sınır %{cfg.slippage_alert_pct:g})"
                 if cfg.slippage_alert_pct > 0 else "kapalı")
+        cool = (f"zararla kapanan coine {fmt_duration(cfg.loss_cooldown_minutes * 60)} girilmez"
+                if cfg.loss_cooldown_minutes > cfg.symbol_cooldown_minutes else
+                f"normal ({cfg.symbol_cooldown_minutes} dk, her çıkıştan sonra)")
         frozen = bot.freeze_note()
         text = (f"🧯 <b>Risk Sigortaları</b>\n{LINE}\n"
                 f"📉 Günlük zarar limiti: {daily} | bugün: {fmt_signed(day_pnl)} {q}\n"
                 f"🎯 Günlük kâr hedefi: {target}\n🔁 Zarar serisi sigortası: {streak}\n"
-                f"📒 Coin karnesi: {karne}\n💧 Kayma alarmı: {slip}\n"
+                f"📒 Coin karnesi: {karne}\n💧 Kayma alarmı: {slip}\n⏳ Zarardan sonra bekleme: {cool}\n"
                 f"{frozen or '▶️ Alımlar dondurulmamış'}\n{LINE}\n"
                 "<i>Sigortalar yalnızca YENİ alımları durdurur; açık pozisyonların takibi sürer. Diğerleri için: "
                 "/ayar DAILY_PROFIT_TARGET_PCT 3, /ayar COIN_SL_LIMIT 0 ...</i>" + (f"\n\n{note}" if note else ""))
@@ -373,7 +384,10 @@ class ControlPanel:
                f"dl:{c}") for c in DAILY_LIMIT_CHOICES]
         ls = [(("✅ " if cfg.loss_streak_limit == c else "") + ("Seri yok" if c == 0 else f"{c} SL"), f"ls:{c}")
               for c in STREAK_CHOICES]
-        keyboard = [dl, ls]
+        lc = [(("✅ " if cfg.loss_cooldown_minutes == c else "") + ("Zarar sonrası: normal" if c == 0 else
+                                                                  f"{c // 60} sa"), f"lcd:{c}")
+              for c in LOSS_COOLDOWN_CHOICES]
+        keyboard = [dl, ls, lc]
         if frozen:
             keyboard.append([("▶️ Dondurmayı kaldır", "unfreeze")])
         self.proc.reply_menu(text, keyboard + [self._back()], mid)
@@ -389,6 +403,8 @@ class ControlPanel:
         targets = [f"Kâr Al +%{cfg.rsi_div_tp_pct:g}" if cfg.rsi_div_tp_pct > 0 else "",
                    f"Zarar Kes -%{cfg.rsi_div_sl_pct:g}" if cfg.rsi_div_sl_pct > 0 else ""]
         div_note = (f" ({', '.join(t for t in targets if t)})" if any(targets) else "")
+        stale = (f"{cfg.stale_exit_minutes} dk'da net +%{cfg.stale_exit_peak_pct:g} görmediyse"
+                 if cfg.stale_exit_minutes > 0 else "kapalı")
         if cfg.rsi_div_trade != "off" and not divergence_trading(cfg):
             div_note += " — ⚠️ bu stratejide çalışmaz (rotasyon / rsi_divergence)"
         text = (f"🧠 <b>Akıllı Yönetim</b>\n{LINE}\n"
@@ -403,6 +419,7 @@ class ControlPanel:
                 f"başabaşta sat\n"
                 f"🏃 <b>Erken kaçış</b> ({mode('ESCAPE_MODE')}): net -%{cfg.escape_trigger_pct:g}'de hacimli satış "
                 f"baskısı varsa zarar kesi beklemeden çık\n"
+                f"🧊 <b>Takılan işlem çıkışı</b> ({stale}): toparlanma gelmeyen işlemi maks. süreyi beklemeden sat\n"
                 f"{_on(cfg.trailing_buy)} <b>Kademeli alım</b>: sinyalden sonra fiyat düştükçe bekle, dipten "
                 f"%{cfg.trailing_buy_pct:g} dönünce al (en fazla {cfg.trailing_buy_minutes} dk)\n"
                 f"🔔 <b>Sinyal onayı</b> ({mode('SIGNAL_APPROVAL')}): almadan önce Telegram'dan sor\n"
@@ -422,6 +439,8 @@ class ControlPanel:
             [bool_btn("TRAILING_BUY", "Kademeli alım"), mode_btn("SIGNAL_APPROVAL", "🔔", "Onay")],
             [bool_btn("LIQ_FEED", "Likidasyon"), bool_btn("RSI_DIV_ALERTS", "RSI uyumsuzluk")],
             [mode_btn("RSI_DIV_TRADE", "📐", "Uyumsuzluk alımı")],
+            [(("✅ " if cfg.stale_exit_minutes == c else "") + ("🧊 Takılan: kapalı" if c == 0 else f"🧊 {c} dk"),
+              f"stx:{c}") for c in STALE_CHOICES],
             self._back(),
         ]
         self.proc.reply_menu(text, keyboard, mid)

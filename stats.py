@@ -61,12 +61,13 @@ REASON_LABELS: Dict[str, str] = {
     "ESCAPE": "Erken Kaçış",
     "TIME_EXIT": "Süre Sorusu (başabaş)",
     "PROFIT_LOCK": "Piramit Kilidi",
+    "STALE": "Takılan İşlem",
 }
 REASON_EMOJIS: Dict[str, str] = {
     "TAKE_PROFIT": "🎯", "STOP_LOSS": "🛑", "TRAILING_STOP": "🛡️", "BREAKEVEN": "⚖️",
     "MAX_HOLD": "⏱️", "KILL_SWITCH": "☠️", "EXTERNAL": "❔", "MANUAL": "✋", "BTC_CRASH": "📉",
     "BACKUP_STOP": "🧷", "ROTATION": "🔄", "TREND_FILTER": "📉", "TP_EXTENDED": "🚀", "ESCAPE": "🏃",
-    "TIME_EXIT": "⏳", "PROFIT_LOCK": "🔐",
+    "TIME_EXIT": "⏳", "PROFIT_LOCK": "🔐", "STALE": "🧊",
 }
 
 PathLike = Union[str, Path]
