@@ -46,7 +46,7 @@ STEPS = {"TP": ("TAKE_PROFIT_PCT", 0.5), "SL": ("STOP_LOSS_PCT", 0.5), "TR": ("T
 CAPITAL_CHOICES = (100, 75, 50, 33)
 FILTER_KEYS = ("BTC_FILTER", "SPREAD_FILTER", "FAKEOUT_FILTER", "VWAP_FILTER", "OVERHEAT_FILTER", "RSI_DIV_FILTER",
                "PRIOR_TREND_FILTER", "OB_WALL_FILTER", "OB_IMBALANCE_FILTER", "TAPE_FILTER")
-SMART_BOOL_KEYS = ("ATR_TARGETS", "TP_EXTEND", "TRAILING_BUY", "LIQ_FEED", "RSI_DIV_ALERTS")
+SMART_BOOL_KEYS = ("ATR_TARGETS", "TP_EXTEND", "SL_EXTEND", "TRAILING_BUY", "LIQ_FEED", "RSI_DIV_ALERTS")
 SMART_MODE_KEYS = ("DCA_MODE", "PYRAMID_MODE", "TIME_EXIT_MODE", "ESCAPE_MODE", "SIGNAL_APPROVAL", "RSI_DIV_TRADE")
 MODE_LABELS = {"off": "kapalı", "ask": "sorarak", "auto": "otomatik", "volatile": "oynak piyasada", "all": "her sinyalde"}
 DAILY_LIMIT_CHOICES = (0, 2, 3, 5)
@@ -412,6 +412,9 @@ class ControlPanel:
                 f"ATR × {cfg.atr_sl_mult:g} (en fazla -%{cfg.stop_loss_pct:g})\n"
                 f"{_on(cfg.tp_extend)} <b>Hedef uzatma</b>: Kâr Al'da momentum güçlüyse satma, zirveden "
                 f"%{cfg.tp_extend_gap_pct:g} dönünce sat\n"
+                f"{_on(cfg.sl_extend)} <b>Zarar kes uzatma</b>: zarar kese gelindiğinde dönüş işareti varsa (RSI "
+                f"uyumsuzluğu ya da aşırı satımdan alıcılı yeşil mum) bir kez "
+                f"-%{cfg.stop_loss_pct + cfg.sl_extend_pct:g}'e genişlet, dönüşü bekle\n"
                 f"➕ <b>DCA</b> ({mode('DCA_MODE')}): net -%{cfg.dca_trigger_pct:g}'de yedek akçeyle ekle\n"
                 f"🔺 <b>Piramit</b> ({mode('PYRAMID_MODE')}): net +%{cfg.pyramid_trigger_pct:g} ve momentum güçlüyse "
                 f"yedekle ekle, sonra zarara döndürmeden sat\n"
@@ -434,6 +437,7 @@ class ControlPanel:
         bool_btn = lambda key, name: (f"{_on(getattr(cfg, EDITABLE[key].attr))} {name}", f"tg:{key}")  # noqa: E731
         keyboard = [
             [bool_btn("ATR_TARGETS", "ATR hedefleri"), bool_btn("TP_EXTEND", "Hedef uzatma")],
+            [bool_btn("SL_EXTEND", "Zarar kes uzatma")],
             [mode_btn("DCA_MODE", "➕", "DCA"), mode_btn("PYRAMID_MODE", "🔺", "Piramit")],
             [mode_btn("TIME_EXIT_MODE", "⏳", "Süre"), mode_btn("ESCAPE_MODE", "🏃", "Kaçış")],
             [bool_btn("TRAILING_BUY", "Kademeli alım"), mode_btn("SIGNAL_APPROVAL", "🔔", "Onay")],

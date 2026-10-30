@@ -422,6 +422,8 @@ class Config:
     stale_exit_peak_pct: float = 1.0       # (0 = kapalı; DCA ile eklenmiş pozisyona uygulanmaz)
     loss_cooldown_minutes: int = 0         # Zararla kapanan coine bu kadar dakika tekrar girme (0 = SYMBOL_COOLDOWN_MINUTES)
     prior_trend_filter: bool = False       # Coin son düşüşten önce yükselişte olmalı (1 gün önceki fiyat ≥ 7 gün önceki)
+    sl_extend: bool = False                # Zarar kese gelindi ama dönüş işareti var: zarar kes bir kez genişletilir
+    sl_extend_pct: float = 1.5             # ...bu kadar (net zarar %; ör. zarar kes -%4 → -%5.5)
     # 44) Araçlar
     pnl_board_sec: int = 5                 # /pano: canlı K/Z mesajı bu aralıkla güncellenir
     pnl_board_minutes: int = 30            # ...ve bu süre sonra kendiliğinden durur
@@ -623,6 +625,12 @@ class Config:
         if self.stale_exit_minutes < 0 or not 0 < self.stale_exit_peak_pct <= 50 or self.loss_cooldown_minutes < 0:
             errors.append("STALE_EXIT_MINUTES ve LOSS_COOLDOWN_MINUTES 0 (kapalı) veya pozitif, STALE_EXIT_PEAK_PCT "
                           "0-50 arasında olmalı")
+        if not 0 < self.sl_extend_pct <= 20:
+            errors.append("SL_EXTEND_PCT 0-20 arasında olmalı (zarar kesin kaç puan genişletileceği)")
+        elif (self.sl_extend and self.backup_stop_enabled and not is_rotation(self.strategy)
+              and self.stop_loss_pct + self.sl_extend_pct >= self.backup_stop_pct):
+            errors.append("STOP_LOSS_PCT + SL_EXTEND_PCT, BACKUP_STOP_PCT'den küçük olmalı (yoksa Binance'teki yedek "
+                          "stop uzatılmış zarar kesten önce satar)")
         if self.pnl_board_sec < 3 or self.pnl_board_minutes <= 0:
             errors.append("PNL_BOARD_SEC en az 3, PNL_BOARD_MINUTES sıfırdan büyük olmalı")
         if self.bnb_topup_usdt < 0:
@@ -814,6 +822,8 @@ def load_config(env_file: Optional[str] = None, mode_override: Optional[str] = N
         stale_exit_peak_pct=_env_float("STALE_EXIT_PEAK_PCT", 1.0),
         loss_cooldown_minutes=_env_int("LOSS_COOLDOWN_MINUTES", 0),
         prior_trend_filter=_env_bool("PRIOR_TREND_FILTER", False),
+        sl_extend=_env_bool("SL_EXTEND", False),
+        sl_extend_pct=_env_float("SL_EXTEND_PCT", 1.5),
         pnl_board_sec=_env_int("PNL_BOARD_SEC", 5),
         pnl_board_minutes=_env_int("PNL_BOARD_MINUTES", 30),
         bnb_topup_usdt=_env_float("BNB_TOPUP_USDT", 6.0),

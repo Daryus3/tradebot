@@ -203,6 +203,7 @@ satırında yapmak için: `--ayar ANAHTAR=DEĞER` (örn. `--ayar TAKE_PROFIT_PCT
 |---|---|---|
 | 📏 ATR hedefleri | Kâr Al / Zarar Kes'i coinin 1 saatlik ATR'sine göre belirler (zarar kes yalnızca daralır) | ✅ |
 | 🚀 Hedef uzatma | Kâr Al'da momentum güçlüyse satmaz, zirveden %0.5 geri dönünce satar | ✅ |
+| 🛟 Zarar kes uzatma | Zarar kese gelindiğinde **dönüş işareti** varsa (pozitif RSI uyumsuzluğu ya da aşırı satımdan dönen RSI + yeşil mum + alıcı ağırlıklı hacim; hacimli satış baskısında asla) satmaz, zarar kesi **bir kez** `SL_EXTEND_PCT` (varsayılan 1.5 puan) genişletip dönüşü bekler; oraya da gelirse satar. Dönüş gelmezse zarar o kadar büyür: önce A/B testiyle bakın | ✅ (A/B satırı) |
 | ➕ DCA | Net -%5'te pozisyonun yedek akçesiyle bir kez ekler (sorarak / otomatik) | ✅ otomatik |
 | 🔺 Piramit | Net +%3 ve momentum güçlüyse yedekle ekler; sonra birleşik pozisyon zarara dönmeden satılır | ✅ otomatik |
 | ⏳ Süre sorusu | 3 saat yatay kalan pozisyonda "başabaşta satılsın mı?" (Başabaşta sat / Hemen sat / Bekle) | ✅ otomatik |

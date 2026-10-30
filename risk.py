@@ -72,6 +72,7 @@ class Position:
     tp_pct: Optional[float] = None    # Pozisyona özel Kâr Al (ATR_TARGETS); None = TAKE_PROFIT_PCT
     sl_pct: Optional[float] = None    # Pozisyona özel Zarar Kes (ATR_TARGETS); None = STOP_LOSS_PCT
     tp_extended: bool = False         # Kâr Al aşıldı, momentum güçlü: zirveden TP_EXTEND_GAP_PCT geri dönünce satılır
+    sl_extra_pct: float = 0.0         # SL_EXTEND: zarar kese gelindi, dönüş işareti vardı: zarar kes bu kadar genişledi
     reserve_usdt: float = 0.0         # Bu pozisyon için yedekte bekleyen USDT (CAPITAL_USAGE_PCT < 100)
     adds: int = 0                     # Yedek akçeyle kaç kez eklendi (DCA / piramit)
     lock_pct: Optional[float] = None  # Piramit sonrası: net K/Z bunun altına inerse sat (zarara dönmesin)
@@ -176,8 +177,11 @@ def position_tp(pos: Position, cfg) -> float:
 
 
 def position_sl(pos: Position, cfg) -> float:
-    """Pozisyonun Zarar Kes yüzdesi (ATR_TARGETS ile pozisyona özel olabilir)."""
-    return pos.sl_pct if getattr(pos, "sl_pct", None) is not None else cfg.stop_loss_pct
+    """Pozisyonun Zarar Kes yüzdesi (ATR_TARGETS ile pozisyona özel olabilir; SL_EXTEND ile bir kez genişlemiş
+    olabilir). Genişletme kararı ÇAĞIRAN tarafta verilir (pos.sl_extra_pct; canlı: SmartManager, backtest:
+    _Simulator)."""
+    base = pos.sl_pct if getattr(pos, "sl_pct", None) is not None else cfg.stop_loss_pct
+    return base + getattr(pos, "sl_extra_pct", 0.0)
 
 
 def extension_floor(pos: Position, cfg) -> float:

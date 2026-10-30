@@ -37,7 +37,8 @@ from binance_client import RateLimitError
 from config import DATA_DIR
 from exchange import SymbolRules, parse_symbol_rules, to_dec
 from market_regime import COKUS, KLINE_1D_LIMIT, KLINE_4H_LIMIT, ZAYIF, classify
-from position_rules import atr_pct, atr_targets, is_flat, momentum_strong, trailing_buy_trigger, volume_breakdown
+from position_rules import (REVERSAL_ROWS, atr_pct, atr_targets, is_flat, momentum_strong, reversal_signal,
+                            trailing_buy_trigger, volume_breakdown)
 from risk import (ExitReason, Position, breakeven_effective, cooldown_minutes, evaluate_exit, extension_floor,
                   kill_switch_hit, net_exit_value, plan_entry, pnl_pct, position_sl, position_slots, position_tp,
                   price_for_pnl, target_exits, trailing_floor_pct, update_breakeven, update_trailing)
@@ -641,6 +642,11 @@ class _Simulator:
         if pos.lock_pct is not None and pos.lock_pct > level_pct:        # Piramit kilidi
             level_pct = pos.lock_pct
             level, reason = self._market_level(level_pct, op), ExitReason.PROFIT_LOCK
+        if (low <= level and reason is ExitReason.STOP_LOSS and cfg.sl_extend and not pos.sl_extra_pct
+                and "sl_ext" not in pos.asked and self._pnl_at(op, min(level, o)) > -(sl_pct + cfg.sl_extend_pct)
+                and self._extend_sl(op, k)):
+            # Zarar kes bu mumda genişledi: kötümser varsayım, mumun dibi yeni seviyeyi de gördüyse orada satılır
+            sl_pct, level = position_sl(pos, cfg), op.sl_price
         if low <= level:
             price = min(level, o)  # Açılış zaten eşiğin altındaysa açılıştan
             if reason is not ExitReason.STOP_LOSS and self._pnl_at(op, price) <= -sl_pct:
@@ -687,6 +693,18 @@ class _Simulator:
         if k < 0:
             return []
         return self.series[symbol].window(k, count + 1)[:-1]
+
+    def _extend_sl(self, op: _OpenPos, k: int) -> bool:
+        """SL_EXTEND: zarar kese gelindi; son kapanmış mumlarda dönüş işareti varsa zarar kes bir kez SL_EXTEND_PCT
+        genişletilir (canlıdaki gibi pozisyon başına bir kez bakılır, son REVERSAL_ROWS kapanmış mumla)."""
+        cfg, pos = self.cfg, op.pos
+        pos.asked.append("sl_ext")
+        if not reversal_signal(self._closed_rows(pos.symbol, k - 1, REVERSAL_ROWS), cfg.escape_volume_ratio):
+            return False
+        pos.sl_extra_pct = cfg.sl_extend_pct
+        op.sl_price = self._market_level(-position_sl(pos, cfg), op)
+        self.stats["zarar_kes_uzatma"] += 1
+        return True
 
     def _extend_tp(self, op: _OpenPos, k: int) -> bool:
         """TP_EXTEND: Kâr Al'a gelindi; son kapanmış mumlarda momentum güçlüyse hedef uzatılır (pozisyon başına bir
@@ -1497,6 +1515,8 @@ SWEEP_FIELDS: Dict[str, Tuple[str, type, Optional[str]]] = {
     "BACKUP_STOP_PCT": ("backup_stop_pct", float, None),
     "ROTATION_UNIVERSE": ("rotation_universe", int, None),
     "ROTATION_COINS": ("rotation_coins", str, None),
+    "SL_EXTEND": ("sl_extend", bool, None),
+    "SL_EXTEND_PCT": ("sl_extend_pct", float, None),
     "MR_BAND_STD": ("mr_band_std", float, "Bant"),
     "MR_UNIVERSE": ("mr_universe", int, None),
     "RSI_DIV_OVERSOLD": ("rsi_div_oversold", float, "RSIdip"),
@@ -2060,6 +2080,8 @@ AB_TESTS: Tuple[Tuple[str, str, Union[bool, int, float], Union[bool, int, float]
     # Zararı azaltma: düşüşten önce de düşen coini alma, zarardan sonra aynı coine bir süre girme
     ("PRIOR_TREND_FILTER", "Önceki trend (düşen bıçak filtresi)", True, False),
     ("LOSS_COOLDOWN_MINUTES", "Zarardan sonra coine bekleme", 720, 0),
+    # Zarar kese gelindiğinde dönüş işareti varsa zarar kes bir kez genişler (SL_EXTEND_PCT)
+    ("SL_EXTEND", "Zarar kes uzatma (dönüş işaretinde)", True, False),
 )
 # Birden çok değerle denenen satırlar: (anahtar, ad, değerler); mevcut değerden farklı her değer + kapalı hali
 AB_MULTI = (("STALE_EXIT_MINUTES", "Takılan işlem çıkışı", (60, 120, 240)),)
@@ -2101,6 +2123,15 @@ def _dca_fit(cfg) -> Settings:
     return {"DCA_TRIGGER_PCT": round(cfg.stop_loss_pct / 2, 2)} if cfg.dca_trigger_pct >= cfg.stop_loss_pct else {}
 
 
+def _sl_extend_fit(cfg) -> Settings:
+    """Uzatılmış zarar kes Binance'teki yedek stopun üstünde kalmalı: SL + SL_EXTEND_PCT yedek stopa yetişiyorsa pay
+    aradaki boşluğun yarısına çekilir (ör. SL -%10, yedek -%12 → +%1); değilse değişmez."""
+    room = cfg.backup_stop_pct - cfg.stop_loss_pct
+    if not cfg.backup_stop_enabled or cfg.stop_loss_pct + cfg.sl_extend_pct < cfg.backup_stop_pct or room <= 0:
+        return {}
+    return {"SL_EXTEND_PCT": round(room / 2, 2)}
+
+
 def _stale_choices(cfg, choices: Sequence[int]) -> List[int]:
     """Takılan işlem süreleri: maks. süreye (MAX_HOLD_MINUTES) eşit ya da uzun olan anlamsızdır (işlem o an zaten
     satılır); hiçbiri kalmazsa maks. sürenin yarısı (15 dk'ya yuvarlı) denenir."""
@@ -2122,8 +2153,9 @@ def ab_combos(cfg, regime_available: bool = True) -> List[Combo]:
         if cfg.strategy not in AB_ONLY_FOR.get(key, (cfg.strategy,)) or cfg.strategy in AB_NOT_FOR.get(key, ()):
             continue
         value = _ab_flip(current, on, off)
-        if _valid(replace(cfg, **{attr: SWEEP_FIELDS[key][1](value)})):
-            combos.append(({key: value}, False))
+        settings = {**(_sl_extend_fit(cfg) if key == "SL_EXTEND" and value else {}), key: value}
+        if _valid(_with_settings(cfg, settings)):
+            combos.append((settings, False))
     for key, _label, values in AB_MULTI:
         if is_rotation(cfg.strategy):
             break
@@ -2165,13 +2197,15 @@ def _ab_label(cfg, settings: Settings) -> str:
     if usage is not None:
         parts.append(f"Yedek akçe %{100 - usage:g}")
     for key, value in settings.items():
-        if key in ("CAPITAL_USAGE_PCT", "DCA_TRIGGER_PCT"):
+        if key in ("CAPITAL_USAGE_PCT", "DCA_TRIGGER_PCT", "SL_EXTEND_PCT"):
             continue
         if key in AB_CANDLE_KEYS and len(settings) > 1:
             return "3 mum filtresi birden açık"
         parts.append(f"{names[key]}: {_ab_state(key, getattr(cfg, SWEEP_FIELDS[key][0]))} → {_ab_state(key, value)}")
         if key == "DCA_MODE" and "DCA_TRIGGER_PCT" in settings:
             parts[-1] += f" (tetik -%{settings['DCA_TRIGGER_PCT']:g})"
+        if key == "SL_EXTEND" and value:
+            parts[-1] += f" (+%{settings.get('SL_EXTEND_PCT', cfg.sl_extend_pct):g})"
     return " + ".join(parts)
 
 
@@ -3184,6 +3218,7 @@ def format_backtest_report(result: BacktestResult, cfg) -> str:
             lines.append(f"🧊 Risk sigortası (zarar serisi / günlük limit) alımları {st['dondurma']} kez dondurdu")
         smart = {"hedef_uzatma": "hedef uzatma", "ekleme_dca": "DCA ekleme", "ekleme_piramit": "piramit ekleme",
                  "erken_kacis": "erken kaçış", "sure_kurali": "süre kuralı", "kademeli_alim": "kademeli alım",
+                 "zarar_kes_uzatma": "zarar kes uzatma",
                  "kademeli_iptal": "dönmeyen kademeli alım"}
         used = [f"{label}: {st[key]}" for key, label in smart.items() if st.get(key)]
         if used:

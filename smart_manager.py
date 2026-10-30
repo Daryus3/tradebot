@@ -27,8 +27,8 @@ import requests
 from binance_client import BinanceAPIError, RateLimitError
 from exchange import OrderError
 from logger import get_logger
-from position_rules import (atr_pct, atr_targets, is_flat, momentum_strong, trailing_buy_trigger,
-                            volume_breakdown)
+from position_rules import (REVERSAL_ROWS, atr_pct, atr_targets, is_flat, momentum_strong, reversal_signal,
+                            trailing_buy_trigger, volume_breakdown)
 from risk import ExitReason, net_exit_value, plan_entry, pnl_pct, position_sl, position_tp, target_exits
 from telegram_bot import LINE, Messages, esc, fmt_duration, fmt_price, fmt_qty, fmt_signed, fmt_usdt
 
@@ -104,6 +104,10 @@ class SmartManager:
 
     def momentum(self, symbol: str) -> bool:
         return momentum_strong(self._closed(symbol, self.interval(), 40))
+
+    def reversal(self, symbol: str) -> Optional[str]:
+        """Zarar kes uzatma için dönüş işareti (son REVERSAL_ROWS kapanmış mum; backtest de aynı sayıyla bakar)."""
+        return reversal_signal(self._closed(symbol, self.interval(), REVERSAL_ROWS + 1), self.cfg.escape_volume_ratio)
 
     def hourly_atr(self, symbol: str, price: float) -> Optional[float]:
         return atr_pct(self._closed(symbol, "1h", 30), price)
@@ -388,6 +392,18 @@ class SmartManager:
                 self.notifier.notify(
                     f"🚀 <b>HEDEF UZATILDI</b> — {esc(pos.symbol)}\nNet kâr %{pnl:.2f} (Kâr Al +%{position_tp(pos, cfg):g}) "
                     f"ama momentum güçlü: satmak yerine zirveden %{cfg.tp_extend_gap_pct:g} geri dönünce satılacak.",
+                    "update")
+        sl = position_sl(pos, cfg)
+        if (cfg.sl_extend and not pos.sl_extra_pct and "sl_ext" not in pos.asked
+                and -(sl + cfg.sl_extend_pct) < pnl <= -sl):
+            pos.asked.append("sl_ext")   # Pozisyon başına bir kez: uzatılmış zarar kese gelinirse satılır
+            why = self._safe(self.reversal, pos.symbol, default=None)
+            if why:
+                pos.sl_extra_pct = cfg.sl_extend_pct
+                self.bot.store.save(self.bot.state)
+                self.notifier.notify(
+                    f"🛟 <b>ZARAR KES UZATILDI</b> — {esc(pos.symbol)}\nNet zarar %{pnl:.2f} (Zarar Kes -%{sl:g}) ama "
+                    f"{esc(why)}: zarar kes bir kez -%{position_sl(pos, cfg):g}'e genişletildi, dönüş bekleniyor.",
                     "update")
         if (cfg.time_exit_mode != "off" and "time" not in pos.asked
                 and now - pos.opened_at >= cfg.time_exit_minutes * 60 and is_flat(pnl, cfg.time_exit_band_pct)):

@@ -112,6 +112,7 @@ PRESETS: Dict[str, Tuple[str, Tuple[Dict[str, str], ...]]] = {
     "coins": ("🪙 Rotasyon: büyük coin trendi (ROTATION_COINS)", (
         {"ROTATION_COINS": "", "ROTATION_TOP_N": "3"}, {"ROTATION_COINS": "BTC", "ROTATION_TOP_N": "1"},
         {"ROTATION_COINS": "BTC,ETH", "ROTATION_TOP_N": "1"}, {"ROTATION_COINS": "BTC,ETH", "ROTATION_TOP_N": "2"})),
+    "slx": ("🛟 Zarar kes uzatma payı % (SL_EXTEND_PCT)", tuple({"SL_EXTEND_PCT": v} for v in ("1", "2", "3", "5"))),
     "stale": ("🧊 Takılan işlem çıkışı (dk)", tuple({"STALE_EXIT_MINUTES": v} for v in ("0", "60", "120", "240"))),
     "lcool": ("⏳ Zarardan sonra coine bekleme (dk)", tuple({"LOSS_COOLDOWN_MINUTES": v} for v in
                                                             ("0", "240", "720", "1440"))),
@@ -125,7 +126,7 @@ TOGGLES: Tuple[Tuple[str, str], ...] = (
     ("REGIME_FILTER", "Rejim"), ("REGIME_SKIP_WEAK", "Zayıfta alma"), ("TRAILING_DYNAMIC", "Dinamik iz."),
     ("ATR_TARGETS", "ATR hedef"), ("TP_EXTEND", "Hedef uzatma"), ("TRAILING_BUY", "Kademeli alım"),
     ("RSI_DIV_FILTER", "Uyumsuzluk teyidi"), ("RSI_DIV_TREND_FILTER", "Uyumsuzlukta trend"),
-    ("PRIOR_TREND_FILTER", "Önceki trend"), ("BNB_FEES", "Komisyon BNB'den"),
+    ("PRIOR_TREND_FILTER", "Önceki trend"), ("BNB_FEES", "Komisyon BNB'den"), ("SL_EXTEND", "Zarar kes uzatma"),
 )
 MODES: Tuple[Tuple[str, str], ...] = (("DCA_MODE", "DCA"), ("PYRAMID_MODE", "Piramit"),
                                       ("TIME_EXIT_MODE", "Süre kuralı"), ("ESCAPE_MODE", "Erken kaçış"))

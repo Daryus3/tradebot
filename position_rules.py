@@ -16,6 +16,12 @@ DIV_MIN_GAP, DIV_MAX_GAP = 5, 30
 DIV_RSI_OVERSOLD = 35.0         # İlk dipte RSI en fazla bu olmalı (varsayılan; ayar: RSI_DIV_OVERSOLD)
 DIV_RSI_RISE = 3.0              # İkinci dipte RSI en az bu kadar yüksek olmalı (varsayılan; ayar: RSI_DIV_RISE)
 DIV_RECENT_BARS = 5             # İkinci dip son kaç mum içinde aranır (yeni oluşmuş: son 4 kapanmış mum)
+# Zarar kes uzatma (SL_EXTEND): zarar kese gelindiğinde "yukarı dönüş" işareti
+REVERSAL_ROWS = 100             # Bakılan kapanmış mum sayısı (canlı ve backtest aynı; RSI başlangıca bağlıdır)
+REVERSAL_LOOKBACK = 6           # RSI dibi son kaç mumda aranır
+REVERSAL_RSI_OVERSOLD = 35.0    # ...dipte RSI en fazla
+REVERSAL_RSI_RISE = 3.0         # ...ve şimdi dipten en az bu kadar puan yukarıda
+REVERSAL_BUYER_RATIO = 0.55     # Son mumda alıcı-başlatan hacmin payı en az
 
 
 def _col(rows: Sequence[Sequence], i: int):
@@ -114,6 +120,36 @@ def bullish_divergence(rows: Sequence[Sequence], period: int = 14, oversold: flo
                         "bars_apart": gap, "bars_since_low": n - 1 - p2, "low": low2,
                         "peak": max(float(r[2]) for r in rows[p1:p2 + 1])}
     return None
+
+
+def reversal_signal(rows: Sequence[Sequence], breakdown_ratio: float) -> Optional[str]:
+    """Zarar kese gelmiş pozisyonda yukarı dönüş işareti (SL_EXTEND); kapanmış mumlarla, canlı ve backtest aynı:
+
+    - pozitif RSI uyumsuzluğu (fiyat daha düşük dip, RSI daha yüksek dip; bkz. bullish_divergence), ya da
+    - son mum yeşil, RSI aşırı satımdan dönüyor (son 6 mumun en düşüğü ≤ 35, şimdi en az 3 puan yukarıda) ve son
+      mumda alıcılar baskın (alıcı-başlatan hacim ≥ %55).
+    Son mum hacimli satış baskısıysa (volume_breakdown, erken kaçışla aynı ölçü) dönüş sayılmaz. Bulursa kısa açıklama,
+    yoksa None.
+    """
+    if len(rows) < DIV_LOOKBACK or volume_breakdown(rows, breakdown_ratio):
+        return None
+    div = bullish_divergence(rows)
+    if div:
+        return f"pozitif RSI uyumsuzluğu (RSI {div['rsi_prev']:.0f} → {div['rsi_now']:.0f})"
+    last = rows[-1]
+    if float(last[4]) <= float(last[1]):
+        return None
+    values = [v for v in rsi(_col(rows, 4), 14)[-REVERSAL_LOOKBACK:] if v is not None]
+    if len(values) < REVERSAL_LOOKBACK:
+        return None
+    bottom, now = min(values), values[-1]
+    if bottom > REVERSAL_RSI_OVERSOLD or now < bottom + REVERSAL_RSI_RISE:
+        return None
+    qv = float(last[7])
+    buyers = float(last[10]) / qv if qv > 0 else 0.0
+    if buyers < REVERSAL_BUYER_RATIO:
+        return None
+    return f"aşırı satımdan alıcılı dönüş (RSI {bottom:.0f} → {now:.0f}, alıcı payı %{buyers * 100:.0f})"
 
 
 def trailing_buy_trigger(low: float, pct: float) -> float:

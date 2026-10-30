@@ -82,6 +82,8 @@ EDITABLE: Dict[str, Setting] = {
     "ESCAPE_TRIGGER_PCT": Setting("escape_trigger_pct", "float", "Erken kaçış tetiği (net zarar %)"),
     "TRAILING_BUY": Setting("trailing_buy", "bool", "Kademeli alım"),
     "STALE_EXIT_MINUTES": Setting("stale_exit_minutes", "int", "Takılan işlem çıkışı (dk, 0 = kapalı)"),
+    "SL_EXTEND": Setting("sl_extend", "bool", "Zarar kes uzatma (dönüş işaretinde bir kez)"),
+    "SL_EXTEND_PCT": Setting("sl_extend_pct", "float", "Zarar kes uzatma payı (%)"),
     "STALE_EXIT_PEAK_PCT": Setting("stale_exit_peak_pct", "float", "Takılan işlem: beklenen en az net kâr (%)"),
     "TRAILING_BUY_PCT": Setting("trailing_buy_pct", "float", "Kademeli alım dönüş payı (%)"),
     "SIGNAL_APPROVAL": Setting("signal_approval", "choice", "Sinyal onayı", SIGNAL_APPROVAL_MODES),
