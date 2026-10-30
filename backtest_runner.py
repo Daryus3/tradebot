@@ -96,6 +96,14 @@ PRESETS: Dict[str, Tuple[str, Tuple[Dict[str, str], ...]]] = {
                                                                   ("25", "30", "35", "40", "45"))),
     "ret": ("↩️ Rebound: en fazla geri alınan (MAX_RETRACE)", tuple({"MAX_RETRACE": v} for v in
                                                                    ("0.5", "0.6", "0.75", "0.9"))),
+    # Giriş taramasının (--tara-giris) satırları: bulduğunuz birleşimi kill-switch açık normal backtest'le doğrulamak
+    # için. Puan ölçeği stratejiye özeldir (giriş taraması verideki ortanca / üst çeyrek puanı önerir)
+    "room": ("📏 Hedef alanı oranı (MIN_ROOM_RATIO)", tuple({"MIN_ROOM_RATIO": v} for v in
+                                                          ("0", "0.25", "0.5", "0.75", "1", "1.5"))),
+    "drop": ("📉 24s en fazla düşüş % (MAX_24H_DROP_PCT)", tuple({"MAX_24H_DROP_PCT": v} for v in
+                                                                ("8", "10", "15", "20", "30"))),
+    "score": ("🏅 En düşük sinyal puanı (MIN_SIGNAL_SCORE)", tuple(
+        {"MIN_SIGNAL_SCORE": v} for v in ("0", "10", "12", "14", "15", "16", "17", "18", "20"))),
     "stale": ("🧊 Takılan işlem çıkışı (dk)", tuple({"STALE_EXIT_MINUTES": v} for v in ("0", "60", "120", "240"))),
     "lcool": ("⏳ Zarardan sonra coine bekleme (dk)", tuple({"LOSS_COOLDOWN_MINUTES": v} for v in
                                                             ("0", "240", "720", "1440"))),
@@ -788,6 +796,9 @@ class BacktestMenu:
                  f"⏳ Tekrar giriş bekleme {eff.symbol_cooldown_minutes} dk | 🔁 Zarar serisi "
                  f"{eff.loss_streak_limit or 'kapalı'} | 📉 Günlük limit "
                  + (f"-%{eff.daily_loss_limit_pct:g}" if eff.daily_loss_limit_pct else "kapalı"),
+                 f"📏 Hedef alanı {f'{eff.min_room_ratio:g}' if eff.min_room_ratio else 'kapalı'} | 📉 24s düşüş en "
+                 f"fazla %{eff.max_24h_drop_pct:g} | 🏅 Puan en az "
+                 f"{f'{eff.min_signal_score:g}' if eff.min_signal_score else 'kapalı'}",
                  "<i>✏️ = bu test için değiştirildi. Akıllı yönetim modları backtest'te yalnızca kapalı / otomatik "
                  "olabilir.</i>"]
         if eff.strategy == "rsi_divergence" or eff.rsi_div_filter:
@@ -820,7 +831,8 @@ class BacktestMenu:
                 text = "kapalı"
             elif option.get("MAX_HOLD_MINUTES") == "0":
                 text = "sınırsız"
-            elif set(option) <= {"LOSS_STREAK_LIMIT", "DAILY_LOSS_LIMIT_PCT"} and values == ["0"]:
+            elif set(option) <= {"LOSS_STREAK_LIMIT", "DAILY_LOSS_LIMIT_PCT", "STALE_EXIT_MINUTES", "MIN_ROOM_RATIO",
+                                 "MIN_SIGNAL_SCORE"} and values == ["0"]:
                 text = "kapalı"
             else:
                 text = " → ".join(values)

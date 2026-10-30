@@ -155,6 +155,30 @@ def test_overrides_toggle_validate_and_reset(bt_bot):
     assert BacktestDraft.from_dict(bot.state.backtest_draft).overrides == {}
 
 
+def test_entry_sweep_settings_can_be_tested_and_applied(bt_bot):
+    """Giriş taramasının bulduğu birleşim (hedef alanı, 24s düşüş, sinyal puanı) Telegram'dan teste özel
+    denenebilmeli ve /ayar ile bota uygulanabilmeli."""
+    bot, notes, _ = bt_bot
+    press(bot, "bt:ov")
+    assert {"bt:ovp:room", "bt:ovp:drop", "bt:ovp:score"} <= set(buttons(notes))
+    assert "Hedef alanı kapalı" in notes.menus[-1][0]
+    press(bot, "bt:ovp:room")
+    assert "✅ kapalı" in [label for row in notes.menus[-1][1] for label, _cb in row]
+    press(bot, "bt:ovv:room:2")
+    press(bot, "bt:ovv:drop:2")
+    press(bot, "bt:ovv:score:5")
+    assert BacktestDraft.from_dict(bot.state.backtest_draft).overrides == {
+        "MIN_ROOM_RATIO": "0.5", "MAX_24H_DROP_PCT": "15", "MIN_SIGNAL_SCORE": "16"}
+    text = notes.menus[-1][0]
+    assert "Hedef alanı 0.5" in text and "en fazla %15" in text and "Puan en az 16" in text
+    assert bot.cfg.min_room_ratio == 0                              # Botun ayarı değişmedi
+    for key, value in (("MIN_ROOM_RATIO", "0.5"), ("MAX_24H_DROP_PCT", "15"), ("MIN_SIGNAL_SCORE", "16.3")):
+        bot.commands.handle(Command("ayar", [key, value]))
+    assert (bot.cfg.min_room_ratio, bot.cfg.max_24h_drop_pct, bot.cfg.min_signal_score) == (0.5, 15.0, 16.3)
+    bot.commands.handle(Command("ayar", ["MAX_24H_DROP_PCT", "0"]))  # Hiç alım yapılamazdı: reddedilir
+    assert bot.cfg.max_24h_drop_pct == 15.0
+
+
 def test_strategy_change_rejected_when_overrides_conflict(bt_bot):
     bot, notes, _ = bt_bot
     bot.state.backtest_draft = {"overrides": {"STOP_LOSS_PCT": "11"}}   # Yedek stop (12) altında: geçerli

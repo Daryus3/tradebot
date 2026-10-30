@@ -153,7 +153,8 @@ Bot **yalnızca sizin sohbetinizden** (`TELEGRAM_CHAT_ID`) gelen komutları ve m
 
 Menüden değiştirilen her ayar doğrulanır, hemen uygulanır ve sunucudaki `.env`'nin sonuna yazılır (bot yeniden
 başlasa da kalır; `.env`, `ayarlar.env`'yi ezer). Diğer ayarlar için `/ayar ANAHTAR DEĞER` (örn. `/ayar tp 2.5`,
-`/ayar DAILY_LOSS_LIMIT_PCT 3`). API anahtarları, mod, sermaye ve kill-switch Telegram'dan değiştirilemez.
+`/ayar DAILY_LOSS_LIMIT_PCT 3`, giriş taramasının önerdiği `/ayar MIN_ROOM_RATIO 0.5`, `/ayar MAX_24H_DROP_PCT 15`,
+`/ayar MIN_SIGNAL_SCORE 16.3`). API anahtarları, mod, sermaye ve kill-switch Telegram'dan değiştirilemez.
 
 | Komut | Ne yapar? |
 |---|---|
@@ -185,7 +186,7 @@ Sunucuya bağlanmadan, düğmelerle:
 | 🧭 Strateji | Botun stratejisi veya herhangi bir strateji (yalnızca bu test için) |
 | 🗓️ Süre · 📅 Bitiş | 7 günden 3 yıla; bitiş bugün, N gün önce veya **önceki dönem** (bulunan ayarları başka bir dönemde doğrulamak için) |
 | 💼 Sermaye · 🪙 Coin | Ayardaki / botun güncel sermayesi veya 11-1000 USDT; en hacimli 10-100 coin |
-| ⚙️ Test ayarları | Kâr Al, Zarar Kes, izleyen stop, başabaş, maks. süre, pozisyon sayısı, ilk giriş %, filtreler, sigortalar, akıllı yönetim — **yalnızca bu test için**, botun ayarları değişmez |
+| ⚙️ Test ayarları | Kâr Al, Zarar Kes, izleyen stop, başabaş, maks. süre, pozisyon sayısı, ilk giriş %, hedef alanı (`MIN_ROOM_RATIO`), 24s en fazla düşüş, en düşük sinyal puanı, filtreler, sigortalar, akıllı yönetim — **yalnızca bu test için**, botun ayarları değişmez (giriş taramasında bulunan birleşimi kill-switch açık normal backtest'le doğrulamak için) |
 | 🎚️ Tarama değerleri | Çıkış taramasında denenecek Kâr Al / Zarar Kes / izleyen stop / süre / alan değerleri |
 | ▶️ Başlat · ⏹ Durdur · 📄 Son sonuç | Çalıştırır (ilerleme mesajı güncellenir), durdurur, son sonucu tekrar gönderir |
 
@@ -276,7 +277,9 @@ ettirir; kararı "İşl.başı" sütunu verir. Seçilen birleşimi `--bitis` ile
   bekleme, takılan işlem çıkışı; rsi_divergence'ta trend filtresi)
   tek tek açıp kapatarak aynı veriyle kazanma oranına ve net kâra etkisini gösterir. Yalnızca dönemin **iki
   yarısında da** kârı artıran değişikliği önerir (🟢); tek yarıda işe yarayan 🟡 (şans olabilir), sermayenin
-  %0.5'inden küçük fark ≈ (önemsiz) işaretlenir. "Yedek akçe %50" yalnızca kıyas satırıdır: DCA / piramit ona göre ölçülür. Emir defteri / tape filtreleri geçmiş veriyle denenemez.
+  %0.5'inden küçük fark ≈ (önemsiz) işaretlenir. "Yedek akçe %50" yalnızca kıyas satırıdır: DCA / piramit ona göre ölçülür (DCA tetiği zarar kesten büyükse,
+  örn. tetik -%5 / zarar kes -%4, DCA hiç çalışmayacağı için satır zarar kesin yarısıyla denenir). Takılan işlem
+  satırları yalnızca maks. süreden kısa değerlerle denenir. Emir defteri / tape filtreleri geçmiş veriyle denenemez.
 - **Taramalar** (`--tara`, `--tara-giris`, `--tara-filtre`): veri bir kez indirilir, ayarlar aynı veriyle denenir;
   karşılaştırma adil olsun diye kill-switch kapalıdır; canlıda kill-switch'e takılacak ayarlar MaksDD yanında `!` ile
   işaretlenir ve raporun altında ☠️ ile tarihiyle yazılır (o tarihten sonraki sonuçlar canlıda hiç gerçekleşmez). Çok ayar denendiğinde birkaçı tesadüfen kârlı çıkar:

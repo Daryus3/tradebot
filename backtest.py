@@ -2070,6 +2070,20 @@ def _ab_flip(current, on, off):
     return off if current else on
 
 
+def _dca_fit(cfg) -> Settings:
+    """DCA tetiği zarar kesten önce gelmeli: zarar kes -%4 iken varsayılan -%5 tetik hiç çalışmaz (ayar doğrulaması
+    da reddeder). Öyleyse tetik zarar kesin yarısına çekilir (varsayılanlardaki 5 / 10 oranı); değilse değişmez."""
+    return {"DCA_TRIGGER_PCT": round(cfg.stop_loss_pct / 2, 2)} if cfg.dca_trigger_pct >= cfg.stop_loss_pct else {}
+
+
+def _stale_choices(cfg, choices: Sequence[int]) -> List[int]:
+    """Takılan işlem süreleri: maks. süreye (MAX_HOLD_MINUTES) eşit ya da uzun olan anlamsızdır (işlem o an zaten
+    satılır); hiçbiri kalmazsa maks. sürenin yarısı (15 dk'ya yuvarlı) denenir."""
+    hold = cfg.max_hold_minutes
+    picks = [m for m in choices if hold <= 0 or m < hold]
+    return picks or [max(15, hold // 2 // 15 * 15)]
+
+
 def ab_combos(cfg, regime_available: bool = True) -> List[Combo]:
     """İlk satır mevcut ayarlar; sonra her filtre tek tek ters çevrilir; en sonda üç mum filtresi birden açık."""
     combos: List[Combo] = [({}, True)]
@@ -2089,6 +2103,8 @@ def ab_combos(cfg, regime_available: bool = True) -> List[Combo]:
         if is_rotation(cfg.strategy):
             break
         current = getattr(cfg, SWEEP_FIELDS[key][0])
+        if key == "STALE_EXIT_MINUTES":
+            values = _stale_choices(cfg, values)
         for value in [v for v in values if v != current] + ([0] if current else []):
             combos.append(({key: value}, False))
     if not is_rotation(cfg.strategy):
@@ -2100,7 +2116,8 @@ def ab_combos(cfg, regime_available: bool = True) -> List[Combo]:
             combos.append((dict(reserve), False))   # Kıyas: yalnızca yedek akçe (ekleme yok)
         for key, _label in AB_RESERVE_TESTS:
             value = _ab_flip(getattr(cfg, SWEEP_FIELDS[key][0]), "auto", "off")
-            settings = {**reserve, key: value} if value == "auto" else {key: value}
+            fit = _dca_fit(cfg) if key == "DCA_MODE" else {}   # Tetik moddan önce: /ayar sırayla uygulanabilsin
+            settings = {**reserve, **fit, key: value} if value == "auto" else {key: value}
             if _valid(_apply(cfg, settings)):
                 combos.append((settings, False))
     return combos
@@ -2123,11 +2140,13 @@ def _ab_label(cfg, settings: Settings) -> str:
     if usage is not None:
         parts.append(f"Yedek akçe %{100 - usage:g}")
     for key, value in settings.items():
-        if key == "CAPITAL_USAGE_PCT":
+        if key in ("CAPITAL_USAGE_PCT", "DCA_TRIGGER_PCT"):
             continue
         if key in AB_CANDLE_KEYS and len(settings) > 1:
             return "3 mum filtresi birden açık"
         parts.append(f"{names[key]}: {_ab_state(key, getattr(cfg, SWEEP_FIELDS[key][0]))} → {_ab_state(key, value)}")
+        if key == "DCA_MODE" and "DCA_TRIGGER_PCT" in settings:
+            parts[-1] += f" (tetik -%{settings['DCA_TRIGGER_PCT']:g})"
     return " + ".join(parts)
 
 
@@ -2237,6 +2256,10 @@ def format_ab_report(rows: Sequence[SweepRow], cfg, data: BacktestData, spread_p
                  "uygulanan \"otomatik\" hali var. DCA / piramit yedek akçe ister: ilk giriş %100 ise yedek "
                  f"%{AB_RESERVE_PCT:g} ile denenir. Ekleme ve süre kuralları mum kapanışında, kademeli alım mumlarla "
                  "yaklaşık simüle edilir.")
+    fitted = next((r.settings["DCA_TRIGGER_PCT"] for r in rows if "DCA_TRIGGER_PCT" in r.settings), None)
+    if fitted is not None:
+        lines.append(f"📝 DCA tetiğiniz (-%{cfg.dca_trigger_pct:g}) zarar kesten (-%{cfg.stop_loss_pct:g}) önce "
+                     f"gelmediği için DCA hiç çalışmazdı: satır tetik -%{fitted:g} ile denendi (DCA_TRIGGER_PCT).")
     lines.append("📝 Günlük zarar limiti backtest'te UTC gün sınırıyla, canlıda yerel saatle hesaplanır. Kayma yok, "
                  "geçmiş sonuçlar geleceği garanti etmez.")
     return "\n".join(lines)
@@ -2265,22 +2288,12 @@ def _with_settings(cfg, settings: Settings):
     return replace(cfg, **{SWEEP_FIELDS[k][0]: SWEEP_FIELDS[k][1](v) for k, v in settings.items()})
 
 
-def _stale_choices(cfg) -> List[int]:
-    """Takılan işlem süreleri: maks. süreye (MAX_HOLD_MINUTES) eşit ya da uzun olan anlamsızdır (işlem o an zaten
-    satılır); hiçbiri kalmazsa maks. sürenin yarısı (15 dk'ya yuvarlı) denenir."""
-    hold = cfg.max_hold_minutes
-    picks = [m for m in EXPERIMENT_STALE if hold <= 0 or m < hold]
-    return picks or [max(15, hold // 2 // 15 * 15)]
-
-
 def experiment_rows(cfg) -> List[Tuple[str, Settings]]:
     """Deney satırları (ad, ayarlar), kullanıcının ayarlarına uydurulmuş: DCA tetiği zarar kesten önce gelmeli
     (örn. zarar kes -%4 iken varsayılan -%5 tetik hiç çalışmaz: zarar kesin yarısına çekilir, A/B testlerindeki
     5 / 10 oranı), takılan işlem süresi maks. süreden kısa olmalı."""
-    base = dict(EXPERIMENT_BASE)
-    if cfg.dca_trigger_pct >= cfg.stop_loss_pct:
-        base["DCA_TRIGGER_PCT"] = round(cfg.stop_loss_pct / 2, 2)
-    stale = _stale_choices(cfg)
+    base = {**EXPERIMENT_BASE, **_dca_fit(cfg)}
+    stale = _stale_choices(cfg, EXPERIMENT_STALE)
     reducers: Settings = {"STALE_EXIT_MINUTES": stale[0], "LOSS_COOLDOWN_MINUTES": EXPERIMENT_LOSS_COOLDOWN,
                           "PRIOR_TREND_FILTER": True}
     return ([("Mevcut ayarlarınız", {})]

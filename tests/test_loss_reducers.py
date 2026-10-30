@@ -129,6 +129,30 @@ def test_ab_test_tries_the_new_rows(cfg):
     assert not {"STALE_EXIT_MINUTES", "PRIOR_TREND_FILTER"} & {k for st, _ in backtest.ab_combos(rot) for k in st}
 
 
+def test_ab_test_fits_dca_and_stale_rows_to_tight_exits(cfg):
+    """Zarar kes -%4 ve maks. süre 120 dk iken: varsayılan -%5 DCA tetiği hiç çalışmaz (satır eskiden sessizce
+    düşüyordu), tetik zarar kesin yarısıyla denenir; 120 / 240 dk takılan işlem hiçbir şeyi değiştirmez, denenmez."""
+    from types import SimpleNamespace
+    tight = replace(cfg, stop_loss_pct=4.0, max_hold_minutes=120)
+    combos = [st for st, _ in backtest.ab_combos(tight)]
+    dca = next(st for st in combos if st.get("DCA_MODE") == "auto")
+    assert list(dca.items()) == [("CAPITAL_USAGE_PCT", 50.0), ("DCA_TRIGGER_PCT", 2.0), ("DCA_MODE", "auto")]
+    assert backtest._ab_label(tight, dca) == "Yedek akçe %50 + DCA: kapalı → otomatik (tetik -%2)"
+    assert [st["STALE_EXIT_MINUTES"] for st in combos if "STALE_EXIT_MINUTES" in st] == [60]
+    assert next(st for st, _ in backtest.ab_combos(cfg) if st.get("DCA_MODE") == "auto") == {
+        "CAPITAL_USAGE_PCT": 50.0, "DCA_MODE": "auto"}          # Tetik zaten zarar kesten önce: değişmez
+    rows = [backtest.SweepRow({}, True, 50, 60.0, -10.0, -0.2, 20.0, -5.0, -5.0, None),
+            backtest.SweepRow({"CAPITAL_USAGE_PCT": 50.0}, False, 50, 60.0, -5.0, -0.2, 10.0, -2.5, -2.5, None),
+            backtest.SweepRow(dca, False, 50, 62.0, -4.0, -0.15, 9.0, -2.0, -2.0, None)]
+    data = SimpleNamespace(sim_start_ms=1_785_000_000_000, end_ms=1_792_800_000_000, days=180, interval="5m",
+                           series={})
+    text = backtest.format_ab_report(rows, tight, data)
+    assert "DCA: kapalı → otomatik (tetik -%2)" in text
+    assert "DCA tetiğiniz (-%5) zarar kesten (-%4) önce gelmediği için" in text
+    advice = next(line for line in text.splitlines() if "DCA_MODE=auto" in line)
+    assert advice.index("DCA_TRIGGER_PCT=2") < advice.index("DCA_MODE=auto")   # /ayar sırayla uygulanabilsin
+
+
 # ------------------------------------------------------------------ canlı bot ve menüler
 def test_live_stale_exit_and_loss_cooldown(cfg, fake_client, tmp_path):
     bot, client, notes = make_bot(replace(cfg, stale_exit_minutes=60, loss_cooldown_minutes=720), fake_client,

@@ -490,6 +490,8 @@ class Config:
             errors.append("BREAKEVEN_FLOOR_PCT, BREAKEVEN_TRIGGER_PCT'den küçük olmalı")
         if self.min_room_ratio < 0:
             errors.append("MIN_ROOM_RATIO negatif olamaz (0 = kapalı)")
+        if self.max_24h_drop_pct <= 0:
+            errors.append("MAX_24H_DROP_PCT sıfırdan büyük olmalı")
         if self.strategy not in STRATEGY_NAMES:
             errors.append("STRATEGY şunlardan biri olmalı: " + ", ".join(STRATEGY_NAMES))
         if not 0 <= self.min_24h_gain_pct < self.max_24h_gain_pct:
