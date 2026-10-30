@@ -121,6 +121,8 @@ def cast_value(kind: str, raw, key: str, choices: Tuple[str, ...] = ()) -> objec
     """Metni türüne (float | int | bool | choice) çevirir; geçersizse ConfigError."""
     if not isinstance(raw, str):
         return raw
+    if kind == "str":                  # Serbest metin (ör. ROTATION_COINS=BTC,ETH): virgül ondalık sayılmaz
+        return raw.strip()
     text = raw.strip().replace(",", ".")
     try:
         if kind == "float":
@@ -154,6 +156,7 @@ OVERRIDE_BLOCKED = frozenset({
 })
 OVERRIDE_CHOICES = {"dca_mode": ACTION_MODES, "pyramid_mode": ACTION_MODES, "time_exit_mode": ACTION_MODES,
                     "escape_mode": ACTION_MODES, "signal_approval": SIGNAL_APPROVAL_MODES, "notify_mode": NOTIFY_MODES}
+OVERRIDE_TEXT = frozenset({"rotation_coins"})   # Serbest metin olarak değiştirilebilenler (doğrulamayı Config yapar)
 
 
 def override_spec(key: str) -> Optional[Tuple[str, str, Tuple[str, ...]]]:
@@ -166,6 +169,8 @@ def override_spec(key: str) -> Optional[Tuple[str, str, Tuple[str, ...]]]:
         return attr, f.type, ()
     if f.type == "str" and attr in OVERRIDE_CHOICES:
         return attr, "choice", OVERRIDE_CHOICES[attr]
+    if f.type == "str" and attr in OVERRIDE_TEXT:
+        return attr, "str", ()
     return None
 
 

@@ -143,6 +143,26 @@ def is_rotation(strategy: str) -> bool:
     return strategy in ROTATION_STRATEGIES
 
 
+def rotation_coin_list(cfg) -> Tuple[str, ...]:
+    """ROTATION_COINS → ("BTC", "ETH"): büyük harf, tekrarsız; "BTCUSDT" yazıldıysa parite eki atılır. Boş = sınır yok
+    (en hacimli ROTATION_UNIVERSE coin sıralanır)."""
+    quote = getattr(cfg, "quote_asset", "USDT").upper()
+    out: List[str] = []
+    for raw in getattr(cfg, "rotation_coins", "").replace(",", " ").split():
+        coin = raw.upper()
+        if len(coin) > len(quote) and coin.endswith(quote):
+            coin = coin[: -len(quote)]
+        if coin not in out:
+            out.append(coin)
+    return tuple(out)
+
+
+def fee_from_coin(cfg) -> bool:
+    """Alış komisyonu alınan coinden mi kesilir? BNB_FEES=true ise BNB'den ödenir: coin miktarı azalmaz, satışta LOT
+    adımı yüzünden toz kalmaz; toz sınırı (MAX_DUST_PCT) gerekmez, küçük sermayeyle BTC / ETH de alınabilir."""
+    return not getattr(cfg, "bnb_fees", False)
+
+
 def divergence_trading(cfg) -> bool:
     """RSI_DIV_TRADE ana stratejinin yanında çalışıyor mu? (Rotasyonda ve rsi_divergence'ın kendisinde çalışmaz.)"""
     return (getattr(cfg, "rsi_div_trade", "off") != "off" and not is_rotation(cfg.strategy)
@@ -312,6 +332,7 @@ class Config:
     rotation_days: int = 7                 # Kaç günde bir yeniden dengelenir
     rotation_btc_ma_days: int = 50         # BTC bu günlük ortalamanın altına inince her şey satılıp USDT'de beklenir (0 = kapalı)
     rotation_universe: int = 30            # Sıralamaya giren en hacimli coin sayısı
+    rotation_coins: str = ""               # Yalnızca bu coinler (ör. "BTC,ETH": büyük coin trendi); boş = en hacimliler
     # Ortalamaya dönüş (STRATEGY=mean_revert; 1 saatlik mumlar)
     mr_band_std: float = 2.0               # Kapanış 20 saatlik ortalamanın en az bu kadar standart sapma altında olmalı
     mr_universe: int = 20                  # Yalnızca en hacimli bu kadar coin (büyük, likit coinler)
@@ -327,6 +348,7 @@ class Config:
     # 38) BNB ile komisyon indirimi takibi: yalnızca izler ve uyarır (BNB ALMAZ, Binance ayarını değiştirmez)
     bnb_fee_check: bool = True             # false = komisyon/BNB kontrolü tamamen kapalı
     bnb_min_trades: int = 20               # BNB bundan az al-sat işlemine yetecekse uyar (0 = uyarma)
+    bnb_fees: bool = False                 # Komisyon BNB ile ödeniyor: alınan coinden kesilmez, satışta toz kalmaz
     # 39) Telegram kontrol paneli (/menu) ve bildirim modu
     notify_mode: str = "all"               # all | closes | silent (bkz. NOTIFY_MODES)
     service_name: str = "tradebot.service"  # Menüdeki "Sunucu Reset" düğmesinin yeniden başlattığı systemd servisi
@@ -518,6 +540,10 @@ class Config:
             errors.append("ROTATION_BTC_MA_DAYS 0 (kapalı) veya 10 ile 200 arasında olmalı")
         if not self.rotation_top_n <= self.rotation_universe <= 200:
             errors.append("ROTATION_UNIVERSE, ROTATION_TOP_N'den küçük olmamalı (en fazla 200)")
+        bad = [c for c in self.rotation_coins.replace(",", " ").split() if not c.isalnum()]
+        if bad:
+            errors.append("ROTATION_COINS virgülle ayrılmış coin adları olmalı (ör. BTC,ETH); hatalı: "
+                          + ", ".join(bad))
         if not 0.5 <= self.mr_band_std <= 5:
             errors.append("MR_BAND_STD 0.5 ile 5 arasında olmalı (örn. 2 = ortalamanın 2 standart sapma altı)")
         if not 1 <= self.mr_universe <= 200:
@@ -711,6 +737,7 @@ def load_config(env_file: Optional[str] = None, mode_override: Optional[str] = N
         rotation_days=_env_int("ROTATION_DAYS", 7),
         rotation_btc_ma_days=_env_int("ROTATION_BTC_MA_DAYS", 50),
         rotation_universe=_env_int("ROTATION_UNIVERSE", 30),
+        rotation_coins=_env_str("ROTATION_COINS", ""),
         mr_band_std=_env_float("MR_BAND_STD", 2.0),
         mr_universe=_env_int("MR_UNIVERSE", 20),
         signal_confirm_scans=_env_int("SIGNAL_CONFIRM_SCANS", 1),
@@ -721,6 +748,7 @@ def load_config(env_file: Optional[str] = None, mode_override: Optional[str] = N
         equity_log_minutes=_env_int("EQUITY_LOG_MINUTES", 15),
         bnb_fee_check=_env_bool("BNB_FEE_CHECK", True),
         bnb_min_trades=_env_int("BNB_MIN_TRADES", 20),
+        bnb_fees=_env_bool("BNB_FEES", False),
         notify_mode=_env_str("NOTIFY_MODE", "all").lower(),
         service_name=_env_str("SERVICE_NAME", "tradebot.service"),
         ip_check_minutes=_env_int("IP_CHECK_MINUTES", 10),

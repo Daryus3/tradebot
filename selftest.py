@@ -246,7 +246,8 @@ def _paper_round_trip(cfg, client: BinanceClient, rules: dict, tickers: list) ->
                 continue
             if not plan_entry(cfg.start_capital, r, float(t["lastPrice"]), cfg).ok:
                 continue
-            paper = PaperExchange(client, {cfg.quote_asset: cfg.start_capital}, cfg.quote_asset, cfg.fee_rate)
+            paper = PaperExchange(client, {cfg.quote_asset: cfg.start_capital}, cfg.quote_asset, cfg.fee_rate,
+                                  cfg.bnb_fees)
             paper.rules = rules
             buy = paper.market_buy(r.symbol, cfg.start_capital)
             sell = paper.market_sell(r.symbol, buy.qty)

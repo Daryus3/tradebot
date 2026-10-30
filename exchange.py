@@ -399,9 +399,10 @@ class PaperExchange(BaseExchange):
     name = "paper"
 
     def __init__(self, client: BinanceClient, balances: Dict[str, float],
-                 quote_asset: str = "USDT", fee_rate: float = 0.001):
+                 quote_asset: str = "USDT", fee_rate: float = 0.001, bnb_fees: bool = False):
         super().__init__(client, quote_asset, fee_rate)
         self.balances = balances  # BotState içindeki sözlük; değişiklikler state ile kaydedilir
+        self.bnb_fees = bnb_fees  # BNB_FEES: alış komisyonu coinden değil (canlıda BNB'den) ödenir
 
     def free_balance(self, asset: str) -> float:
         return float(self.balances.get(asset, 0.0))
@@ -411,21 +412,27 @@ class PaperExchange(BaseExchange):
         _, ask = self.get_bid_ask(symbol)
         free = self.free_balance(self.quote_asset)
         spend = min(quote_amount, free)
-        qty = rules.floor_market_qty(to_dec(spend) / to_dec(ask))
+        # BNB_FEES: komisyon ayrıca ödenir; sanal hesapta BNB olmadığından aynı USDT'den düşülür (sığsın diye
+        # miktar komisyon payı bırakılarak hesaplanır)
+        unit = to_dec(ask) * (1 + to_dec(self.fee_rate)) if self.bnb_fees else to_dec(ask)
+        qty = rules.floor_market_qty(to_dec(spend) / unit)
         if qty <= 0 or qty < rules.market_min_qty:
             raise OrderError("Miktar LOT_SIZE minimumunun altında", "LOT_SIZE")
         qty_f = float(qty)
         notional = qty_f * ask
         if notional < float(rules.min_notional):
             raise OrderError(f"Emir tutarı ({notional:.2f}) minimumun ({rules.min_notional}) altında", "MIN_NOTIONAL")
-        if notional > free + 1e-9:
+        fee_base = qty_f * self.fee_rate
+        fee = fee_base * ask
+        cost = notional + fee if self.bnb_fees else notional
+        if cost > free + 1e-9:
             raise OrderError("Yetersiz sanal bakiye", "NO_BALANCE")
 
-        fee_base = qty_f * self.fee_rate  # Binance komisyonu alınan coinden keser
-        net_qty = qty_f - fee_base
-        self.balances[self.quote_asset] = free - notional
+        # Binance komisyonu alınan coinden keser; BNB ile ödeniyorsa coin azalmaz (canlıdaki BNB'li dolum gibi)
+        net_qty = qty_f if self.bnb_fees else qty_f - fee_base
+        self.balances[self.quote_asset] = free - cost
         self.balances[rules.base_asset] = self.free_balance(rules.base_asset) + net_qty
-        return Fill(symbol, "BUY", net_qty, ask, notional, fee_base * ask, f"PAPER-{int(time.time() * 1000)}")
+        return Fill(symbol, "BUY", net_qty, ask, cost, fee, f"PAPER-{int(time.time() * 1000)}")
 
     def market_sell(self, symbol: str, qty: float) -> Fill:
         bid, _ = self.get_bid_ask(symbol)

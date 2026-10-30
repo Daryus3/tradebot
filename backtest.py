@@ -42,8 +42,8 @@ from risk import (ExitReason, Position, breakeven_effective, cooldown_minutes, e
                   kill_switch_hit, net_exit_value, plan_entry, pnl_pct, position_sl, position_slots, position_tp,
                   price_for_pnl, target_exits, trailing_floor_pct, update_breakeven, update_trailing)
 from rotation import btc_trend, momentum_pct, plan_rotation, pump_pct
-from config import (PROFILE_ATTRS, PROFILES, ConfigError, is_long_horizon, is_mean_reversion, is_rotation,
-                    strategy_family)
+from config import (PROFILE_ATTRS, PROFILES, ConfigError, fee_from_coin, is_long_horizon, is_mean_reversion,
+                    is_rotation, rotation_coin_list, strategy_family)
 from entry_filters import NO_PRIOR_TREND, PRIOR_TREND_DAYS, candle_filters_on, candle_reject, prior_trend_ok
 from strategy import KLINE_LIMIT, STRATEGIES, Signal, make_strategy, required_move_pct, room_ok, strategy_class
 from telegram_bot import LINE, fmt_duration, fmt_price, fmt_rate, fmt_signed, fmt_usdt
@@ -735,22 +735,16 @@ class _Simulator:
         pos, rules = op.pos, op.rules
         price = self.series[symbol].c[k] * self.entry_factor
         spend = min(pos.reserve_usdt, self.cash)
-        qty = rules.floor_market_qty(to_dec(spend) / to_dec(price))
-        if qty <= 0 or qty < rules.market_min_qty:
+        qty, net_qty, notional, fee, cost = self._buy_amounts(rules, spend, price)
+        if qty <= 0:
             return
-        qty_f = float(qty)
-        notional = qty_f * price
-        if notional < float(rules.min_notional) or notional > self.cash + 1e-9:
-            return
-        fee_base = qty_f * cfg.fee_rate
-        net_qty = qty_f - fee_base
         pos.entry_price = (pos.entry_price * pos.qty + price * net_qty) / (pos.qty + net_qty)
         pos.qty += net_qty
-        pos.cost_usdt += notional
-        pos.buy_fee_usdt += fee_base * price
-        pos.reserve_usdt = round(max(0.0, pos.reserve_usdt - notional), 2)
+        pos.cost_usdt += cost
+        pos.buy_fee_usdt += fee
+        pos.reserve_usdt = round(max(0.0, pos.reserve_usdt - cost), 2)
         pos.adds += 1
-        op.buy_fee += fee_base * price
+        op.buy_fee += fee
         sell_q = rules.floor_market_qty(pos.qty)
         op.sellable = float(sell_q) if sell_q >= rules.market_min_qty else 0.0
         op.tp_price = self._market_level(position_tp(pos, cfg), op)
@@ -759,8 +753,8 @@ class _Simulator:
         pos.trailing_active = pos.breakeven_active = False
         if kind == "pyramid":
             pos.lock_pct = max(0.1, cfg.breakeven_floor_pct)
-        self.cash -= notional
-        self.fees += fee_base * price
+        self.cash -= cost
+        self.fees += fee
         self.stats["ekleme_dca" if kind == "dca" else "ekleme_piramit"] += 1
 
     def _hourly_atr(self, symbol: str, k: int, price: float) -> Optional[float]:
@@ -933,7 +927,7 @@ class _Simulator:
             change = s.change24[k]
             if change is None or not self.strategy.change_ok(change):
                 continue
-            if target > 0 and s.rules.step_value(s.c[k]) / target * 100 > cfg.max_dust_pct:
+            if target > 0 and fee_from_coin(cfg) and s.rules.step_value(s.c[k]) / target * 100 > cfg.max_dust_pct:
                 continue
             candidates.append((self.strategy.candidate_key(change, s.vol24[k]), symbol))
         if not candidates:
@@ -1043,15 +1037,18 @@ class _Simulator:
 
         capital = cfg.start_capital + self.realized
         slots = min(cfg.rotation_top_n, position_slots(capital, self.min_notional, cfg))
+        coins = rotation_coin_list(cfg)   # ROTATION_COINS: yalnızca bu coinler (canlı RotationStrategy.universe gibi)
         liquid: List[Tuple[float, str]] = []
         for symbol, s in self.series.items():
             if s.rules is None or not s.has(k) or s.change24[k] is None:   # Hacim / fiyat adımı ön elemesi
+                continue
+            if coins and s.rules.base_asset not in coins:
                 continue
             liquid.append((s.qv[k], symbol))
         liquid.sort(key=lambda x: (-x[0], x[1]))
         lookback = cfg.rotation_lookback_days
         momentum: Dict[str, Optional[float]] = {}
-        for _, symbol in liquid[: cfg.rotation_universe]:
+        for _, symbol in (liquid if coins else liquid[: cfg.rotation_universe]):
             s = self.series[symbol]
             if not self._listing_ok(s, t_close):      # Canlıda da güvenlik filtresine takılan sıralamaya girmez
                 self.stats["yeni_coin"] += 1
@@ -1117,40 +1114,54 @@ class _Simulator:
 
     def _open(self, signal, rules: SymbolRules, quote_amount: float, ask: float, t_close: int,
               k: Optional[int] = None, reserve: float = 0.0) -> bool:
-        """PaperExchange.market_buy ile aynı hesap: komisyon alınan coinden kesilir."""
+        """PaperExchange.market_buy ile aynı hesap (komisyon alınan coinden ya da BNB_FEES ile BNB'den)."""
         cfg = self.cfg
         spend = min(quote_amount, self.cash)
-        qty = rules.floor_market_qty(to_dec(spend) / to_dec(ask))
-        if qty <= 0 or qty < rules.market_min_qty:
+        qty, net_qty, notional, fee, cost = self._buy_amounts(rules, spend, ask)
+        if qty <= 0:
             return False
-        qty_f = float(qty)
-        notional = qty_f * ask
-        if notional < float(rules.min_notional) or notional > self.cash + 1e-9:
-            return False
-        fee_base = qty_f * cfg.fee_rate
-        net_qty = qty_f - fee_base
         sell_q = rules.floor_market_qty(net_qty)
         sellable = float(sell_q) if sell_q >= rules.market_min_qty else 0.0
         if sellable <= 0:
             return False  # Komisyon sonrası satılabilir miktar kalmıyor (toz)
 
         pos = Position(symbol=signal.symbol, base_asset=rules.base_asset, qty=net_qty, entry_price=ask,
-                       cost_usdt=notional, opened_at=t_close / 1000, buy_fee_usdt=fee_base * ask,
-                       signal_note=signal.note())
+                       cost_usdt=cost, opened_at=t_close / 1000, buy_fee_usdt=fee, signal_note=signal.note())
         pos.reserve_usdt = reserve
         if k is not None and cfg.atr_targets:   # Canlıdaki gibi: girişte coinin 1 saatlik ATR'sine göre hedefler
             pos.tp_pct, pos.sl_pct = atr_targets(cfg, self._hourly_atr(signal.symbol, k, ask / self.entry_factor))
         op = _OpenPos(pos=pos, rules=rules, sellable=sellable, score=signal.score, open_ms=t_close,
-                      tp_price=0.0, sl_price=0.0, market_entry=ask / self.entry_factor, buy_fee=fee_base * ask,
+                      tp_price=0.0, sl_price=0.0, market_entry=ask / self.entry_factor, buy_fee=fee,
                       room=signal.metrics.get("room_pct"))
         op.tp_price = self._market_level(position_tp(pos, cfg), op) if target_exits(cfg) else math.inf
         op.sl_price = self._market_level(-position_sl(pos, cfg), op)
         op.peak = op.trough = self._pnl_at(op, op.market_entry)   # Girişte: -(komisyon + spread)
         op.peak_ms = t_close
         self.open[signal.symbol] = op
-        self.cash -= notional
-        self.fees += fee_base * ask
+        self.cash -= cost
+        self.fees += fee
         return True
+
+    def _buy_amounts(self, rules: SymbolRules, spend: float, price: float) -> Tuple[float, float, float, float, float]:
+        """Piyasa alımının (alınan, elde kalan net miktar, emir tutarı, komisyon USDT, maliyet); alınamazsa qty 0.
+
+        Komisyon normalde alınan coinden kesilir (net miktar azalır, satışta LOT adımı altındaki kısım toz kalır).
+        BNB_FEES ile BNB'den ödenir (canlıdaki BNB'li dolumda olduğu gibi): coin azalmaz, komisyon maliyete eklenir
+        ve aynı bütçeden ödenebilsin diye miktar (1 + komisyon) payı bırakılarak hesaplanır (PaperExchange ile aynı).
+        """
+        fee_rate = self.cfg.fee_rate
+        bnb = not fee_from_coin(self.cfg)
+        unit = to_dec(price) * (1 + to_dec(fee_rate)) if bnb else to_dec(price)
+        qty = rules.floor_market_qty(to_dec(spend) / unit)
+        if qty <= 0 or qty < rules.market_min_qty:
+            return 0.0, 0.0, 0.0, 0.0, 0.0
+        qty_f = float(qty)
+        notional = qty_f * price
+        fee = qty_f * fee_rate * price      # PaperExchange ile aynı işlem sırası (sonuçlar birebir aynı olsun)
+        cost = notional + fee if bnb else notional
+        if notional < float(rules.min_notional) or cost > self.cash + 1e-9:
+            return 0.0, 0.0, 0.0, 0.0, 0.0
+        return qty_f, (qty_f if bnb else qty_f - qty_f * fee_rate), notional, fee, cost
 
     # ------------------------------------------------------------ özkaynak / dönem sonu
     def _record_equity(self, k: int, t_close: int) -> None:
@@ -1249,6 +1260,9 @@ def prepare_backtest(cfg, client, days: float = 30, max_symbols: int = 40,
     notes: List[str] = []
 
     # --- semboller
+    coins = rotation_coin_list(cfg) if strategy_class(cfg.strategy).is_rotation else ()
+    if symbols is None and coins:   # Büyük coin trendi: yalnızca seçilen coinler indirilir
+        symbols = [c + cfg.quote_asset for c in coins]
     if symbols is None:
         if strategy_class(cfg.strategy).is_rotation and max_symbols < cfg.rotation_universe:
             notes.append(f"Rotasyon evreni (ROTATION_UNIVERSE={cfg.rotation_universe}) için {max_symbols} yerine "
@@ -1482,6 +1496,7 @@ SWEEP_FIELDS: Dict[str, Tuple[str, type, Optional[str]]] = {
     "BREAKEVEN_FLOOR_PCT": ("breakeven_floor_pct", float, None),
     "BACKUP_STOP_PCT": ("backup_stop_pct", float, None),
     "ROTATION_UNIVERSE": ("rotation_universe", int, None),
+    "ROTATION_COINS": ("rotation_coins", str, None),
     "MR_BAND_STD": ("mr_band_std", float, "Bant"),
     "MR_UNIVERSE": ("mr_universe", int, None),
     "RSI_DIV_OVERSOLD": ("rsi_div_oversold", float, "RSIdip"),
@@ -2462,8 +2477,10 @@ TOURNAMENT_EXIT_NOTES = {
     "trend": "Kâr Al +%12, Zarar Kes -%6, izleyen stop +%8 → +%4, en fazla 5 gün (az ama büyük kazanç)",
 }
 TOURNAMENT_ROTATIONS: Dict[str, Settings] = {
-    "haftalık rotasyon": {},                                   # .env'deki ROTATION_* ayarları
-    "en hacimli coin trendi": {"ROTATION_TOP_N": 1, "ROTATION_UNIVERSE": 1},   # Genelde BTC: trend varken tut
+    "haftalık rotasyon": {"ROTATION_COINS": ""},               # .env'deki ROTATION_* ayarları, en hacimli coinler
+    # Büyük coin trendi: trend varken tut, yokken USDT'de bekle (BTC/ETH: ikisinden güçlü olanı)
+    "BTC trendi": {"ROTATION_TOP_N": 1, "ROTATION_COINS": "BTC"},
+    "BTC/ETH trendi": {"ROTATION_TOP_N": 1, "ROTATION_COINS": "BTC,ETH"},
 }
 
 
@@ -2524,7 +2541,7 @@ def run_tournament(cfg, client, days: float = 365, max_symbols: int = 40, spread
     rotation_data: Optional[BacktestData] = None
     rot_base: Settings = {"STRATEGY": "rotation", **{k: v for k, v in PROFILES["rotation"].items()}}
     try:
-        rotation_data = prepare_backtest(replace(cfg, strategy="rotation"), client, days=days,
+        rotation_data = prepare_backtest(replace(cfg, strategy="rotation", rotation_coins=""), client, days=days,
                                          max_symbols=max(max_symbols, cfg.rotation_universe), cache_dir=cache_dir,
                                          progress=say, end_time_ms=end_time_ms)
     except Exception as exc:  # noqa: BLE001 - rotasyon verisi alınamazsa saatlik sonuçlar yine gösterilsin
@@ -2550,8 +2567,9 @@ def plan_reject_text(rejects: Dict[str, int], cfg) -> str:
     text = f"alım {sum(rejects.values())} kez reddedildi (en sık neden: \"{why}\")"
     if why == DUST_REASON:
         text += (f": sermaye ({fmt_usdt(cfg.start_capital)} {cfg.quote_asset}) bu coinlerin LOT adımına küçük geliyor, "
-                 f"satışta kalacak toz MAX_DUST_PCT sınırını (%{cfg.max_dust_pct:g}) aşıyor. Canlı bot da almaz; "
-                 "daha büyük sermayeyle deneyin (Telegram'da 💼 Sermaye, komut satırında --sermaye)")
+                 f"satışta kalacak toz MAX_DUST_PCT sınırını (%{cfg.max_dust_pct:g}) aşıyor. Canlı bot da almaz. "
+                 "Komisyonu BNB ile ödüyorsanız BNB_FEES=true yapın (coin azalmaz, toz kalmaz); ya da daha büyük "
+                 "sermayeyle deneyin (Telegram'da 💼 Sermaye, komut satırında --sermaye)")
     return text
 
 
@@ -2609,8 +2627,10 @@ def format_tournament_report(result: TournamentResult, cfg, spread_pct: float = 
         "             swing = çok günlük zirve kırılımı | rotation = haftalık momentum rotasyonu (günlük mumlar)",
     ]
     lines += [f"   Çıkış: {name} = {note}" for name, note in TOURNAMENT_EXIT_NOTES.items()]
-    lines += ["   Çıkış: haftalık rotasyon = .env'deki ROTATION_* ayarları | en hacimli coin trendi = genelde BTC; "
-              "momentum pozitif ve BTC 50 günlük ortalamanın üstündeyken tutar", LINE]
+    lines += ["   Çıkış: haftalık rotasyon = .env'deki ROTATION_* ayarları (en hacimli coinler) | BTC trendi = "
+              f"{cfg.rotation_lookback_days} günlük momentum pozitif ve BTC {cfg.rotation_btc_ma_days} günlük "
+              "ortalamanın üstündeyken BTC'yi tutar, değilse USDT'de bekler | BTC/ETH trendi = aynı kuralla ikisinden "
+              "güçlü olanı tutar", LINE]
     lines += _kill_lines([t.row for t in rows], cfg, "birleşimde")
     lines += [f"⚠️ {t.entry} + {t.exit}: hiç işlem açılmadı, sinyal geldiği halde {plan_reject_text(t.rejects, cfg)}."
               for t in rows if t.row.trades == 0 and t.rejects]

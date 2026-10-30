@@ -108,17 +108,24 @@ PRESETS: Dict[str, Tuple[str, Tuple[Dict[str, str], ...]]] = {
                                                                 ("8", "10", "15", "20", "30"))),
     "score": ("🏅 En düşük sinyal puanı (MIN_SIGNAL_SCORE)", tuple(
         {"MIN_SIGNAL_SCORE": v} for v in ("0", "10", "12", "14", "15", "16", "17", "18", "20"))),
+    # Büyük coin trendi (STRATEGY=rotation): yalnızca BTC / ETH; trend varken tutar, yokken USDT'de bekler
+    "coins": ("🪙 Rotasyon: büyük coin trendi (ROTATION_COINS)", (
+        {"ROTATION_COINS": "", "ROTATION_TOP_N": "3"}, {"ROTATION_COINS": "BTC", "ROTATION_TOP_N": "1"},
+        {"ROTATION_COINS": "BTC,ETH", "ROTATION_TOP_N": "1"}, {"ROTATION_COINS": "BTC,ETH", "ROTATION_TOP_N": "2"})),
     "stale": ("🧊 Takılan işlem çıkışı (dk)", tuple({"STALE_EXIT_MINUTES": v} for v in ("0", "60", "120", "240"))),
     "lcool": ("⏳ Zarardan sonra coine bekleme (dk)", tuple({"LOSS_COOLDOWN_MINUTES": v} for v in
                                                             ("0", "240", "720", "1440"))),
 }
-PRESET_NAMES: Dict[str, Tuple[str, ...]] = {"prof": tuple(TOURNAMENT_EXITS)}   # Değer yerine ad gösterilenler
+PRESET_NAMES: Dict[str, Tuple[str, ...]] = {    # Değer yerine ad gösterilenler
+    "prof": tuple(TOURNAMENT_EXITS),
+    "coins": ("kapalı (en hacimli 3)", "BTC", "BTC/ETH (güçlü olan)", "BTC + ETH (ikisi)"),
+}
 TOGGLES: Tuple[Tuple[str, str], ...] = (
     ("VWAP_FILTER", "VWAP"), ("FAKEOUT_FILTER", "Fitil"), ("OVERHEAT_FILTER", "Isınma"), ("BTC_FILTER", "BTC sig."),
     ("REGIME_FILTER", "Rejim"), ("REGIME_SKIP_WEAK", "Zayıfta alma"), ("TRAILING_DYNAMIC", "Dinamik iz."),
     ("ATR_TARGETS", "ATR hedef"), ("TP_EXTEND", "Hedef uzatma"), ("TRAILING_BUY", "Kademeli alım"),
     ("RSI_DIV_FILTER", "Uyumsuzluk teyidi"), ("RSI_DIV_TREND_FILTER", "Uyumsuzlukta trend"),
-    ("PRIOR_TREND_FILTER", "Önceki trend"),
+    ("PRIOR_TREND_FILTER", "Önceki trend"), ("BNB_FEES", "Komisyon BNB'den"),
 )
 MODES: Tuple[Tuple[str, str], ...] = (("DCA_MODE", "DCA"), ("PYRAMID_MODE", "Piramit"),
                                       ("TIME_EXIT_MODE", "Süre kuralı"), ("ESCAPE_MODE", "Erken kaçış"))

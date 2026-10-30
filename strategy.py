@@ -69,7 +69,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from binance_client import BinanceClient, RateLimitError
-from config import STRATEGY_NAMES
+from config import STRATEGY_NAMES, fee_from_coin, rotation_coin_list
 from rotation import RotationPlan, btc_trend, momentum_pct, plan_rotation
 from exchange import SymbolRules
 from entry_filters import candle_reject, prior_trend_reject
@@ -315,8 +315,8 @@ class ReboundStrategy:
             # Fiyat adımı çok kabaysa (düşük fiyatlı coinler) hedefler hassas yakalanamaz
             if r.tick_size > 0 and float(r.tick_size) / last > 0.002:
                 continue
-            # Küçük bakiyede LOT adımı büyükse satışta ciddi 'toz' kaybı olur
-            if invest_hint > 0 and r.step_value(last) / invest_hint * 100 > cfg.max_dust_pct:
+            # Küçük bakiyede LOT adımı büyükse satışta ciddi 'toz' kaybı olur (komisyon BNB'den ödeniyorsa olmaz)
+            if invest_hint > 0 and fee_from_coin(cfg) and r.step_value(last) / invest_hint * 100 > cfg.max_dust_pct:
                 continue
             out.append(t)
         out.sort(key=lambda x: self.candidate_key(float(x["priceChangePercent"]), float(x["quoteVolume"])))
@@ -1096,13 +1096,17 @@ class RotationStrategy(ReboundStrategy):
         return [float(r[4]) for r in rows[:-1]]
 
     def universe(self, tickers: List[dict], rules: Dict[str, SymbolRules], excluded_symbols: Set[str]) -> List[str]:
-        """Sıralamaya girecek en hacimli ROTATION_UNIVERSE parite (stabil / fiat / kaldıraçlı / ince fiyat adımlı hariç)."""
+        """Sıralamaya girecek en hacimli ROTATION_UNIVERSE parite (stabil / fiat / kaldıraçlı / ince fiyat adımlı
+        hariç). ROTATION_COINS verilmişse (ör. BTC,ETH) yalnızca o coinler sıralanır (büyük coin trendi)."""
         cfg = self.cfg
+        coins = rotation_coin_list(cfg)
         rows: List[Tuple[float, str]] = []
         for t in tickers:
             symbol = t.get("symbol", "")
             r = rules.get(symbol)
             if r is None or symbol in excluded_symbols or r.base_asset in cfg.excluded_assets:
+                continue
+            if coins and r.base_asset not in coins:
                 continue
             if r.base_asset.endswith(LEVERAGED_SUFFIXES):
                 continue
@@ -1116,7 +1120,7 @@ class RotationStrategy(ReboundStrategy):
                 continue
             rows.append((quote_vol, symbol))
         rows.sort(key=lambda x: (-x[0], x[1]))
-        return [sym for _, sym in rows[: cfg.rotation_universe]]
+        return [sym for _, sym in (rows if coins else rows[: cfg.rotation_universe])]
 
     def risk_on(self) -> Tuple[Optional[bool], str]:
         """BTC trend filtresi: (olumlu mu, açıklama)."""

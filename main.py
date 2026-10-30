@@ -607,7 +607,7 @@ def _start_bot(cfg, store, client, notifier, log, env_path=None) -> int:
         store.save(state)
 
     if cfg.is_paper:
-        exchange = PaperExchange(client, state.paper_balances, cfg.quote_asset, cfg.fee_rate)
+        exchange = PaperExchange(client, state.paper_balances, cfg.quote_asset, cfg.fee_rate, cfg.bnb_fees)
     else:
         exchange = LiveExchange(client, cfg.quote_asset, cfg.fee_rate)
 

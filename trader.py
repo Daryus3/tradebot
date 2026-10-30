@@ -142,6 +142,7 @@ class TradingBot:
         self.fee_info: Optional[FeeInfo] = None  # Son okunan komisyon / BNB durumu (/ayarlar bunu gösterir)
         self._fee_noted_rate: Optional[float] = None  # "FEE_RATE temkinli" bilgisi bu oran için verildi
         self._bnb_empty_noted = False     # "BNB yetmiyor" bilgisi bu süreçte verildi
+        self._bnb_fees_noted = False      # "BNB_FEES açık ama komisyon BNB'den kesilmiyor" uyarısı verildi
         self._next_bnb_low_notice = 0.0   # "BNB azalıyor" bilgisi en erken bu anda tekrar verilir
         self._announced = False  # Açılış mesajları ağ hatasıyla tekrarlanan denemelerde yinelenmesin
         self._next_kill_retry = 0.0
@@ -1340,6 +1341,7 @@ class TradingBot:
             info = self.refresh_fee_info()
             if info is not None:
                 self._fee_rate_notice(info)
+                self._bnb_fees_notice(info)
                 if self.cfg.bnb_fee_check:
                     self._bnb_balance_notice(info)
         except Exception as exc:  # noqa: BLE001 - izleme hatası işlemleri etkilemesin
@@ -1392,6 +1394,20 @@ class TradingBot:
                 f"Gerçek işlem komisyonu {fmt_rate(real)}, ayardaki FEE_RATE ise {fmt_rate(cfg_rate)} ({why}). "
                 f"Net kâr al / zarar kes hesapları fazla iyimser: satışlar hedeflenenden biraz düşük kârla "
                 f"veya biraz büyük zararla gerçekleşir. {advice}"), cooldown_sec=FEE_WARN_COOLDOWN_SEC)
+
+    def _bnb_fees_notice(self, info: FeeInfo) -> None:
+        """BNB_FEES=true (toz sınırı uygulanmıyor) ama komisyon BNB'den kesilmiyorsa bir kez uyarır: komisyon alınan
+        coinden kesilir ve BTC gibi LOT adımı büyük coinlerde satılamayan küçük bir kalıntı (toz) oluşur."""
+        if not self.cfg.bnb_fees or self._bnb_fees_noted:
+            return
+        if info.bnb_enabled and info.covers(self.position_size()):
+            return
+        self._bnb_fees_noted = True
+        why = ("Binance'te \"BNB ile komisyon öde\" kapalı" if not info.bnb_enabled
+               else "Spot'taki BNB bir işlemin komisyonuna yetmiyor")
+        self.notifier.send(Messages.warning(
+            f"BNB_FEES=true ama {why}: komisyon alınan coinden kesilir, BTC gibi pahalı coinlerde satılamayan küçük "
+            "bir kalıntı (toz) kalabilir. Binance'te biraz BNB alın ya da .env dosyasında BNB_FEES=false yapın."))
 
     def _bnb_balance_notice(self, info: FeeInfo) -> None:
         """BNB indirimi açıkken BNB azaldıysa/bittiyse SESSİZ bilgi verir. Bot otomatik BNB ALMAZ.

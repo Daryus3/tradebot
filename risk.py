@@ -19,7 +19,7 @@ from dataclasses import asdict, dataclass, field, fields
 from enum import Enum
 from typing import Dict, List, Optional
 
-from config import is_rotation, strategy_family
+from config import fee_from_coin, is_rotation, strategy_family
 from exchange import SymbolRules, floor_decimals, to_dec
 
 
@@ -305,7 +305,7 @@ def plan_entry(available_usdt: float, rules: SymbolRules, price: float, cfg) -> 
         return EntryPlan(False, reason="Miktar LOT_SIZE minimumunun altında")
 
     dust_pct = rules.step_value(price) / invest * 100
-    if dust_pct > cfg.max_dust_pct:
+    if fee_from_coin(cfg) and dust_pct > cfg.max_dust_pct:   # BNB ile ödenen komisyonda coin azalmaz: toz kalmaz
         return EntryPlan(False, reason=f"LOT adımı çok büyük: satışta ~%{dust_pct:.2f} toz kaybı olur "
                                        f"(sınır %{cfg.max_dust_pct})")
 

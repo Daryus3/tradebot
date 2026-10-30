@@ -240,6 +240,7 @@ geçmiş veriyle etkisini `--tara-ab` gösterir; "sorarak" hali geçmiş veriyle
 | `mean_revert` | **Ortalamaya dönüş:** yalnızca en hacimli `MR_UNIVERSE` (20) coinde, yükseliş trendindeki (1 saatlik EMA50 > EMA200) coinin saatlik kapanışı 20 saatlik ortalamanın `MR_BAND_STD` (2) standart sapma altına inince alır; küçük hedefle satar (önerilen: TP 1.5, SL 5, süre 2880 dk, izleyen stop 1 → 0.5, başabaş 0.7 → 0.2). Kazanma oranı yüksek olur; kâr, kayıpların kazançları silmemesine bağlıdır |
 | `rsi_divergence` | **Pozitif RSI uyumsuzluğu:** en hacimli `RSI_DIV_UNIVERSE` (30) coinde fiyat daha düşük dip yaparken RSI daha yüksek dip yapınca (ilk dipte RSI ≤ `RSI_DIV_OVERSOLD`, ikinci dipte en az `RSI_DIV_RISE` puan yüksek) ve son saatlik mum dönüşü **teyit edince** (yeşil, dipten beri görülen en yüksek seviyenin üstünde, ortalamanın üstünde hacimle) alır. `RSI_DIV_TREND_FILTER=true`: yalnızca fiyat 1 saatlik EMA200'ün üstündeyken. Çıkışlar `mean_revert` ile aynı grup (küçük hedef, 2 gün) |
 | `rotation` | Haftalık momentum rotasyonu: en hacimli 30 coinden son 4 haftanın en güçlü 3'ünü tutar, BTC 50 günlük ortalamasının altına inince USDT'ye geçer (`STOP_LOSS_PCT=20`, `BACKUP_STOP_PCT=25` önerilir) |
+| `rotation` + `ROTATION_COINS` | **Büyük coin trendi:** yalnızca seçilen coinler. `ROTATION_COINS=BTC`, `ROTATION_TOP_N=1`: BTC'nin son 4 haftası artıda ve BTC 50 günlük ortalamasının üstündeyken BTC'yi tutar, değilse USDT'de bekler (haftada bir bakar; trend bozulunca ertesi gün satar). `ROTATION_COINS=BTC,ETH`: ikisinden güçlü olanı (`ROTATION_TOP_N=2`: ikisini birden). Yılda birkaç işlem yapar; amaç sık al-sat değil, büyük düşüşlerin dışında kalmak |
 
 `--strateji` yalnızca o backtest için geçerlidir; botun kullandığı strateji `STRATEGY` ayarıdır. Swing,
 mean_revert ve rsi_divergence'ta backtest varsayılanı 365 gün, rotasyonda 3 yıldır (`--strateji swing
@@ -257,7 +258,7 @@ kurallarıyla dener ve kazanma oranı, ortalama kazanç / kayıp, işlem başı 
 - **Çıkış:** küçük hedef (+%1.5 / −%5, 2 gün — kazanma oranı yüksek), dengeli (+%3 / −%3, 3 gün),
   trend (+%12 / −%6, izleyen stop, 5 gün)
 - **Piyasa filtresi:** zayıf piyasada alım yap / yapma (`REGIME_SKIP_WEAK`)
-- **Rotasyon** (günlük mumlar): haftalık momentum rotasyonu ve "en hacimli coinin (genelde BTC) trendini tut"
+- **Rotasyon** (günlük mumlar): haftalık momentum rotasyonu, **BTC trendi** ve **BTC/ETH trendi** (büyük coin trendi)
 - Kıyas: aynı dönemde BTC'yi alıp tutmak
 
 ✅ işaretli satır (iki yarıda kârlı, ≥30 işlem, şanstan ayırt edilebiliyor) varsa rapor `.env`'ye yazılacak satırları
@@ -268,9 +269,12 @@ Bir birleşimi kill-switch açık **normal backtest**le (işlem listesi, çıkı
 Telegram'da: 🧭 Strateji → ör. `mean_revert`, ⚙️ Test ayarları → 🧩 Çıkış profili → `trend`, gerekirse "Zayıfta alma".
 Strateji 5 dk'dan 1 saatlik gruba geçince `MAX_24H_GAIN_PCT` turnuvadaki gibi en az 25 olur.
 
-Hiç işlem açmayan satırın nedeni raporda yazılır. Küçük sermayede en sık neden **toz sınırıdır**: LOT adımının
-değeri (BTC'de 0.00001 BTC) sermayenin `MAX_DUST_PCT`'sinden (%0.5) büyükse coin alınmaz (canlıda da). Örneğin BTC
-~78.000 $ iken bunun için ~160 USDT gerekir; daha az sermayeyle "en hacimli coin trendi" (BTC) hiç işlem açamaz.
+Hiç işlem açmayan satırın nedeni raporda yazılır. Küçük sermayede en sık neden **toz sınırıdır**: komisyon alınan
+coinden kesilince satışta LOT adımının (BTC'de 0.00001 BTC) altında bir kalıntı kalır; bu adımın değeri sermayenin
+`MAX_DUST_PCT`'sinden (%0.5) büyükse coin alınmaz (canlıda da). Örneğin BTC ~78.000 $ iken bunun için ~160 USDT
+gerekir. Komisyonu **BNB ile** ödüyorsanız coin azalmaz, toz kalmaz: `BNB_FEES=true` ile bot (canlı, test modu ve
+backtest) BTC / ETH'yi küçük sermayeyle de alır. Telegram'da teste özel: ⚙️ Test ayarları → "Komisyon BNB'den";
+büyük coin trendi için 🧭 Strateji → `rotation`, ⚙️ Test ayarları → 🪙 Rotasyon: büyük coin trendi.
 
 ---
 
