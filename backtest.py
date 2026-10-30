@@ -81,6 +81,10 @@ REASON_LABELS = {
     END_REASON: "🏁 Dönem Sonu",
 }
 
+# Alım planı reddi istatistikleri (stats["plan:<neden>"]); toz nedeni küçük sermayede pahalı coinleri hiç aldırmaz
+PLAN_PREFIX = "plan:"
+DUST_REASON = "LOT adımı çok büyük"
+
 Progress = Optional[Callable[[str], None]]
 
 
@@ -804,7 +808,7 @@ class _Simulator:
             entry_price = price * self.entry_factor
             plan = plan_entry(min(pb.available, self.cash), rules, entry_price, cfg)
             if not plan.ok:
-                self.stats["plan_red"] += 1
+                self._plan_rejected(plan.reason)
                 continue
             reserve = round(max(0.0, pb.available - plan.quote_amount), 2) if cfg.capital_usage_pct < 100 else 0.0
             if self._open(pb.signal, rules, plan.quote_amount, entry_price, t_close, k=k, reserve=reserve):
@@ -983,7 +987,7 @@ class _Simulator:
             available = min(budget, self.cash)
             plan = plan_entry(available, rules, entry_price, cfg)
             if not plan.ok:
-                self.stats["plan_red"] += 1
+                self._plan_rejected(plan.reason)
                 if "bakiye" in plan.reason.lower():
                     return
                 continue
@@ -1077,7 +1081,7 @@ class _Simulator:
             entry_price = s.c[k] * self.entry_factor
             entry = plan_entry(min(budget, self.cash), s.rules, entry_price, cfg)
             if not entry.ok:
-                self.stats["plan_red"] += 1
+                self._plan_rejected(entry.reason)
                 if "bakiye" in entry.reason.lower():
                     break
                 continue   # Toz / LOT adımı: sıradakini dene (canlıda da)
@@ -1086,6 +1090,12 @@ class _Simulator:
                                                            "lookback_days": float(lookback)})
             if self._open(signal, s.rules, entry.quote_amount, entry_price, t_close):
                 self.stats["sinyal"] += 1
+
+    def _plan_rejected(self, reason: str) -> None:
+        """Alım planı reddi (bakiye, en az emir tutarı, LOT adımı / toz): nedeni sayısız haliyle de sayılır ki rapor
+        "neden hiç işlem yok?" sorusunu yanıtlayabilsin ("LOT adımı çok büyük: ~%1.2 ..." → "LOT adımı çok büyük")."""
+        self.stats["plan_red"] += 1
+        self.stats[PLAN_PREFIX + reason.split(":")[0].split(" (")[0].strip()] += 1
 
     def _prior_trend_ok(self, symbol: str, k: int) -> bool:
         """PRIOR_TREND_FILTER: k. mum kapanışında 1 gün ve 7 gün önceki kapanış (canlı: 1 saatlik mumlar). Yeterli
@@ -2465,6 +2475,7 @@ class TournamentRow:
     row: SweepRow
     avg_win_pct: float = 0.0
     avg_loss_pct: float = 0.0
+    rejects: Dict[str, int] = field(default_factory=dict)   # Alım planı red nedenleri (hiç işlem yoksa raporda)
 
 
 @dataclass
@@ -2486,7 +2497,7 @@ def _tournament_row(cfg, data: BacktestData, settings: Settings, spread_pct: flo
                    sum(t.pnl for t in first), sum(t.pnl for t in second), sm.profit_factor, sm.se_net_pct,
                    _kill_time(cfg, res))
     return TournamentRow(entry, exit_name, skip_weak, row, sum(wins) / len(wins) if wins else 0.0,
-                         sum(losses) / len(losses) if losses else 0.0)
+                         sum(losses) / len(losses) if losses else 0.0, plan_rejections(res.stats))
 
 
 def run_tournament(cfg, client, days: float = 365, max_symbols: int = 40, spread_pct: float = 0.05,
@@ -2524,6 +2535,24 @@ def run_tournament(cfg, client, days: float = 365, max_symbols: int = 40, spread
             rows.append(_tournament_row(cfg, rotation_data, settings, spread_pct, {}, "rotation", name, None))
             say(f"   ⏳ Turnuva {j}/{len(plan) + len(TOURNAMENT_ROTATIONS)}: {name}")
     return TournamentResult(rows, data, rotation_data, notes)
+
+
+def plan_rejections(stats: Optional[dict]) -> Dict[str, int]:
+    """Simülasyonda alım planının reddedilme nedenleri → sayı (bkz. _Simulator._plan_rejected)."""
+    return {k[len(PLAN_PREFIX):]: v for k, v in (stats or {}).items() if k.startswith(PLAN_PREFIX)}
+
+
+def plan_reject_text(rejects: Dict[str, int], cfg) -> str:
+    """'alım N kez reddedildi (en sık: ...)' + toz nedeniyse sermaye açıklaması. Boşsa ''."""
+    if not rejects:
+        return ""
+    why = max(rejects, key=lambda k: (rejects[k], k))
+    text = f"alım {sum(rejects.values())} kez reddedildi (en sık neden: \"{why}\")"
+    if why == DUST_REASON:
+        text += (f": sermaye ({fmt_usdt(cfg.start_capital)} {cfg.quote_asset}) bu coinlerin LOT adımına küçük geliyor, "
+                 f"satışta kalacak toz MAX_DUST_PCT sınırını (%{cfg.max_dust_pct:g}) aşıyor. Canlı bot da almaz; "
+                 "daha büyük sermayeyle deneyin (Telegram'da 💼 Sermaye, komut satırında --sermaye)")
+    return text
 
 
 def _tournament_mark(t: TournamentRow, tested: int) -> str:
@@ -2583,6 +2612,8 @@ def format_tournament_report(result: TournamentResult, cfg, spread_pct: float = 
     lines += ["   Çıkış: haftalık rotasyon = .env'deki ROTATION_* ayarları | en hacimli coin trendi = genelde BTC; "
               "momentum pozitif ve BTC 50 günlük ortalamanın üstündeyken tutar", LINE]
     lines += _kill_lines([t.row for t in rows], cfg, "birleşimde")
+    lines += [f"⚠️ {t.entry} + {t.exit}: hiç işlem açılmadı, sinyal geldiği halde {plan_reject_text(t.rejects, cfg)}."
+              for t in rows if t.row.trades == 0 and t.rejects]
 
     enough = [t for t in rows if t.row.enough_trades]
     if enough:
@@ -3137,6 +3168,10 @@ def format_backtest_report(result: BacktestResult, cfg) -> str:
         used = [f"{label}: {st[key]}" for key, label in smart.items() if st.get(key)]
         if used:
             lines.append("🧠 Akıllı yönetim: " + ", ".join(used))
+    rejects = plan_rejections(st)
+    if rejects:
+        lines.append(("⚠️ Hiç işlem açılmadı: sinyal" if not trades else "🧾 Sinyal") + " geldiği halde "
+                     + plan_reject_text(rejects, cfg) + ".")
 
     lines.append(LINE)
     if trades:

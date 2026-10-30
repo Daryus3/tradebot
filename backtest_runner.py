@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Sequence, Tuple
 
 from config import (BASE_DIR, DATA_DIR, SETTINGS_FILE, STRATEGY_NAMES, Config, ConfigError, is_long_horizon,
                     is_mean_reversion, is_rotation, with_strategy)
+from backtest import TOURNAMENT_EXIT_NOTES, TOURNAMENT_EXITS
 from logger import get_logger
 from runtime_settings import apply_overrides, format_value
 from telegram_bot import LINE, esc, fmt_duration
@@ -74,7 +75,10 @@ GRIDS: Dict[str, Tuple[str, str, Tuple[str, ...]]] = {
 # Yalnızca bu test için ayar değişiklikleri: grup → (ad, seçenekler: her biri {ANAHTAR: değer})
 PRESETS: Dict[str, Tuple[str, Tuple[Dict[str, str], ...]]] = {
     "tp": ("🎯 Kâr Al %", tuple({"TAKE_PROFIT_PCT": v} for v in
-                               ("1", "1.5", "2", "2.5", "3", "4", "5", "8", "10", "15", "25", "50"))),
+                               ("1", "1.5", "2", "2.5", "3", "4", "5", "8", "10", "12", "15", "25", "50"))),
+    # Turnuvadaki çıkış kuralları tek tıkla: turnuvada öne çıkan birleşimi normal backtest'le (kill-switch açık) denemek
+    "prof": ("🧩 Çıkış profili (turnuvadaki)", tuple({k: format_value(v) for k, v in exits.items()}
+                                                    for exits in TOURNAMENT_EXITS.values())),
     "sl": ("🛑 Zarar Kes %", tuple({"STOP_LOSS_PCT": v} for v in
                                   ("1", "1.5", "2", "3", "4", "5", "6", "8", "10", "15", "20"))),
     "tr": ("📈 İzleyen stop (başlar → satar)", tuple(
@@ -108,6 +112,7 @@ PRESETS: Dict[str, Tuple[str, Tuple[Dict[str, str], ...]]] = {
     "lcool": ("⏳ Zarardan sonra coine bekleme (dk)", tuple({"LOSS_COOLDOWN_MINUTES": v} for v in
                                                             ("0", "240", "720", "1440"))),
 }
+PRESET_NAMES: Dict[str, Tuple[str, ...]] = {"prof": tuple(TOURNAMENT_EXITS)}   # Değer yerine ad gösterilenler
 TOGGLES: Tuple[Tuple[str, str], ...] = (
     ("VWAP_FILTER", "VWAP"), ("FAKEOUT_FILTER", "Fitil"), ("OVERHEAT_FILTER", "Isınma"), ("BTC_FILTER", "BTC sig."),
     ("REGIME_FILTER", "Rejim"), ("REGIME_SKIP_WEAK", "Zayıfta alma"), ("TRAILING_DYNAMIC", "Dinamik iz."),
@@ -824,10 +829,12 @@ class BacktestMenu:
         title, options = PRESETS[group]
         eff = self._effective_or(base_config(draft, self.bot.cfg), draft)
 
-        def label(option: Dict[str, str]) -> str:
+        def label(option: Dict[str, str], i: int) -> str:
             current = all(format_value(getattr(eff, k.lower())) == v for k, v in option.items())
             values = [v for k, v in option.items() if k != "BREAKEVEN_ENABLED"]
-            if option.get("BREAKEVEN_ENABLED") == "false":
+            if group in PRESET_NAMES:
+                text = PRESET_NAMES[group][i]
+            elif option.get("BREAKEVEN_ENABLED") == "false":
                 text = "kapalı"
             elif option.get("MAX_HOLD_MINUTES") == "0":
                 text = "sınırsız"
@@ -838,5 +845,9 @@ class BacktestMenu:
                 text = " → ".join(values)
             return ("✅ " if current else "") + text
 
-        buttons = [(label(o), f"bt:ovv:{group}:{i}") for i, o in enumerate(options)]
-        self._pick(mid, title, buttons, "<i>Yalnızca bu backtest için.</i>", back="bt:ov", per_row=3)
+        buttons = [(label(o, i), f"bt:ovv:{group}:{i}") for i, o in enumerate(options)]
+        note = "<i>Yalnızca bu backtest için.</i>"
+        if group == "prof":
+            note = "\n".join(f"• <b>{esc(name)}</b>: {esc(text)}" for name, text in TOURNAMENT_EXIT_NOTES.items()) + \
+                "\n" + note
+        self._pick(mid, title, buttons, note, back="bt:ov", per_row=3)

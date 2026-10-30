@@ -264,6 +264,14 @@ kurallarıyla dener ve kazanma oranı, ortalama kazanç / kayıp, işlem başı 
 verir. **Kazanma oranı tek başına kârlılık değildir:** %70 kazanan işlem, kayıplar kazançların 3 katıysa yine zarar
 ettirir; kararı "İşl.başı" sütunu verir. Seçilen birleşimi `--bitis` ile önceki yılda doğrulayın ve test modunda izleyin.
 
+Bir birleşimi kill-switch açık **normal backtest**le (işlem listesi, çıkış nedenleri, grafik) tekrar görmek için
+Telegram'da: 🧭 Strateji → ör. `mean_revert`, ⚙️ Test ayarları → 🧩 Çıkış profili → `trend`, gerekirse "Zayıfta alma".
+Strateji 5 dk'dan 1 saatlik gruba geçince `MAX_24H_GAIN_PCT` turnuvadaki gibi en az 25 olur.
+
+Hiç işlem açmayan satırın nedeni raporda yazılır. Küçük sermayede en sık neden **toz sınırıdır**: LOT adımının
+değeri (BTC'de 0.00001 BTC) sermayenin `MAX_DUST_PCT`'sinden (%0.5) büyükse coin alınmaz (canlıda da). Örneğin BTC
+~78.000 $ iken bunun için ~160 USDT gerekir; daha az sermayeyle "en hacimli coin trendi" (BTC) hiç işlem açamaz.
+
 ---
 
 ## 📊 Backtest nasıl okunur?

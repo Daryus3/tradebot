@@ -179,6 +179,29 @@ def test_entry_sweep_settings_can_be_tested_and_applied(bt_bot):
     assert bot.cfg.max_24h_drop_pct == 15.0
 
 
+def test_tournament_exit_profile_preset(bt_bot, tmp_path):
+    """Turnuvadaki çıkış kuralları tek tıkla: öne çıkan birleşim (mean_revert + trend + zayıf piyasada alma) normal
+    backtest'le, kill-switch açık, aynı ayarlarla denenebilmeli."""
+    bot, notes, _ = bt_bot
+    press(bot, "bt:strat:mean_revert")
+    press(bot, "bt:ov")
+    assert "bt:ovp:prof" in buttons(notes)
+    press(bot, "bt:ovp:prof")
+    labels = [label for row in notes.menus[-1][1] for label, _cb in row]
+    assert labels[:3] == ["✅ küçük hedef", "dengeli", "trend"]        # mean_revert'in kendi çıkışları = küçük hedef
+    assert "Kâr Al +%12" in notes.menus[-1][0]
+    press(bot, "bt:ovv:prof:2")
+    press(bot, "bt:ovt:REGIME_SKIP_WEAK")
+    draft = BacktestDraft.from_dict(bot.state.backtest_draft)
+    assert draft.overrides == {"TAKE_PROFIT_PCT": "12", "STOP_LOSS_PCT": "6", "TRAILING_ACTIVATION_PCT": "8",
+                               "TRAILING_FLOOR_PCT": "4", "MAX_HOLD_MINUTES": "7200", "BREAKEVEN_TRIGGER_PCT": "5",
+                               "BREAKEVEN_FLOOR_PCT": "1", "REGIME_SKIP_WEAK": "true"}
+    eff = br.effective_config(draft, bot.cfg)
+    assert eff.strategy == "mean_revert" and eff.max_24h_gain_pct >= 25 and eff.regime_skip_weak
+    args = build_args(draft, bot, tmp_path, date(2026, 10, 30))
+    assert args[args.index("--strateji") + 1] == "mean_revert" and "TAKE_PROFIT_PCT=12" in args
+
+
 def test_strategy_change_rejected_when_overrides_conflict(bt_bot):
     bot, notes, _ = bt_bot
     bot.state.backtest_draft = {"overrides": {"STOP_LOSS_PCT": "11"}}   # Yedek stop (12) altında: geçerli

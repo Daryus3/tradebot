@@ -193,6 +193,20 @@ def test_rotation_backtest_respects_listing_filter(rcfg, fake_client, tmp_path):
     assert result.stats.get("yeni_coin", 0) > 0
 
 
+def test_rotation_report_explains_why_nothing_was_bought(rcfg, fake_client, tmp_path):
+    """Sermaye coinin LOT adımına küçükse (toz sınırı) hiç alım olmaz: rapor nedenini yazar (turnuvadaki BTC trendi
+    satırı küçük sermayede bu yüzden 0 işlem açar)."""
+    cfg = replace(rcfg, rotation_top_n=1, rotation_lookback_days=14, start_capital=11.0, max_dust_pct=0.0001)
+    data = _prepare(cfg, DailyClient(fake_client, _series()).client, tmp_path)
+    result = simulate(cfg, data)
+    assert not result.trades and result.stats["plan_red"] > 0
+    assert backtest.plan_rejections(result.stats) == {backtest.DUST_REASON: result.stats["plan_red"]}
+    report = backtest.format_backtest_report(result, cfg)
+    assert "⚠️ Hiç işlem açılmadı: sinyal geldiği halde alım" in report and "MAX_DUST_PCT" in report
+    normal = backtest.format_backtest_report(simulate(replace(cfg, max_dust_pct=0.5), data), cfg)
+    assert "reddedildi" not in normal                                 # Alınabiliyorsa satır yok
+
+
 def test_rotation_sweeps_and_advice(rcfg):
     combos = sweep_combos(rcfg)
     assert combos[0] == ({"STOP_LOSS_PCT": 20.0, "ROTATION_DAYS": 7}, True)

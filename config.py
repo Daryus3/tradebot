@@ -846,16 +846,12 @@ def _setting_notes(cfg: Config) -> List[str]:
         if filters:
             notes.append(f"STRATEGY={cfg.strategy} ile şu giriş filtreleri sinyalleri gereksiz yere eleyebilir: "
                          f"{'; '.join(filters)}.")
-    if is_mean_reversion(cfg.strategy):
-        odd = []
-        if cfg.take_profit_pct > 5:
-            odd.append(f"TAKE_PROFIT_PCT={cfg.take_profit_pct:g}")
-        if cfg.max_hold_minutes <= 0:
-            odd.append("MAX_HOLD_MINUTES=0 (süre sınırı yok)")
-        if odd:
-            notes.append(f"STRATEGY={cfg.strategy} düşüş sonrası dönüşü küçük hedefle (saatler-2 gün) alır; şu "
-                         f"ayarlar ona uymuyor: {', '.join(odd)}. Önerilen: " + " ".join(
-                             f"{k}={v:g}" for k, v in MEAN_REVERSION_PROFILE.items()))
+    # Büyük Kâr Al (ör. turnuvadaki "trend" çıkışları: +%12 / 5 gün) uyarılmaz: iki ayrı 3 yıllık dönemde
+    # ortalamaya dönüşte küçük hedeften iyi sonuç verdi. Süre sınırının hiç olmaması ise dönmeyen düşüşte bekletir.
+    if is_mean_reversion(cfg.strategy) and cfg.max_hold_minutes <= 0:
+        notes.append(f"STRATEGY={cfg.strategy} düşüş sonrası dönüşü saatler-günler içinde bekler; MAX_HOLD_MINUTES=0 "
+                     "(süre sınırı yok) dönmeyen düşüşte pozisyonu süresiz tutar. Önerilen: " + " ".join(
+                         f"{k}={v:g}" for k, v in MEAN_REVERSION_PROFILE.items()))
     if is_rotation(cfg.strategy):
         if cfg.stop_loss_pct < 10:
             notes.append(f"STRATEGY=rotation coinleri haftalarca tutar; STOP_LOSS_PCT={cfg.stop_loss_pct:g} haftalık "
@@ -925,7 +921,8 @@ def with_strategy(cfg: Config, strategy: str) -> Tuple[Config, bool]:
     if profile:
         # Profildeki türle (1.5 → float, 2880 → int): mevcut değerin türüne çevirmek 1.5'i 1'e kırpabilirdi
         changes.update({PROFILE_ATTRS[k]: v for k, v in PROFILES[family].items()})
-        if family == "swing":
-            # Üst sınır: .env'deki daha geniş değer korunur (yalnızca 5 dk için daraltılmışsa genişletilir)
+        if family in ("swing", "mr"):
+            # Üst sınır: .env'deki daha geniş değer korunur (yalnızca 5 dk için daraltılmışsa genişletilir; turnuva
+            # da 1 saatlik stratejileri bu sınırla dener, normal backtest aynı sonucu versin)
             changes["max_24h_gain_pct"] = max(cfg.max_24h_gain_pct, SWING_EXIT_PROFILE["MAX_24H_GAIN_PCT"])
     return replace(cfg, **changes), profile

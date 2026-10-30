@@ -80,8 +80,11 @@ def test_mean_revert_config_profile_and_notes(cfg, tmp_path, monkeypatch):
     assert mr.stop_loss_pct == 5 and mr.max_hold_minutes == 2880 and mr.backup_stop_pct == 8
     assert with_strategy(mr, "mean_revert") == (mr, False)
     assert not _setting_notes(mr)
-    notes = _setting_notes(replace(mr, take_profit_pct=12, max_hold_minutes=0))
-    assert notes and "TAKE_PROFIT_PCT=12" in notes[0] and "süre sınırı yok" in notes[0]
+    assert not _setting_notes(replace(mr, take_profit_pct=12, max_hold_minutes=7200))   # Turnuvadaki "trend" çıkışı
+    notes = _setting_notes(replace(mr, max_hold_minutes=0))
+    assert notes and "süre sınırı yok" in notes[0]
+    narrow, _ = with_strategy(replace(cfg, max_24h_gain_pct=12.0), "mean_revert")
+    assert narrow.max_24h_gain_pct == 25.0                 # 5 dk için daraltılmış sınır turnuvadaki gibi genişler
     for key, value in (("MR_BAND_STD", "0"), ("MR_UNIVERSE", "0")):
         monkeypatch.setenv(key, value)
         with pytest.raises(ConfigError):
@@ -151,6 +154,13 @@ def test_tournament_tries_every_combination_and_reports(cfg, fake_client, tmp_pa
     assert "STRATEJİ TURNUVASI" in text and "Kaz%" in text and "Ort.kayıp" in text
     assert f"--turnuva --gun {DAYS:g} --bitis" in text
     assert "kârlılığı bu belirler, kazanma oranı değil" in text
+    # Hiç işlem açmayan satır: neden yazılır (ör. küçük sermayede BTC'nin LOT adımı / toz sınırı)
+    empty = by[("mean_revert", "küçük hedef", False)]
+    empty.row = backtest.SweepRow(empty.row.settings, False, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, None)
+    empty.rejects = {backtest.DUST_REASON: 12}
+    text = format_tournament_report(result, cfg)
+    assert ("⚠️ mean_revert + küçük hedef: hiç işlem açılmadı, sinyal geldiği halde alım 12 kez reddedildi (en sık "
+            'neden: "LOT adımı çok büyük")') in text
     # CSV de yazılabilir (tüm ayar anahtarları bilinen ayarlar)
     path = backtest.save_sweep_csv([t.row for t in result.rows], tmp_path / "t.csv")
     assert len(path.read_text(encoding="utf-8-sig").splitlines()) == len(result.rows) + 1

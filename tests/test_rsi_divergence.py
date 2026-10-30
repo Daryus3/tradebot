@@ -108,7 +108,8 @@ def test_divergence_config_family_and_validation(cfg, tmp_path, monkeypatch):
     div, applied = with_strategy(replace(cfg, take_profit_pct=50), "rsi_divergence")
     assert applied and div.take_profit_pct == MEAN_REVERSION_PROFILE["TAKE_PROFIT_PCT"] and div.max_hold_minutes == 2880
     assert not _setting_notes(div)
-    assert "STRATEGY=rsi_divergence" in _setting_notes(replace(div, take_profit_pct=12))[0]
+    assert not _setting_notes(replace(div, take_profit_pct=12))          # Büyük hedef uyarılmaz (turnuva)
+    assert "STRATEGY=rsi_divergence" in _setting_notes(replace(div, max_hold_minutes=0))[0]
     for key, value in (("RSI_DIV_OVERSOLD", "5"), ("RSI_DIV_RISE", "-1"), ("RSI_DIV_UNIVERSE", "0"),
                        ("RSI_DIV_TRADE", "maybe")):
         monkeypatch.setenv(key, value)
