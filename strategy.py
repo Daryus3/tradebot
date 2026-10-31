@@ -69,7 +69,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from binance_client import BinanceClient, RateLimitError
-from config import STRATEGY_NAMES, fee_from_coin, rotation_coin_list
+from config import STRATEGY_NAMES, fee_from_coin, rotation_coin_list, rotation_hold_count
 from rotation import RotationPlan, btc_trend, momentum_pct, plan_rotation
 from exchange import SymbolRules
 from entry_filters import candle_reject, prior_trend_reject
@@ -1168,7 +1168,7 @@ class RotationStrategy(ReboundStrategy):
     # ------------------------------------------------------------ bilgi amaçlı tarama (self-test, /tarama)
     def scan(self, rules: Dict[str, SymbolRules], excluded_symbols: Set[str], invest_hint: float) -> ScanResult:
         result = ScanResult()
-        plan, note = self.plan([], rules, excluded_symbols, self.cfg.rotation_top_n)
+        plan, note = self.plan([], rules, excluded_symbols, rotation_hold_count(self.cfg))
         result.market_ok = plan.risk_on is not False
         result.market_note = note
         result.candidates = result.analyzed = len(plan.ranking)

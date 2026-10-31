@@ -211,7 +211,7 @@ def test_big_coin_trend_presets(bt_bot, tmp_path):
     press(bot, "bt:ovp:coins")
     labels = [label for row in notes.menus[-1][1] for label, _cb in row]
     assert labels[:6] == ["✅ kapalı (en hacimli 3)", "BTC", "BTC/ETH (güçlü olan)", "BTC + ETH (ikisi)",
-                          "10 büyük (Kasım 2023)", "10 büyük (Kasım 2020)"]
+                          "10 büyük: son 3 yıl için (Kas 2023)", "10 büyük: ⏮️ önceki dönem için (Kas 2020)"]
     press(bot, "bt:ovv:coins:2")
     press(bot, "bt:ovt:BNB_FEES")
     draft = BacktestDraft.from_dict(bot.state.backtest_draft)

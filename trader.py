@@ -24,7 +24,7 @@ from typing import Dict, List, Optional, Set
 import requests
 
 from binance_client import BinanceAPIError, RateLimitError
-from config import divergence_trading, is_rotation, parse_hhmm
+from config import divergence_trading, is_rotation, parse_hhmm, rotation_hold_count
 from control_panel import READ_ONLY_CALLBACKS
 from entry_filters import live_reject
 from exchange import BaseExchange, FeeInfo, Fill, OrderError, combine_fills
@@ -618,9 +618,9 @@ class TradingBot:
                 self._queue_rotation_sells(list(state.positions), ExitReason.TREND_FILTER, now)
 
     def target_slots(self) -> int:
-        """Aynı anda tutulacak coin sayısı (rotasyonda ROTATION_TOP_N ile sınırlı)."""
+        """Aynı anda tutulacak coin sayısı (rotasyonda ROTATION_TOP_N ve ROTATION_COINS'teki coin sayısıyla sınırlı)."""
         slots = self.slots()
-        return min(self.cfg.rotation_top_n, slots) if getattr(self.strategy, "is_rotation", False) else slots
+        return min(rotation_hold_count(self.cfg), slots) if getattr(self.strategy, "is_rotation", False) else slots
 
     def _rotation_plan(self, slots: int):
         state, cfg = self.state, self.cfg

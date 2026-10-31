@@ -112,3 +112,23 @@ def test_live_warns_when_bnb_fees_is_set_but_binance_takes_the_coin(cfg, tmp_pat
     assert any("BNB_FEES=true ama" in m for m in notes.messages)
     _bot, ok = live_bot(cfg, tmp_path / "ok", make_fake(bnb=0.05, enabled=True), bnb_fees=True)
     assert not any("BNB_FEES=true ama" in m for m in ok.messages)
+
+
+def test_coin_list_caps_how_many_coins_are_held(rcfg, fake_client, tmp_path, cfg):
+    """Listede tek coin varken ROTATION_TOP_N=3 sermayenin üçte ikisini boşta bekletirdi: en fazla listedeki kadar
+    coin tutulur (canlı, backtest ve tarama aynı)."""
+    from config import _setting_notes, rotation_hold_count
+    one = replace(rcfg, rotation_coins="LEAD", rotation_top_n=3, rotation_lookback_days=14, start_capital=11.0)
+    assert rotation_hold_count(one) == 1 and rotation_hold_count(replace(one, rotation_coins="")) == 3
+    assert any("ROTATION_COINS'te 1 coin" in n for n in _setting_notes(one))
+    client = DailyClient(fake_client, _series()).client
+    data = backtest.prepare_backtest(one, client, days=DAYS, cache_dir=tmp_path / "c", progress=None,
+                                     end_time_ms=END_TIME_MS)
+    three = backtest.simulate(one, data)
+    single = backtest.simulate(replace(one, rotation_top_n=1), data)
+    assert three.trades and [(t.symbol, t.cost) for t in three.trades] == [(t.symbol, t.cost) for t in single.trades]
+    assert three.trades[0].cost == pytest.approx(one.start_capital, rel=0.01)   # Sermayenin tamamı
+    tops = {st["ROTATION_TOP_N"] for st, _ in backtest.entry_combos(replace(one, rotation_coins="BTC,ETH",
+                                                                            rotation_top_n=1), [0.0])}
+    assert tops == {1, 2}                                     # 2 coinlik listede 3 coin tutmak denenmez
+    assert "coinler: BTC, ETH" in backtest._rotation_summary(replace(one, rotation_coins="BTC,ETH"))

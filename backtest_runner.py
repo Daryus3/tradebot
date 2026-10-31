@@ -125,8 +125,8 @@ PRESETS: Dict[str, Tuple[str, Tuple[Dict[str, str], ...]]] = {
 }
 PRESET_NAMES: Dict[str, Tuple[str, ...]] = {    # Değer yerine ad gösterilenler
     "prof": tuple(TOURNAMENT_EXITS),
-    "coins": ("kapalı (en hacimli 3)", "BTC", "BTC/ETH (güçlü olan)", "BTC + ETH (ikisi)", "10 büyük (Kasım 2023)",
-              "10 büyük (Kasım 2020)"),
+    "coins": ("kapalı (en hacimli 3)", "BTC", "BTC/ETH (güçlü olan)", "BTC + ETH (ikisi)",
+              "10 büyük: son 3 yıl için (Kas 2023)", "10 büyük: ⏮️ önceki dönem için (Kas 2020)"),
 }
 TOGGLES: Tuple[Tuple[str, str], ...] = (
     ("VWAP_FILTER", "VWAP"), ("FAKEOUT_FILTER", "Fitil"), ("OVERHEAT_FILTER", "Isınma"), ("BTC_FILTER", "BTC sig."),

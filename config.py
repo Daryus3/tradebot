@@ -157,6 +157,13 @@ def rotation_coin_list(cfg) -> Tuple[str, ...]:
     return tuple(out)
 
 
+def rotation_hold_count(cfg) -> int:
+    """Rotasyonda aynı anda en fazla kaç coin tutulur: ROTATION_TOP_N; ROTATION_COINS verildiyse listedeki coin
+    sayısından fazla olamaz (yalnızca BTC varken TOP_N=3, sermayenin üçte ikisini hep boşta bekletirdi)."""
+    coins = rotation_coin_list(cfg)
+    return min(cfg.rotation_top_n, len(coins)) if coins else cfg.rotation_top_n
+
+
 def fee_from_coin(cfg) -> bool:
     """Alış komisyonu alınan coinden mi kesilir? BNB_FEES=true ise BNB'den ödenir: coin miktarı azalmaz, satışta LOT
     adımı yüzünden toz kalmaz; toz sınırı (MAX_DUST_PCT) gerekmez, küçük sermayeyle BTC / ETH de alınabilir."""
@@ -898,6 +905,9 @@ def _setting_notes(cfg: Config) -> List[str]:
         if cfg.rotation_top_n > cfg.max_open_positions:
             notes.append(f"ROTATION_TOP_N={cfg.rotation_top_n} ama MAX_OPEN_POSITIONS={cfg.max_open_positions}: "
                          f"en fazla {cfg.max_open_positions} coin tutulur.")
+        if rotation_hold_count(cfg) < cfg.rotation_top_n:
+            notes.append(f"ROTATION_TOP_N={cfg.rotation_top_n} ama ROTATION_COINS'te {rotation_hold_count(cfg)} coin "
+                         f"var: en fazla {rotation_hold_count(cfg)} coin tutulur, sermaye onlara bölünür.")
         return notes   # Kâr al / izleyen stop / başabaş rotasyonda kullanılmaz: onlarla ilgili uyarılar anlamsız
     if cfg.regime_skip_weak and not cfg.regime_filter:
         notes.append("REGIME_SKIP_WEAK=true yalnızca REGIME_FILTER=true iken çalışır; şu an etkisi yok.")

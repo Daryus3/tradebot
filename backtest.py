@@ -44,7 +44,7 @@ from risk import (ExitReason, Position, breakeven_effective, cooldown_minutes, e
                   price_for_pnl, target_exits, trailing_floor_pct, update_breakeven, update_trailing)
 from rotation import btc_trend, momentum_pct, plan_rotation, pump_pct
 from config import (PROFILE_ATTRS, PROFILES, ConfigError, fee_from_coin, is_long_horizon, is_mean_reversion,
-                    is_rotation, rotation_coin_list, strategy_family)
+                    is_rotation, rotation_coin_list, rotation_hold_count, strategy_family)
 from entry_filters import NO_PRIOR_TREND, PRIOR_TREND_DAYS, candle_filters_on, candle_reject, prior_trend_ok
 from strategy import KLINE_LIMIT, STRATEGIES, Signal, make_strategy, required_move_pct, room_ok, strategy_class
 from telegram_bot import LINE, fmt_duration, fmt_price, fmt_rate, fmt_signed, fmt_usdt
@@ -1055,7 +1055,7 @@ class _Simulator:
         self.stats["dengeleme"] += 1
 
         capital = cfg.start_capital + self.realized
-        slots = min(cfg.rotation_top_n, position_slots(capital, self.min_notional, cfg))
+        slots = min(rotation_hold_count(cfg), position_slots(capital, self.min_notional, cfg))
         coins = rotation_coin_list(cfg)   # ROTATION_COINS: yalnızca bu coinler (canlı RotationStrategy.universe gibi)
         liquid: List[Tuple[float, str]] = []
         for symbol, s in self.series.items():
@@ -1776,9 +1776,11 @@ def entry_combos(cfg, scores: Sequence[float], max_drops: Sequence[float] = SWEE
     base = _current(cfg, keys)
     if is_rotation(cfg.strategy):   # Sinyal puanı / alan / piyasa rejimi rotasyonda kullanılmaz
         combos = [(base, True)]
+        coins = len(rotation_coin_list(cfg))   # Listede 2 coin varken 3 coin tutmak denenmez (sonuç 2 ile aynı olurdu)
+        tops = sorted({cfg.rotation_top_n, *(t for t in ROTATION_SWEEP_TOP if not coins or t <= coins)})
         for lookback in sorted({cfg.rotation_lookback_days, *ROTATION_SWEEP_LOOKBACK}):
             for ma in sorted({cfg.rotation_btc_ma_days, *ROTATION_SWEEP_MA}):
-                for top in sorted({cfg.rotation_top_n, *ROTATION_SWEEP_TOP}):
+                for top in tops:
                     st = {"ROTATION_LOOKBACK_DAYS": lookback, "ROTATION_BTC_MA_DAYS": ma, "ROTATION_TOP_N": top}
                     if st != base:
                         combos.append((st, False))
@@ -2786,9 +2788,10 @@ def _benchmark_lines(data: BacktestData) -> List[str]:
 def _rotation_summary(cfg) -> str:
     btc = f"BTC {cfg.rotation_btc_ma_days} günlük ortalamanın altındayken USDT" if cfg.rotation_btc_ma_days else \
         "BTC trend filtresi kapalı"
-    return (f"En güçlü {cfg.rotation_top_n} coin | momentum: son {cfg.rotation_lookback_days} gün | her "
-            f"{cfg.rotation_days} günde dengeleme | {btc} | evren: en hacimli {cfg.rotation_universe} | felaket zarar "
-            f"kesi -%{cfg.stop_loss_pct:g}")
+    coins = rotation_coin_list(cfg)
+    universe = f"coinler: {', '.join(coins)}" if coins else f"evren: en hacimli {cfg.rotation_universe}"
+    return (f"En güçlü {rotation_hold_count(cfg)} coin | momentum: son {cfg.rotation_lookback_days} gün | her "
+            f"{cfg.rotation_days} günde dengeleme | {btc} | {universe} | felaket zarar kesi -%{cfg.stop_loss_pct:g}")
 
 
 def _exit_summary(cfg) -> str:
