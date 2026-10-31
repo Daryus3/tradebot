@@ -642,10 +642,11 @@ class _Simulator:
         if pos.lock_pct is not None and pos.lock_pct > level_pct:        # Piramit kilidi
             level_pct = pos.lock_pct
             level, reason = self._market_level(level_pct, op), ExitReason.PROFIT_LOCK
-        if (low <= level and reason is ExitReason.STOP_LOSS and cfg.sl_extend and not pos.sl_extra_pct
-                and "sl_ext" not in pos.asked and self._pnl_at(op, min(level, o)) > -(sl_pct + cfg.sl_extend_pct)
-                and self._extend_sl(op, k)):
-            # Zarar kes bu mumda genişledi: kötümser varsayım, mumun dibi yeni seviyeyi de gördüyse orada satılır
+        # SL_EXTEND (rotasyonda yok: orada zarar kes yalnızca felaket korumasıdır, canlıda da uygulanmaz). Zarar kes
+        # bu mumda genişlerse kötümser varsayım: mumun dibi yeni seviyeyi de gördüyse orada satılır
+        if (low <= level and reason is ExitReason.STOP_LOSS and cfg.sl_extend and target_exits(cfg)
+                and not pos.sl_extra_pct and "sl_ext" not in pos.asked
+                and self._pnl_at(op, min(level, o)) > -(sl_pct + cfg.sl_extend_pct) and self._extend_sl(op, k)):
             sl_pct, level = position_sl(pos, cfg), op.sl_price
         if low <= level:
             price = min(level, o)  # Açılış zaten eşiğin altındaysa açılıştan

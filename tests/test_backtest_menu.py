@@ -210,7 +210,8 @@ def test_big_coin_trend_presets(bt_bot, tmp_path):
     assert {"bt:ovp:coins", "bt:ovt:BNB_FEES"} <= set(buttons(notes))
     press(bot, "bt:ovp:coins")
     labels = [label for row in notes.menus[-1][1] for label, _cb in row]
-    assert labels[:4] == ["✅ kapalı (en hacimli 3)", "BTC", "BTC/ETH (güçlü olan)", "BTC + ETH (ikisi)"]
+    assert labels[:6] == ["✅ kapalı (en hacimli 3)", "BTC", "BTC/ETH (güçlü olan)", "BTC + ETH (ikisi)",
+                          "10 büyük (Kasım 2023)", "10 büyük (Kasım 2020)"]
     press(bot, "bt:ovv:coins:2")
     press(bot, "bt:ovt:BNB_FEES")
     draft = BacktestDraft.from_dict(bot.state.backtest_draft)
@@ -219,6 +220,11 @@ def test_big_coin_trend_presets(bt_bot, tmp_path):
     assert "ROTATION_COINS=BTC,ETH" in args and args[args.index("--strateji") + 1] == "rotation"
     press(bot, "bt:ovv:coins:0")                                    # Geri: liste yok, botun değerleri
     assert BacktestDraft.from_dict(bot.state.backtest_draft).overrides == {"BNB_FEES": "true"}
+    press(bot, "bt:ovv:coins:5")                                    # Önceki dönem için o günün büyük 10'u
+    eff = br.effective_config(BacktestDraft.from_dict(bot.state.backtest_draft), bot.cfg)
+    assert eff.rotation_coins == br.TOP10_2020 and eff.rotation_top_n == 3
+    from config import rotation_coin_list
+    assert len(rotation_coin_list(eff)) == 10 and "SOL" not in rotation_coin_list(eff)   # 2020'de küçüktü
 
 
 def test_strategy_change_rejected_when_overrides_conflict(bt_bot):

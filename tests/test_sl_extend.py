@@ -150,3 +150,22 @@ def test_smart_menu_toggle_and_ayar(cfg, fake_client, tmp_path):
     assert bot.cfg.sl_extend_pct == 1.5 and "BACKUP_STOP_PCT" in notes.messages[-1]
     bot.commands.handle(Command("ayar", ["SL_EXTEND_PCT", "1"]))
     assert bot.cfg.sl_extend_pct == 1.0
+
+
+def test_rotation_never_extends_its_disaster_stop(fake_client, tmp_path, monkeypatch, cfg):
+    """Rotasyonda zarar kes yalnızca felaket korumasıdır: SL_EXTEND açık olsa da backtest canlıdaki gibi uzatmaz."""
+    from test_rotation import N, DailyClient, _prepare, _start_ms, day_rows, path
+    start = _start_ms()
+    crash = path((211, 1.004), (N - 211, 0.95))          # İlk dengelemede alınır, sonra günde %5 düşer
+    flat = path((N, 1.0))
+    series = {"LEADUSDT": day_rows(crash, start), "NEXTUSDT": day_rows(flat, start),
+              "FLATUSDT": day_rows(flat, start), "BTCUSDT": day_rows(path((N, 1.001), start=30_000.0), start, vol=5e9)}
+    rot = replace(cfg, strategy="rotation", rotation_top_n=1, rotation_lookback_days=14, start_capital=11.0,
+                  stop_loss_pct=10.0, backup_stop_pct=25.0)
+    data = _prepare(rot, DailyClient(fake_client, series).client, tmp_path)
+    normal = backtest.simulate(rot, data)
+    assert any(t.reason == ExitReason.STOP_LOSS.value for t in normal.trades)      # Çöküşte zarar kes çalışır
+    monkeypatch.setattr(backtest, "reversal_signal", lambda rows, ratio: "test")
+    extended = backtest.simulate(replace(rot, sl_extend=True, sl_extend_pct=5.0), data)
+    key = lambda r: [(t.symbol, t.open_time_ms, t.close_time_ms, t.reason, round(t.pnl, 8)) for t in r.trades]  # noqa
+    assert key(extended) == key(normal) and not extended.stats.get("zarar_kes_uzatma")

@@ -72,6 +72,10 @@ GRIDS: Dict[str, Tuple[str, str, Tuple[str, ...]]] = {
              ("", "0,240", "120,240,480", "250,500,1000", "720,1440,2880", "0,1440,4320,7200")),
     "alan": ("📏 Hedef alanı oranı", "--alan", ("", "0,0.5,1", "0,1,2")),
 }
+# Dönem başında piyasa değeri en büyük 10 coin (stabil coinler, BNB ve sonradan adı / paritesi değişenler hariç):
+# son 3 yıl (Kasım 2023 →) ve önceki 3 yıl (Kasım 2020 →) için, o günün bilgisiyle seçilmiş sabit listeler
+TOP10_2023 = "BTC,ETH,XRP,SOL,ADA,DOGE,TRX,LINK,DOT,LTC"
+TOP10_2020 = "BTC,ETH,XRP,BCH,LINK,DOT,LTC,ADA,XLM,TRX"
 # Yalnızca bu test için ayar değişiklikleri: grup → (ad, seçenekler: her biri {ANAHTAR: değer})
 PRESETS: Dict[str, Tuple[str, Tuple[Dict[str, str], ...]]] = {
     "tp": ("🎯 Kâr Al %", tuple({"TAKE_PROFIT_PCT": v} for v in
@@ -108,10 +112,12 @@ PRESETS: Dict[str, Tuple[str, Tuple[Dict[str, str], ...]]] = {
                                                                 ("8", "10", "15", "20", "30"))),
     "score": ("🏅 En düşük sinyal puanı (MIN_SIGNAL_SCORE)", tuple(
         {"MIN_SIGNAL_SCORE": v} for v in ("0", "10", "12", "14", "15", "16", "17", "18", "20"))),
-    # Büyük coin trendi (STRATEGY=rotation): yalnızca BTC / ETH; trend varken tutar, yokken USDT'de bekler
-    "coins": ("🪙 Rotasyon: büyük coin trendi (ROTATION_COINS)", (
+    # STRATEGY=rotation hangi coinler arasında dönsün: büyük coin trendi (BTC / ETH) ya da dönem BAŞINDAKİ en büyük 10
+    # coin (sabit liste: bugünün en hacimlileri, dönem içinde yükselmiş coinlerdir; momentumu olduğundan iyi gösterir)
+    "coins": ("🪙 Rotasyon coinleri (ROTATION_COINS)", (
         {"ROTATION_COINS": "", "ROTATION_TOP_N": "3"}, {"ROTATION_COINS": "BTC", "ROTATION_TOP_N": "1"},
-        {"ROTATION_COINS": "BTC,ETH", "ROTATION_TOP_N": "1"}, {"ROTATION_COINS": "BTC,ETH", "ROTATION_TOP_N": "2"})),
+        {"ROTATION_COINS": "BTC,ETH", "ROTATION_TOP_N": "1"}, {"ROTATION_COINS": "BTC,ETH", "ROTATION_TOP_N": "2"},
+        {"ROTATION_COINS": TOP10_2023, "ROTATION_TOP_N": "3"}, {"ROTATION_COINS": TOP10_2020, "ROTATION_TOP_N": "3"})),
     "slx": ("🛟 Zarar kes uzatma payı % (SL_EXTEND_PCT)", tuple({"SL_EXTEND_PCT": v} for v in ("1", "2", "3", "5"))),
     "stale": ("🧊 Takılan işlem çıkışı (dk)", tuple({"STALE_EXIT_MINUTES": v} for v in ("0", "60", "120", "240"))),
     "lcool": ("⏳ Zarardan sonra coine bekleme (dk)", tuple({"LOSS_COOLDOWN_MINUTES": v} for v in
@@ -119,7 +125,8 @@ PRESETS: Dict[str, Tuple[str, Tuple[Dict[str, str], ...]]] = {
 }
 PRESET_NAMES: Dict[str, Tuple[str, ...]] = {    # Değer yerine ad gösterilenler
     "prof": tuple(TOURNAMENT_EXITS),
-    "coins": ("kapalı (en hacimli 3)", "BTC", "BTC/ETH (güçlü olan)", "BTC + ETH (ikisi)"),
+    "coins": ("kapalı (en hacimli 3)", "BTC", "BTC/ETH (güçlü olan)", "BTC + ETH (ikisi)", "10 büyük (Kasım 2023)",
+              "10 büyük (Kasım 2020)"),
 }
 TOGGLES: Tuple[Tuple[str, str], ...] = (
     ("VWAP_FILTER", "VWAP"), ("FAKEOUT_FILTER", "Fitil"), ("OVERHEAT_FILTER", "Isınma"), ("BTC_FILTER", "BTC sig."),

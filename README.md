@@ -275,7 +275,12 @@ coinden kesilince satışta LOT adımının (BTC'de 0.00001 BTC) altında bir ka
 `MAX_DUST_PCT`'sinden (%0.5) büyükse coin alınmaz (canlıda da). Örneğin BTC ~78.000 $ iken bunun için ~160 USDT
 gerekir. Komisyonu **BNB ile** ödüyorsanız coin azalmaz, toz kalmaz: `BNB_FEES=true` ile bot (canlı, test modu ve
 backtest) BTC / ETH'yi küçük sermayeyle de alır. Telegram'da teste özel: ⚙️ Test ayarları → "Komisyon BNB'den";
-büyük coin trendi için 🧭 Strateji → `rotation`, ⚙️ Test ayarları → 🪙 Rotasyon: büyük coin trendi.
+büyük coin trendi için 🧭 Strateji → `rotation`, ⚙️ Test ayarları → 🪙 Rotasyon coinleri.
+
+**Rotasyon sonuçlarına dikkat:** backtest bugünün en hacimli coinleriyle yapılır; bunlar dönem içinde yükselmiş
+(hayatta kalmış) coinlerdir. Momentum rotasyonu tam da yükselen coini aldığı için sonuç olduğundan çok iyi görünür
+(sonradan çöken coinler listede yoktur). Adil bir sınama için 🪙 Rotasyon coinleri → "10 büyük (Kasım 2023)" (son 3
+yıl) ya da "10 büyük (Kasım 2020)" (⏮️ önceki dönem) seçin: dönem başındaki en büyük 10 coinden sabit bir liste.
 
 ---
 
