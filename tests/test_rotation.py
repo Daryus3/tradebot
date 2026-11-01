@@ -221,6 +221,9 @@ def test_rotation_sweeps_and_advice(rcfg):
                  "ROTATION_LOOKBACK_DAYS=28", "BACKUP_STOP_PCT=34"):
         assert line in lines, line
     assert sum(1 for ln in lines if ln.startswith("BACKUP_STOP_PCT=")) == 1
+    assert "ROTATION_COINS=" in lines                              # Liste yok: .env'deki eski liste de temizlensin
+    fixed = _advice_lines(replace(rcfg, rotation_coins="BTC,ETH", rotation_top_n=2), row)
+    assert "ROTATION_COINS=BTC,ETH" in fixed and "ROTATION_TOP_N=2" in fixed   # Sabit listeyle yapılan test
 
 
 def test_cli_rotation_compare_falls_back_to_report(cfg, monkeypatch, capsys):

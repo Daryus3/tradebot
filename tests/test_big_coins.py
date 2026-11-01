@@ -132,3 +132,5 @@ def test_coin_list_caps_how_many_coins_are_held(rcfg, fake_client, tmp_path, cfg
                                                                             rotation_top_n=1), [0.0])}
     assert tops == {1, 2}                                     # 2 coinlik listede 3 coin tutmak denenmez
     assert "coinler: BTC, ETH" in backtest._rotation_summary(replace(one, rotation_coins="BTC,ETH"))
+    assert "ilk giriş %50" in backtest._rotation_summary(replace(one, capital_usage_pct=50.0))   # Yarısı yatırılır
+    assert "ilk giriş" not in backtest._rotation_summary(replace(one, capital_usage_pct=100.0))

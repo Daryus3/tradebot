@@ -1582,7 +1582,9 @@ FILTER_STEPS: Tuple[Tuple[str, int, Tuple[Union[float, bool], ...]], ...] = (
 )
 ROTATION_EXIT_KEYS = ("STOP_LOSS_PCT", "ROTATION_DAYS")
 ROTATION_ENTRY_KEYS = ("ROTATION_LOOKBACK_DAYS", "ROTATION_BTC_MA_DAYS", "ROTATION_TOP_N")
-ROTATION_KEYS = ROTATION_EXIT_KEYS[1:] + ROTATION_ENTRY_KEYS + ("ROTATION_UNIVERSE",)
+# Öneri satırlarında yazılan tüm rotasyon ayarları (ROTATION_COINS dahil: sabit listeyle yapılan test, .env'de liste
+# olmadan en hacimli coinlerle çalışırdı)
+ROTATION_KEYS = ROTATION_EXIT_KEYS[1:] + ROTATION_ENTRY_KEYS + ("ROTATION_UNIVERSE", "ROTATION_COINS")
 EXIT_KEYS = ("TAKE_PROFIT_PCT", "STOP_LOSS_PCT", "TRAILING_ACTIVATION_PCT", "TRAILING_FLOOR_PCT",
              "MAX_HOLD_MINUTES", "MIN_ROOM_RATIO")
 ENTRY_KEYS = ("REGIME_SKIP_WEAK", "MAX_24H_DROP_PCT", "MIN_SIGNAL_SCORE", "MIN_ROOM_RATIO")
@@ -2790,8 +2792,11 @@ def _rotation_summary(cfg) -> str:
         "BTC trend filtresi kapalı"
     coins = rotation_coin_list(cfg)
     universe = f"coinler: {', '.join(coins)}" if coins else f"evren: en hacimli {cfg.rotation_universe}"
+    usage = (f" | ilk giriş %{cfg.capital_usage_pct:g} (geri kalanı USDT'de bekler)" if cfg.capital_usage_pct < 100
+             else "")
     return (f"En güçlü {rotation_hold_count(cfg)} coin | momentum: son {cfg.rotation_lookback_days} gün | her "
-            f"{cfg.rotation_days} günde dengeleme | {btc} | {universe} | felaket zarar kesi -%{cfg.stop_loss_pct:g}")
+            f"{cfg.rotation_days} günde dengeleme | {btc} | {universe} | felaket zarar kesi -%{cfg.stop_loss_pct:g}"
+            + usage)
 
 
 def _exit_summary(cfg) -> str:
