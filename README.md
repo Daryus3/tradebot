@@ -184,7 +184,7 @@ Sunucuya bağlanmadan, düğmelerle:
 |---|---|
 | 📋 Tür | Normal backtest, çıkış taraması (`--tara`), giriş taraması, filtre gevşetme, A/B filtre testi, strateji karşılaştırma, strateji turnuvası, zarar azaltma deneyi, tüm taramalar birden |
 | 🧭 Strateji | Botun stratejisi veya herhangi bir strateji (yalnızca bu test için) |
-| 🗓️ Süre · 📅 Bitiş | 7 günden 3 yıla; bitiş bugün, N gün önce veya **önceki dönem** (bulunan ayarları başka bir dönemde doğrulamak için) |
+| 🗓️ Süre · 📅 Bitiş | 7 günden 3 yıla; bitiş bugün, N gün önce, **önceki dönem** ya da **iki dönem önce** (bulunan ayarları başka dönemlerde doğrulamak için; 3 yılda iki dönem önce = 2017-2020, 2018 düşüşü dahil) |
 | 💼 Sermaye · 🪙 Coin | Ayardaki / botun güncel sermayesi veya 11-1000 USDT; en hacimli 10-100 coin |
 | ⚙️ Test ayarları | Kâr Al, Zarar Kes, izleyen stop, başabaş, maks. süre, pozisyon sayısı, ilk giriş %, hedef alanı (`MIN_ROOM_RATIO`), 24s en fazla düşüş, en düşük sinyal puanı, filtreler, sigortalar, akıllı yönetim — **yalnızca bu test için**, botun ayarları değişmez (giriş taramasında bulunan birleşimi kill-switch açık normal backtest'le doğrulamak için) |
 | 🎚️ Tarama değerleri | Çıkış taramasında denenecek Kâr Al / Zarar Kes / izleyen stop / süre / alan değerleri |

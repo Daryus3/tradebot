@@ -86,6 +86,9 @@ def test_build_args_full_draft(cfg, fake_client, tmp_path):
                  "--grafiksiz", "--tp 2,3,5", "--sure 0,240", "--ayar VWAP_FILTER=true",
                  f"--cikti-klasoru {tmp_path / 'out'}", f"--env {tmp_path / '.env'}"):
         assert part in joined, part
+    older = build_args(BacktestDraft(kind="giris", strategy="rotation", days=1095, end="prev2"), bot, tmp_path,
+                       date(2026, 11, 1))
+    assert "--bitis 2020-11-02" in " ".join(older)            # İki dönem önce: 2017-2020 (2018 düşüşü dahil)
     turnuva = build_args(BacktestDraft(kind="turnuva", strategy="swing", capital="bot"), bot, tmp_path, date.today())
     assert "--strateji" not in turnuva and "--turnuva" in turnuva and "--gun 365" in " ".join(turnuva)
     assert f"--sermaye {bot.state.capital:g}" in " ".join(turnuva)

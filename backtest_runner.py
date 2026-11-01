@@ -60,7 +60,8 @@ KINDS: Dict[str, Tuple[str, Tuple[str, ...], str]] = {
               "çıkış + giriş + filtre + A/B; veri bir kez indirilir"),
 }
 DAY_CHOICES = (7, 14, 30, 45, 60, 90, 120, 180, 270, 365, 540, 730, 1095)
-END_CHOICES = ("today", "prev", "30", "60", "90", "180", "365")
+END_CHOICES = ("today", "prev", "prev2", "30", "60", "90", "180", "365")
+END_LABELS = {"prev": "önceki dönem", "prev2": "iki dönem önce"}   # Seçilen süre kadar (×2) daha eski dönem
 CAPITAL_CHOICES = ("cfg", "bot", "11", "20", "32", "50", "100", "250", "500", "1000")
 COIN_CHOICES = (10, 20, 30, 40, 60, 80, 100)
 # Çıkış taraması (--tara) değerleri; "" = botun kendi tarama ızgarası
@@ -191,8 +192,8 @@ def effective_days(draft: BacktestDraft, cfg) -> int:
 
 def end_date(draft: BacktestDraft, cfg, today: date) -> Optional[date]:
     """Dönemin bitiş günü; None = bugün (şimdiye kadar)."""
-    if draft.end == "prev":
-        return today - timedelta(days=effective_days(draft, cfg))
+    if draft.end in ("prev", "prev2"):
+        return today - timedelta(days=effective_days(draft, cfg) * (2 if draft.end == "prev2" else 1))
     if draft.end.isdigit():
         return today - timedelta(days=int(draft.end))
     return None
@@ -618,12 +619,14 @@ class BacktestMenu:
                 draft.end = arg
                 self.save(draft)
             else:
-                labels = {"today": "Bugün", "prev": "⏮️ Önceki dönem (doğrulama)"}
+                labels = {"today": "Bugün", "prev": "⏮️ Önceki dönem (doğrulama)",
+                          "prev2": "⏮️⏮️ İki dönem önce (2. doğrulama)"}
                 options = [(("✅ " if draft.end == e else "") + labels.get(e, f"{e} gün önce"), f"bt:end:{e}")
                            for e in END_CHOICES]
                 return self._pick(mid, "📅 Dönem bitişi", options,
-                                  "<i>Önceki dönem: seçtiğiniz süre kadar daha eski bir dönem. Bulduğunuz ayarları, "
-                                  "seçerken kullanmadığınız bir dönemde doğrulamak için.</i>")
+                                  "<i>Önceki dönem: seçtiğiniz süre kadar daha eski bir dönem; iki dönem önce: onun da "
+                                  "öncesi (ör. 3 yılda 2017-2020, 2018 düşüşü dahil). Bulduğunuz ayarları, seçerken "
+                                  "kullanmadığınız bir dönemde doğrulamak için.</i>")
         elif sub == "cap":
             if arg in CAPITAL_CHOICES:
                 draft.capital = arg
@@ -706,7 +709,7 @@ class BacktestMenu:
                  f"🧭 Strateji: {esc(strategy) if draft.kind != 'turnuva' else 'hepsi (turnuva)'}"
                  + ("" if draft.strategy else " (botun stratejisi)"),
                  f"🗓️ Dönem: {days} gün{'' if draft.days else ' (otomatik)'} — {start:%d.%m.%Y} → "
-                 f"{(end or today):%d.%m.%Y}" + (" (önceki dönem)" if draft.end == "prev" else ""),
+                 f"{(end or today):%d.%m.%Y}" + (f" ({END_LABELS[draft.end]})" if draft.end in END_LABELS else ""),
                  f"💼 Sermaye: {capital if capital is not None else cfg.start_capital:g} {cfg.quote_asset} | "
                  f"🪙 {draft.coins} coin | 🖼️ grafik {'açık' if draft.chart else 'kapalı'}"]
         if draft.kind in ("tara", "hepsi"):
@@ -727,9 +730,8 @@ class BacktestMenu:
         keyboard = [
             [(f"📋 Tür: {name}", "bt:kind"),
              (f"🧭 {strategy if draft.kind != 'turnuva' else 'hepsi'}", "bt:strat")],
-            [(f"🗓️ {days} gün", "bt:days"), ("📅 Bitiş: " + ("önceki dönem" if draft.end == "prev" else
-                                                            "bugün" if draft.end == "today" else f"-{draft.end} g"),
-                                            "bt:end")],
+            [(f"🗓️ {days} gün", "bt:days"), ("📅 Bitiş: " + END_LABELS.get(
+                draft.end, "bugün" if draft.end == "today" else f"-{draft.end} g"), "bt:end")],
             [(f"💼 {capital if capital is not None else cfg.start_capital:g} {cfg.quote_asset}", "bt:cap"),
              (f"🪙 {draft.coins} coin", "bt:coin")],
             [("⚙️ Test ayarları" + (f" ({len(draft.overrides)})" if draft.overrides else ""), "bt:ov")]
