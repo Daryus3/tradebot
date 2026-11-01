@@ -134,3 +134,48 @@ def test_coin_list_caps_how_many_coins_are_held(rcfg, fake_client, tmp_path, cfg
     assert "coinler: BTC, ETH" in backtest._rotation_summary(replace(one, rotation_coins="BTC,ETH"))
     assert "ilk giriş %50" in backtest._rotation_summary(replace(one, capital_usage_pct=50.0))   # Yarısı yatırılır
     assert "ilk giriş" not in backtest._rotation_summary(replace(one, capital_usage_pct=100.0))
+
+
+def _small_live_bot(rcfg, fake_client, tmp_path, bnb_fees):
+    """34 USDT, gerçek LOT adımlarıyla (BTC 0.00001, ETH 0.0001) BTC/ETH trend rotasyonu, test modunda."""
+    from state import BotState, StateStore, TradeLog
+    from strategy import RotationStrategy
+    from test_bot_flow import CaptureNotifier
+    from test_rotation import T0, LiveDaily, rising
+    from trader import TradingBot
+    cfg = replace(rcfg, start_capital=34.0, rotation_coins="BTC,ETH", rotation_top_n=2, max_open_positions=2,
+                  rotation_lookback_days=56, bnb_fees=bnb_fees, fee_rate=0.00075)
+    closes = {"BTCUSDT": rising(n=120, f=1.003, start=60_000.0), "ETHUSDT": rising(n=120, f=1.004, start=2_000.0),
+              "SOLUSDT": rising(n=120, f=1.02, start=100.0)}          # En güçlüsü ama listede yok
+    feed = LiveDaily(fake_client, closes)
+    plain = feed.client.exchange_info
+
+    def info():
+        data = plain()
+        for s in data["symbols"]:
+            step = {"BTCUSDT": "0.00001000", "ETHUSDT": "0.00010000"}.get(s["symbol"])
+            for f in s["filters"]:
+                if step and f["filterType"] == "LOT_SIZE":
+                    f["stepSize"] = f["minQty"] = step
+        return data
+    feed.client.exchange_info = info
+    state = BotState.new("paper", cfg.start_capital)
+    exchange = PaperExchange(feed.client, state.paper_balances, fee_rate=cfg.fee_rate, bnb_fees=cfg.bnb_fees)
+    clock = [T0]
+    bot = TradingBot(cfg, exchange, RotationStrategy(feed.client, cfg), CaptureNotifier(),
+                     StateStore(tmp_path / "s.json"), state, TradeLog(tmp_path / "t.csv"), time_fn=lambda: clock[0])
+    bot.startup()
+    bot.running = True
+    bot.tick()
+    return bot
+
+
+def test_live_big_coin_trend_buys_btc_and_eth_with_small_capital(rcfg, fake_client, tmp_path):
+    """Önerilen ayarlarla (BTC+ETH, 2 coin, 56 gün, BNB komisyonu) 34 USDT'lik test modu botu ilk dengelemede iki
+    coini de yarı yarıya alır, satışta toz kalmaz; BNB komisyonu kapalıyken toz sınırı yüzünden hiçbirini alamaz."""
+    bot = _small_live_bot(rcfg, fake_client, tmp_path / "bnb", bnb_fees=True)
+    assert set(bot.state.positions) == {"BTCUSDT", "ETHUSDT"}
+    for pos in bot.state.positions.values():
+        assert 15.0 <= pos.cost_usdt <= 17.05
+        assert bot.exchange.sellable_qty(pos.symbol, pos.qty) == pytest.approx(pos.qty)   # Tamamı satılabilir
+    assert not _small_live_bot(rcfg, fake_client, tmp_path / "coin", bnb_fees=False).state.positions
