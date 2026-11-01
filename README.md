@@ -280,7 +280,9 @@ büyük coin trendi için 🧭 Strateji → `rotation`, ⚙️ Test ayarları �
 **Rotasyon sonuçlarına dikkat:** backtest bugünün en hacimli coinleriyle yapılır; bunlar dönem içinde yükselmiş
 (hayatta kalmış) coinlerdir. Momentum rotasyonu tam da yükselen coini aldığı için sonuç olduğundan çok iyi görünür
 (sonradan çöken coinler listede yoktur). Adil bir sınama için 🪙 Rotasyon coinleri → "10 büyük (Kasım 2023)" (son 3
-yıl) ya da "10 büyük (Kasım 2020)" (⏮️ önceki dönem) seçin: dönem başındaki en büyük 10 coinden sabit bir liste.
+yıl), "10 büyük (Kasım 2020)" (⏮️ önceki dönem) ya da "10 büyük (Kasım 2017)" (⏮️⏮️ iki dönem önce) seçin: dönem
+başındaki en büyük 10 coinden sabit bir liste. 2017 listesinde artık Binance'te olmayan NEM ve Monero yerine sıradaki
+IOTA ve QTUM var; bu coinlerin çoğunun USDT paritesi 2018'de açıldı, backtest onları listelendikleri gün sıralamaya alır.
 
 **Dengeleme günü şansı (🎲):** haftada bir dengelenen rotasyon az işlem yapar; sonuç, ilk dengelemenin hangi gün
 yapıldığına çok bağlıdır (canlı bot başlatıldığı gün başlar). Dönemi bir gün kaydırmak bile sonucu ikiye katlayabilir.

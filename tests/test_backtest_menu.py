@@ -213,8 +213,9 @@ def test_big_coin_trend_presets(bt_bot, tmp_path):
     assert {"bt:ovp:coins", "bt:ovt:BNB_FEES"} <= set(buttons(notes))
     press(bot, "bt:ovp:coins")
     labels = [label for row in notes.menus[-1][1] for label, _cb in row]
-    assert labels[:6] == ["✅ kapalı (en hacimli 3)", "BTC", "BTC/ETH (güçlü olan)", "BTC + ETH (ikisi)",
-                          "10 büyük: son 3 yıl için (Kas 2023)", "10 büyük: ⏮️ önceki dönem için (Kas 2020)"]
+    assert labels[:7] == ["✅ kapalı (en hacimli 3)", "BTC", "BTC/ETH (güçlü olan)", "BTC + ETH (ikisi)",
+                          "10 büyük: son 3 yıl için (Kas 2023)", "10 büyük: ⏮️ önceki dönem için (Kas 2020)",
+                          "10 büyük: ⏮️⏮️ iki dönem önce için (Kas 2017)"]
     press(bot, "bt:ovv:coins:2")
     press(bot, "bt:ovt:BNB_FEES")
     draft = BacktestDraft.from_dict(bot.state.backtest_draft)
@@ -228,6 +229,9 @@ def test_big_coin_trend_presets(bt_bot, tmp_path):
     assert eff.rotation_coins == br.TOP10_2020 and eff.rotation_top_n == 3
     from config import rotation_coin_list
     assert len(rotation_coin_list(eff)) == 10 and "SOL" not in rotation_coin_list(eff)   # 2020'de küçüktü
+    press(bot, "bt:ovv:coins:6")                                    # İki dönem önce (2017-2020) için
+    older = rotation_coin_list(br.effective_config(BacktestDraft.from_dict(bot.state.backtest_draft), bot.cfg))
+    assert len(older) == 10 and {"DASH", "NEO", "IOTA"} <= set(older) and not {"LINK", "ADA", "SOL"} & set(older)
 
 
 def test_rotation_entry_presets_rebuild_a_sweep_row(bt_bot, tmp_path):

@@ -74,9 +74,12 @@ GRIDS: Dict[str, Tuple[str, str, Tuple[str, ...]]] = {
     "alan": ("📏 Hedef alanı oranı", "--alan", ("", "0,0.5,1", "0,1,2")),
 }
 # Dönem başında piyasa değeri en büyük 10 coin (stabil coinler, BNB ve sonradan adı / paritesi değişenler hariç):
-# son 3 yıl (Kasım 2023 →) ve önceki 3 yıl (Kasım 2020 →) için, o günün bilgisiyle seçilmiş sabit listeler
+# son 3 yıl (Kasım 2023 →), önceki 3 yıl (Kasım 2020 →) ve iki dönem önce (Kasım 2017 →) için, o günün bilgisiyle
+# seçilmiş sabit listeler. 2017'nin ilk 10'undaki NEM ve Monero artık Binance'te yok (sıradaki IOTA ve QTUM girdi);
+# 2017 listesindeki coinlerin çoğunun USDT paritesi 2018'de açıldı: backtest onları listelendikleri gün sıralamaya alır
 TOP10_2023 = "BTC,ETH,XRP,SOL,ADA,DOGE,TRX,LINK,DOT,LTC"
 TOP10_2020 = "BTC,ETH,XRP,BCH,LINK,DOT,LTC,ADA,XLM,TRX"
+TOP10_2017 = "BTC,ETH,BCH,XRP,LTC,DASH,NEO,ETC,IOTA,QTUM"
 # Yalnızca bu test için ayar değişiklikleri: grup → (ad, seçenekler: her biri {ANAHTAR: değer})
 PRESETS: Dict[str, Tuple[str, Tuple[Dict[str, str], ...]]] = {
     "tp": ("🎯 Kâr Al %", tuple({"TAKE_PROFIT_PCT": v} for v in
@@ -118,7 +121,8 @@ PRESETS: Dict[str, Tuple[str, Tuple[Dict[str, str], ...]]] = {
     "coins": ("🪙 Rotasyon coinleri (ROTATION_COINS)", (
         {"ROTATION_COINS": "", "ROTATION_TOP_N": "3"}, {"ROTATION_COINS": "BTC", "ROTATION_TOP_N": "1"},
         {"ROTATION_COINS": "BTC,ETH", "ROTATION_TOP_N": "1"}, {"ROTATION_COINS": "BTC,ETH", "ROTATION_TOP_N": "2"},
-        {"ROTATION_COINS": TOP10_2023, "ROTATION_TOP_N": "3"}, {"ROTATION_COINS": TOP10_2020, "ROTATION_TOP_N": "3"})),
+        {"ROTATION_COINS": TOP10_2023, "ROTATION_TOP_N": "3"}, {"ROTATION_COINS": TOP10_2020, "ROTATION_TOP_N": "3"},
+        {"ROTATION_COINS": TOP10_2017, "ROTATION_TOP_N": "3"})),
     # Rotasyon giriş taramasında bulunan birleşimi (momentum günü / BTC ortalaması / dengeleme sıklığı) normal
     # backtest ya da çıkış taramasıyla denemek için
     "rmom": ("📆 Rotasyon: momentum günü (ROTATION_LOOKBACK_DAYS)", tuple(
@@ -135,7 +139,8 @@ PRESETS: Dict[str, Tuple[str, Tuple[Dict[str, str], ...]]] = {
 PRESET_NAMES: Dict[str, Tuple[str, ...]] = {    # Değer yerine ad gösterilenler
     "prof": tuple(TOURNAMENT_EXITS),
     "coins": ("kapalı (en hacimli 3)", "BTC", "BTC/ETH (güçlü olan)", "BTC + ETH (ikisi)",
-              "10 büyük: son 3 yıl için (Kas 2023)", "10 büyük: ⏮️ önceki dönem için (Kas 2020)"),
+              "10 büyük: son 3 yıl için (Kas 2023)", "10 büyük: ⏮️ önceki dönem için (Kas 2020)",
+              "10 büyük: ⏮️⏮️ iki dönem önce için (Kas 2017)"),
 }
 TOGGLES: Tuple[Tuple[str, str], ...] = (
     ("VWAP_FILTER", "VWAP"), ("FAKEOUT_FILTER", "Fitil"), ("OVERHEAT_FILTER", "Isınma"), ("BTC_FILTER", "BTC sig."),
