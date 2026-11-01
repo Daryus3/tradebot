@@ -119,6 +119,14 @@ PRESETS: Dict[str, Tuple[str, Tuple[Dict[str, str], ...]]] = {
         {"ROTATION_COINS": "", "ROTATION_TOP_N": "3"}, {"ROTATION_COINS": "BTC", "ROTATION_TOP_N": "1"},
         {"ROTATION_COINS": "BTC,ETH", "ROTATION_TOP_N": "1"}, {"ROTATION_COINS": "BTC,ETH", "ROTATION_TOP_N": "2"},
         {"ROTATION_COINS": TOP10_2023, "ROTATION_TOP_N": "3"}, {"ROTATION_COINS": TOP10_2020, "ROTATION_TOP_N": "3"})),
+    # Rotasyon giriş taramasında bulunan birleşimi (momentum günü / BTC ortalaması / dengeleme sıklığı) normal
+    # backtest ya da çıkış taramasıyla denemek için
+    "rmom": ("📆 Rotasyon: momentum günü (ROTATION_LOOKBACK_DAYS)", tuple(
+        {"ROTATION_LOOKBACK_DAYS": v} for v in ("14", "28", "56"))),
+    "rma": ("📉 Rotasyon: BTC ortalaması gün (ROTATION_BTC_MA_DAYS)", tuple(
+        {"ROTATION_BTC_MA_DAYS": v} for v in ("0", "50", "100"))),
+    "rdays": ("🔁 Rotasyon: kaç günde bir dengeleme (ROTATION_DAYS)", tuple(
+        {"ROTATION_DAYS": v} for v in ("1", "7", "14"))),
     "slx": ("🛟 Zarar kes uzatma payı % (SL_EXTEND_PCT)", tuple({"SL_EXTEND_PCT": v} for v in ("1", "2", "3", "5"))),
     "stale": ("🧊 Takılan işlem çıkışı (dk)", tuple({"STALE_EXIT_MINUTES": v} for v in ("0", "60", "120", "240"))),
     "lcool": ("⏳ Zarardan sonra coine bekleme (dk)", tuple({"LOSS_COOLDOWN_MINUTES": v} for v in
@@ -856,7 +864,7 @@ class BacktestMenu:
             elif option.get("MAX_HOLD_MINUTES") == "0":
                 text = "sınırsız"
             elif set(option) <= {"LOSS_STREAK_LIMIT", "DAILY_LOSS_LIMIT_PCT", "STALE_EXIT_MINUTES", "MIN_ROOM_RATIO",
-                                 "MIN_SIGNAL_SCORE"} and values == ["0"]:
+                                 "MIN_SIGNAL_SCORE", "ROTATION_BTC_MA_DAYS"} and values == ["0"]:
                 text = "kapalı"
             else:
                 text = " → ".join(values)

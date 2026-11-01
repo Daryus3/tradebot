@@ -230,6 +230,26 @@ def test_big_coin_trend_presets(bt_bot, tmp_path):
     assert len(rotation_coin_list(eff)) == 10 and "SOL" not in rotation_coin_list(eff)   # 2020'de küçüktü
 
 
+def test_rotation_entry_presets_rebuild_a_sweep_row(bt_bot, tmp_path):
+    """Giriş taramasında öne çıkan rotasyon satırı (ör. 56 gün / BTC 50 gün / 2 coin) Telegram'dan normal backtest
+    olarak denenebilmeli."""
+    bot, notes, _ = bt_bot
+    press(bot, "bt:strat:rotation")
+    press(bot, "bt:ov")
+    assert {"bt:ovp:rmom", "bt:ovp:rma", "bt:ovp:rdays"} <= set(buttons(notes))
+    press(bot, "bt:ovv:coins:3")                                    # BTC + ETH, 2 coin
+    press(bot, "bt:ovv:rmom:2")
+    press(bot, "bt:ovv:rdays:0")
+    draft = BacktestDraft.from_dict(bot.state.backtest_draft)
+    assert draft.overrides == {"ROTATION_COINS": "BTC,ETH", "ROTATION_TOP_N": "2", "ROTATION_LOOKBACK_DAYS": "56",
+                               "ROTATION_DAYS": "1"}
+    press(bot, "bt:ovp:rma")
+    labels = [label for row in notes.menus[-1][1] for label, _cb in row]
+    assert labels[:3] == ["kapalı", "✅ 50", "100"]
+    eff = br.effective_config(draft, bot.cfg)
+    assert (eff.rotation_lookback_days, eff.rotation_btc_ma_days, eff.rotation_days) == (56, 50, 1)
+
+
 def test_strategy_change_rejected_when_overrides_conflict(bt_bot):
     bot, notes, _ = bt_bot
     bot.state.backtest_draft = {"overrides": {"STOP_LOSS_PCT": "11"}}   # Yedek stop (12) altında: geçerli
