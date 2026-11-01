@@ -28,6 +28,7 @@ from bisect import bisect_right
 import os
 import time
 from collections import Counter, deque
+from statistics import median
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -143,6 +144,7 @@ class BacktestResult:
     interval: str = INTERVAL                             # Mum aralığı (5m / 1h / 1d)
     btc_hold_pct: Optional[float] = None                 # Kıyas: aynı dönemde BTC'yi alıp tutmak (%)
     btc_hold_dd_pct: Optional[float] = None              # ...ve en büyük düşüşü (%)
+    phase_nets: Tuple[float, ...] = ()                   # Rotasyon: dengeleme takvimi kaydırılınca net getiriler (%)
 
     @property
     def wins(self) -> int:
@@ -538,8 +540,10 @@ class _PendingBuy:
 class _Simulator:
     def __init__(self, cfg, series: Dict[str, _Series], btc: Optional[_Series],
                  min_notional: float, spread_pct: float, progress: Progress,
-                 regime: Optional[_RegimeSim] = None, signal_cache: Optional[dict] = None):
+                 regime: Optional[_RegimeSim] = None, signal_cache: Optional[dict] = None,
+                 rotation_offset: int = 0):
         self.cfg = cfg
+        self.rotation_offset = rotation_offset   # Rotasyon: ilk dengeleme kaç gün sonra (takvim kaydırma)
         self.series = series
         self.btc = btc
         self.regime = regime if cfg.regime_filter else None
@@ -1048,7 +1052,7 @@ class _Simulator:
             self.stats["trend_kapali_gun"] += 1
             for symbol in list(self.open):
                 self._close(symbol, self._close_price(symbol, k), ExitReason.TREND_FILTER.value, t_close)
-        if (k - self.k_start) % cfg.rotation_days != 0 or risk_on is False:
+        if (k - self.k_start - self.rotation_offset) % cfg.rotation_days != 0 or risk_on is False:
             return
         if k >= self.last_k:   # Son mum yalnızca değerlemedir: alınan coin aynı fiyattan hemen "kapatılırdı"
             return
@@ -1386,8 +1390,8 @@ def prepare_backtest(cfg, client, days: float = 30, max_symbols: int = 40,
 
 
 def simulate(cfg, data: BacktestData, spread_pct: float = 0.05, progress: Progress = None,
-             signal_cache: Optional[dict] = None) -> BacktestResult:
-    """Hazırlanmış veri üzerinde bir ayar setini simüle eder."""
+             signal_cache: Optional[dict] = None, rotation_offset: int = 0) -> BacktestResult:
+    """Hazırlanmış veri üzerinde bir ayar setini simüle eder (rotation_offset: rotasyonda ilk dengeleme günü)."""
     if spread_pct < 0:
         raise ValueError("spread_pct negatif olamaz")
     needed = strategy_class(cfg.strategy).interval
@@ -1395,7 +1399,7 @@ def simulate(cfg, data: BacktestData, spread_pct: float = 0.05, progress: Progre
         raise BacktestError(f"{cfg.strategy} stratejisi {needed} mumlarla çalışır ama veri {data.interval} "
                             f"mumlarla hazırlandı (aynı taramada farklı aralıklı stratejiler karşılaştırılamaz)")
     sim = _Simulator(cfg, data.series, data.btc, data.min_notional, spread_pct, progress, regime=data.regime,
-                     signal_cache=signal_cache)
+                     signal_cache=signal_cache, rotation_offset=rotation_offset)
     sim.run(data.start_ms, data.k_start, data.n)
 
     notes = _base_notes(spread_pct, data.interval, is_rotation(cfg.strategy)) + list(data.notes)
@@ -1455,7 +1459,19 @@ def run_backtest(cfg, client, days: float = 30, max_symbols: int = 40,
     data = prepare_backtest(cfg, client, days, max_symbols, cache_dir, progress, symbols, end_time_ms)
     say = progress or (lambda _msg: None)
     say(f"⚙️ Simülasyon: {len(data.series)} sembol, {data.n - data.k_start} mum ({days:g} gün)")
-    return simulate(cfg, data, spread_pct, progress)
+    result = simulate(cfg, data, spread_pct, progress)
+    result.phase_nets = rotation_phase_nets(cfg, data, spread_pct)
+    return result
+
+
+def rotation_phase_nets(cfg, data: BacktestData, spread_pct: float = 0.05) -> Tuple[float, ...]:
+    """Rotasyon: dengeleme takvimi 0..ROTATION_DAYS-1 gün kaydırılınca aynı ayarın net getirileri (başlangıç
+    sermayesinin %'si). Canlı bot ilk dengelemeyi başlatıldığı gün yapar; az işlemde sonuç bu güne çok bağlıdır.
+    Rotasyon değilse (ya da her gün dengeleniyorsa) boş."""
+    if not is_rotation(cfg.strategy) or cfg.rotation_days <= 1 or cfg.start_capital <= 0:
+        return ()
+    return tuple(simulate(cfg, data, spread_pct, None, rotation_offset=o).realized_pnl / cfg.start_capital * 100
+                 for o in range(cfg.rotation_days))
 
 
 # ================================================================ parametre taraması (--tara / --tara-giris)
@@ -1481,7 +1497,7 @@ DIV_SWEEP_OVERSOLD = (30.0, 35.0, 40.0)   # rsi_divergence giriş taraması: RSI
 # Momentum rotasyonu: "çıkış" = felaket zarar kesi ve yeniden dengeleme sıklığı, "giriş" = momentum süresi,
 # BTC trend filtresi ve tutulan coin sayısı
 ROTATION_SWEEP_SL = (10.0, 20.0, 30.0)
-ROTATION_SWEEP_DAYS = (7, 14)
+ROTATION_SWEEP_DAYS = (1, 7, 14)   # 1 = her gün: dengeleme günü şansı olmaz (ama daha çok al-sat)
 ROTATION_SWEEP_LOOKBACK = (14, 28, 56)
 ROTATION_SWEEP_MA = (0, 50, 100)
 ROTATION_SWEEP_TOP = (2, 3)
@@ -1629,6 +1645,7 @@ class SweepRow:
     profit_factor: Optional[float]
     se_net_pct: float = 0.0  # mean_net_pct'nin standart hatası
     kill_ms: Optional[int] = None  # Taramada kill-switch kapalıdır; canlıda tetikleneceği an (None = tetiklenmezdi)
+    phase_nets: Tuple[float, ...] = ()   # Rotasyon: aynı ayar, dengeleme farklı günde başlasaydı net getiri (%)
 
     @property
     def consistent(self) -> bool:
@@ -1841,12 +1858,14 @@ def run_sweep(cfg, data: BacktestData, spread_pct: float = 0.05, progress: Progr
     cache = signal_cache if signal_cache is not None else {}
     rows: List[SweepRow] = []
     for i, (settings, is_base) in enumerate(combos, 1):
-        res = simulate(_apply(cfg, settings), data, spread_pct, None, signal_cache=cache)
+        applied = _apply(cfg, settings)
+        res = simulate(applied, data, spread_pct, None, signal_cache=cache)
         sm = summarize(res.trades)
         first, second = split_halves(res.trades, res.start_ms, res.end_ms)
         rows.append(SweepRow(dict(settings), is_base, sm.count, sm.win_rate, sm.net, sm.mean_net_pct,
                              res.max_drawdown_pct, sum(t.pnl for t in first), sum(t.pnl for t in second),
-                             sm.profit_factor, sm.se_net_pct, _kill_time(cfg, res)))
+                             sm.profit_factor, sm.se_net_pct, _kill_time(cfg, res),
+                             rotation_phase_nets(applied, data, spread_pct)))
         if i == 1 or i % 10 == 0 or i == len(combos):
             say(f"   ⏳ Tarama {i}/{len(combos)} ayar denendi")
     return rows
@@ -2720,6 +2739,26 @@ def _fmt_setting(key: str, value) -> str:
     return f"{float(value):g}"
 
 
+def _phase_spread(nets: Sequence[float]) -> str:
+    return f"en kötü {min(nets):+.0f}% | ortanca {median(nets):+.0f}% | en iyi {max(nets):+.0f}%"
+
+
+def _phase_lines(rows: Sequence[SweepRow], limit: int = 5) -> List[str]:
+    """Rotasyon taraması: tablodaki ilk satırların (ve mevcut ayarın) dengeleme günü şansı."""
+    rows = [r for r in rows if len(r.phase_nets) > 1]
+    picks = rows[:limit] + [r for r in rows[limit:] if r.baseline]
+    if not picks:
+        return []
+    out = ["🎲 Dengeleme günü şansı: aynı ayar, ilk dengeleme farklı bir günde yapılsaydı net getiri (canlı bot",
+           "   başlatıldığı gün başlar). Az işlemde sonuç bu güne çok bağlıdır: tek sayı yerine ortancaya bakın."]
+    for r in picks:
+        label = " · ".join(f"{SWEEP_FIELDS[k][2]} {_fmt_setting(k, v)}" for k, v in r.settings.items()
+                           if SWEEP_FIELDS[k][2])
+        out.append(f"   {'⭐ ' if r.baseline else ''}{label}: {_phase_spread(r.phase_nets)} "
+                   f"({len(r.phase_nets)} başlangıç günü)")
+    return out
+
+
 def _advice_lines(cfg, r: SweepRow) -> List[str]:
     """Önerilen satırın .env'e yazılacak TÜM satırları: strateji + satırın ayarları.
 
@@ -2923,6 +2962,7 @@ def format_sweep_report(rows: Sequence[SweepRow], cfg, data: BacktestData, sprea
                    + ("; 1440 = 1 gün" if swing or is_mean_reversion(cfg.strategy) else "") + "),",
                    "   Alan = MIN_ROOM_RATIO (0 = kapalı)"]
     lines += legend + ["   İşl.başı = işlem başına ortalama net K/Z", LINE] + _kill_lines(rows, cfg)
+    lines += _phase_lines(shown)
 
     best = next((r for r in ranked if r.enough_trades), None)
     if not profitable:
@@ -3205,6 +3245,9 @@ def format_backtest_report(result: BacktestResult, cfg) -> str:
         lines.append(f"🔄 Yeniden dengeleme: {st.get('dengeleme', 0)} kez | alınan coin: {st.get('sinyal', 0)} | "
                      f"BTC trend filtresiyle USDT'de geçen gün: {st.get('trend_kapali_gun', 0)} "
                      f"(%{st.get('trend_kapali_gun', 0) / days * 100:.0f})")
+        if len(result.phase_nets) > 1:
+            lines.append(f"🎲 Dengeleme günü şansı ({len(result.phase_nets)} farklı başlangıç günü): "
+                         f"{_phase_spread(result.phase_nets)} — az işlemde sonuç güne çok bağlıdır, ortancaya bakın")
         if st.get("pompa"):
             lines.append(f"🚀 Pompa filtresine takılan aday: {st['pompa']}")
         if st.get("yeni_coin"):

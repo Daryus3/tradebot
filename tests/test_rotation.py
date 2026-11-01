@@ -210,7 +210,8 @@ def test_rotation_report_explains_why_nothing_was_bought(rcfg, fake_client, tmp_
 def test_rotation_sweeps_and_advice(rcfg):
     combos = sweep_combos(rcfg)
     assert combos[0] == ({"STOP_LOSS_PCT": 20.0, "ROTATION_DAYS": 7}, True)
-    assert {c["STOP_LOSS_PCT"] for c, _ in combos} == {10.0, 20.0, 30.0} and len(combos) == 6
+    assert {c["STOP_LOSS_PCT"] for c, _ in combos} == {10.0, 20.0, 30.0} and len(combos) == 9
+    assert {c["ROTATION_DAYS"] for c, _ in combos} == {1, 7, 14}
     entries = entry_combos(rcfg, [0.0])
     assert {c["ROTATION_LOOKBACK_DAYS"] for c, _ in entries} == {14, 28, 56}
     assert {c["ROTATION_BTC_MA_DAYS"] for c, _ in entries} == {0, 50, 100} and len(entries) == 18
@@ -754,3 +755,22 @@ def test_recovered_buy_keeps_refill_flag_if_stopped_while_placing_backup(rcfg, t
         bot2.next_scan_at = 0
         bot2.tick()
     assert sorted(market_buys(fake)) == sorted(bot2.state.positions) == ["AUSDT", "BUSDT", "CUSDT"]
+
+
+def test_rebalance_day_luck_is_reported(rcfg, fake_client, tmp_path):
+    """Dengeleme takvimi kaydırılınca (canlı bot ilk dengelemeyi başlatıldığı gün yapar) sonuç değişebilir: rotasyon
+    raporları aynı ayarın tüm başlangıç günlerindeki sonucunu da verir."""
+    cfg = replace(rcfg, rotation_top_n=1, rotation_lookback_days=14, start_capital=11.0)
+    data = _prepare(cfg, DailyClient(fake_client, _series()).client, tmp_path)
+    plain = simulate(cfg, data)
+    shifted = simulate(cfg, data, rotation_offset=3)
+    assert shifted.trades[0].open_time_ms == plain.trades[0].open_time_ms + 3 * DAY_MS   # İlk alım 3 gün sonra
+    nets = backtest.rotation_phase_nets(cfg, data)
+    assert len(nets) == cfg.rotation_days and nets[0] == pytest.approx(plain.realized_pnl / cfg.start_capital * 100)
+    assert backtest.rotation_phase_nets(replace(cfg, rotation_days=1), data) == ()
+    rows = backtest.run_entry_sweep(cfg, data)
+    assert all(len(r.phase_nets) == cfg.rotation_days for r in rows)
+    text = backtest.format_sweep_report(rows, cfg, data, kind="giris")
+    assert "🎲 Dengeleme günü şansı" in text and "ortanca" in text and "(7 başlangıç günü)" in text
+    plain.phase_nets = nets
+    assert "🎲 Dengeleme günü şansı (7 farklı başlangıç günü)" in backtest.format_backtest_report(plain, cfg)

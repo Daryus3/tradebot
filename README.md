@@ -282,6 +282,12 @@ büyük coin trendi için 🧭 Strateji → `rotation`, ⚙️ Test ayarları �
 (sonradan çöken coinler listede yoktur). Adil bir sınama için 🪙 Rotasyon coinleri → "10 büyük (Kasım 2023)" (son 3
 yıl) ya da "10 büyük (Kasım 2020)" (⏮️ önceki dönem) seçin: dönem başındaki en büyük 10 coinden sabit bir liste.
 
+**Dengeleme günü şansı (🎲):** haftada bir dengelenen rotasyon az işlem yapar; sonuç, ilk dengelemenin hangi gün
+yapıldığına çok bağlıdır (canlı bot başlatıldığı gün başlar). Dönemi bir gün kaydırmak bile sonucu ikiye katlayabilir.
+Rotasyon raporları bu yüzden aynı ayarın 7 farklı başlangıç günündeki en kötü / ortanca / en iyi sonucunu da yazar;
+karar için ortancaya ve en kötüye bakın. Çıkış taraması her gün dengelemeyi (`ROTATION_DAYS=1`, bu şans yok ama daha
+çok al-sat) de dener.
+
 ---
 
 ## 📊 Backtest nasıl okunur?
