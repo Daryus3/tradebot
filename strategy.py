@@ -55,6 +55,12 @@ ve son kapanan saatlik mum dönüşü teyit edince (yeşil, dipten beri görüle
 üstünde hacimle) alır. RSI_DIV_TREND_FILTER=true ise yalnızca fiyat 1 saatlik EMA200'ün üstündeyken:
     python main.py --backtest --strateji rsi_divergence
 
+Gün içi al-sat ("intraday", 5 dk mumlar): yalnızca en büyük coinlerde (INTRADAY_COINS, varsayılan Kasım 2023'ün ilk
+10'u). Giriş taktiği INTRADAY_TACTIC: vwap (gün başı VWAP'ından sapma), bollinger, rsi2, orb (açılış aralığı
+kırılımı), ema_cross, squeeze, donchian, pullback, dip (bkz. config.INTRADAY_TACTICS). Küçük hedef / zarar kes, işlem
+gün içinde kapanır (config.INTRADAY_PROFILE). Hangi taktiğin işe yaradığını giriş taraması gösterir:
+    python main.py --backtest --strateji intraday --gun 1095 --tara-giris
+
 Haftalık momentum rotasyonu ("rotation", günlük mumlar): sinyal/kâr al mantığı yerine en güçlü birkaç coini tutar ve
 her hafta yeniden dengeler (bkz. rotation.py). Canlı botta TradingBot.rotation_tick, backtest'te
 _Simulator._rotation_step aynı rotation.plan_rotation fonksiyonunu kullanır:
@@ -69,7 +75,8 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from binance_client import BinanceClient, RateLimitError
-from config import STRATEGY_NAMES, fee_from_coin, rotation_coin_list, rotation_hold_count
+from config import (STRATEGY_NAMES, fee_from_coin, intraday_coin_list, intraday_tactic_list, rotation_coin_list,
+                    rotation_hold_count)
 from rotation import RotationPlan, btc_trend, momentum_pct, plan_rotation
 from exchange import SymbolRules
 from entry_filters import candle_reject, prior_trend_reject
@@ -125,6 +132,24 @@ DIV_STRICT_OVERSOLD = 5.0        # Zayıf piyasada ilk dipteki RSI bu kadar daha
 DIV_STRICT_RISE = 2.0            # ...ve ikinci dipte RSI bu kadar daha fazla yükselmiş olmalı
 
 # Haftalık momentum rotasyonu: günlük mumlar
+# Gün içi al-sat (intraday, 5 dk mumlar, en büyük coinler)
+INTRADAY_INTERVAL = "5m"
+INTRADAY_KLINE_LIMIT = 400          # EMA200 trend filtresi + gün başından beri (en fazla 288 mum) VWAP / açılış aralığı
+INTRADAY_MIN_BARS = 250
+INTRADAY_DAY_MS = 86_400_000        # Gün başı: UTC 00:00 (Binance günlük mumu)
+INTRADAY_SESSION_MIN_BARS = 24      # vwap: gün başından en az 2 saat geçmiş olmalı (VWAP otursun)
+INTRADAY_STRICT_BAND_EXTRA = 0.5    # Zayıf piyasada aşırı satım bandı bu kadar standart sapma daha derin
+INTRADAY_ORB_MAX_BARS = 144         # orb: kırılım gün başından en geç 12 saat sonra (sonrası "açılış" sayılmaz)
+INTRADAY_SQUEEZE_BARS = 120         # squeeze: bant genişliği son 10 saatle karşılaştırılır
+INTRADAY_DIP_WINDOW = 36            # dip: zirve / dip son 3 saatte aranır
+INTRADAY_DIP_MAX_BARS = 18          # dip: dip en fazla 1.5 saat önce oluşmuş olmalı
+INTRADAY_DIP_ATR_MULT = 4.0         # dip: düşüş en az 5 dk ATR'nin bu katı
+INTRADAY_MAX_EXTENSION_PCT = 1.5    # ema_cross / pullback: fiyat EMA21 / EMA20'nin bu kadar üstündeyse kovalanmaz
+INTRADAY_TACTIC_LABELS = {
+    "vwap": "VWAP sapması", "bollinger": "Bollinger alt bandı", "rsi2": "RSI(2) aşırı satım",
+    "orb": "Açılış aralığı kırılımı", "ema_cross": "EMA 9/21 kesişimi", "squeeze": "Sıkışma kırılımı",
+    "donchian": "Zirve (Donchian) kırılımı", "pullback": "Trend içi geri çekilme", "dip": "Sert düşüş dönüşü",
+}
 ROTATION_INTERVAL = "1d"
 ROTATION_WARMUP_DAYS = 210.0     # En uzun momentum (180 gün) / BTC ortalaması (200 gün) için geçmiş
 LEVERAGED_SUFFIXES = ("DOWN", "BULL", "BEAR")
@@ -166,6 +191,25 @@ class Signal:
             return (f"{int(m.get('lookback_hours', 0))} saatlik zirve kırılımı %{m.get('breakout_pct', 0):.2f} | "
                     f"Trend %{m.get('trend_pct', 0):+.1f} (1s EMA50/200) | 7 gün %{m.get('momentum_pct', 0):+.1f} | "
                     f"RSI {m.get('rsi', 0):.0f} | Hacim x{m.get('vol_ratio', 0):.1f}")
+        if kind == "intraday":
+            parts = [INTRADAY_TACTIC_LABELS.get(str(m.get("tactic", "")), str(m.get("tactic", "")))]
+            if "z" in m:
+                parts.append(f"VWAP'tan {m['z']:.1f}σ")
+            if "rsi2" in m:
+                parts.append(f"RSI(2) {m['rsi2']:.0f}")
+            if "dip_pct" in m:
+                parts.append(f"Düşüş %{m['dip_pct']:.1f}")
+            if "breakout_pct" in m:
+                parts.append(f"Kırılım %{m['breakout_pct']:.2f}")
+            if "room_pct" in m:
+                parts.append(f"Hedefe %{m['room_pct']:.1f}")
+            if "vol_ratio" in m:
+                parts.append(f"Hacim x{m['vol_ratio']:.1f}")
+            if "rsi" in m:
+                parts.append(f"RSI {m['rsi']:.0f}")
+            if "trend_pct" in m:
+                parts.append(f"Trend %{m['trend_pct']:+.2f}")
+            return " | ".join(parts)
         if kind == "rotation":
             return (f"Momentum %{m.get('momentum_pct', 0):+.1f} (son {int(m.get('lookback_days', 0))} gün) | "
                     f"sıra {int(m.get('rank', 0))}")
@@ -708,6 +752,401 @@ class BreakoutStrategy(_TrendBase):
         return Signal(symbol, price, score, metrics), ""
 
 
+# ================================================================ gün içi: en büyük coinler (5 dk)
+class _IntradayBars:
+    """Kapanmış 5 dk mumların sütunları (gerektiği kadarı, sondan) + anlık fiyat. Taktikler pencerenin yalnızca
+    ihtiyaç duyduğu kısmını okur (backtest'te her mumda 10 coin analiz edilir); bir analizde hesaplanan ATR / trend /
+    gün başı bilgisi saklanır."""
+    __slots__ = ("rows", "n", "price", "_cols", "_memo")
+
+    def __init__(self, raw_klines: List[list]):
+        self.rows = raw_klines[:-1]          # Son satır henüz kapanmamış mumdur (kapanışı = güncel fiyat)
+        self.n = len(self.rows)
+        self.price = float(raw_klines[-1][4])
+        self._cols: Dict[Tuple[int, int], List[float]] = {}
+        self._memo: Dict[str, object] = {}
+
+    def col(self, idx: int, count: int) -> List[float]:
+        """Son `count` kapanmış mumun `idx` sütunu (1 açılış, 2 en yüksek, 3 en düşük, 4 kapanış, 7 quote hacim)."""
+        key = (idx, count)
+        out = self._cols.get(key)
+        if out is None:
+            out = [float(r[idx]) for r in self.rows[-count:]]
+            self._cols[key] = out
+        return out
+
+    def green(self) -> bool:
+        last = self.rows[-1]
+        return float(last[4]) > float(last[1])
+
+    def session(self) -> int:
+        """Son kapanmış mumun günü (UTC 00:00'dan beri) kaç kapanmış mum içeriyor."""
+        m = self._memo.get("session")
+        if m is None:
+            day = int(self.rows[-1][0]) // INTRADAY_DAY_MS
+            m = 0
+            for r in reversed(self.rows):
+                if int(r[0]) // INTRADAY_DAY_MS != day:
+                    break
+                m += 1
+            self._memo["session"] = m
+        return m   # type: ignore[return-value]
+
+    def atr_pct(self) -> float:
+        val = self._memo.get("atr")
+        if val is None:
+            h, lo, c = self.col(2, 60), self.col(3, 60), self.col(4, 60)
+            a = atr(h, lo, c, 14)[-1]
+            val = a / self.price * 100 if a and self.price > 0 else 0.0
+            self._memo["atr"] = val
+        return val   # type: ignore[return-value]
+
+    def trend(self) -> Optional[Tuple[bool, float]]:
+        """(yükseliş trendi mi: EMA50 > EMA200 ve kapanış EMA200 üstünde, EMA50/EMA200 farkı %); veri azsa None."""
+        if "trend" not in self._memo:
+            c = self.col(4, INTRADAY_KLINE_LIMIT)
+            e50, e200 = ema(c, 50), ema(c, 200)
+            if e50[-1] is None or e200[-1] is None:
+                self._memo["trend"] = None
+            else:
+                self._memo["trend"] = (e50[-1] > e200[-1] and c[-1] > e200[-1], (e50[-1] / e200[-1] - 1) * 100)
+        return self._memo["trend"]   # type: ignore[return-value]
+
+    def volume_ratio(self, base_bars: int = 24) -> float:
+        """Son kapanmış mumun hacmi ÷ önceki `base_bars` mumun ortalaması."""
+        qv = self.col(7, base_bars + 1)
+        base = mean(qv[:-1])
+        return qv[-1] / base if base > 0 else 0.0
+
+
+def _mean_sd(values: List[float]) -> Tuple[float, float]:
+    avg = mean(values)
+    var = sum((x - avg) ** 2 for x in values) / len(values) if values else 0.0
+    return avg, math.sqrt(var) if var > 0 else 0.0
+
+
+class IntradayStrategy(ReboundStrategy):
+    """Yalnızca en büyük coinlerde (INTRADAY_COINS, boşsa en hacimli INTRADAY_UNIVERSE coin) 5 dk mumlarla gün içi
+    al-sat. Giriş taktiği INTRADAY_TACTIC (bkz. config.INTRADAY_TACTICS; virgülle birden çoğu: yazılış sırasıyla ilk
+    sinyal veren alınır). Çıkışlar config.INTRADAY_PROFILE: küçük Kâr Al / Zarar Kes, en fazla 6 saat.
+
+    Bütün taktiklerde ortak: 5 dk ATR ≥ INTRADAY_MIN_ATR_PCT (fiyat hedefe gidebilecek kadar oynak) ve
+    INTRADAY_TREND_FILTER açıksa 5 dk EMA50 > EMA200 ve fiyat EMA200 üstünde (yükselen günde alım).
+    """
+    name = "intraday"
+    interval = INTRADAY_INTERVAL
+    kline_limit = INTRADAY_KLINE_LIMIT
+    uses_24h_range = False   # Büyük coinler sakin günlerde %4'lük 24 saat aralığını göremeyebilir
+    uses_room = True         # vwap / bollinger / rsi2 / pullback / dip hedef alanı ölçer (kırılımlar ölçmez)
+    analysis_fields = ("intraday_tactic", "intraday_band_std", "intraday_rsi2_max", "intraday_orb_minutes",
+                       "intraday_breakout_bars", "intraday_volume_ratio", "intraday_trend_filter",
+                       "intraday_min_atr_pct", "max_atr_pct", "rsi_period")
+
+    @property
+    def bar_interval(self) -> str:
+        return INTRADAY_INTERVAL   # Taktiklerin süreleri (açılış aralığı, gün başı) 5 dk mumlara göredir
+
+    @property
+    def candidate_limit(self) -> int:
+        coins = intraday_coin_list(self.cfg)
+        return len(coins) if coins else self.cfg.intraday_universe
+
+    def change_ok(self, change_24h_pct: float) -> bool:
+        return -self.cfg.max_24h_drop_pct <= change_24h_pct <= self.cfg.max_24h_gain_pct
+
+    def candidate_key(self, change_24h_pct: float, quote_volume_24h: float = 0.0) -> float:
+        return -quote_volume_24h   # En hacimli (en büyük) coinler önce
+
+    def prefilter(self, tickers: List[dict], rules: Dict[str, SymbolRules],
+                  excluded_symbols: Set[str], invest_hint: float) -> List[dict]:
+        coins = intraday_coin_list(self.cfg)
+        if coins:
+            wanted = {c + self.cfg.quote_asset for c in coins}
+            tickers = [t for t in tickers if t.get("symbol") in wanted]
+        return super().prefilter(tickers, rules, excluded_symbols, invest_hint)
+
+    def analyze(self, symbol: str, raw_klines: List[list], strict: bool = False) -> Tuple[Optional[Signal], str]:
+        if len(raw_klines) <= INTRADAY_MIN_BARS:
+            return None, "veri az"
+        bars = _IntradayBars(raw_klines)
+        if bars.price <= 0:
+            return None, "veri hatalı"
+        first = ""
+        for tactic in intraday_tactic_list(self.cfg):
+            fn = getattr(self, f"_t_{tactic}", None)
+            if fn is None:
+                continue
+            signal, why = fn(symbol, bars, strict)
+            if signal is not None:
+                return signal, ""
+            first = first or why
+        return None, first or "sinyal yok"
+
+    # ------------------------------------------------------------ ortak son kontroller
+    def _finish(self, symbol: str, b: _IntradayBars, tactic: str, score: float, metrics: Dict[str, float],
+                need_trend: bool = False) -> Tuple[Optional[Signal], str]:
+        cfg = self.cfg
+        atr_pct = b.atr_pct()
+        if atr_pct < cfg.intraday_min_atr_pct:
+            return None, "oynaklık düşük"
+        if atr_pct > cfg.max_atr_pct:
+            return None, "aşırı oynak"
+        out: Dict[str, float] = {"kind": "intraday", "tactic": tactic, "atr_pct": atr_pct, **metrics}  # type: ignore
+        if need_trend or cfg.intraday_trend_filter:
+            trend = b.trend()
+            if trend is None:
+                return None, "veri az"
+            if not trend[0]:
+                return None, "trend yok"
+            out["trend_pct"] = trend[1]
+        return Signal(symbol, b.price, score + min(atr_pct, 1.0) * 2, out), ""
+
+    def _band(self, strict: bool) -> float:
+        return self.cfg.intraday_band_std + (INTRADAY_STRICT_BAND_EXTRA if strict else 0.0)
+
+    # ------------------------------------------------------------ ortalamaya dönüş taktikleri
+    def _t_vwap(self, symbol: str, b: _IntradayBars, strict: bool):
+        """Fiyat gün başından beri oluşan VWAP'ın band × standart sapma altına inip yeşil mumla döndü."""
+        m = b.session()
+        if m < INTRADAY_SESSION_MIN_BARS:
+            return None, "gün yeni başladı"
+        rows = b.rows[-m:]
+        tps = [(float(r[2]) + float(r[3]) + float(r[4])) / 3 for r in rows]
+        vols = [float(r[7]) for r in rows]
+        sv = sum(vols)
+        if sv <= 0:
+            return None, "hacim yok"
+        vw = sum(t * v for t, v in zip(tps, vols)) / sv
+        var = sum(v * (t - vw) ** 2 for t, v in zip(tps, vols)) / sv
+        sd = math.sqrt(var) if var > 0 else 0.0
+        if sd <= 0 or vw <= 0:
+            return None, "veri az"
+        close = float(rows[-1][4])
+        z = (close - vw) / sd
+        band = self._band(strict)
+        if z > -band:
+            return None, "VWAP'tan sapma az"
+        if not b.green():
+            return None, "son mum kırmızı"
+        if b.price >= vw:
+            return None, "VWAP'a dönmüş"
+        room = (vw - b.price) / b.price * 100
+        return self._finish(symbol, b, "vwap", -z * 3 + min(room, 3) * 2,
+                            {"z": z, "room_pct": room, "band_std": band})
+
+    def _t_bollinger(self, symbol: str, b: _IntradayBars, strict: bool):
+        """Önceki mum Bollinger alt bandının altında kapandı, son mum bandın içine yeşil döndü."""
+        c = b.col(4, 22)
+        if len(c) < 22:
+            return None, "veri az"
+        band = self._band(strict)
+        prev_mid, prev_sd = _mean_sd(c[-21:-1])
+        mid, sd = _mean_sd(c[-20:])
+        if prev_sd <= 0 or sd <= 0:
+            return None, "veri az"
+        prev_low = prev_mid - band * prev_sd
+        if c[-2] >= prev_low:
+            return None, "alt banda inmedi"
+        if c[-1] <= mid - band * sd:
+            return None, "bant altında sürüyor"
+        if not b.green():
+            return None, "son mum kırmızı"
+        if b.price >= mid:
+            return None, "orta banda dönmüş"
+        room = (mid - b.price) / b.price * 100
+        depth = (prev_low - c[-2]) / prev_sd
+        return self._finish(symbol, b, "bollinger", band * 2 + min(depth, 3) * 3 + min(room, 3) * 2,
+                            {"room_pct": room, "band_std": band})
+
+    def _t_rsi2(self, symbol: str, b: _IntradayBars, strict: bool):
+        """2 periyotluk RSI çok kısa süreli aşırı satımda (INTRADAY_RSI2_MAX altı)."""
+        c = b.col(4, 40)
+        r2 = rsi(c, 2)[-1]
+        if r2 is None:
+            return None, "veri az"
+        limit = max(1.0, self.cfg.intraday_rsi2_max - (3.0 if strict else 0.0))
+        if r2 > limit:
+            return None, "RSI(2) yüksek"
+        sma5 = mean(c[-5:])
+        if b.price >= sma5:
+            return None, "ortalamaya dönmüş"
+        room = (sma5 - b.price) / b.price * 100
+        return self._finish(symbol, b, "rsi2", (limit - r2) * 0.5 + min(room, 3) * 2 + 5,
+                            {"rsi2": r2, "room_pct": room})
+
+    def _t_dip(self, symbol: str, b: _IntradayBars, strict: bool):
+        """Son 3 saatte ATR'nin en az 4 katı düşüş, dipte RSI 30 altı; dönüş başladı (düşüşün %15-60'ı alındı)."""
+        h, lo, c = b.col(2, 60), b.col(3, 60), b.col(4, 60)
+        n = len(c)
+        start = n - INTRADAY_DIP_WINDOW
+        hi_idx = max(range(start, n), key=lambda i: h[i])
+        lo_idx = min(range(hi_idx, n), key=lambda i: lo[i])
+        high, low = h[hi_idx], lo[lo_idx]
+        if high <= 0 or low <= 0 or high <= low:
+            return None, "düşüş az"
+        drop = (high - low) / high * 100
+        if drop < INTRADAY_DIP_ATR_MULT * b.atr_pct() * (1.25 if strict else 1.0):
+            return None, "düşüş az"
+        since = n - 1 - lo_idx
+        if since < 2 or b.price < low:
+            return None, "dip sürüyor"
+        if since > INTRADAY_DIP_MAX_BARS:
+            return None, "dip eski"
+        retrace = (b.price - low) / (high - low)
+        if retrace < 0.15:
+            return None, "toparlanma yok"
+        if retrace > 0.6:
+            return None, "toparlanma bitmiş"
+        rs = rsi(c, self.cfg.rsi_period)
+        dip_rsis = [v for v in rs[max(lo_idx - 3, 0):] if v is not None]
+        if rs[-1] is None or rs[-3] is None or not dip_rsis:
+            return None, "veri az"
+        if min(dip_rsis) > (25.0 if strict else 30.0):
+            return None, "RSI aşırı satım görmedi"
+        if rs[-1] <= rs[-3] or not b.green():
+            return None, "dönüş yok"
+        room = (high - b.price) / b.price * 100
+        return self._finish(symbol, b, "dip", drop * 2 + (1 - retrace) * 5 + (rs[-1] - min(dip_rsis)) / 5,
+                            {"dip_pct": drop, "retrace": retrace, "rsi": rs[-1], "room_pct": room})
+
+    def _t_pullback(self, symbol: str, b: _IntradayBars, strict: bool):
+        """Yükselen trendde (her zaman şart) EMA20'ye geri çekilip önceki mumun zirvesinin üstünde kapandı."""
+        c, h, lo = b.col(4, 120), b.col(2, 120), b.col(3, 120)
+        e20 = ema(c, 20)
+        if e20[-8] is None:
+            return None, "veri az"
+        if not any(lo[-i] <= e20[-i] * 1.001 for i in range(2, 8)):
+            return None, "EMA20'ye inmedi"
+        if c[-1] <= e20[-1] or c[-1] <= h[-2] or not b.green():
+            return None, "dönüş teyidi yok"
+        r = rsi(c[-60:], self.cfg.rsi_period)[-1]
+        if r is None:
+            return None, "veri az"
+        if not 45 <= r <= 68:
+            return None, "RSI aralık dışı"
+        if (b.price - e20[-1]) / e20[-1] * 100 > INTRADAY_MAX_EXTENSION_PCT:
+            return None, "fazla uzamış"
+        room = (max(h[-36:]) - b.price) / b.price * 100
+        signal, why = self._finish(symbol, b, "pullback", (r - 45) / 5 + min(max(room, 0), 3),
+                                   {"rsi": r, "room_pct": room}, need_trend=True)   # Trend en pahalı kontrol: en son
+        if signal is not None:
+            signal.score += min(signal.metrics["trend_pct"], 3) * 3
+        return signal, why
+
+    # ------------------------------------------------------------ kırılım / momentum taktikleri
+    def _t_orb(self, symbol: str, b: _IntradayBars, strict: bool):
+        """Gün başının ilk INTRADAY_ORB_MINUTES dakikasındaki zirve, hacimli mumla ilk kez yukarı kırıldı."""
+        m = b.session()
+        orb = self.cfg.intraday_orb_minutes // 5
+        if m <= orb:
+            return None, "açılış aralığı oluşmadı"
+        if m > INTRADAY_ORB_MAX_BARS:
+            return None, "açılıştan çok geçti"
+        rows = b.rows[-m:]
+        or_high = max(float(r[2]) for r in rows[:orb])
+        or_low = min(float(r[3]) for r in rows[:orb])
+        close, prev_close = float(rows[-1][4]), float(rows[-2][4])
+        if close <= or_high:
+            return None, "kırılım yok"
+        if prev_close > or_high:
+            return None, "kırılım eski"
+        if not b.green():
+            return None, "son mum kırmızı"
+        if b.price < or_high * 0.998:
+            return None, "kırılım geri döndü"
+        vol_ratio = b.volume_ratio()
+        if vol_ratio < self.cfg.intraday_volume_ratio * (1.3 if strict else 1.0):
+            return None, "hacim zayıf"
+        breakout = (close / or_high - 1) * 100
+        width = (or_high - or_low) / or_low * 100 if or_low > 0 else 0.0
+        return self._finish(symbol, b, "orb", min(vol_ratio, 6) * 2 + min(breakout, 2) * 3 + min(width, 3),
+                            {"breakout_pct": breakout, "range_pct": width, "vol_ratio": vol_ratio})
+
+    def _t_ema_cross(self, symbol: str, b: _IntradayBars, strict: bool):
+        """EMA9 son kapanan mumda EMA21'i yukarı kesti (RSI 50-70, fiyat EMA21'den fazla uzaklaşmamış)."""
+        c = b.col(4, 120)
+        e9, e21 = ema(c, 9), ema(c, 21)
+        if e9[-2] is None or e21[-2] is None:
+            return None, "veri az"
+        if not (e9[-1] > e21[-1] and e9[-2] <= e21[-2]):
+            return None, "kesişim yok"
+        if not b.green():
+            return None, "son mum kırmızı"
+        r = rsi(c[-60:], self.cfg.rsi_period)[-1]
+        if r is None:
+            return None, "veri az"
+        if not (55.0 if strict else 50.0) <= r <= 70.0:
+            return None, "RSI aralık dışı"
+        if (b.price - e21[-1]) / e21[-1] * 100 > INTRADAY_MAX_EXTENSION_PCT:
+            return None, "fazla uzamış"
+        return self._finish(symbol, b, "ema_cross", (r - 50) / 4 + (e9[-1] / e21[-1] - 1) * 1000,
+                            {"rsi": r})
+
+    def _t_squeeze(self, symbol: str, b: _IntradayBars, strict: bool):
+        """Bollinger bant genişliği son 10 saatin en dar %15'indeyken üst bant hacimli mumla kırıldı."""
+        k = INTRADAY_SQUEEZE_BARS
+        c = b.col(4, k + 20)
+        if len(c) < k + 20:
+            return None, "veri az"
+        band = self.cfg.intraday_band_std
+        s1, s2 = sum(c[:20]), sum(x * x for x in c[:20])
+        widths, mids, sds = [], [], []
+        for end in range(20, len(c) + 1):   # Pencere c[end-20:end]
+            if end > 20:
+                s1 += c[end - 1] - c[end - 21]
+                s2 += c[end - 1] ** 2 - c[end - 21] ** 2
+            avg = s1 / 20
+            var = s2 / 20 - avg * avg
+            sd = math.sqrt(var) if var > 0 else 0.0
+            mids.append(avg)
+            sds.append(sd)
+            widths.append(2 * band * sd / avg if avg > 0 else 0.0)
+        history = sorted(widths[:-1])
+        threshold = history[int(len(history) * 0.15)]
+        if min(widths[-7:-1]) > threshold:
+            return None, "sıkışma yok"
+        upper = mids[-1] + band * sds[-1]
+        if c[-1] <= upper:
+            return None, "kırılım yok"
+        if c[-2] > mids[-2] + band * sds[-2]:
+            return None, "kırılım eski"
+        if not b.green():
+            return None, "son mum kırmızı"
+        vol_ratio = b.volume_ratio()
+        if vol_ratio < self.cfg.intraday_volume_ratio * (1.3 if strict else 1.0):
+            return None, "hacim zayıf"
+        breakout = (c[-1] / upper - 1) * 100
+        return self._finish(symbol, b, "squeeze", min(vol_ratio, 6) * 2 + min(breakout, 2) * 3 + 3,
+                            {"breakout_pct": breakout, "vol_ratio": vol_ratio, "width_pct": widths[-2] * 100})
+
+    def _t_donchian(self, symbol: str, b: _IntradayBars, strict: bool):
+        """Son kapanan mum önceki INTRADAY_BREAKOUT_BARS mumun zirvesinin üstünde kapandı (taze, hacimli kırılım)."""
+        n = self.cfg.intraday_breakout_bars
+        h, c = b.col(2, n + 2), b.col(4, n + 2)
+        if len(c) < n + 2:
+            return None, "veri az"
+        prior_high = max(h[-n - 1:-1])
+        if c[-1] <= prior_high:
+            return None, "kırılım yok"
+        if c[-2] > max(h[-n - 2:-2]):
+            return None, "kırılım eski"
+        if not b.green():
+            return None, "son mum kırmızı"
+        if b.price < prior_high * 0.998:
+            return None, "kırılım geri döndü"
+        vol_ratio = b.volume_ratio()
+        if vol_ratio < self.cfg.intraday_volume_ratio * (1.3 if strict else 1.0):
+            return None, "hacim zayıf"
+        r = rsi(b.col(4, 60), self.cfg.rsi_period)[-1]
+        if r is None:
+            return None, "veri az"
+        if r > BREAKOUT_MAX_RSI:
+            return None, "aşırı alım"
+        breakout = (c[-1] / prior_high - 1) * 100
+        return self._finish(symbol, b, "donchian", min(vol_ratio, 6) * 2 + min(breakout, 2) * 3,
+                            {"breakout_pct": breakout, "vol_ratio": vol_ratio, "rsi": r})
+
+
 # ================================================================ uzun vadeli (swing) stratejiler
 class _SwingBase(_TrendBase):
     """1 saatlik mumlar, çok günlük trend. Kısa vadeli stratejilerle aynı tarama altyapısını kullanır."""
@@ -1181,7 +1620,7 @@ class RotationStrategy(ReboundStrategy):
 
 
 STRATEGY_CLASSES = {"rebound": ReboundStrategy, "trend": TrendPullbackStrategy, "breakout": BreakoutStrategy,
-                    "swing": SwingBreakoutStrategy, "swing_pullback": SwingPullbackStrategy,
+                    "intraday": IntradayStrategy, "swing": SwingBreakoutStrategy, "swing_pullback": SwingPullbackStrategy,
                     "mean_revert": MeanRevertStrategy, "rsi_divergence": RsiDivergenceStrategy,
                     "rotation": RotationStrategy}
 assert tuple(STRATEGY_CLASSES) == STRATEGIES

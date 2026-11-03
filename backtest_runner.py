@@ -25,8 +25,8 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Optional, Sequence, Tuple
 
-from config import (BASE_DIR, DATA_DIR, SETTINGS_FILE, STRATEGY_NAMES, Config, ConfigError, is_long_horizon,
-                    is_mean_reversion, is_rotation, with_strategy)
+from config import (BASE_DIR, DATA_DIR, INTRADAY_TACTICS, SETTINGS_FILE, STRATEGY_NAMES, Config, ConfigError,
+                    is_long_horizon, is_mean_reversion, is_rotation, with_strategy)
 from backtest import TOURNAMENT_EXIT_NOTES, TOURNAMENT_EXITS
 from logger import get_logger
 from runtime_settings import apply_overrides, format_value
@@ -131,6 +131,12 @@ PRESETS: Dict[str, Tuple[str, Tuple[Dict[str, str], ...]]] = {
         {"ROTATION_BTC_MA_DAYS": v} for v in ("0", "50", "100"))),
     "rdays": ("🔁 Rotasyon: kaç günde bir dengeleme (ROTATION_DAYS)", tuple(
         {"ROTATION_DAYS": v} for v in ("1", "7", "14"))),
+    # STRATEGY=intraday: giriş taktiği ve hangi coinler (dönem BAŞINDAKİ en büyük 10: 9 yılı üç dönemde denemek için)
+    "itac": ("🕐 Gün içi taktik (INTRADAY_TACTIC)", tuple({"INTRADAY_TACTIC": t} for t in INTRADAY_TACTICS)),
+    "icoins": ("🪙 Gün içi coinler (INTRADAY_COINS)", (
+        {"INTRADAY_COINS": TOP10_2023}, {"INTRADAY_COINS": TOP10_2020}, {"INTRADAY_COINS": TOP10_2017},
+        {"INTRADAY_COINS": "BTC,ETH"}, {"INTRADAY_COINS": ""})),
+    "itrend": ("📈 Gün içi trend filtresi", ({"INTRADAY_TREND_FILTER": "true"}, {"INTRADAY_TREND_FILTER": "false"})),
     "slx": ("🛟 Zarar kes uzatma payı % (SL_EXTEND_PCT)", tuple({"SL_EXTEND_PCT": v} for v in ("1", "2", "3", "5"))),
     "stale": ("🧊 Takılan işlem çıkışı (dk)", tuple({"STALE_EXIT_MINUTES": v} for v in ("0", "60", "120", "240"))),
     "lcool": ("⏳ Zarardan sonra coine bekleme (dk)", tuple({"LOSS_COOLDOWN_MINUTES": v} for v in
@@ -141,6 +147,9 @@ PRESET_NAMES: Dict[str, Tuple[str, ...]] = {    # Değer yerine ad gösterilenle
     "coins": ("kapalı (en hacimli 3)", "BTC", "BTC/ETH (güçlü olan)", "BTC + ETH (ikisi)",
               "10 büyük: son 3 yıl için (Kas 2023)", "10 büyük: ⏮️ önceki dönem için (Kas 2020)",
               "10 büyük: ⏮️⏮️ iki dönem önce için (Kas 2017)"),
+    "icoins": ("10 büyük: son 3 yıl için (Kas 2023)", "10 büyük: ⏮️ önceki dönem için (Kas 2020)",
+               "10 büyük: ⏮️⏮️ iki dönem önce için (Kas 2017)", "BTC + ETH", "en hacimli 10 (sabit liste yok)"),
+    "itrend": ("açık", "kapalı"),
 }
 TOGGLES: Tuple[Tuple[str, str], ...] = (
     ("VWAP_FILTER", "VWAP"), ("FAKEOUT_FILTER", "Fitil"), ("OVERHEAT_FILTER", "Isınma"), ("BTC_FILTER", "BTC sig."),
@@ -836,6 +845,10 @@ class BacktestMenu:
                  f"{f'{eff.min_signal_score:g}' if eff.min_signal_score else 'kapalı'}",
                  "<i>✏️ = bu test için değiştirildi. Akıllı yönetim modları backtest'te yalnızca kapalı / otomatik "
                  "olabilir.</i>"]
+        if eff.strategy == "intraday":
+            lines.insert(-1, f"🕐 Gün içi: taktik {esc(eff.intraday_tactic)} | coinler "
+                             f"{esc(eff.intraday_coins) or f'en hacimli {eff.intraday_universe}'} | trend filtresi "
+                             f"{'açık' if eff.intraday_trend_filter else 'kapalı'}")
         if eff.strategy == "rsi_divergence" or eff.rsi_div_filter:
             lines.insert(-1, f"📐 Uyumsuzluk: ilk dipte RSI ≤ {eff.rsi_div_oversold:g}, ikinci dipte en az "
                              f"+{eff.rsi_div_rise:g} puan | trend filtresi "

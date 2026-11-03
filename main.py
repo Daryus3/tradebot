@@ -282,6 +282,7 @@ def run_backtest_cli(cfg, args) -> int:
         if profile:
             kind = ("haftalarca tutulan rotasyon işlemleri" if is_rotation(cfg.strategy) else
                     "saatler-2 gün süren küçük hedefli dönüş işlemleri" if is_mean_reversion(cfg.strategy)
+                    else "en büyük coinlerde küçük hedefli gün içi işlemler" if cfg.strategy == "intraday"
                     else "1-5 gün süren işlemler")
             print(f"ℹ️ .env'deki çıkış ayarları {env_strategy} stratejisi içindir; {cfg.strategy}, {kind} "
                   f"için önerilen ayarlarla deneniyor:")
@@ -368,8 +369,9 @@ def run_backtest_cli(cfg, args) -> int:
         reports = []
         if compare:
             combos = backtest.strategy_combos(cfg)
-            print(f"🧪 Strateji karşılaştırması: {', '.join(st['STRATEGY'] for st, _ in combos)} aynı veriyle "
-                  f"deneniyor...")
+            names = ", ".join(str(st.get("STRATEGY", st.get("INTRADAY_TACTIC", ""))) for st, _ in combos)
+            what = "Gün içi taktik" if cfg.strategy == "intraday" else "Strateji"
+            print(f"🧪 {what} karşılaştırması: {names} aynı veriyle deneniyor...")
             reports.append(("strateji", backtest.run_sweep(cfg, data, progress=print, combos=combos,
                                                            signal_cache=cache)))
         if args.tara:

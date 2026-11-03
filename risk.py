@@ -244,9 +244,10 @@ def _backup_floor(cfg) -> float:
     """Binance yedek stop emrinin (STOP_LOSS / STOP_LOSS_LIMIT) tetiklenince değerinin pozisyona oranı.
 
     Yalnızca günlerce / haftalarca tutulan stratejilerde (swing, rotasyon) boyutlandırmaya katılır: bot kapalıyken
-    korumanın asıl önemli olduğu yer orası. 5 dk stratejilerinin boyutlandırması değişmez (1.0 döner).
+    korumanın asıl önemli olduğu yer orası. 5 dk stratejilerinin (gün içi dahil) boyutlandırması değişmez (1.0 döner).
     """
-    if not getattr(cfg, "backup_stop_enabled", False) or strategy_family(getattr(cfg, "strategy", "")) == "short":
+    if (not getattr(cfg, "backup_stop_enabled", False)
+            or strategy_family(getattr(cfg, "strategy", "")) in ("short", "intraday")):
         return 1.0
     return (1 - cfg.backup_stop_pct / 100) * (1 - getattr(cfg, "backup_stop_limit_gap_pct", 0.0) / 100)
 

@@ -237,11 +237,18 @@ geçmiş veriyle etkisini `--tara-ab` gösterir; "sorarak" hali geçmiş veriyle
 |---|---|
 | `trend` | 24 saatte yükselmiş, 5 dk EMA50 > EMA200 coinde fiyat EMA20'ye geri çekilip yukarı dönünce alır |
 | `breakout` | Yükselen trendde son 4 saatin zirvesi yüksek hacimle kırılınca alır |
+| `intraday` | **Gün içi al-sat, yalnızca en büyük coinler:** `INTRADAY_COINS` (varsayılan Kasım 2023'ün ilk 10'u: BTC, ETH, XRP, SOL, ADA, DOGE, TRX, LINK, DOT, LTC; boşsa en hacimli `INTRADAY_UNIVERSE` coin), 5 dk mumlar. Giriş taktiği `INTRADAY_TACTIC`: `vwap` (gün başından beri oluşan VWAP'ın `INTRADAY_BAND_STD` standart sapma altından yeşil mumla dönüş), `bollinger` (alt banttan dönüş), `rsi2` (RSI(2) `INTRADAY_RSI2_MAX` altı), `orb` (gün başının ilk `INTRADAY_ORB_MINUTES` dakikasının zirvesi hacimle kırılınca), `ema_cross` (EMA 9/21 kesişimi), `squeeze` (bantlar daraldıktan sonra kırılım), `donchian` (son `INTRADAY_BREAKOUT_BARS` mumun zirvesi kırılınca), `pullback` (trendde EMA20'ye geri çekilme), `dip` (sert düşüş sonrası dönüş); virgülle birkaçı yazılabilir (ilk sinyal veren alınır). `INTRADAY_TREND_FILTER=true`: yalnızca 5 dk EMA50 > EMA200 iken. Çıkışlar küçük: TP 1.5, SL 1.5, izleyen stop 1 → 0.5, başabaş 0.6 → 0.1, en fazla 6 saat. Telegram'da `/ayar INTRADAY_TACTIC rsi2` gibi değişir |
 | `swing` / `swing_pullback` | 1 saatlik mumlarla 1-5 günlük, %8-15'lik hareketler (çıkış ayarları da uzun vadeye göre olmalı: örn. TP 12, SL 6, süre 7200 dk) |
 | `mean_revert` | **Ortalamaya dönüş:** yalnızca en hacimli `MR_UNIVERSE` (20) coinde, yükseliş trendindeki (1 saatlik EMA50 > EMA200) coinin saatlik kapanışı 20 saatlik ortalamanın `MR_BAND_STD` (2) standart sapma altına inince alır; küçük hedefle satar (önerilen: TP 1.5, SL 5, süre 2880 dk, izleyen stop 1 → 0.5, başabaş 0.7 → 0.2). Kazanma oranı yüksek olur; kâr, kayıpların kazançları silmemesine bağlıdır |
 | `rsi_divergence` | **Pozitif RSI uyumsuzluğu:** en hacimli `RSI_DIV_UNIVERSE` (30) coinde fiyat daha düşük dip yaparken RSI daha yüksek dip yapınca (ilk dipte RSI ≤ `RSI_DIV_OVERSOLD`, ikinci dipte en az `RSI_DIV_RISE` puan yüksek) ve son saatlik mum dönüşü **teyit edince** (yeşil, dipten beri görülen en yüksek seviyenin üstünde, ortalamanın üstünde hacimle) alır. `RSI_DIV_TREND_FILTER=true`: yalnızca fiyat 1 saatlik EMA200'ün üstündeyken. Çıkışlar `mean_revert` ile aynı grup (küçük hedef, 2 gün) |
 | `rotation` | Haftalık momentum rotasyonu: en hacimli 30 coinden son 4 haftanın en güçlü 3'ünü tutar, BTC 50 günlük ortalamasının altına inince USDT'ye geçer (`STOP_LOSS_PCT=20`, `BACKUP_STOP_PCT=25` önerilir) |
 | `rotation` + `ROTATION_COINS` | **Büyük coin trendi:** yalnızca seçilen coinler. `ROTATION_COINS=BTC`, `ROTATION_TOP_N=1`: BTC'nin son 4 haftası artıda ve BTC 50 günlük ortalamasının üstündeyken BTC'yi tutar, değilse USDT'de bekler (haftada bir bakar; trend bozulunca ertesi gün satar). `ROTATION_COINS=BTC,ETH`: ikisinden güçlü olanı (`ROTATION_TOP_N=2`: ikisini birden). Yılda birkaç işlem yapar; amaç sık al-sat değil, büyük düşüşlerin dışında kalmak |
+
+Gün içi taktiklerini aynı veriyle karşılaştırmak için `python main.py --backtest --strateji intraday --gun 365
+--strateji-karsilastir` (her taktik aynı çıkışlarla) ya da `--tara-giris` (taktik × zayıf piyasada alım × hedef alanı).
+9 yılı adil sınamak için her dönemi kendi başındaki 10 büyük coinle deneyin: Telegram'da 🧭 Strateji → `intraday`,
+⚙️ Test ayarları → 🪙 Gün içi coinler → "10 büyük (Kas 2023 / Kas 2020 / Kas 2017)" ve 📅 Bitiş → bugün / önceki
+dönem / iki dönem önce (3 yıl × 3).
 
 `--strateji` yalnızca o backtest için geçerlidir; botun kullandığı strateji `STRATEGY` ayarıdır. Swing,
 mean_revert ve rsi_divergence'ta backtest varsayılanı 365 gün, rotasyonda 3 yıldır (`--strateji swing

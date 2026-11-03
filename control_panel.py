@@ -54,6 +54,7 @@ STREAK_CHOICES = (0, 2, 3, 4)
 STALE_CHOICES = (0, 60, 120, 240)              # Takılan işlem çıkışı (dk)
 LOSS_COOLDOWN_CHOICES = (0, 240, 720, 1440)    # Zarardan sonra aynı coine bekleme (dk)
 STRATEGY_SHORT = {"rebound": "Rebound (5 dk dip)", "trend": "Trend (5 dk)", "breakout": "Breakout (5 dk)",
+                  "intraday": "Gün içi (10 büyük coin, 5 dk)",
                   "swing": "Swing kırılım (1 saat)", "swing_pullback": "Swing geri çekilme (1 saat)",
                   "mean_revert": "Ortalamaya dönüş (1 saat)", "rsi_divergence": "RSI uyumsuzluğu (1 saat)",
                   "rotation": "Rotasyon (haftalık)"}
@@ -458,7 +459,7 @@ class ControlPanel:
         cfg = self.bot.cfg
         text = (f"🧭 <b>Strateji Seç</b>\n{LINE}\nŞu an: <b>{esc(STRATEGY_SHORT.get(cfg.strategy, cfg.strategy))}</b>\n"
                 "Seçtiğiniz strateji onaydan sonra .env'ye kaydedilir ve bot yeniden başlatılır (~20 sn).\n"
-                "<i>Farklı gruba (5 dk / 1 saat / rotasyon) geçerken o grubun çıkış ayarları da (Kâr Al, Zarar Kes...) "
+                "<i>Farklı gruba (5 dk / gün içi / 1 saat / rotasyon) geçerken o grubun çıkış ayarları da (Kâr Al, Zarar Kes...) "
                 "yüklenir; eski grubun ayarları saklanır, geri dönünce aynen geri gelir. Hangi stratejinin kârlı "
                 "olduğunu görmek için sunucuda: python main.py --backtest --turnuva</i>")
         keyboard = [[(("✅ " if name == cfg.strategy else "") + STRATEGY_SHORT.get(name, name), f"stp:{name}")]

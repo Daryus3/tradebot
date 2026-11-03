@@ -32,7 +32,7 @@ from statistics import median
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union
 
 from binance_client import RateLimitError
 from config import DATA_DIR
@@ -44,8 +44,9 @@ from risk import (ExitReason, Position, breakeven_effective, cooldown_minutes, e
                   kill_switch_hit, net_exit_value, plan_entry, pnl_pct, position_sl, position_slots, position_tp,
                   price_for_pnl, target_exits, trailing_floor_pct, update_breakeven, update_trailing)
 from rotation import btc_trend, momentum_pct, plan_rotation, pump_pct
-from config import (PROFILE_ATTRS, PROFILES, ConfigError, fee_from_coin, is_long_horizon, is_mean_reversion,
-                    is_rotation, rotation_coin_list, rotation_hold_count, strategy_family)
+from config import (INTRADAY_TACTICS, PROFILE_ATTRS, PROFILES, ConfigError, fee_from_coin, intraday_coin_list,
+                    is_intraday, is_long_horizon, is_mean_reversion, is_rotation, rotation_coin_list,
+                    rotation_hold_count, strategy_family)
 from entry_filters import NO_PRIOR_TREND, PRIOR_TREND_DAYS, candle_filters_on, candle_reject, prior_trend_ok
 from strategy import KLINE_LIMIT, STRATEGIES, Signal, make_strategy, required_move_pct, room_ok, strategy_class
 from telegram_bot import LINE, fmt_duration, fmt_price, fmt_rate, fmt_signed, fmt_usdt
@@ -558,6 +559,9 @@ class _Simulator:
         self.step_ms = next(iter(series.values())).step_ms if series else INTERVAL_MS
         self.btc_bars_1h = max(1, HOUR_MS // self.step_ms)   # BTC filtresi: son 1 saatin mumları
         self.analysis_key = self.strategy.analysis_key()
+        # Gün içi: canlı ön eleme yalnızca INTRADAY_COINS'e bakar (veri başka coinleri de içerse bile)
+        coins = intraday_coin_list(cfg) if is_intraday(cfg.strategy) else ()
+        self.allowed: Optional[Set[str]] = {c + cfg.quote_asset for c in coins} if coins else None
 
         self.cash = cfg.start_capital
         self.realized = 0.0
@@ -943,7 +947,8 @@ class _Simulator:
         candidates: List[Tuple[float, str]] = []
         for symbol, s in self.series.items():
             if (s.rules is None or symbol in self.open or symbol in self.pending_buys
-                    or self.cooldown.get(symbol, 0) > t_close):
+                    or self.cooldown.get(symbol, 0) > t_close
+                    or (self.allowed is not None and symbol not in self.allowed)):
                 continue
             if not s.has(k):
                 continue
@@ -1283,8 +1288,9 @@ def prepare_backtest(cfg, client, days: float = 30, max_symbols: int = 40,
     notes: List[str] = []
 
     # --- semboller
-    coins = rotation_coin_list(cfg) if strategy_class(cfg.strategy).is_rotation else ()
-    if symbols is None and coins:   # Büyük coin trendi: yalnızca seçilen coinler indirilir
+    coins = (rotation_coin_list(cfg) if strategy_class(cfg.strategy).is_rotation
+             else intraday_coin_list(cfg) if is_intraday(cfg.strategy) else ())
+    if symbols is None and coins:   # Büyük coin trendi / gün içi: yalnızca seçilen coinler indirilir
         symbols = [c + cfg.quote_asset for c in coins]
     if symbols is None:
         if strategy_class(cfg.strategy).is_rotation and max_symbols < cfg.rotation_universe:
@@ -1493,6 +1499,11 @@ MR_SWEEP_SL = (3.0, 5.0, 8.0)
 MR_SWEEP_TRAIL = (0.7, 1.0)
 MR_SWEEP_HOLD = (720, 1440, 2880)
 MR_SWEEP_BAND = (1.5, 2.0, 2.5)       # Giriş taraması: MR_BAND_STD (aşırı satım eşiği, standart sapma)
+# Gün içi (intraday, en büyük coinler): küçük hedef / zarar kes, saatler (komisyon + spread ~%0.2 ile)
+INTRADAY_SWEEP_TP = (0.8, 1.2, 2.0)
+INTRADAY_SWEEP_SL = (0.8, 1.5, 2.5)
+INTRADAY_SWEEP_TRAIL = (0.5, 1.0)
+INTRADAY_SWEEP_HOLD = (120, 360, 720)
 DIV_SWEEP_OVERSOLD = (30.0, 35.0, 40.0)   # rsi_divergence giriş taraması: RSI_DIV_OVERSOLD (ilk dipte RSI en fazla)
 # Momentum rotasyonu: "çıkış" = felaket zarar kesi ve yeniden dengeleme sıklığı, "giriş" = momentum süresi,
 # BTC trend filtresi ve tutulan coin sayısı
@@ -1538,6 +1549,15 @@ SWEEP_FIELDS: Dict[str, Tuple[str, type, Optional[str]]] = {
     "MR_UNIVERSE": ("mr_universe", int, None),
     "RSI_DIV_OVERSOLD": ("rsi_div_oversold", float, "RSIdip"),
     "RSI_DIV_UNIVERSE": ("rsi_div_universe", int, None),
+    "INTRADAY_TACTIC": ("intraday_tactic", str, "Taktik"),
+    "INTRADAY_COINS": ("intraday_coins", str, None),
+    "INTRADAY_TREND_FILTER": ("intraday_trend_filter", bool, None),
+    "INTRADAY_BAND_STD": ("intraday_band_std", float, None),
+    "INTRADAY_RSI2_MAX": ("intraday_rsi2_max", float, None),
+    "INTRADAY_ORB_MINUTES": ("intraday_orb_minutes", int, None),
+    "INTRADAY_BREAKOUT_BARS": ("intraday_breakout_bars", int, None),
+    "INTRADAY_VOLUME_RATIO": ("intraday_volume_ratio", float, None),
+    "INTRADAY_MIN_ATR_PCT": ("intraday_min_atr_pct", float, None),
     # Filtre gevşetme taraması (--tara-filtre); kendi tablosunda gösterilir
     "MIN_24H_DROP_PCT": ("min_24h_drop_pct", float, None),
     "MIN_24H_RANGE_PCT": ("min_24h_range_pct", float, None),
@@ -1601,6 +1621,7 @@ ROTATION_ENTRY_KEYS = ("ROTATION_LOOKBACK_DAYS", "ROTATION_BTC_MA_DAYS", "ROTATI
 # Öneri satırlarında yazılan tüm rotasyon ayarları (ROTATION_COINS dahil: sabit listeyle yapılan test, .env'de liste
 # olmadan en hacimli coinlerle çalışırdı)
 ROTATION_KEYS = ROTATION_EXIT_KEYS[1:] + ROTATION_ENTRY_KEYS + ("ROTATION_UNIVERSE", "ROTATION_COINS")
+INTRADAY_KEYS = ("INTRADAY_COINS", "INTRADAY_TACTIC", "INTRADAY_TREND_FILTER")
 EXIT_KEYS = ("TAKE_PROFIT_PCT", "STOP_LOSS_PCT", "TRAILING_ACTIVATION_PCT", "TRAILING_FLOOR_PCT",
              "MAX_HOLD_MINUTES", "MIN_ROOM_RATIO")
 ENTRY_KEYS = ("REGIME_SKIP_WEAK", "MAX_24H_DROP_PCT", "MIN_SIGNAL_SCORE", "MIN_ROOM_RATIO")
@@ -1615,6 +1636,8 @@ def _range_key(strategy: str) -> str:
         return "RSI_DIV_OVERSOLD"
     if is_long_horizon(strategy):
         return "SWING_LOOKBACK_HOURS"
+    if is_intraday(strategy):
+        return "INTRADAY_TACTIC"
     return "MR_BAND_STD" if is_mean_reversion(strategy) else "MAX_24H_GAIN_PCT"
 
 
@@ -1735,7 +1758,7 @@ def sweep_combos(cfg, tps: Optional[Sequence[float]] = None, sls: Optional[Seque
     """Çıkış taraması kombinasyonları; ilk satır .env'deki mevcut ayarlardır.
 
     Verilmeyen listeler stratejinin vadesine göre seçilir (5 dk: TP %2-5 / süre 1-4 saat, swing: TP %8-15 / 2-5 gün,
-    mean_revert / rsi_divergence: TP %1-2.5 / süre 12 saat-2 gün).
+    mean_revert / rsi_divergence: TP %1-2.5 / süre 12 saat-2 gün, intraday: TP %0.8-2 / süre 2-12 saat).
     Rotasyonda yalnızca felaket zarar kesi (--sl) ve yeniden dengeleme sıklığı denenir.
     """
     if is_rotation(cfg.strategy):
@@ -1747,11 +1770,13 @@ def sweep_combos(cfg, tps: Optional[Sequence[float]] = None, sls: Optional[Seque
                 if st != base:
                     combos.append((st, False))
         return combos
-    swing, mr = is_long_horizon(cfg.strategy), is_mean_reversion(cfg.strategy)
-    tps = tps or (SWING_SWEEP_TP if swing else MR_SWEEP_TP if mr else SWEEP_TP)
-    sls = sls or (SWING_SWEEP_SL if swing else MR_SWEEP_SL if mr else SWEEP_SL)
-    trails = trails or (SWING_SWEEP_TRAIL if swing else MR_SWEEP_TRAIL if mr else SWEEP_TRAIL)
-    holds = holds or (SWING_SWEEP_HOLD if swing else MR_SWEEP_HOLD if mr else SWEEP_HOLD)
+    swing, mr, day = is_long_horizon(cfg.strategy), is_mean_reversion(cfg.strategy), is_intraday(cfg.strategy)
+    tps = tps or (SWING_SWEEP_TP if swing else MR_SWEEP_TP if mr else INTRADAY_SWEEP_TP if day else SWEEP_TP)
+    sls = sls or (SWING_SWEEP_SL if swing else MR_SWEEP_SL if mr else INTRADAY_SWEEP_SL if day else SWEEP_SL)
+    trails = trails or (SWING_SWEEP_TRAIL if swing else MR_SWEEP_TRAIL if mr else INTRADAY_SWEEP_TRAIL if day
+                        else SWEEP_TRAIL)
+    holds = holds or (SWING_SWEEP_HOLD if swing else MR_SWEEP_HOLD if mr else INTRADAY_SWEEP_HOLD if day
+                      else SWEEP_HOLD)
     rooms = rooms or SWEEP_ROOM
     base = _current(cfg, EXIT_KEYS)
     # Kırılımda "eski zirveye alan" ölçülmez; alan filtresi hiçbir şeyi değiştirmez (aynı satırlar iki kez denenmesin)
@@ -1813,6 +1838,11 @@ def entry_combos(cfg, scores: Sequence[float], max_drops: Sequence[float] = SWEE
         ranges = sorted({cfg.mr_band_std, *MR_SWEEP_BAND})
     elif range_key == "RSI_DIV_OVERSOLD":
         ranges = sorted({cfg.rsi_div_oversold, *DIV_SWEEP_OVERSOLD})
+    elif range_key == "INTRADAY_TACTIC":
+        # Her taktik tek başına (+ .env'deki birleşim). Puan ölçeği taktiğe özeldir: mevcut taktiğin sinyallerinden
+        # çıkan eşikler başka taktiğe uymaz, puan filtresi taranmaz
+        ranges = list(dict.fromkeys([cfg.intraday_tactic, *INTRADAY_TACTICS]))
+        scores = (cfg.min_signal_score,)
     else:
         ranges = sorted({cfg.max_24h_gain_pct, *(g for g in SWEEP_MAX_GAIN if g > cfg.min_24h_gain_pct)},
                         reverse=True)
@@ -1846,6 +1876,10 @@ def strategy_combos(cfg) -> List[Combo]:
     stratejileri haksız yere eleyebileceği için karşılaştırmada ikisi de kapalıdır (0).
     5 dk ve 1 saatlik stratejiler farklı veriyle çalıştığından birlikte karşılaştırılmaz.
     """
+    if is_intraday(cfg.strategy):   # Gün içinde tek strateji, farklı giriş taktikleri: taktikler karşılaştırılır
+        tactics = list(dict.fromkeys([cfg.intraday_tactic, *INTRADAY_TACTICS]))
+        return [({"INTRADAY_TACTIC": t, "MIN_SIGNAL_SCORE": 0.0, "MIN_ROOM_RATIO": 0.0}, t == cfg.intraday_tactic)
+                for t in tactics]
     order = [cfg.strategy] + [s for s in comparable_strategies(cfg.strategy) if s != cfg.strategy]
     return [({"STRATEGY": s, "MIN_SIGNAL_SCORE": 0.0, "MIN_ROOM_RATIO": 0.0}, s == cfg.strategy) for s in order]
 
@@ -2106,12 +2140,14 @@ AB_TESTS: Tuple[Tuple[str, str, Union[bool, int, float], Union[bool, int, float]
     ("LOSS_COOLDOWN_MINUTES", "Zarardan sonra coine bekleme", 720, 0),
     # Zarar kese gelindiğinde dönüş işareti varsa zarar kes bir kez genişler (SL_EXTEND_PCT)
     ("SL_EXTEND", "Zarar kes uzatma (dönüş işaretinde)", True, False),
+    ("INTRADAY_TREND_FILTER", "Gün içi trend filtresi (EMA50 > EMA200)", True, False),
 )
 # Birden çok değerle denenen satırlar: (anahtar, ad, değerler); mevcut değerden farklı her değer + kapalı hali
 AB_MULTI = (("STALE_EXIT_MINUTES", "Takılan işlem çıkışı", (60, 120, 240)),)
 AB_MINUTE_KEYS = frozenset({"STALE_EXIT_MINUTES", "LOSS_COOLDOWN_MINUTES"})
 # Yalnızca bir stratejide anlamlı A/B satırları (diğerlerinde hiçbir şeyi değiştirmez ya da hep aynı sonucu verir)
-AB_ONLY_FOR = {"RSI_DIV_TREND_FILTER": frozenset({"rsi_divergence"})}
+AB_ONLY_FOR = {"RSI_DIV_TREND_FILTER": frozenset({"rsi_divergence"}),
+               "INTRADAY_TREND_FILTER": frozenset({"intraday"})}
 AB_NOT_FOR = {"RSI_DIV_FILTER": frozenset({"rsi_divergence"})}   # Strateji zaten uyumsuzlukla alıyor
 # Yedek akçe gerektirenler: ilk giriş %100 ise yedek %50 ile denenir (ve kıyas için yalnızca yedek %50)
 AB_RESERVE_TESTS = (("DCA_MODE", "DCA"), ("PYRAMID_MODE", "Piramit"))
@@ -2773,6 +2809,8 @@ def _advice_lines(cfg, r: SweepRow) -> List[str]:
         settings.update({k: getattr(cfg, PROFILE_ATTRS[k]) for k in PROFILES[family]})
     if family == "rotation":
         settings.update({k: getattr(cfg, SWEEP_FIELDS[k][0]) for k in ROTATION_KEYS})
+    if family == "intraday":   # Test edilen coin listesi ve taktik (.env'de başkası olabilir)
+        settings.update({k: getattr(cfg, SWEEP_FIELDS[k][0]) for k in INTRADAY_KEYS})
     settings.update(r.settings)
     lines = [f"{k}={_fmt_setting(k, v)}" for k, v in settings.items()]
     stop = float(settings.get("STOP_LOSS_PCT", cfg.stop_loss_pct))
@@ -2939,6 +2977,12 @@ def format_sweep_report(rows: Sequence[SweepRow], cfg, data: BacktestData, sprea
     elif compare and swing:
         legend += ["   swing = çok günlük yükseliş trendinde son günlerin zirvesinin hacimle kırılmasında alım |",
                    "   swing_pullback = aynı trendde zirveden geri çekilip EMA50'den dönüşte alım (1 saatlik mumlar)"]
+    elif is_intraday(cfg.strategy) and (compare or entry):
+        legend += ["   Taktik = INTRADAY_TACTIC: vwap (gün başı VWAP'ının altına sapma) | bollinger (alt banttan dönüş) |",
+                   "   rsi2 (RSI(2) aşırı satım) | orb (açılış aralığı kırılımı) | ema_cross (EMA 9/21) | squeeze (sıkışma",
+                   "   kırılımı) | donchian (zirve kırılımı) | pullback (EMA20'ye geri çekilme) | dip (sert düşüş dönüşü)"]
+        if entry:
+            legend += ["   Zayıf = REGIME_SKIP_WEAK (true: piyasa zayıfken alım yok), Alan = MIN_ROOM_RATIO (0 = kapalı)"]
     elif compare and is_mean_reversion(cfg.strategy):
         legend += ["   mean_revert = trend içi aşırı satımda (20 saatlik ortalamanın altı) alım | rsi_divergence = pozitif",
                    "   RSI uyumsuzluğu + dönüş teyidiyle alım (en hacimli coinler, 1 saatlik mumlar, aynı çıkışlar)"]

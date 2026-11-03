@@ -97,6 +97,17 @@ EDITABLE: Dict[str, Setting] = {
     "RSI_DIV_OVERSOLD": Setting("rsi_div_oversold", "float", "Uyumsuzluk: ilk dipte RSI en fazla"),
     "RSI_DIV_TREND_FILTER": Setting("rsi_div_trend_filter", "bool", "Uyumsuzlukta trend filtresi (EMA200 üstü)"),
     "BNB_TOPUP_USDT": Setting("bnb_topup_usdt", "float", "BNB takviye tutarı (USDT, 0 = sorma)"),
+    # Gün içi al-sat (STRATEGY=intraday)
+    "INTRADAY_TACTIC": Setting("intraday_tactic", "str",
+                               "Gün içi taktik (vwap, bollinger, rsi2, orb, ema_cross, squeeze, donchian, pullback, dip)"),
+    "INTRADAY_COINS": Setting("intraday_coins", "str", "Gün içi coinler (virgülle, ör. BTC,ETH,XRP)"),
+    "INTRADAY_TREND_FILTER": Setting("intraday_trend_filter", "bool", "Gün içi trend filtresi (EMA50 > EMA200)"),
+    "INTRADAY_BAND_STD": Setting("intraday_band_std", "float", "Gün içi: VWAP / Bollinger bandı (standart sapma)"),
+    "INTRADAY_RSI2_MAX": Setting("intraday_rsi2_max", "float", "Gün içi: RSI(2) eşiği"),
+    "INTRADAY_ORB_MINUTES": Setting("intraday_orb_minutes", "int", "Gün içi: açılış aralığı (dk)"),
+    "INTRADAY_BREAKOUT_BARS": Setting("intraday_breakout_bars", "int", "Gün içi: kırılacak zirve (mum)"),
+    "INTRADAY_VOLUME_RATIO": Setting("intraday_volume_ratio", "float", "Gün içi: kırılım hacmi (ortalamanın katı)"),
+    "INTRADAY_MIN_ATR_PCT": Setting("intraday_min_atr_pct", "float", "Gün içi: en düşük 5 dk oynaklık (ATR %)"),
 }
 
 _TRUE = {"1", "true", "yes", "on", "evet", "e", "acik", "açık"}
@@ -158,7 +169,8 @@ OVERRIDE_BLOCKED = frozenset({
 })
 OVERRIDE_CHOICES = {"dca_mode": ACTION_MODES, "pyramid_mode": ACTION_MODES, "time_exit_mode": ACTION_MODES,
                     "escape_mode": ACTION_MODES, "signal_approval": SIGNAL_APPROVAL_MODES, "notify_mode": NOTIFY_MODES}
-OVERRIDE_TEXT = frozenset({"rotation_coins"})   # Serbest metin olarak değiştirilebilenler (doğrulamayı Config yapar)
+# Serbest metin olarak değiştirilebilenler (doğrulamayı Config yapar)
+OVERRIDE_TEXT = frozenset({"rotation_coins", "intraday_coins", "intraday_tactic"})
 
 
 def override_spec(key: str) -> Optional[Tuple[str, str, Tuple[str, ...]]]:

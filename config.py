@@ -65,12 +65,30 @@ class ConfigError(Exception):
 # 1 saatlik mumlarla 1-5 gün süren işlemler içindir; mean_revert 1 saatlik mumlarla en hacimli coinlerde trend içi
 # aşırı satımı alıp küçük hedefle (saatler-2 gün) satar; rsi_divergence aynı coinlerde pozitif RSI uyumsuzluğunu
 # dönüş teyidiyle alır (aynı çıkış grubu); rotation günlük mumlarla haftalık momentum rotasyonudur (en güçlü birkaç
-# coini tutar, her hafta yeniden dengeler; bkz. strategy.py ve rotation.py).
-STRATEGY_NAMES = ("rebound", "trend", "breakout", "swing", "swing_pullback", "mean_revert", "rsi_divergence",
-                  "rotation")
+# coini tutar, her hafta yeniden dengeler; bkz. strategy.py ve rotation.py). intraday yalnızca en büyük coinlerde
+# (INTRADAY_COINS) 5 dk mumlarla gün içi al-sat yapar; giriş taktiği INTRADAY_TACTIC ile seçilir.
+STRATEGY_NAMES = ("rebound", "trend", "breakout", "intraday", "swing", "swing_pullback", "mean_revert",
+                  "rsi_divergence", "rotation")
 LONG_HORIZON_STRATEGIES = frozenset({"swing", "swing_pullback"})
 MEAN_REVERSION_STRATEGIES = frozenset({"mean_revert", "rsi_divergence"})
 ROTATION_STRATEGIES = frozenset({"rotation"})
+INTRADAY_STRATEGIES = frozenset({"intraday"})
+# Gün içi (intraday) giriş taktikleri; INTRADAY_TACTIC virgülle birden çoğunu alabilir (sıradaki ilk sinyal alınır):
+#   vwap      : fiyat gün başından (UTC 00:00) beri oluşan VWAP'ın INTRADAY_BAND_STD standart sapma altına inip yeşil
+#               mumla dönünce (ortalamaya dönüş; hedef alanı = VWAP'a kalan mesafe)
+#   bollinger : önceki mum Bollinger alt bandının (20 mum, INTRADAY_BAND_STD) altında kapanıp son mum bandın içine
+#               yeşil dönünce (hedef alanı = orta bant)
+#   rsi2      : 2 periyotluk RSI INTRADAY_RSI2_MAX'ın altına inince (kısa süreli aşırı satım; hedef alanı = 5 mum ort.)
+#   orb       : açılış aralığı kırılımı: gün başının ilk INTRADAY_ORB_MINUTES dakikasının zirvesi hacimle kırılınca
+#   ema_cross : 5 dk EMA9, EMA21'i yukarı kesince (RSI 50-70, fiyat EMA21'den fazla uzaklaşmamış)
+#   squeeze   : Bollinger bantları son 10 saatin en darına yakınken (sıkışma) üst bant hacimle kırılınca
+#   donchian  : son INTRADAY_BREAKOUT_BARS mumun zirvesi hacimle kırılınca (taze kırılım)
+#   pullback  : yükselen trendde (EMA50 > EMA200) EMA20'ye geri çekilip önceki mumun zirvesinin üstünde kapanınca
+#   dip       : son 3 saatte ATR'nin en az 4 katı düşüş, RSI 30 altı, dönüş başlamış (düşüşün %15-60'ı geri alınmış)
+INTRADAY_TACTICS = ("vwap", "bollinger", "rsi2", "orb", "ema_cross", "squeeze", "donchian", "pullback", "dip")
+INTRADAY_BELOW_VWAP_TACTICS = frozenset({"vwap", "bollinger", "rsi2", "dip"})   # Düşüşte (ortalamanın altında) alanlar
+# Dönem başında piyasa değeri en büyük 10 coin (stabil coinler ve BNB hariç; BNB komisyon için tutulur), Kasım 2023
+DEFAULT_INTRADAY_COINS = "BTC,ETH,XRP,SOL,ADA,DOGE,TRX,LINK,DOT,LTC"
 # Telegram bildirim modu: all = hepsi | closes = yalnızca pozisyon kapanışları | silent = yalnızca acil durumlar.
 # Komut cevapları, hatalar ve kritik uyarılar (zarar kes, kill-switch...) her modda gelir.
 NOTIFY_MODES = ("all", "closes", "silent")
@@ -116,6 +134,21 @@ MEAN_REVERSION_PROFILE = {
     "MIN_ROOM_RATIO": 0.0,
     "BACKUP_STOP_PCT": 8.0,
 }
+# Gün içi (intraday): büyük coinler 5 dk'da az oynar; küçük hedef / zarar kes, işlem gün içinde kapanır (6 saat).
+# Kâr Al / Zarar Kes net (komisyon düşülmüş) yüzdedir: +%1.5 için fiyat ~%1.7 yükselmelidir.
+INTRADAY_PROFILE = {
+    "TAKE_PROFIT_PCT": 1.5,
+    "STOP_LOSS_PCT": 1.5,
+    "TRAILING_ACTIVATION_PCT": 1.0,
+    "TRAILING_FLOOR_PCT": 0.5,
+    "MAX_HOLD_MINUTES": 360,
+    "BREAKEVEN_TRIGGER_PCT": 0.6,
+    "BREAKEVEN_FLOOR_PCT": 0.1,
+    "MIN_SIGNAL_SCORE": 0.0,           # Puan ölçeği taktiğe özeldir
+    "MIN_ROOM_RATIO": 0.0,
+    "MAX_24H_GAIN_PCT": 25.0,          # 5 dk trend/breakout için daraltılmış üst sınır büyük coinleri eleyebilir
+    "BACKUP_STOP_PCT": 12.0,
+}
 PROFILE_ATTRS = {
     "TAKE_PROFIT_PCT": "take_profit_pct", "STOP_LOSS_PCT": "stop_loss_pct",
     "TRAILING_ACTIVATION_PCT": "trailing_activation_pct", "TRAILING_FLOOR_PCT": "trailing_floor_pct",
@@ -124,7 +157,8 @@ PROFILE_ATTRS = {
     "MIN_ROOM_RATIO": "min_room_ratio", "MAX_24H_GAIN_PCT": "max_24h_gain_pct",
     "BACKUP_STOP_PCT": "backup_stop_pct",
 }
-PROFILES = {"swing": SWING_EXIT_PROFILE, "mr": MEAN_REVERSION_PROFILE, "rotation": ROTATION_PROFILE}
+PROFILES = {"swing": SWING_EXIT_PROFILE, "mr": MEAN_REVERSION_PROFILE, "rotation": ROTATION_PROFILE,
+            "intraday": INTRADAY_PROFILE}
 
 
 def is_long_horizon(strategy: str) -> bool:
@@ -143,17 +177,40 @@ def is_rotation(strategy: str) -> bool:
     return strategy in ROTATION_STRATEGIES
 
 
-def rotation_coin_list(cfg) -> Tuple[str, ...]:
-    """ROTATION_COINS → ("BTC", "ETH"): büyük harf, tekrarsız; "BTCUSDT" yazıldıysa parite eki atılır. Boş = sınır yok
-    (en hacimli ROTATION_UNIVERSE coin sıralanır)."""
-    quote = getattr(cfg, "quote_asset", "USDT").upper()
+def is_intraday(strategy: str) -> bool:
+    """Yalnızca en büyük coinlerde (INTRADAY_COINS) gün içi al-sat yapan strateji mi?"""
+    return strategy in INTRADAY_STRATEGIES
+
+
+def _coin_list(text: str, quote: str) -> Tuple[str, ...]:
     out: List[str] = []
-    for raw in getattr(cfg, "rotation_coins", "").replace(",", " ").split():
+    for raw in (text or "").replace(",", " ").split():
         coin = raw.upper()
         if len(coin) > len(quote) and coin.endswith(quote):
             coin = coin[: -len(quote)]
         if coin not in out:
             out.append(coin)
+    return tuple(out)
+
+
+def rotation_coin_list(cfg) -> Tuple[str, ...]:
+    """ROTATION_COINS → ("BTC", "ETH"): büyük harf, tekrarsız; "BTCUSDT" yazıldıysa parite eki atılır. Boş = sınır yok
+    (en hacimli ROTATION_UNIVERSE coin sıralanır)."""
+    return _coin_list(getattr(cfg, "rotation_coins", ""), getattr(cfg, "quote_asset", "USDT").upper())
+
+
+def intraday_coin_list(cfg) -> Tuple[str, ...]:
+    """INTRADAY_COINS → ("BTC", "ETH", ...) (ROTATION_COINS ile aynı yazım). Boş = en hacimli INTRADAY_UNIVERSE coin."""
+    return _coin_list(getattr(cfg, "intraday_coins", ""), getattr(cfg, "quote_asset", "USDT").upper())
+
+
+def intraday_tactic_list(cfg) -> Tuple[str, ...]:
+    """INTRADAY_TACTIC → ("vwap", "rsi2"): küçük harf, tekrarsız, yazıldığı sırayla (ilk sinyal veren alınır)."""
+    out: List[str] = []
+    for raw in (getattr(cfg, "intraday_tactic", "") or "").replace(",", " ").split():
+        name = raw.strip().lower()
+        if name and name not in out:
+            out.append(name)
     return tuple(out)
 
 
@@ -177,10 +234,13 @@ def divergence_trading(cfg) -> bool:
 
 
 def strategy_family(strategy: str) -> str:
-    """Aynı çıkış mantığını ve mum aralığını paylaşan strateji grubu: 'short' (5 dk), 'swing' (1 saat, günler),
-    'mr' (1 saat, ortalamaya dönüş / RSI uyumsuzluğu), 'rotation' (günlük)."""
+    """Aynı çıkış mantığını ve mum aralığını paylaşan strateji grubu: 'short' (5 dk), 'intraday' (5 dk, en büyük
+    coinler, küçük hedef), 'swing' (1 saat, günler), 'mr' (1 saat, ortalamaya dönüş / RSI uyumsuzluğu), 'rotation'
+    (günlük)."""
     if is_rotation(strategy):
         return "rotation"
+    if is_intraday(strategy):
+        return "intraday"
     if is_mean_reversion(strategy):
         return "mr"
     return "swing" if is_long_horizon(strategy) else "short"
@@ -343,6 +403,17 @@ class Config:
     # Ortalamaya dönüş (STRATEGY=mean_revert; 1 saatlik mumlar)
     mr_band_std: float = 2.0               # Kapanış 20 saatlik ortalamanın en az bu kadar standart sapma altında olmalı
     mr_universe: int = 20                  # Yalnızca en hacimli bu kadar coin (büyük, likit coinler)
+    # Gün içi al-sat (STRATEGY=intraday; 5 dk mumlar, yalnızca en büyük coinler)
+    intraday_coins: str = DEFAULT_INTRADAY_COINS   # Boş = en hacimli INTRADAY_UNIVERSE coin
+    intraday_universe: int = 10            # INTRADAY_COINS boşken taranacak en hacimli coin sayısı
+    intraday_tactic: str = "vwap"          # Giriş taktiği (bkz. INTRADAY_TACTICS); virgülle birden çok
+    intraday_band_std: float = 2.0         # vwap / bollinger: kaç standart sapma altı aşırı satım sayılır
+    intraday_rsi2_max: float = 10.0        # rsi2: RSI(2) bunun altına inince
+    intraday_orb_minutes: int = 60         # orb: gün başından (UTC 00:00) itibaren açılış aralığının süresi
+    intraday_breakout_bars: int = 48       # donchian: kırılacak zirvenin bakıldığı mum sayısı (48 × 5 dk = 4 saat)
+    intraday_volume_ratio: float = 1.5     # orb / squeeze / donchian: kırılım mumunun hacmi ortalamanın en az katı
+    intraday_trend_filter: bool = True     # Yalnızca 5 dk EMA50 > EMA200 ve fiyat EMA200 üstündeyken al
+    intraday_min_atr_pct: float = 0.1      # 5 dk ATR / fiyat (%) bundan düşükse alma (hedefe gidemeyecek kadar durgun)
     signal_confirm_scans: int = 1          # 1 = kapalı (2 = sinyal art arda 2 taramada görülmeli)
     # 31) Oynaklık (ATR) filtresi — 5 dk ATR(14) / fiyat (%)
     min_atr_pct: float = 0.25
@@ -557,6 +628,29 @@ class Config:
             errors.append("MR_BAND_STD 0.5 ile 5 arasında olmalı (örn. 2 = ortalamanın 2 standart sapma altı)")
         if not 1 <= self.mr_universe <= 200:
             errors.append("MR_UNIVERSE 1 ile 200 arasında olmalı")
+        bad = [c for c in self.intraday_coins.replace(",", " ").split() if not c.isalnum()]
+        if bad:
+            errors.append("INTRADAY_COINS virgülle ayrılmış coin adları olmalı (ör. BTC,ETH,XRP); hatalı: "
+                          + ", ".join(bad))
+        if not 1 <= self.intraday_universe <= 50:
+            errors.append("INTRADAY_UNIVERSE 1 ile 50 arasında olmalı")
+        tactics = intraday_tactic_list(self)
+        unknown = [t for t in tactics if t not in INTRADAY_TACTICS]
+        if not tactics or unknown:
+            errors.append("INTRADAY_TACTIC şunlardan biri (veya virgülle birkaçı) olmalı: " + ", ".join(INTRADAY_TACTICS)
+                          + (f" (hatalı: {', '.join(unknown)})" if unknown else ""))
+        if not 0.5 <= self.intraday_band_std <= 5:
+            errors.append("INTRADAY_BAND_STD 0.5 ile 5 arasında olmalı")
+        if not 1 <= self.intraday_rsi2_max <= 50:
+            errors.append("INTRADAY_RSI2_MAX 1 ile 50 arasında olmalı")
+        if not 15 <= self.intraday_orb_minutes <= 240 or self.intraday_orb_minutes % 5:
+            errors.append("INTRADAY_ORB_MINUTES 15 ile 240 arasında ve 5'in katı olmalı (5 dk mumlar)")
+        if not 12 <= self.intraday_breakout_bars <= 288:
+            errors.append("INTRADAY_BREAKOUT_BARS 12 ile 288 (24 saat) arasında olmalı")
+        if self.intraday_volume_ratio <= 0:
+            errors.append("INTRADAY_VOLUME_RATIO sıfırdan büyük olmalı")
+        if not 0 <= self.intraday_min_atr_pct < self.max_atr_pct:
+            errors.append("INTRADAY_MIN_ATR_PCT 0 veya pozitif ve MAX_ATR_PCT'den küçük olmalı")
         if self.signal_confirm_scans < 1:
             errors.append("SIGNAL_CONFIRM_SCANS en az 1 olmalı")
         if self.min_atr_pct >= self.max_atr_pct:
@@ -755,6 +849,16 @@ def load_config(env_file: Optional[str] = None, mode_override: Optional[str] = N
         rotation_coins=_env_str("ROTATION_COINS", ""),
         mr_band_std=_env_float("MR_BAND_STD", 2.0),
         mr_universe=_env_int("MR_UNIVERSE", 20),
+        intraday_coins=_env_str("INTRADAY_COINS", DEFAULT_INTRADAY_COINS),
+        intraday_universe=_env_int("INTRADAY_UNIVERSE", 10),
+        intraday_tactic=_env_str("INTRADAY_TACTIC", "vwap").lower(),
+        intraday_band_std=_env_float("INTRADAY_BAND_STD", 2.0),
+        intraday_rsi2_max=_env_float("INTRADAY_RSI2_MAX", 10.0),
+        intraday_orb_minutes=_env_int("INTRADAY_ORB_MINUTES", 60),
+        intraday_breakout_bars=_env_int("INTRADAY_BREAKOUT_BARS", 48),
+        intraday_volume_ratio=_env_float("INTRADAY_VOLUME_RATIO", 1.5),
+        intraday_trend_filter=_env_bool("INTRADAY_TREND_FILTER", True),
+        intraday_min_atr_pct=_env_float("INTRADAY_MIN_ATR_PCT", 0.1),
         signal_confirm_scans=_env_int("SIGNAL_CONFIRM_SCANS", 1),
         min_atr_pct=_env_float("MIN_ATR_PCT", 0.25),
         max_atr_pct=_env_float("MAX_ATR_PCT", 4.0),
@@ -897,6 +1001,18 @@ def _setting_notes(cfg: Config) -> List[str]:
         notes.append(f"STRATEGY={cfg.strategy} düşüş sonrası dönüşü saatler-günler içinde bekler; MAX_HOLD_MINUTES=0 "
                      "(süre sınırı yok) dönmeyen düşüşte pozisyonu süresiz tutar. Önerilen: " + " ".join(
                          f"{k}={v:g}" for k, v in MEAN_REVERSION_PROFILE.items()))
+    if is_intraday(cfg.strategy):
+        if cfg.max_hold_minutes <= 0 or cfg.max_hold_minutes > 1440:
+            notes.append(f"STRATEGY=intraday gün içi al-sat içindir; MAX_HOLD_MINUTES={cfg.max_hold_minutes} işlemi "
+                         f"günlerce tutabilir. Önerilen: MAX_HOLD_MINUTES={INTRADAY_PROFILE['MAX_HOLD_MINUTES']:g}")
+        if cfg.take_profit_pct > 5 or cfg.stop_loss_pct > 5:
+            notes.append(f"STRATEGY=intraday en büyük coinlerde işlem yapar; bunlar gün içinde nadiren %5 oynar "
+                         f"(TAKE_PROFIT_PCT={cfg.take_profit_pct:g}, STOP_LOSS_PCT={cfg.stop_loss_pct:g}). Önerilen: "
+                         + " ".join(f"{k}={v:g}" for k, v in INTRADAY_PROFILE.items()))
+        below = [t for t in intraday_tactic_list(cfg) if t in INTRADAY_BELOW_VWAP_TACTICS]
+        if cfg.vwap_filter and below:
+            notes.append(f"VWAP_FILTER=true fiyat VWAP'ın altındayken alımı engeller; INTRADAY_TACTIC={','.join(below)} "
+                         f"tam da düşüşte (VWAP altında) alır, bu yüzden çok az sinyal kalır. VWAP_FILTER=false önerilir.")
     if is_rotation(cfg.strategy):
         if cfg.stop_loss_pct < 10:
             notes.append(f"STRATEGY=rotation coinleri haftalarca tutar; STOP_LOSS_PCT={cfg.stop_loss_pct:g} haftalık "
