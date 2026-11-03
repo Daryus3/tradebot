@@ -244,3 +244,15 @@ def test_intraday_settings_can_be_changed_from_telegram_and_backtest_menu(cfg):
     assert [o["INTRADAY_TACTIC"] for o in PRESETS["itac"][1]] == list(INTRADAY_TACTICS)
     for group in ("icoins", "itrend"):
         assert len(PRESET_NAMES[group]) == len(PRESETS[group][1])
+
+
+def test_empty_text_override_means_no_coin_list(cfg):
+    """Telegram backtest menüsündeki "kapalı (en hacimli coinler)" seçeneği boş liste gönderir."""
+    from runtime_settings import apply_overrides, parse_override_args
+    values = parse_override_args(["ROTATION_COINS=", "ROTATION_TOP_N=3", "INTRADAY_COINS="])
+    assert values == {"ROTATION_COINS": "", "ROTATION_TOP_N": "3", "INTRADAY_COINS": ""}
+    new = apply_overrides(replace(cfg, rotation_coins="BTC,ETH"), values)
+    assert new.rotation_coins == "" and new.intraday_coins == ""
+    for bad in (["TAKE_PROFIT_PCT="], ["ROTATION_COINS"], ["=3"]):
+        with pytest.raises(ConfigError):
+            parse_override_args(bad)

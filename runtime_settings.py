@@ -203,11 +203,14 @@ def apply_overrides(cfg: Config, values: Dict[str, object]) -> Config:
 
 
 def parse_override_args(items: Sequence[str]) -> Dict[str, str]:
-    """['TAKE_PROFIT_PCT=3', 'VWAP_FILTER=true'] → {'TAKE_PROFIT_PCT': '3', ...}; biçim hatalıysa ConfigError."""
+    """['TAKE_PROFIT_PCT=3', 'VWAP_FILTER=true'] → {'TAKE_PROFIT_PCT': '3', ...}; biçim hatalıysa ConfigError.
+
+    Serbest metin ayarları boş olabilir (ör. ROTATION_COINS= → liste yok, en hacimli coinler)."""
     out: Dict[str, str] = {}
     for item in items or ():
         key, sep, value = str(item).partition("=")
-        if not sep or not key.strip() or not value.strip():
+        text_key = key.strip().lower() in OVERRIDE_TEXT
+        if not sep or not key.strip() or (not value.strip() and not text_key):
             raise ConfigError(f"--ayar ANAHTAR=DEĞER biçiminde olmalı (girilen: {item!r})")
         out[key.strip().upper()] = value.strip()
     return out
