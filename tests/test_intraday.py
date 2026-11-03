@@ -54,8 +54,8 @@ def test_intraday_config_defaults_profile_and_validation(cfg, monkeypatch, tmp_p
     assert intraday_tactic_list(replace(cfg, intraday_tactic="RSI2, vwap ,rsi2")) == ("rsi2", "vwap")
     assert intraday_coin_list(replace(cfg, intraday_coins="btcusdt, eth,ETH")) == ("BTC", "ETH")
     day, applied = with_strategy(replace(cfg, take_profit_pct=5.0, max_hold_minutes=120), "intraday")
-    assert applied and day.take_profit_pct == INTRADAY_PROFILE["TAKE_PROFIT_PCT"] == 1.5
-    assert day.stop_loss_pct == 1.5 and day.max_hold_minutes == 360 and day.max_24h_gain_pct == 25
+    assert applied and day.take_profit_pct == INTRADAY_PROFILE["TAKE_PROFIT_PCT"] == 1.2
+    assert day.stop_loss_pct == 2.5 and day.max_hold_minutes == 360 and day.max_24h_gain_pct == 25
     assert with_strategy(day, "intraday") == (day, False)
     assert _backup_floor(day) == 1.0          # 5 dk grubu gibi: yedek stop boyutlandırmaya katılmaz
     assert not _setting_notes(day)

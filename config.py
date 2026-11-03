@@ -134,11 +134,13 @@ MEAN_REVERSION_PROFILE = {
     "MIN_ROOM_RATIO": 0.0,
     "BACKUP_STOP_PCT": 8.0,
 }
-# Gün içi (intraday): büyük coinler 5 dk'da az oynar; küçük hedef / zarar kes, işlem gün içinde kapanır (6 saat).
-# Kâr Al / Zarar Kes net (komisyon düşülmüş) yüzdedir: +%1.5 için fiyat ~%1.7 yükselmelidir.
+# Gün içi (intraday): büyük coinler 5 dk'da az oynar; küçük hedef, işlem gün içinde kapanır (6 saat). Değerler 9 yıllık
+# testte (2017-2026, her dönem kendi başındaki ilk 10 coinle) varsayılan taktiğin (vwap) üç dönemde de en iyi çıkışı.
+# Kâr Al / Zarar Kes net (komisyon düşülmüş) yüzdedir: +%1.2 için fiyat ~%1.4 yükselmelidir. Uyarı: o testte hiçbir
+# taktik kâr etmedi (en iyisi vwap + trend filtresi, 9 yılda -%28); işlem başı maliyet (~%0.2) avantajdan büyük.
 INTRADAY_PROFILE = {
-    "TAKE_PROFIT_PCT": 1.5,
-    "STOP_LOSS_PCT": 1.5,
+    "TAKE_PROFIT_PCT": 1.2,
+    "STOP_LOSS_PCT": 2.5,
     "TRAILING_ACTIVATION_PCT": 1.0,
     "TRAILING_FLOOR_PCT": 0.5,
     "MAX_HOLD_MINUTES": 360,

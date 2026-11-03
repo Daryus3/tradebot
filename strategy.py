@@ -60,6 +60,8 @@ Gün içi al-sat ("intraday", 5 dk mumlar): yalnızca en büyük coinlerde (INTR
 kırılımı), ema_cross, squeeze, donchian, pullback, dip (bkz. config.INTRADAY_TACTICS). Küçük hedef / zarar kes, işlem
 gün içinde kapanır (config.INTRADAY_PROFILE). Hangi taktiğin işe yaradığını giriş taraması gösterir:
     python main.py --backtest --strateji intraday --gun 1095 --tara-giris
+9 yıllık testte (2017-2026, her dönem kendi başındaki ilk 10 coinle) hiçbir taktik kâr etmedi: işlem başına sonuç
+alış-satış maliyetine (~%0.2) eşitti, komisyonsuzken bile avantaj en fazla +%0.13 / işlem (vwap + trend filtresi).
 
 Haftalık momentum rotasyonu ("rotation", günlük mumlar): sinyal/kâr al mantığı yerine en güçlü birkaç coini tutar ve
 her hafta yeniden dengeler (bkz. rotation.py). Canlı botta TradingBot.rotation_tick, backtest'te
