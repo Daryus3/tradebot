@@ -866,7 +866,8 @@ def save_chart(ev: Evaluation, path: Path, title: str) -> Optional[Path]:
         ax.axvline(datetime.fromtimestamp(res.ruined_ms / 1000, tz=timezone.utc), color="#dc2626", lw=1, ls=":")
     ax.set_yscale("log")
     ax.set_title(f"A) Tek hesap: {res.params.start_capital:g} USDT'nin seyri (log)")
-    ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
+    ax.xaxis.set_major_locator(mdates.AutoDateLocator(minticks=3, maxticks=6))
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%m.%Y"))
     ax.grid(alpha=0.3)
     labels = [str(y) for y, _r in ev.years]
     nets = [r.net_pct for _y, r in ev.years]
@@ -884,7 +885,7 @@ def save_chart(ev: Evaluation, path: Path, title: str) -> Optional[Path]:
         tt = [datetime.fromtimestamp(tr.exit_ms / 1000, tz=timezone.utc) for tr in fixed]
         ax.plot(tt, np.cumsum([net_move_pct(tr) for tr in fixed]), color="#7c3aed", lw=1.2, label="net")
         ax.plot(tt, np.cumsum([net_move_pct(tr) + (tr.fees + tr.funding) / tr.notional * 100 for tr in fixed]),
-                color="#9ca3af", lw=1.0, ls="--", label="maliyetsiz")
+                color="#9ca3af", lw=1.0, ls="--", label="komisyon ve fonlama hariç")
         ax.legend(loc="best", fontsize=8)
     ax.axhline(0, color="#374151", lw=0.8)
     ax.set_title("C) Sabit pozisyon: işlem sonuçlarının toplamı (kaldıraçsız %)")
