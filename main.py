@@ -21,6 +21,7 @@ Kullanım:
     python main.py --backtest --strateji mean_revert   # Büyük coinlerde trend içi aşırı satım alımı (küçük hedef)
     python main.py --backtest --strateji rsi_divergence   # Pozitif RSI uyumsuzluğu + dönüş teyidiyle alım (1 saat)
     python main.py --backtest --turnuva             # Tüm strateji türleri × çıkış profilleri aynı yılda, sıralı tablo
+    python main.py --backtest --strateji futures --tum-donem   # Vadeli scalping: Ocak 2020'den bugüne, yıllara göre
     python main.py --backtest --gun 90 --tara-ab    # Her giriş filtresini açıp / kapatıp kâra etkisini karşılaştırır
     python main.py --backtest --deney --gun 540     # Zarar azaltma deneyi: önerilen ayar birleşimleri, kill-switch açık
     python main.py --backtest --ayar TAKE_PROFIT_PCT=3 --ayar VWAP_FILTER=true  # Ayarı yalnızca bu test için değiştirir
@@ -45,8 +46,8 @@ import time
 from datetime import datetime
 from typing import Optional
 
-from config import (BASE_DIR, DATA_DIR, LOG_DIR, STRATEGY_NAMES, ConfigError, is_long_horizon, is_mean_reversion,
-                    is_rotation, load_config)
+from config import (BASE_DIR, DATA_DIR, LOG_DIR, STRATEGY_NAMES, ConfigError, is_futures, is_long_horizon,
+                    is_mean_reversion, is_rotation, load_config)
 from logger import redact, register_secrets, setup_logging
 
 EXIT_OK, EXIT_CONFIG, EXIT_KILLED, EXIT_CRASH = 0, 1, 2, 3
@@ -98,6 +99,9 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--strateji", choices=list(STRATEGY_NAMES), default=None,
                         help="Backtest için strateji (.env'deki STRATEGY yerine). Başka tür bir stratejiye "
                              "(5 dk → swing / rotation) geçilirse çıkışlar o tür için önerilen değerlerle denenir")
+    parser.add_argument("--tum-donem", action="store_true",
+                        help="Vadeli backtest (STRATEGY=futures): Ocak 2020'den (arşivin başı) bugüne, her dönem kendi "
+                             "başındaki en büyük 10 coinle; yıllara göre kazanma oranı / getiri / düşüş")
     parser.add_argument("--strateji-karsilastir", action="store_true",
                         help="Backtest: aynı mum aralığındaki stratejileri aynı veriyle karşılaştırır "
                              "(5 dk: rebound / trend / breakout, 1 saat: swing / swing_pullback, "
@@ -180,7 +184,7 @@ def main(argv=None) -> int:
 
     from state import StateStore
 
-    store = StateStore(DATA_DIR / f"state_{cfg.trading_mode}.json")
+    store = StateStore(state_path(cfg))
 
     if args.reset_state:
         if not store.exists():
@@ -205,6 +209,17 @@ def main(argv=None) -> int:
         return EXIT_CRASH
 
 
+def state_path(cfg):
+    """Vadeli işlem ayrı bir hesaptır (USDⓈ-M cüzdanı): durumu ve işlem kaydı spot'tan ayrı tutulur."""
+    return DATA_DIR / (f"state_futures_{cfg.trading_mode}.json" if is_futures(cfg.strategy)
+                       else f"state_{cfg.trading_mode}.json")
+
+
+def trades_path(cfg):
+    return DATA_DIR / (f"trades_futures_{cfg.trading_mode}.csv" if is_futures(cfg.strategy)
+                       else f"trades_{cfg.trading_mode}.csv")
+
+
 def must_refuse_killed(state) -> bool:
     """Kill-switch tetiklenmiş ve tüm pozisyonlar satılmışsa bot başlamaz (kilit).
     Satılamamış pozisyon kaldıysa bot yalnızca onları satmak için başlar (yeni alım yapmaz)."""
@@ -215,13 +230,13 @@ def show_stats(cfg) -> int:
     import stats
     from telegram_bot import _strip_html
 
-    path = DATA_DIR / f"trades_{cfg.trading_mode}.csv"
+    path = trades_path(cfg)
     trades = stats.load_trades(path)
     if not trades:
         print(f"📭 Henüz kapanmış işlem yok ({path}).")
         return EXIT_OK
     from state import StateStore
-    state = StateStore(DATA_DIR / f"state_{cfg.trading_mode}.json").load()
+    state = StateStore(state_path(cfg)).load()
     realized = state.realized_pnl if state else sum(t["kar_zarar_usdt"] for t in trades)
     st = stats.compute_stats(trades)
     limit = (cfg.loss_limit(state.start_capital, state.capital_added) if state
@@ -280,7 +295,8 @@ def run_backtest_cli(cfg, args) -> int:
         env_strategy = cfg.strategy
         cfg, profile = with_strategy(cfg, args.strateji)
         if profile:
-            kind = ("haftalarca tutulan rotasyon işlemleri" if is_rotation(cfg.strategy) else
+            kind = ("kaldıraçlı vadeli scalping işlemleri (fiyat yüzdesi)" if is_futures(cfg.strategy) else
+                    "haftalarca tutulan rotasyon işlemleri" if is_rotation(cfg.strategy) else
                     "saatler-2 gün süren küçük hedefli dönüş işlemleri" if is_mean_reversion(cfg.strategy)
                     else "en büyük coinlerde küçük hedefli gün içi işlemler" if cfg.strategy == "intraday"
                     else "1-5 gün süren işlemler")
@@ -305,6 +321,8 @@ def run_backtest_cli(cfg, args) -> int:
             print(f"❌ {exc}")
             return EXIT_CONFIG
         print("⚙️ Yalnızca bu test için değiştirilen ayarlar: " + " ".join(f"{k}={v}" for k, v in overrides.items()))
+    if is_futures(cfg.strategy) and not args.turnuva:
+        return run_futures_backtest_cli(cfg, args, out_dir)
     days = args.gun if args.gun is not None else (
         1095 if is_rotation(cfg.strategy) and not args.turnuva else
         365 if args.turnuva or args.deney or is_long_horizon(cfg.strategy) or is_mean_reversion(cfg.strategy)
@@ -423,6 +441,51 @@ def run_backtest_cli(cfg, args) -> int:
     return EXIT_OK
 
 
+def run_futures_backtest_cli(cfg, args, out_dir) -> int:
+    """Vadeli scalping backtesti (futures_backtest.py): rapor, işlem CSV'si ve grafik."""
+    try:
+        import futures_backtest
+    except ImportError as exc:
+        print(f"❌ Vadeli backtest için numpy gerekir: .venv/bin/pip install -r requirements.txt ({exc})")
+        return EXIT_CONFIG
+    try:
+        end_ms = _end_date_ms(args.bitis)
+    except ValueError as exc:
+        print(f"❌ {exc}")
+        return EXIT_CONFIG
+    if args.gun is not None and args.gun <= 0:
+        print("❌ --gun sıfırdan büyük olmalı")
+        return EXIT_CONFIG
+    if cfg.futures_liq_source != "proxy":
+        print(f"ℹ️ FUTURES_LIQ_SOURCE={cfg.futures_liq_source}: Binance geçmiş likidasyon kaydı yayımlamadığı için "
+              f"backtest likidasyon dalgasını mumlardan (vekil ölçüt) ölçer.")
+    what = "Ocak 2020'den bugüne (her dönem kendi başındaki ilk 10 coinle)" if args.tum_donem else (
+        f"{'Belirtilen tarihte biten' if end_ms else 'Son'} {args.gun or 365} gün ({cfg.futures_coins})")
+    print(f"⏳ Vadeli scalping backtesti: {what}, {cfg.futures_leverage}x, {cfg.start_capital:g} USDT. Veri Binance "
+          f"arşivinden indirilir (ilk seferde birkaç dakika - tüm dönem için ~1-2 GB)...")
+    try:
+        report, chart, _ev = futures_backtest.run_cli(cfg, args.gun, end_ms, out_dir, chart=not args.grafiksiz,
+                                                      full_history=args.tum_donem, progress=print)
+    except Exception as exc:  # noqa: BLE001
+        print(f"❌ Vadeli backtest çalıştırılamadı: {exc}")
+        return EXIT_CONFIG
+    print(report)
+    if chart is not None:
+        print(f"🖼️ Grafik: {chart}")
+        if not args.cikti_klasoru and cfg.has_telegram:   # Komut satırından: Telegram'a da gönder
+            from telegram_bot import TelegramNotifier
+            notifier = TelegramNotifier(cfg.telegram_bot_token, cfg.telegram_chat_id, async_mode=False)
+            text_path = chart.with_suffix(".txt")
+            try:
+                text_path.write_text(report, encoding="utf-8")
+                notifier.send_photo(chart, f"📊 Vadeli backtest — {cfg.futures_leverage}x")
+                notifier.send_document(text_path, "📄 Vadeli backtest raporu")
+                print("📤 Grafik ve rapor Telegram'a gönderildi.")
+            except Exception as exc:  # noqa: BLE001
+                print(f"⚠️ Telegram'a gönderilemedi: {exc}")
+    return EXIT_OK
+
+
 def _send_backtest_chart(cfg, result, report: str, out_dir=DATA_DIR, send: bool = True) -> None:
     """K/Z dağılım grafiğini `out_dir` klasörüne kaydeder; Telegram ayarlıysa (ve send) rapor ve grafiği oraya da
     gönderir (sunucuda resim açılamadığı için grafiği telefondan görmenin en kolay yolu). Telegram'dan başlatılan
@@ -503,17 +566,27 @@ def run_bot(cfg, store, args, log) -> int:
         if not cfg.has_binance_keys:
             print("❌ Canlı mod için .env dosyasına BINANCE_API_KEY ve BINANCE_API_SECRET yazmalısınız.")
             return EXIT_CONFIG
-        print("\n" + "!" * 64)
-        print("  ⚠️  CANLI MOD: Bot GERÇEK PARANIZLA Binance'te işlem yapacak!")
-        kill = (f"-{cfg.legacy_loss_usdt:g} {cfg.quote_asset}" if cfg.legacy_loss_usdt is not None
-                else f"sermayenin %{cfg.max_total_loss_pct:g}'i")
-        exits = (f"Rotasyon: en güçlü {cfg.rotation_top_n} coin, felaket zarar kesi -%{cfg.stop_loss_pct:g}"
-                 if is_rotation(cfg.strategy) else f"TP +%{cfg.take_profit_pct:g} | SL -%{cfg.stop_loss_pct:g}")
-        print(f"  Sermaye: {cfg.start_capital:g} {cfg.quote_asset} | Kill-switch: {kill} | {exits}")
-        print("!" * 64)
-        if not args.yes and not confirm("Devam etmek için EVET yazın: "):
-            print("İptal edildi.")
-            return EXIT_CONFIG
+        if is_futures(cfg.strategy):
+            print("\n" + "!" * 64)
+            print(f"  ⚠️  CANLI VADELİ MOD: {cfg.futures_leverage}x KALDIRAÇLA gerçek parayla işlem yapılacak!")
+            print(f"  Zarar kes fiyat -%{cfg.stop_loss_pct:g} = teminatın ~%{cfg.stop_loss_pct * cfg.futures_leverage:.0f}'i. "
+                  f"Backtestte (2020-2026) bu strateji her yıl zarar etti.")
+            print("!" * 64)
+            if not args.yes and not confirm("Devam etmek için EVET yazın: "):
+                print("İptal edildi.")
+                return EXIT_CONFIG
+        else:
+            print("\n" + "!" * 64)
+            print("  ⚠️  CANLI MOD: Bot GERÇEK PARANIZLA Binance'te işlem yapacak!")
+            kill = (f"-{cfg.legacy_loss_usdt:g} {cfg.quote_asset}" if cfg.legacy_loss_usdt is not None
+                    else f"sermayenin %{cfg.max_total_loss_pct:g}'i")
+            exits = (f"Rotasyon: en güçlü {cfg.rotation_top_n} coin, felaket zarar kesi -%{cfg.stop_loss_pct:g}"
+                     if is_rotation(cfg.strategy) else f"TP +%{cfg.take_profit_pct:g} | SL -%{cfg.stop_loss_pct:g}")
+            print(f"  Sermaye: {cfg.start_capital:g} {cfg.quote_asset} | Kill-switch: {kill} | {exits}")
+            print("!" * 64)
+            if not args.yes and not confirm("Devam etmek için EVET yazın: "):
+                print("İptal edildi.")
+                return EXIT_CONFIG
 
     client = BinanceClient(cfg.binance_api_key, cfg.binance_api_secret, cfg.binance_base_url)
     prefix = "🧪 <i>[TEST MODU]</i>\n" if cfg.is_paper else ""
@@ -526,6 +599,8 @@ def run_bot(cfg, store, args, log) -> int:
     from pathlib import Path
     env_path = Path(args.env) if args.env else BASE_DIR / ".env"   # Telegram menüsünden değişen ayarlar buraya yazılır
     try:
+        if is_futures(cfg.strategy):
+            return _start_futures_bot(cfg, store, notifier, log, env_path)
         return _start_bot(cfg, store, client, notifier, log, env_path)
     finally:
         notifier.flush()  # Kuyruktaki Telegram mesajlarının gitmesini bekle
@@ -634,6 +709,69 @@ def _start_bot(cfg, store, client, notifier, log, env_path=None) -> int:
         if isinstance(exc, BinanceAPIError) and is_transient_binance_error(exc):
             return EXIT_CRASH  # Geçici sunucu hatası: bekçi yeniden denesin
         return EXIT_CONFIG
+    return bot.run(do_startup=False)
+
+
+def _start_futures_bot(cfg, store, notifier, log, env_path=None) -> int:
+    """Vadeli scalping motoru (FuturesBot): ayrı durum dosyası, Binance USDⓈ-M cüzdanı, CCXT."""
+    import requests
+
+    from futures_exchange import FuturesError, FuturesExchange, describe_error, make_exchange
+    from futures_trader import FuturesBot
+    from state import BotState, EquityLog, TradeLog
+    from strategy import make_strategy
+    from telegram_bot import Messages
+
+    try:
+        state = store.load()
+    except Exception as exc:  # noqa: BLE001
+        print(f"❌ Durum dosyası okunamadı ({store.path}): {exc}\n   Sıfırlamak için: python main.py --reset-state")
+        return EXIT_CONFIG
+    if state and must_refuse_killed(state):
+        msg = (f"🛑 Kill-switch daha önce tetiklenmiş: {state.kill_reason}\n   Bot güvenlik nedeniyle başlatılmadı. "
+               f"Yeniden başlatmak için: python main.py --mode {cfg.trading_mode} --reset-state")
+        print(msg)
+        notifier.send(Messages.warning(msg), critical=True)
+        return EXIT_KILLED
+    try:
+        if state is None:
+            start_capital = cfg.start_capital
+            if not cfg.is_paper:
+                probe = FuturesExchange(cfg)
+                free = wait_for_network(probe.free_balance, "Vadeli bakiye okunamadı", cfg, log)
+                if free <= 0:
+                    msg = ("Binance USDⓈ-M Vadeli cüzdanınızda serbest USDT yok. Binance'te Cüzdan → Transfer ile "
+                           "Spot'tan 'USDⓈ-M Vadeli' cüzdanına aktarın (ücretsiz, anında), sonra botu yeniden başlatın.")
+                    print(f"❌ {msg}")
+                    notifier.send(Messages.error(f"Vadeli bot başlatılamadı: {msg}", fatal=True), critical=True)
+                    return EXIT_CONFIG
+                start_capital = free                 # Bot vadeli cüzdandaki serbest bakiyenin tamamını kullanır
+            state = BotState.new(cfg.trading_mode, start_capital, cfg.quote_asset)
+            store.save(state)
+        exchange = make_exchange(cfg, state)
+    except FuturesError as exc:
+        print(f"❌ {describe_error(exc)}")
+        notifier.send(Messages.error(f"Vadeli bot başlatılamadı: {describe_error(exc)}", fatal=True), critical=True)
+        return EXIT_CONFIG
+    listener = None
+    if cfg.telegram_commands and notifier.enabled:
+        from commands import TelegramCommandListener
+        listener = TelegramCommandListener(cfg.telegram_bot_token, cfg.telegram_chat_id)
+    ip_monitor = None
+    if cfg.ip_check_minutes > 0:
+        from ip_monitor import IpMonitor
+        ip_monitor = IpMonitor(cfg.ip_check_minutes * 60)
+    mode = cfg.trading_mode
+    bot = FuturesBot(cfg, exchange, make_strategy(None, cfg), notifier, store, state,
+                     TradeLog(DATA_DIR / f"trades_futures_{mode}.csv"),
+                     equity_log=EquityLog(DATA_DIR / f"equity_futures_{mode}.csv"), price_stream=None,
+                     command_listener=listener, settings_path=env_path, ip_monitor=ip_monitor)
+    try:
+        wait_for_network(bot.startup, "Açılış", cfg, log)
+    except (FuturesError, requests.RequestException) as exc:
+        print(f"❌ {describe_error(exc)}")
+        notifier.send(Messages.error(f"Vadeli bot başlatılamadı: {describe_error(exc)}", fatal=True), critical=True)
+        return EXIT_CRASH if isinstance(exc, requests.RequestException) else EXIT_CONFIG
     return bot.run(do_startup=False)
 
 

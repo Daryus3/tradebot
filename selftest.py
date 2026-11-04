@@ -21,7 +21,7 @@ from decimal import Decimal
 from typing import List, Tuple
 
 from binance_client import BinanceClient
-from config import is_rotation
+from config import futures_coin_list, is_futures, is_rotation
 from exchange import LiveExchange, PaperExchange, SymbolRules, parse_symbol_rules
 from logger import get_logger
 from risk import (ExitReason, Position, evaluate_exit, kill_switch_hit, min_position_usdt, net_exit_value,
@@ -185,8 +185,12 @@ def run_selftest(cfg) -> int:
     except Exception as exc:  # noqa: BLE001
         results.append((FAIL, "Binance bağlantısı", str(exc)))
 
+    # 3b) Vadeli işlem (STRATEGY=futures): CCXT bağlantısı, veri, sinyal hesabı, hesap modu ve bakiye
+    if is_futures(cfg.strategy):
+        results.extend(_check_futures(cfg))
+
     # 4) Strateji deneme taraması
-    if rules:
+    if rules and not is_futures(cfg.strategy):
         try:
             strategy = make_strategy(client, cfg)
             scan = strategy.scan(rules, set(), cfg.start_capital)
@@ -233,6 +237,44 @@ def run_selftest(cfg) -> int:
         footer = "❌ Bazı kontroller başarısız!" if failed else "✅ Bot çalışmaya hazır."
         notifier.send(f"🧪 <b>Self-Test Sonuçları</b>\n{LINE}\n{lines}\n{LINE}\n{footer}")
     return 1 if failed else 0
+
+
+def _check_futures(cfg) -> List[Result]:
+    """Vadeli: CCXT ile Binance USDⓈ-M (herkese açık veri), 4'lü onay hesabı; anahtar varsa pozisyon modu ve bakiye."""
+    out: List[Result] = []
+    try:
+        import ccxt
+        from futures_exchange import FuturesExchange, describe_error, make_ccxt
+    except ImportError as exc:
+        return [(FAIL, "Binance Vadeli (CCXT)", f"CCXT kurulu değil: .venv/bin/pip install -r requirements.txt ({exc})")]
+    try:
+        ex = FuturesExchange(cfg, exchange=make_ccxt(cfg, with_keys=cfg.has_binance_keys))
+        pairs = ex.load_markets()
+        coins = futures_coin_list(cfg)
+        missing = [c for c in coins if not ex.has_market(c + "USDT")]
+        k5 = ex.klines("BTCUSDT", "5m", 300)
+        k1 = ex.klines("BTCUSDT", "1h", 300)
+        sigs, rejects = make_strategy(None, cfg).evaluate({"BTCUSDT": k5}, k1, int(time.time() * 1000))
+        why = ", ".join(f"{k}" for k in rejects) or (f"sinyal: {sigs[0].side}" if sigs else "-")
+        out.append((WARN if missing else OK, "Binance Vadeli (USDⓈ-M, CCXT)",
+                    f"ccxt {ccxt.__version__}, {pairs} USDT sürekli vadeli parite, BTC 5 dk: {len(k5['t'])} mum, "
+                    f"1 saat: {len(k1['t'])} mum; son mum değerlendirmesi: {why}"
+                    + (f"\n     ⚠️ Bulunamayan coinler: {', '.join(missing)}" if missing else "")))
+    except Exception as exc:  # noqa: BLE001
+        return [(FAIL, "Binance Vadeli (USDⓈ-M, CCXT)", str(exc))]
+    if cfg.has_binance_keys:
+        try:
+            mode = ex.ex.fetch_position_mode()
+            free = ex.free_balance()
+            hedged = bool(mode.get("hedged"))
+            out.append((WARN if hedged else OK, "Vadeli hesap (API anahtarı)",
+                        ("Pozisyon modu Hedge: bot açılışta tek yönlüye (One-Way) almayı dener" if hedged
+                         else "Pozisyon modu tek yönlü (One-Way)") + f" | vadeli cüzdanda serbest {free:.2f} USDT"
+                        + ("" if free > 0 else " — Spot'tan USDⓈ-M Vadeli cüzdanına transfer edin")))
+        except Exception as exc:  # noqa: BLE001
+            out.append((WARN if cfg.is_paper else FAIL, "Vadeli hesap (API anahtarı)",
+                        describe_error(exc) + " — API anahtarında 'Enable Futures' izni olmalı"))
+    return out
 
 
 def _paper_round_trip(cfg, client: BinanceClient, rules: dict, tickers: list) -> Result:

@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Optional, Sequence, Tuple
 
 from config import (BASE_DIR, DATA_DIR, INTRADAY_TACTICS, SETTINGS_FILE, STRATEGY_NAMES, Config, ConfigError,
-                    is_long_horizon, is_mean_reversion, is_rotation, with_strategy)
+                    is_futures, is_long_horizon, is_mean_reversion, is_rotation, with_strategy)
 from backtest import TOURNAMENT_EXIT_NOTES, TOURNAMENT_EXITS
 from logger import get_logger
 from runtime_settings import apply_overrides, format_value
@@ -60,6 +60,7 @@ KINDS: Dict[str, Tuple[str, Tuple[str, ...], str]] = {
               "çıkış + giriş + filtre + A/B; veri bir kez indirilir"),
 }
 DAY_CHOICES = (7, 14, 30, 45, 60, 90, 120, 180, 270, 365, 540, 730, 1095)
+FULL_HISTORY_DAYS = 9999      # Vadeli: "tüm dönem" (Ocak 2020 → bugün, dönem başı ilk 10 coin) → --tum-donem
 END_CHOICES = ("today", "prev", "prev2", "30", "60", "90", "180", "365")
 END_LABELS = {"prev": "önceki dönem", "prev2": "iki dönem önce"}   # Seçilen süre kadar (×2) daha eski dönem
 CAPITAL_CHOICES = ("cfg", "bot", "11", "20", "32", "50", "100", "250", "500", "1000")
@@ -203,6 +204,8 @@ def default_days(kind: str, strategy: str) -> int:
     """Komut satırındaki varsayılanla aynı (main.run_backtest_cli)."""
     if is_rotation(strategy) and kind != "turnuva":
         return 1095
+    if is_futures(strategy) and kind != "turnuva":
+        return 365
     if kind in ("turnuva", "deney") or is_long_horizon(strategy) or is_mean_reversion(strategy):
         return 365
     return 30
@@ -245,7 +248,8 @@ def effective_config(draft: BacktestDraft, cfg) -> Config:
 def build_args(draft: BacktestDraft, bot, out_dir: Path, today: date) -> List[str]:
     """main.py'ye verilecek argümanlar."""
     cfg = bot.cfg
-    args = ["--backtest", *KINDS[draft.kind][1], "--gun", str(effective_days(draft, cfg)),
+    full = is_futures(strategy_of(draft, cfg)) and draft.days == FULL_HISTORY_DAYS and draft.kind != "turnuva"
+    args = ["--backtest", *KINDS[draft.kind][1], *(("--tum-donem",) if full else ("--gun", str(effective_days(draft, cfg)))),
             "--coin-sayisi", str(draft.coins), "--cikti-klasoru", str(out_dir)]
     if draft.strategy and draft.kind != "turnuva":
         args += ["--strateji", draft.strategy]
@@ -277,7 +281,10 @@ def describe(draft: BacktestDraft, bot, today: date) -> str:
     parts = [KINDS[draft.kind][0]]
     if draft.kind != "turnuva":
         parts.append(strategy_of(draft, cfg))
-    parts.append(f"{days} gün" + (f", bitiş {end:%d.%m.%Y}" if end else ""))
+    if is_futures(strategy_of(draft, cfg)) and draft.days == FULL_HISTORY_DAYS and draft.kind != "turnuva":
+        parts.append("tüm dönem (2020→)")
+    else:
+        parts.append(f"{days} gün" + (f", bitiş {end:%d.%m.%Y}" if end else ""))
     parts.append(f"{capital if capital is not None else cfg.start_capital:g} {cfg.quote_asset}")
     parts.append(f"{draft.coins} coin")
     if draft.overrides:
@@ -515,7 +522,8 @@ class BacktestRunner:
         if len(chunks) > MAX_CHUNKS:
             notifier.send(f"…rapor çok uzun ({len(chunks)} parça): tamamı aşağıdaki rapor.txt dosyasında.")
         for path in sorted(run_dir.glob("*.png")):
-            notifier.send_photo(path, "📊 K/Z dağılımı")
+            notifier.send_photo(path, "📊 Vadeli backtest: bakiye, yıllık getiri, kazanma oranı"
+                                if path.name.startswith("vadeli") else "📊 K/Z dağılımı")
         for path in sorted(run_dir.glob("*.csv")):
             notifier.send_document(path, "📄 Tablonun tamamı (Excel ile açılır)")
         if (run_dir / "rapor.txt").exists():
@@ -633,6 +641,9 @@ class BacktestMenu:
                 auto = default_days(draft.kind, strategy_of(draft, self.bot.cfg))
                 options = [(("✅ " if not draft.days else "") + f"Otomatik ({auto})", "bt:days:0")]
                 options += [(("✅ " if draft.days == d else "") + f"{d} gün", f"bt:days:{d}") for d in DAY_CHOICES]
+                if is_futures(strategy_of(draft, self.bot.cfg)):
+                    options.append((("✅ " if draft.days == FULL_HISTORY_DAYS else "") + "Tüm dönem (2020→)",
+                                    f"bt:days:{FULL_HISTORY_DAYS}"))
                 return self._pick(mid, "🗓️ Backtest süresi", options,
                                   "<i>Uzun dönem daha güvenilir sonuç verir ama ilk seferde veri indirmesi uzun sürer "
                                   "(5 dk mumlarla 1 yıl ≈ 10-20 dk).</i>", per_row=3)
@@ -730,8 +741,10 @@ class BacktestMenu:
                  f"📋 Tür: <b>{esc(name)}</b> — {esc(help_)}",
                  f"🧭 Strateji: {esc(strategy) if draft.kind != 'turnuva' else 'hepsi (turnuva)'}"
                  + ("" if draft.strategy else " (botun stratejisi)"),
-                 f"🗓️ Dönem: {days} gün{'' if draft.days else ' (otomatik)'} — {start:%d.%m.%Y} → "
-                 f"{(end or today):%d.%m.%Y}" + (f" ({END_LABELS[draft.end]})" if draft.end in END_LABELS else ""),
+                 ("🗓️ Dönem: tüm dönem (Ocak 2020 → bugün, her dönem kendi başındaki ilk 10 coin)"
+                  if is_futures(strategy_of(draft, cfg)) and draft.days == FULL_HISTORY_DAYS else
+                  f"🗓️ Dönem: {days} gün{'' if draft.days else ' (otomatik)'} — {start:%d.%m.%Y} → "
+                  f"{(end or today):%d.%m.%Y}" + (f" ({END_LABELS[draft.end]})" if draft.end in END_LABELS else "")),
                  f"💼 Sermaye: {capital if capital is not None else cfg.start_capital:g} {cfg.quote_asset} | "
                  f"🪙 {draft.coins} coin | 🖼️ grafik {'açık' if draft.chart else 'kapalı'}"]
         if draft.kind in ("tara", "hepsi"):

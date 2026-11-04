@@ -23,7 +23,7 @@ from logger import get_logger, redact
 from config import is_rotation
 from risk import ExitReason, trailing_floor_pct
 from telegram_bot import (API_URL, LINE, Messages, esc, fmt_duration, fmt_price, fmt_qty, fmt_signed,
-                          fmt_usdt)
+                          fmt_usdt, futures_board_lines, futures_tag)
 
 if TYPE_CHECKING:  # pragma: no cover
     from trader import TradingBot
@@ -376,6 +376,9 @@ class CommandProcessor:
         for pos in bot.state.positions.values():
             m = bot.marks.get(pos.symbol)
             lv = bot.levels(pos)
+            if getattr(pos, "futures", False):
+                parts.append(self._futures_position_text(pos, m, lv, now, q))
+                continue
             status = (f"🏷️ Şu an: {fmt_price(m.bid)} | Net: {fmt_signed(m.pnl_usdt)} {q} ({fmt_signed(m.pnl_pct)}%)"
                       if m else "🏷️ Fiyat henüz alınmadı")
             protect = []
@@ -399,6 +402,21 @@ class CommandProcessor:
                 + ("\n" + "\n".join(protect) if protect else ""))
         self.reply(f"📦 <b>Açık Pozisyonlar</b>\n{LINE}\n" + f"\n{LINE}\n".join(parts))
 
+    @staticmethod
+    def _futures_position_text(pos, m, lv: dict, now: float, q: str) -> str:
+        lines = futures_board_lines(pos, m, now, q) if m else [f"<b>{esc(pos.symbol)}</b> {futures_tag(pos)} — "
+                                                                   f"fiyat henüz alınmadı"]
+        notional = pos.qty * pos.entry_price
+        lines += [f"🪙 {fmt_qty(pos.qty)} {esc(pos.base_asset)} | Giriş: {fmt_price(pos.entry_price)} | Teminat: "
+                  f"{fmt_usdt(pos.margin_usdt)} {q} (pozisyon {fmt_usdt(notional)} {q})",
+                  f"🎯 Kâr Al: {fmt_price(lv['tp'])} | 🛑 Zarar Kes: {fmt_price(lv['sl'])}"
+                  + (" (başabaş)" if pos.breakeven_active else f" | 🔒 Başabaş tetiği: {fmt_price(lv['trail_on'])}"),
+                  f"💀 Likidasyon ~{fmt_price(lv['liq'])} | 🧷 Binance stop emri: "
+                  + ("var" if pos.stop_order_id else "YOK (bot izliyor)")]
+        if pos.signal_note:
+            lines.append(f"🔍 {esc(pos.signal_note)}")
+        return "\n".join(lines)
+
     def cmd_bakiye(self, args) -> None:
         bot = self.bot
         q = bot.cfg.quote_asset
@@ -419,7 +437,8 @@ class CommandProcessor:
         if not bot.exchange.is_paper:
             try:
                 free = bot.exchange.free_balance(q)
-                lines.append(f"Binance Spot serbest {q}: {fmt_usdt(free)}")
+                where = "Vadeli (USDⓈ-M)" if getattr(bot, "is_futures", False) else "Spot"
+                lines.append(f"Binance {where} serbest {q}: {fmt_usdt(free)}")
             except Exception as exc:  # noqa: BLE001
                 log.debug("Spot bakiye okunamadı: %s", exc)
         if self.try_rate():

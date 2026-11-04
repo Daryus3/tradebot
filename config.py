@@ -68,11 +68,20 @@ class ConfigError(Exception):
 # coini tutar, her hafta yeniden dengeler; bkz. strategy.py ve rotation.py). intraday yalnızca en büyük coinlerde
 # (INTRADAY_COINS) 5 dk mumlarla gün içi al-sat yapar; giriş taktiği INTRADAY_TACTIC ile seçilir.
 STRATEGY_NAMES = ("rebound", "trend", "breakout", "intraday", "swing", "swing_pullback", "mean_revert",
-                  "rsi_divergence", "rotation")
+                  "rsi_divergence", "rotation", "futures")
 LONG_HORIZON_STRATEGIES = frozenset({"swing", "swing_pullback"})
 MEAN_REVERSION_STRATEGIES = frozenset({"mean_revert", "rsi_divergence"})
 ROTATION_STRATEGIES = frozenset({"rotation"})
 INTRADAY_STRATEGIES = frozenset({"intraday"})
+# Vadeli işlem scalping (Binance USDⓈ-M, kaldıraçlı long / short; ayrı motor: futures_trader.FuturesBot). Giriş: son
+# kapanan 5 dk mumda likidasyon dalgası + hacim + RSI uyumsuzluğu + BTC 1 saatlik trendi aynı anda (bkz. strategy.py)
+FUTURES_STRATEGIES = frozenset({"futures"})
+FUTURES_SIDES = ("both", "long", "short")
+FUTURES_LIQ_SOURCES = ("proxy", "feed", "both")
+FUTURES_TP_ORDERS = ("limit", "market")
+FUTURES_MAX_LEVERAGE = 20
+# Kasım 2023'te piyasa değeri en büyük 10 coin (stabil coinler, TON ve MATIC/POL hariç; vadeli testin son dönemi)
+DEFAULT_FUTURES_COINS = "BTC,ETH,BNB,XRP,SOL,ADA,DOGE,TRX,LINK,DOT"
 # Gün içi (intraday) giriş taktikleri; INTRADAY_TACTIC virgülle birden çoğunu alabilir (sıradaki ilk sinyal alınır):
 #   vwap      : fiyat gün başından (UTC 00:00) beri oluşan VWAP'ın INTRADAY_BAND_STD standart sapma altına inip yeşil
 #               mumla dönünce (ortalamaya dönüş; hedef alanı = VWAP'a kalan mesafe)
@@ -151,6 +160,22 @@ INTRADAY_PROFILE = {
     "MAX_24H_GAIN_PCT": 25.0,          # 5 dk trend/breakout için daraltılmış üst sınır büyük coinleri eleyebilir
     "BACKUP_STOP_PCT": 12.0,
 }
+# Vadeli scalping: Kâr Al / Zarar Kes / başabaş FİYAT hareketi yüzdesidir (net K/Z değil): 10x kaldıraçta fiyat
+# +%1.2 = teminatın ~+%12'si. Başabaş: fiyat +%0.5'e gelince zarar kes girişin +%0.2 üstüne çekilir. Zaman stopu 60 dk.
+# İzleyen stop vadeli motorda kullanılmaz (değerler yalnızca ayar doğrulaması için TP'nin altında tutulur).
+FUTURES_PROFILE = {
+    "TAKE_PROFIT_PCT": 1.2,
+    "STOP_LOSS_PCT": 0.9,
+    "TRAILING_ACTIVATION_PCT": 1.0,
+    "TRAILING_FLOOR_PCT": 0.5,
+    "MAX_HOLD_MINUTES": 60,
+    "BREAKEVEN_TRIGGER_PCT": 0.5,
+    "BREAKEVEN_FLOOR_PCT": 0.2,
+    "MIN_SIGNAL_SCORE": 0.0,
+    "MIN_ROOM_RATIO": 0.0,
+    "MAX_24H_GAIN_PCT": 25.0,
+    "BACKUP_STOP_PCT": 5.0,
+}
 PROFILE_ATTRS = {
     "TAKE_PROFIT_PCT": "take_profit_pct", "STOP_LOSS_PCT": "stop_loss_pct",
     "TRAILING_ACTIVATION_PCT": "trailing_activation_pct", "TRAILING_FLOOR_PCT": "trailing_floor_pct",
@@ -160,7 +185,7 @@ PROFILE_ATTRS = {
     "BACKUP_STOP_PCT": "backup_stop_pct",
 }
 PROFILES = {"swing": SWING_EXIT_PROFILE, "mr": MEAN_REVERSION_PROFILE, "rotation": ROTATION_PROFILE,
-            "intraday": INTRADAY_PROFILE}
+            "intraday": INTRADAY_PROFILE, "futures": FUTURES_PROFILE}
 
 
 def is_long_horizon(strategy: str) -> bool:
@@ -184,6 +209,11 @@ def is_intraday(strategy: str) -> bool:
     return strategy in INTRADAY_STRATEGIES
 
 
+def is_futures(strategy: str) -> bool:
+    """Binance vadeli işlemlerde (USDⓈ-M) kaldıraçlı long / short scalping mi? (ayrı motor: FuturesBot)"""
+    return strategy in FUTURES_STRATEGIES
+
+
 def _coin_list(text: str, quote: str) -> Tuple[str, ...]:
     out: List[str] = []
     for raw in (text or "").replace(",", " ").split():
@@ -204,6 +234,17 @@ def rotation_coin_list(cfg) -> Tuple[str, ...]:
 def intraday_coin_list(cfg) -> Tuple[str, ...]:
     """INTRADAY_COINS → ("BTC", "ETH", ...) (ROTATION_COINS ile aynı yazım). Boş = en hacimli INTRADAY_UNIVERSE coin."""
     return _coin_list(getattr(cfg, "intraday_coins", ""), getattr(cfg, "quote_asset", "USDT").upper())
+
+
+def futures_coin_list(cfg) -> Tuple[str, ...]:
+    """FUTURES_COINS → ("BTC", "ETH", ...) (ROTATION_COINS ile aynı yazım)."""
+    return _coin_list(getattr(cfg, "futures_coins", ""), getattr(cfg, "quote_asset", "USDT").upper())
+
+
+def futures_liq_distance_pct(leverage: float, mmr_pct: float) -> float:
+    """Yalıtılmış (isolated) teminatta likidasyona kalan yaklaşık FİYAT hareketi (%): 100/kaldıraç - bakım oranı.
+    10x → ~%9.5, 20x → ~%4.5."""
+    return 100.0 / max(1.0, leverage) - mmr_pct
 
 
 def intraday_tactic_list(cfg) -> Tuple[str, ...]:
@@ -238,7 +279,9 @@ def divergence_trading(cfg) -> bool:
 def strategy_family(strategy: str) -> str:
     """Aynı çıkış mantığını ve mum aralığını paylaşan strateji grubu: 'short' (5 dk), 'intraday' (5 dk, en büyük
     coinler, küçük hedef), 'swing' (1 saat, günler), 'mr' (1 saat, ortalamaya dönüş / RSI uyumsuzluğu), 'rotation'
-    (günlük)."""
+    (günlük), 'futures' (vadeli işlemler, 5 dk, kaldıraçlı long / short)."""
+    if is_futures(strategy):
+        return "futures"
     if is_rotation(strategy):
         return "rotation"
     if is_intraday(strategy):
@@ -416,6 +459,25 @@ class Config:
     intraday_volume_ratio: float = 1.5     # orb / squeeze / donchian: kırılım mumunun hacmi ortalamanın en az katı
     intraday_trend_filter: bool = True     # Yalnızca 5 dk EMA50 > EMA200 ve fiyat EMA200 üstündeyken al
     intraday_min_atr_pct: float = 0.1      # 5 dk ATR / fiyat (%) bundan düşükse alma (hedefe gidemeyecek kadar durgun)
+    # Vadeli işlem scalping (STRATEGY=futures; Binance USDⓈ-M, 5 dk mumlar, kaldıraçlı long / short, isolated)
+    futures_coins: str = DEFAULT_FUTURES_COINS   # İşlem yapılacak vadeli coinler (USDT pariteleri)
+    futures_leverage: int = 10             # Kaldıraç 1-20; her girişten hemen önce Binance'te ayarlanır
+    futures_margin_usage_pct: float = 95.0  # Serbest bakiyenin teminata giden yüzdesi (bileşik; kalan pay komisyon için)
+    futures_volume_ratio: float = 2.5      # Hacim onayı: sinyal mumu hacmi önceki 20 mumun ortalamasının en az bu katı
+    futures_liq_source: str = "proxy"      # proxy (mumlardan, backtest ile aynı) | feed (canlı akış) | both (ikisi)
+    futures_liq_ratio: float = 3.0         # Vekil: zorla satış / alış hacmi önceki 20 mumun ortalamasının en az katı
+    futures_liq_min_usdt: float = 100_000.0  # feed / both: son 5 dk'da bu kadar USDT'lik likidasyon
+    futures_div_oversold: float = 40.0     # Uyumsuzluk: önceki dipte RSI ≤ bu (tepede ≥ 100 - bu)
+    futures_div_rise: float = 3.0          # ...yeni dipte RSI en az bu kadar puan yüksek (tepede düşük)
+    futures_btc_trend: bool = True         # İşlem yönü BTC'nin 1 saatlik trendiyle aynı olmalı
+    futures_sides: str = "both"            # both | long | short
+    futures_tp_order: str = "limit"        # limit: Kâr Al Binance'te bekleyen limit emir (maker komisyon) | market
+    futures_taker_fee: float = 0.0005      # Piyasa emri komisyonu (Binance vadeli VIP0: %0.05)
+    futures_maker_fee: float = 0.0002      # Limit emir komisyonu (%0.02)
+    futures_slippage_pct: float = 0.02     # Test modu / backtest: piyasa emirlerinde kayma (%)
+    futures_mmr_pct: float = 0.5           # Bakım teminatı oranı (likidasyon fiyatı tahmini için, %)
+    futures_exchange_stop: bool = True     # Girişten hemen sonra Binance'e STOP_MARKET; konamazsa pozisyon kapatılır
+    futures_data_url: str = "https://data.binance.vision"   # Backtest geçmiş verisi (Binance'in herkese açık arşivi)
     signal_confirm_scans: int = 1          # 1 = kapalı (2 = sinyal art arda 2 taramada görülmeli)
     # 31) Oynaklık (ATR) filtresi — 5 dk ATR(14) / fiyat (%)
     min_atr_pct: float = 0.25
@@ -653,6 +715,37 @@ class Config:
             errors.append("INTRADAY_VOLUME_RATIO sıfırdan büyük olmalı")
         if not 0 <= self.intraday_min_atr_pct < self.max_atr_pct:
             errors.append("INTRADAY_MIN_ATR_PCT 0 veya pozitif ve MAX_ATR_PCT'den küçük olmalı")
+        bad = [c for c in self.futures_coins.replace(",", " ").split() if not c.isalnum()]
+        if bad or not self.futures_coins.strip():
+            errors.append("FUTURES_COINS virgülle ayrılmış coin adları olmalı (ör. BTC,ETH,SOL)"
+                          + (f"; hatalı: {', '.join(bad)}" if bad else ""))
+        if not 1 <= self.futures_leverage <= FUTURES_MAX_LEVERAGE:
+            errors.append(f"FUTURES_LEVERAGE 1 ile {FUTURES_MAX_LEVERAGE} arasında olmalı")
+        if not 10 <= self.futures_margin_usage_pct <= 100:
+            errors.append("FUTURES_MARGIN_USAGE_PCT 10 ile 100 arasında olmalı")
+        if self.futures_volume_ratio <= 0 or self.futures_liq_ratio <= 0 or self.futures_liq_min_usdt < 0:
+            errors.append("FUTURES_VOLUME_RATIO ve FUTURES_LIQ_RATIO sıfırdan büyük, FUTURES_LIQ_MIN_USDT negatif "
+                          "olmamalı")
+        if self.futures_liq_source not in FUTURES_LIQ_SOURCES:
+            errors.append("FUTURES_LIQ_SOURCE şunlardan biri olmalı: " + ", ".join(FUTURES_LIQ_SOURCES))
+        if self.futures_sides not in FUTURES_SIDES:
+            errors.append("FUTURES_SIDES şunlardan biri olmalı: " + ", ".join(FUTURES_SIDES))
+        if self.futures_tp_order not in FUTURES_TP_ORDERS:
+            errors.append("FUTURES_TP_ORDER şunlardan biri olmalı: " + ", ".join(FUTURES_TP_ORDERS))
+        if not 10 <= self.futures_div_oversold <= 50 or not 0 <= self.futures_div_rise <= 30:
+            errors.append("FUTURES_DIV_OVERSOLD 10 ile 50, FUTURES_DIV_RISE 0 ile 30 arasında olmalı")
+        if not (0 <= self.futures_taker_fee < 0.01 and 0 <= self.futures_maker_fee < 0.01
+                and 0 <= self.futures_slippage_pct < 2 and 0 <= self.futures_mmr_pct < 5):
+            errors.append("FUTURES_TAKER_FEE / FUTURES_MAKER_FEE 0-0.01, FUTURES_SLIPPAGE_PCT 0-2, FUTURES_MMR_PCT 0-5 "
+                          "arasında olmalı")
+        if is_futures(self.strategy):
+            room = futures_liq_distance_pct(self.futures_leverage, self.futures_mmr_pct)
+            if self.stop_loss_pct >= room - 0.5:
+                errors.append(f"Vadeli: STOP_LOSS_PCT ({self.stop_loss_pct:g}) likidasyona kalan mesafeden "
+                              f"({self.futures_leverage}x'te fiyat ~%{room:.1f}) en az 0.5 puan küçük olmalı: zarar kes "
+                              f"likidasyondan önce çalışmalı. Kaldıracı düşürün veya zarar kesi daraltın.")
+            if self.max_hold_minutes <= 0:
+                errors.append("Vadeli: MAX_HOLD_MINUTES (zaman stopu) sıfırdan büyük olmalı (örn. 60)")
         if self.signal_confirm_scans < 1:
             errors.append("SIGNAL_CONFIRM_SCANS en az 1 olmalı")
         if self.min_atr_pct >= self.max_atr_pct:
@@ -861,6 +954,24 @@ def load_config(env_file: Optional[str] = None, mode_override: Optional[str] = N
         intraday_volume_ratio=_env_float("INTRADAY_VOLUME_RATIO", 1.5),
         intraday_trend_filter=_env_bool("INTRADAY_TREND_FILTER", True),
         intraday_min_atr_pct=_env_float("INTRADAY_MIN_ATR_PCT", 0.1),
+        futures_coins=_env_str("FUTURES_COINS", DEFAULT_FUTURES_COINS),
+        futures_leverage=_env_int("FUTURES_LEVERAGE", 10),
+        futures_margin_usage_pct=_env_float("FUTURES_MARGIN_USAGE_PCT", 95.0),
+        futures_volume_ratio=_env_float("FUTURES_VOLUME_RATIO", 2.5),
+        futures_liq_source=_env_str("FUTURES_LIQ_SOURCE", "proxy").lower(),
+        futures_liq_ratio=_env_float("FUTURES_LIQ_RATIO", 3.0),
+        futures_liq_min_usdt=_env_float("FUTURES_LIQ_MIN_USDT", 100_000.0),
+        futures_div_oversold=_env_float("FUTURES_DIV_OVERSOLD", 40.0),
+        futures_div_rise=_env_float("FUTURES_DIV_RISE", 3.0),
+        futures_btc_trend=_env_bool("FUTURES_BTC_TREND", True),
+        futures_sides=_env_str("FUTURES_SIDES", "both").lower(),
+        futures_tp_order=_env_str("FUTURES_TP_ORDER", "limit").lower(),
+        futures_taker_fee=_env_float("FUTURES_TAKER_FEE", 0.0005),
+        futures_maker_fee=_env_float("FUTURES_MAKER_FEE", 0.0002),
+        futures_slippage_pct=_env_float("FUTURES_SLIPPAGE_PCT", 0.02),
+        futures_mmr_pct=_env_float("FUTURES_MMR_PCT", 0.5),
+        futures_exchange_stop=_env_bool("FUTURES_EXCHANGE_STOP", True),
+        futures_data_url=_env_str("FUTURES_DATA_URL", "https://data.binance.vision"),
         signal_confirm_scans=_env_int("SIGNAL_CONFIRM_SCANS", 1),
         min_atr_pct=_env_float("MIN_ATR_PCT", 0.25),
         max_atr_pct=_env_float("MAX_ATR_PCT", 4.0),
@@ -1015,6 +1126,17 @@ def _setting_notes(cfg: Config) -> List[str]:
         if cfg.vwap_filter and below:
             notes.append(f"VWAP_FILTER=true fiyat VWAP'ın altındayken alımı engeller; INTRADAY_TACTIC={','.join(below)} "
                          f"tam da düşüşte (VWAP altında) alır, bu yüzden çok az sinyal kalır. VWAP_FILTER=false önerilir.")
+    if is_futures(cfg.strategy):
+        notes.append("STRATEGY=futures (vadeli scalping) 2020-2026 backtestinde 7 yılın 7'sinde de zarar etti: işlem başı "
+                     "net -%0.14, 10x ve 30 USDT ile hesap 10 ayda eridi. Gerçek parayla kullanmayın; test modunda izleyin.")
+        if cfg.futures_liq_source != "proxy":
+            notes.append(f"FUTURES_LIQ_SOURCE={cfg.futures_liq_source}: canlı likidasyon akışı kullanılır; bu ölçüm "
+                         f"backtest edilemez (backtest mumlardan ölçer), sonuçlar backtestten farklı olabilir.")
+        if cfg.futures_leverage > 10:
+            notes.append(f"FUTURES_LEVERAGE={cfg.futures_leverage}: likidasyon ~%{futures_liq_distance_pct(cfg.futures_leverage, cfg.futures_mmr_pct):.1f} "
+                         f"fiyat hareketinde; ani fitillerde zarar kes kayabilir. Backtestte kaldıraç arttıkça hesap daha "
+                         f"hızlı eridi.")
+        return notes   # Spot'a özgü (izleyen stop, rejim...) uyarılar vadeli motorda anlamsız
     if is_rotation(cfg.strategy):
         if cfg.stop_loss_pct < 10:
             notes.append(f"STRATEGY=rotation coinleri haftalarca tutar; STOP_LOSS_PCT={cfg.stop_loss_pct:g} haftalık "

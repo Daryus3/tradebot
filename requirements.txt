@@ -2,3 +2,5 @@ requests>=2.31,<3
 python-dotenv>=1.0,<2
 websocket-client>=1.6,<2
 matplotlib>=3.7,<4        # İsteğe bağlı: backtest K/Z dağılım grafiği (yoksa grafik çizilmez)
+numpy>=1.24               # Vadeli strateji ve backtest (matplotlib zaten kurar)
+ccxt>=4.5.91,<5           # Vadeli işlem (Binance USDⓈ-M): koşullu emirler Binance'in yeni Algo emir ucuyla

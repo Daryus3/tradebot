@@ -16,7 +16,8 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Dict, Optional, Sequence, Tuple
 
-from config import ACTION_MODES, NOTIFY_MODES, SIGNAL_APPROVAL_MODES, Config, ConfigError, _setting_notes
+from config import (ACTION_MODES, FUTURES_LIQ_SOURCES, FUTURES_SIDES, FUTURES_TP_ORDERS, NOTIFY_MODES,
+                    SIGNAL_APPROVAL_MODES, Config, ConfigError, _setting_notes)
 
 
 @dataclass(frozen=True)
@@ -108,6 +109,21 @@ EDITABLE: Dict[str, Setting] = {
     "INTRADAY_BREAKOUT_BARS": Setting("intraday_breakout_bars", "int", "Gün içi: kırılacak zirve (mum)"),
     "INTRADAY_VOLUME_RATIO": Setting("intraday_volume_ratio", "float", "Gün içi: kırılım hacmi (ortalamanın katı)"),
     "INTRADAY_MIN_ATR_PCT": Setting("intraday_min_atr_pct", "float", "Gün içi: en düşük 5 dk oynaklık (ATR %)"),
+    # Vadeli işlem scalping (STRATEGY=futures)
+    "FUTURES_LEVERAGE": Setting("futures_leverage", "int", "Vadeli kaldıraç (1-20x; sonraki işlemde uygulanır)"),
+    "FUTURES_COINS": Setting("futures_coins", "str", "Vadeli coinler (virgülle, ör. BTC,ETH,SOL)"),
+    "FUTURES_SIDES": Setting("futures_sides", "choice", "Vadeli yön (both / long / short)", FUTURES_SIDES),
+    "FUTURES_MARGIN_USAGE_PCT": Setting("futures_margin_usage_pct", "float", "Vadeli: teminata giden bakiye (%)"),
+    "FUTURES_VOLUME_RATIO": Setting("futures_volume_ratio", "float", "Vadeli: hacim onayı (ortalamanın katı)"),
+    "FUTURES_LIQ_RATIO": Setting("futures_liq_ratio", "float", "Vadeli: likidasyon dalgası eşiği (ortalamanın katı)"),
+    "FUTURES_LIQ_SOURCE": Setting("futures_liq_source", "choice", "Vadeli: likidasyon ölçümü (proxy / feed / both)",
+                                  FUTURES_LIQ_SOURCES),
+    "FUTURES_LIQ_MIN_USDT": Setting("futures_liq_min_usdt", "float", "Vadeli: canlı akışta en az likidasyon (USDT)"),
+    "FUTURES_BTC_TREND": Setting("futures_btc_trend", "bool", "Vadeli: BTC 1 saatlik trend filtresi"),
+    "FUTURES_TP_ORDER": Setting("futures_tp_order", "choice", "Vadeli: Kâr Al emri (limit / market)",
+                                FUTURES_TP_ORDERS),
+    "BREAKEVEN_TRIGGER_PCT": Setting("breakeven_trigger_pct", "float", "Başabaş tetiği (%)"),
+    "BREAKEVEN_FLOOR_PCT": Setting("breakeven_floor_pct", "float", "Başabaş stopu (%)"),
 }
 
 _TRUE = {"1", "true", "yes", "on", "evet", "e", "acik", "açık"}
@@ -119,7 +135,8 @@ def find_key(text: str) -> Optional[str]:
     """'tp', 'take_profit_pct' veya 'TAKE_PROFIT_PCT' → 'TAKE_PROFIT_PCT'."""
     key = text.strip().upper()
     aliases = {"TP": "TAKE_PROFIT_PCT", "SL": "STOP_LOSS_PCT", "POZISYON": "MAX_OPEN_POSITIONS",
-               "GIRIS": "CAPITAL_USAGE_PCT", "BILDIRIM": "NOTIFY_MODE"}
+               "GIRIS": "CAPITAL_USAGE_PCT", "BILDIRIM": "NOTIFY_MODE", "KALDIRAC": "FUTURES_LEVERAGE",
+               "KALDIRAÇ": "FUTURES_LEVERAGE", "LEVERAGE": "FUTURES_LEVERAGE"}
     key = aliases.get(key, key)
     return key if key in EDITABLE else None
 
@@ -168,9 +185,11 @@ OVERRIDE_BLOCKED = frozenset({
     "excluded_assets", "strategy", "kline_interval", "quote_asset",
 })
 OVERRIDE_CHOICES = {"dca_mode": ACTION_MODES, "pyramid_mode": ACTION_MODES, "time_exit_mode": ACTION_MODES,
-                    "escape_mode": ACTION_MODES, "signal_approval": SIGNAL_APPROVAL_MODES, "notify_mode": NOTIFY_MODES}
+                    "escape_mode": ACTION_MODES, "signal_approval": SIGNAL_APPROVAL_MODES, "notify_mode": NOTIFY_MODES,
+                    "futures_sides": FUTURES_SIDES, "futures_liq_source": FUTURES_LIQ_SOURCES,
+                    "futures_tp_order": FUTURES_TP_ORDERS}
 # Serbest metin olarak değiştirilebilenler (doğrulamayı Config yapar)
-OVERRIDE_TEXT = frozenset({"rotation_coins", "intraday_coins", "intraday_tactic"})
+OVERRIDE_TEXT = frozenset({"rotation_coins", "intraday_coins", "intraday_tactic", "futures_coins"})
 
 
 def override_spec(key: str) -> Optional[Tuple[str, str, Tuple[str, ...]]]:

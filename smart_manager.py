@@ -30,7 +30,8 @@ from logger import get_logger
 from position_rules import (REVERSAL_ROWS, atr_pct, atr_targets, is_flat, momentum_strong, reversal_signal,
                             trailing_buy_trigger, volume_breakdown)
 from risk import ExitReason, net_exit_value, plan_entry, pnl_pct, position_sl, position_tp, target_exits
-from telegram_bot import LINE, Messages, esc, fmt_duration, fmt_price, fmt_qty, fmt_signed, fmt_usdt
+from telegram_bot import (LINE, Messages, esc, fmt_duration, fmt_price, fmt_qty, fmt_signed, fmt_usdt,
+                          futures_board_lines, futures_tag)
 
 if TYPE_CHECKING:  # pragma: no cover
     from trader import TradingBot
@@ -572,7 +573,10 @@ class SmartManager:
         for pos in bot.state.positions.values():
             m = bot.marks.get(pos.symbol)
             if m is None:
-                lines.append(f"<b>{esc(pos.symbol)}</b> — fiyat bekleniyor")
+                lines.append(f"<b>{esc(pos.symbol)}</b> {futures_tag(pos)} — fiyat bekleniyor")
+                continue
+            if getattr(pos, "futures", False):
+                lines += futures_board_lines(pos, m, now, q)
                 continue
             tp_left = position_tp(pos, cfg) - m.pnl_pct
             sl_left = m.pnl_pct + position_sl(pos, cfg)

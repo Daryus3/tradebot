@@ -383,10 +383,46 @@ _EXIT_HEADERS = {
     "TIME_EXIT": "⏳ <b>SÜRE SORUSU: BAŞABAŞTA SATILDI</b>",
     "PROFIT_LOCK": "🔐 <b>PİRAMİT KİLİDİ: ZARARA DÖNMEDEN SATILDI</b>",
     "STALE": "🧊 <b>TAKILAN İŞLEM: TOPARLANMA GELMEDİ, SATILDI</b>",
+    "LIQUIDATION": "💀 <b>LİKİDASYON: POZİSYON BINANCE TARAFINDAN KAPATILDI</b>",
+    "SAFETY": "🛟 <b>GÜVENLİK KAPATMASI: ZARAR KES EMRİ KONAMADI</b>",
 }
 
 # Kritik mesajlar sessiz saatlerde de sesli gelir
-CRITICAL_EXITS = {"STOP_LOSS", "KILL_SWITCH", "EXTERNAL", "BTC_CRASH", "BACKUP_STOP"}
+CRITICAL_EXITS = {"STOP_LOSS", "KILL_SWITCH", "EXTERNAL", "BTC_CRASH", "BACKUP_STOP", "LIQUIDATION", "SAFETY"}
+# Vadeli işlemde çıkış başlıkları (aynı nedenler, "satış" yerine "kapatma")
+_FUTURES_EXIT_HEADERS = {
+    "TAKE_PROFIT": "🚀 <b>KÂR AL: HEDEFE ULAŞILDI</b>",
+    "STOP_LOSS": "⚠️ <b>ZARAR KES ÇALIŞTI</b>",
+    "BREAKEVEN": "🔒 <b>BAŞABAŞ KALKANI ÇALIŞTI (kâr korundu)</b>",
+    "MAX_HOLD": "⏱️ <b>ZAMAN STOPU: 1 SAATTE SONUÇ ÇIKMADI, KAPATILDI</b>",
+    "MANUAL": "✋ <b>ELLE KAPATMA (Telegram komutu)</b>",
+}
+
+
+def futures_tag(pos) -> str:
+    """Vadeli pozisyon etiketi: [LONG 10X] / [SHORT 5X] (spot pozisyonda boş)."""
+    if not getattr(pos, "futures", False):
+        return ""
+    return f"[{str(pos.side).upper()} {int(pos.leverage)}X]"
+
+
+def roe_of(mark) -> Optional[float]:
+    """Binance'in gösterdiği ROE (gerçekleşmemiş K/Z ÷ teminat, komisyonsuz); vadeli değerlemede yoksa None."""
+    return getattr(mark, "roe", None)
+
+
+def futures_board_lines(pos, mark, now: float, quote: str = "USDT") -> List[str]:
+    """Canlı pano / pozisyon ekranı için vadeli pozisyon satırları: [LONG 10X], anlık ROE, hedefe / stopa kalan."""
+    roe = roe_of(mark)
+    roe = mark.pnl_pct if roe is None else roe
+    long_ = pos.side == "long"
+    price = mark.bid
+    tp_left = ((pos.tp_price / price - 1) if long_ else (1 - pos.tp_price / price)) * 100 if price else 0.0
+    sl_left = ((1 - pos.sl_price / price) if long_ else (pos.sl_price / price - 1)) * 100 if price else 0.0
+    flags = " | 🔒 başabaş" if getattr(pos, "breakeven_active", False) else ""
+    return [f"<b>{esc(pos.symbol)}</b> {futures_tag(pos)} ROE <b>{fmt_signed(roe)}%</b> "
+            f"(net {fmt_signed(mark.pnl_usdt)} {quote}) | {fmt_duration(now - pos.opened_at)}",
+            f"   🏷️ {fmt_price(price)} | 🎯 hedefe %{max(0.0, tp_left):.2f} | 🛑 stopa %{max(0.0, sl_left):.2f}{flags}"]
 
 
 class Messages:
@@ -521,6 +557,84 @@ class Messages:
             f"📊 Toplam K/Z: {fmt_signed(total_pnl)} {q} | İşlem: {trades} (✅{wins} / ❌{losses})"
             f"{still_open}"
         )
+
+    # ------------------------------------------------------------------ vadeli işlem (STRATEGY=futures)
+    @staticmethod
+    def futures_started(cfg, capital: float, realized: float, pairs: int, coins: List[str], loss_limit: float,
+                        loss_pct: float, mode_note: str = "", free: Optional[float] = None) -> str:
+        mode = "🧪 TEST (sanal bakiye, gerçek para kullanılmaz)" if cfg.is_paper else "💵 CANLI (gerçek para, KALDIRAÇLI!)"
+        lev = cfg.futures_leverage
+        liq = 100.0 / lev - cfg.futures_mmr_pct
+        sides = {"both": "long + short", "long": "yalnızca long", "short": "yalnızca short"}.get(cfg.futures_sides, "")
+        return (
+            f"🤖 <b>Vadeli Scalping Botu Başlatıldı</b> (Binance USDⓈ-M)\n{LINE}\n"
+            f"⚙️ Mod: {mode}\n"
+            f"💰 Bakiye: <b>{fmt_usdt(capital)} {cfg.quote_asset}</b> (K/Z: {fmt_signed(realized)})"
+            + (f" | vadeli cüzdanda serbest {fmt_usdt(free)}" if free is not None else "") + "\n"
+            f"⚡ Kaldıraç: <b>{lev}x ISOLATED</b> | teminat: serbest bakiyenin %{cfg.futures_margin_usage_pct:g}'i "
+            f"(bileşik) | {sides}\n"
+            f"🎯 Kâr Al: fiyat +%{cfg.take_profit_pct:g} (ROE ~+%{cfg.take_profit_pct * lev:.0f}) | 🛑 Zarar Kes: "
+            f"fiyat -%{cfg.stop_loss_pct:g} (ROE ~-%{cfg.stop_loss_pct * lev:.0f})\n"
+            f"🔒 Başabaş kalkanı: +%{cfg.breakeven_trigger_pct:g} → stop girişin +%{cfg.breakeven_floor_pct:g} "
+            f"üstüne | ⏱️ Zaman stopu: {cfg.max_hold_minutes} dk\n"
+            f"💀 Likidasyon fiyatı ~%{liq:.1f} uzakta (zarar kes ondan önce Binance'te bekler)\n"
+            f"🔎 4'lü onay: likidasyon dalgası ({cfg.futures_liq_source}) + hacim ≥{cfg.futures_volume_ratio:g}x + RSI "
+            f"uyumsuzluğu + BTC 1s trendi | 5 dk mum kapanışlarında\n"
+            f"🪙 Coinler ({pairs}): {esc(', '.join(coins))}\n"
+            f"☠️ Kill-switch: toplam zarar sermayenin %{loss_pct:.4g}'i (şu an {fmt_usdt(loss_limit)} {cfg.quote_asset})"
+            + (f"\n{esc(mode_note)}" if mode_note else "")
+        )
+
+    @staticmethod
+    def futures_open(pos, note: str, cfg, notional: float) -> str:
+        q = cfg.quote_asset
+        tag = futures_tag(pos)
+        lev = pos.leverage
+        icon = "🟢" if pos.side == "long" else "🔴"
+        be_price = pos.entry_price * (1 + (1 if pos.side == "long" else -1) * cfg.breakeven_trigger_pct / 100)
+        floor = "üstüne" if pos.side == "long" else "altına"
+        return (
+            f"{icon} <b>POZİSYON AÇILDI</b> — <b>{esc(pos.symbol)}</b> {tag}\n{LINE}\n"
+            f"🏷️ Giriş: {fmt_price(pos.entry_price)} | 🪙 {fmt_qty(pos.qty)} {esc(pos.base_asset)}\n"
+            f"💵 Teminat: {fmt_usdt(pos.margin_usdt)} {q} × {lev} = pozisyon {fmt_usdt(notional)} {q}\n"
+            f"💸 Giriş komisyonu: {pos.buy_fee_usdt:.4f} {q}\n{LINE}\n"
+            f"🎯 Kâr Al: {fmt_price(pos.tp_price)} (fiyat +%{cfg.take_profit_pct:g} → ROE ~+%"
+            f"{cfg.take_profit_pct * lev:.0f})\n"
+            f"🛑 Zarar Kes: {fmt_price(pos.sl_price)} (fiyat -%{cfg.stop_loss_pct:g} → ROE ~-%"
+            f"{cfg.stop_loss_pct * lev:.0f}) — Binance'te STOP_MARKET\n"
+            f"🔒 Başabaş kalkanı: {fmt_price(be_price)} görülünce stop girişin %{cfg.breakeven_floor_pct:g} "
+            f"{floor} çekilir\n"
+            f"⏱️ Zaman stopu: {cfg.max_hold_minutes} dk | 💀 Likidasyon ~{fmt_price(pos.liq_price)}\n"
+            f"🔍 {esc(note)}"
+        )
+
+    @staticmethod
+    def futures_close(reason: str, pos, exit_price: float, exit_fee: float, funding: float, pnl: float,
+                      roe: float, duration_sec: float, balance: float, total_pnl: float, trades: int, wins: int,
+                      losses: int, cfg, estimated: bool = False) -> str:
+        q = cfg.quote_asset
+        header = _FUTURES_EXIT_HEADERS.get(reason) or _EXIT_HEADERS.get(reason, "🔴 <b>POZİSYON KAPANDI</b>")
+        result = (f"✅ Net Kâr: <b>{fmt_signed(pnl)} {q}</b> (ROE {fmt_signed(roe)}%)" if pnl >= 0 else
+                  f"❌ Net Zarar: <b>{fmt_signed(pnl)} {q}</b> (ROE {fmt_signed(roe)}%)")
+        est = " (tahmini)" if estimated else ""
+        move = (exit_price / pos.entry_price - 1) * 100 if pos.entry_price else 0.0
+        return (
+            f"{header}\n"
+            f"<b>{esc(pos.symbol)}</b> {futures_tag(pos)} kapandı{est}\n{LINE}\n"
+            f"🏷️ Giriş: {fmt_price(pos.entry_price)} → Çıkış: {fmt_price(exit_price)} (fiyat {fmt_signed(move)}%)\n"
+            f"💸 Komisyon: {pos.buy_fee_usdt + exit_fee:.4f} {q}"
+            + (f" | fonlama: {fmt_signed(-funding, 4)} {q}" if funding else "") + "\n"
+            f"{result}\n"
+            f"⏳ Süre: {fmt_duration(duration_sec)}\n{LINE}\n"
+            f"💰 Bakiye: <b>{fmt_usdt(balance)} {q}</b>\n"
+            f"📊 Toplam K/Z: {fmt_signed(total_pnl)} {q} | İşlem: {trades} (✅{wins} / ❌{losses})"
+        )
+
+    @staticmethod
+    def futures_breakeven(pos, price: float, stop_price: float, roe: float) -> str:
+        return (f"🔒 <b>{esc(pos.symbol)}</b> {futures_tag(pos)} başabaş kalkanı devrede: fiyat {fmt_price(price)} "
+                f"(ROE {fmt_signed(roe)}%). Zarar kes {fmt_price(stop_price)} seviyesine (girişin kâr tarafı) çekildi; "
+                f"bu işlem artık zararla kapanmaz (kayma hariç).")
 
     @staticmethod
     def kill_switch(total_pnl: float, balance: float, cfg, loss_limit: float, loss_pct: float,

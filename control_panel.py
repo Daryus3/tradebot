@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 from config import (LOG_DIR, PROFILE_ATTRS, PROFILES, STRATEGY_NAMES, Config, ConfigError, divergence_trading,
-                    is_rotation, strategy_family, with_strategy)
+                    futures_liq_distance_pct, is_futures, is_rotation, strategy_family, with_strategy)
 from entry_filters import DIV_FILTER_RECENT_BARS
 from logger import get_logger, redact
 from runtime_settings import EDITABLE, apply_settings, env_values, find_key, format_value, write_env_values
@@ -42,7 +42,9 @@ NOTIFY_HELP = {"all": "her alım, satış, izleyen stop ve rapor",
                "silent": "yalnızca acil durumlar (zarar kes, kill-switch, hatalar)"}
 # Ayar düğmeleri: kısa ad → (ayar, adım)
 STEPS = {"TP": ("TAKE_PROFIT_PCT", 0.5), "SL": ("STOP_LOSS_PCT", 0.5), "TR": ("TRAILING_ACTIVATION_PCT", 0.5),
-         "POS": ("MAX_OPEN_POSITIONS", 1)}
+         "POS": ("MAX_OPEN_POSITIONS", 1), "LEV": ("FUTURES_LEVERAGE", 1)}
+FUTURES_STEPS = {"TP": 0.1, "SL": 0.1}          # Vadeli: Kâr Al / Zarar Kes fiyat yüzdesi, ince adım
+LEVERAGE_CHOICES = (1, 3, 5, 10, 15, 20)
 CAPITAL_CHOICES = (100, 75, 50, 33)
 FILTER_KEYS = ("BTC_FILTER", "SPREAD_FILTER", "FAKEOUT_FILTER", "VWAP_FILTER", "OVERHEAT_FILTER", "RSI_DIV_FILTER",
                "PRIOR_TREND_FILTER", "OB_WALL_FILTER", "OB_IMBALANCE_FILTER", "TAPE_FILTER")
@@ -57,7 +59,7 @@ STRATEGY_SHORT = {"rebound": "Rebound (5 dk dip)", "trend": "Trend (5 dk)", "bre
                   "intraday": "Gün içi (10 büyük coin, 5 dk)",
                   "swing": "Swing kırılım (1 saat)", "swing_pullback": "Swing geri çekilme (1 saat)",
                   "mean_revert": "Ortalamaya dönüş (1 saat)", "rsi_divergence": "RSI uyumsuzluğu (1 saat)",
-                  "rotation": "Rotasyon (haftalık)"}
+                  "rotation": "Rotasyon (haftalık)", "futures": "Vadeli scalping (kaldıraçlı, 5 dk)"}
 
 
 def _on(flag: bool) -> str:
@@ -157,6 +159,8 @@ class ControlPanel:
             simple[action]()
         elif action == "adj" and len(args) == 2:
             self.adjust(arg, args[1], mid)
+        elif action == "lev" and arg.isdigit():
+            self._choose("FUTURES_LEVERAGE", arg, self.show_settings, mid)
         elif action == "capset":
             self._choose("CAPITAL_USAGE_PCT", arg, self.show_capital, mid)
         elif action == "ntfset":
@@ -276,6 +280,8 @@ class ControlPanel:
             self.show_settings(mid)
             return
         key, step = STEPS[short]
+        if is_futures(self.bot.cfg.strategy):
+            step = FUTURES_STEPS.get(short, step)
         current = getattr(self.bot.cfg, EDITABLE[key].attr)
         value = current + step if direction == "+" else current - step
         value = round(value, 4) if isinstance(step, float) else int(value)
@@ -284,6 +290,9 @@ class ControlPanel:
 
     def show_settings(self, mid: Optional[int] = None, note: str = "") -> None:
         cfg = self.bot.cfg
+        if is_futures(cfg.strategy):
+            self.show_futures_settings(mid, note)
+            return
         hold = fmt_duration(cfg.max_hold_minutes * 60, exact=True) if cfg.max_hold_minutes else "sınırsız"
         rot = "\n<i>Rotasyon stratejisinde Kâr Al ve izleyen stop kullanılmaz.</i>" if is_rotation(cfg.strategy) else ""
         text = (f"⚙️ <b>Dinamik Ayarlar</b>\n{LINE}\n"
@@ -298,6 +307,31 @@ class ControlPanel:
             [("🛑 SL −0.5", "adj:SL:-"), ("🛑 SL +0.5", "adj:SL:+")],
             [("📈 İz. −0.5", "adj:TR:-"), ("📈 İz. +0.5", "adj:TR:+")],
             [("📦 Poz. −1", "adj:POS:-"), ("📦 Poz. +1", "adj:POS:+")],
+            self._back(),
+        ]
+        self.proc.reply_menu(text, keyboard, mid)
+
+    def show_futures_settings(self, mid: Optional[int] = None, note: str = "") -> None:
+        """Vadeli işlem için Dinamik Ayarlar: kaldıraç (1x-20x), fiyat yüzdesi olarak Kâr Al / Zarar Kes."""
+        cfg = self.bot.cfg
+        lev = cfg.futures_leverage
+        room = futures_liq_distance_pct(lev, cfg.futures_mmr_pct)
+        text = (f"⚙️ <b>Dinamik Ayarlar — Vadeli</b>\n{LINE}\n"
+                f"⚡ Kaldıraç: <b>{lev}x</b> (isolated) | likidasyon ~%{room:.1f} fiyat hareketinde\n"
+                f"🎯 Kâr Al: fiyat +%{cfg.take_profit_pct:g} → ROE ~+%{cfg.take_profit_pct * lev:.0f}\n"
+                f"🛑 Zarar Kes: fiyat -%{cfg.stop_loss_pct:g} → ROE ~-%{cfg.stop_loss_pct * lev:.0f}\n"
+                f"🔒 Başabaş: +%{cfg.breakeven_trigger_pct:g} → stop +%{cfg.breakeven_floor_pct:g} | ⏱️ Zaman stopu: "
+                f"{cfg.max_hold_minutes} dk\n"
+                f"💵 Teminat: serbest bakiyenin %{cfg.futures_margin_usage_pct:g}'i | yön: {cfg.futures_sides}\n{LINE}\n"
+                "<i>Kaldıraç değişikliği hemen kaydedilir ve SONRAKİ işlemde (girişten hemen önce Binance'te) "
+                "uygulanır; açık pozisyonun kaldıracı değişmez. Zarar kes likidasyondan en az 0.5 puan önce "
+                "olmalı. Diğerleri: /ayar ANAHTAR DEĞER (örn. /ayar FUTURES_SIDES long)</i>"
+                + (f"\n\n{note}" if note else ""))
+        keyboard = [
+            [("⚡ −1x", "adj:LEV:-"), ("⚡ +1x", "adj:LEV:+")],
+            [(("✅ " if c == lev else "") + f"{c}x", f"lev:{c}") for c in LEVERAGE_CHOICES],
+            [("🎯 TP −0.1", "adj:TP:-"), ("🎯 TP +0.1", "adj:TP:+")],
+            [("🛑 SL −0.1", "adj:SL:-"), ("🛑 SL +0.1", "adj:SL:+")],
             self._back(),
         ]
         self.proc.reply_menu(text, keyboard, mid)
@@ -459,7 +493,7 @@ class ControlPanel:
         cfg = self.bot.cfg
         text = (f"🧭 <b>Strateji Seç</b>\n{LINE}\nŞu an: <b>{esc(STRATEGY_SHORT.get(cfg.strategy, cfg.strategy))}</b>\n"
                 "Seçtiğiniz strateji onaydan sonra .env'ye kaydedilir ve bot yeniden başlatılır (~20 sn).\n"
-                "<i>Farklı gruba (5 dk / gün içi / 1 saat / rotasyon) geçerken o grubun çıkış ayarları da (Kâr Al, Zarar Kes...) "
+                "<i>Farklı gruba (5 dk / gün içi / 1 saat / rotasyon / vadeli) geçerken o grubun çıkış ayarları da (Kâr Al, Zarar Kes...) "
                 "yüklenir; eski grubun ayarları saklanır, geri dönünce aynen geri gelir. Hangi stratejinin kârlı "
                 "olduğunu görmek için sunucuda: python main.py --backtest --turnuva</i>")
         keyboard = [[(("✅ " if name == cfg.strategy else "") + STRATEGY_SHORT.get(name, name), f"stp:{name}")]

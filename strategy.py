@@ -1621,10 +1621,340 @@ class RotationStrategy(ReboundStrategy):
         return result
 
 
+# ===================================================================== Vadeli işlem scalping (STRATEGY=futures)
+# Binance USDⓈ-M vadeli işlemler, 5 dk mumlar. Son KAPANMIŞ mumda dört şart AYNI ANDA sağlanınca işlem açılır:
+#   1) Likidasyon dalgası: long için zorla SATIŞ (long'lar likide oluyor), short için zorla ALIŞ (short'lar likide).
+#      Vekil ölçüt (canlı ve backtest aynı): mumun piyasa satış hacmi (hacim - taker buy) önceki 20 mumun ortalamasının
+#      en az FUTURES_LIQ_RATIO katı, mum son 1 saatin dibini kırmış (stop / likidasyon kümesi süpürülmüş) ve açılıştan
+#      en az 1 ATR aşağı itmiş. Short için tersi (taker buy hacmi, son 1 saatin zirvesi). Gerçek likidasyon kayıtlarıyla
+#      (Binance COIN-M, Haz 2023 - Mar 2024) karşılaştırıldı: işaretlenen mumların BTC'de %21'i, ETH'de %26'sı gerçek
+#      likidasyonların en yoğun %1'lik 5 dk dilimine denk geldi (rastgele seçimde %1). FUTURES_LIQ_SOURCE=feed / both
+#      canlıda Binance'in anlık likidasyon akışını (forceOrder) kullanır; geçmiş verisi olmadığı için backtest edilemez.
+#   2) Hacim onayı: mum hacmi önceki 20 mumun ortalamasının en az FUTURES_VOLUME_RATIO (2.5) katı.
+#   3) RSI uyumsuzluğu: long için fiyat son 3 mumda yeni dip yaptı ama RSI(14) 5-30 mum önceki dipten (RSI ≤
+#      FUTURES_DIV_OVERSOLD) en az FUTURES_DIV_RISE puan yüksek (pozitif uyumsuzluk); short için tersi (negatif).
+#   4) BTC trendi: 1 saatlik BTC kapanışı EMA50'nin üstünde ve EMA20 > EMA50 ise yalnızca long, tersiyse yalnızca short;
+#      arada (trend yok) işlem açılmaz.
+# Canlı bot (futures_trader.FuturesBot) ve backtest (futures_backtest.py) aşağıdaki AYNI fonksiyonları kullanır.
+try:
+    import numpy as np
+except ImportError:      # numpy yalnızca vadeli strateji için gerekir (pip install -r requirements.txt)
+    np = None
+
+FUT_INTERVAL = "5m"
+FUT_BAR_MS = 300_000
+FUT_HOUR_MS = 3_600_000
+FUT_AVG_BARS = 20            # Hacim / taker hacmi ortalaması: önceki 20 mum (sinyal mumu hariç)
+FUT_SWEEP_BARS = 12          # Likidasyon dalgası son 1 saatin (12 × 5 dk) dibini / zirvesini kırmalı
+FUT_ATR_BARS = 14            # ...ve mum içinde en az 1 ATR itmiş olmalı (önceki 14 mumun ortalama gerçek aralığı)
+FUT_DIV_MIN_GAP, FUT_DIV_MAX_GAP = 5, 30   # Uyumsuzluk: önceki dip / tepe 5-30 mum (25 dk - 2.5 saat) önce
+FUT_DIV_RECENT = 3           # Yeni dip / tepe son 3 kapanmış mum içinde (sinyal mumu dahil)
+FUT_PIVOT = 2                # Önceki dip: iki yanındaki 2'şer mumdan düşük (tepe: yüksek)
+FUT_BTC_EMA_FAST, FUT_BTC_EMA_SLOW = 20, 50   # BTC 1 saatlik trend
+FUT_KLINE_LIMIT = 300        # Canlı: coin başına istenen 5 dk mum (RSI ve ortalamalar için yeterli geçmiş)
+FUT_BTC_1H_LIMIT = 300       # Canlı: BTC 1 saatlik mum (EMA50 için yeterli geçmiş)
+FUT_MIN_BARS = 80            # Bundan az kapanmış mum varsa sinyal aranmaz
+FUT_SIDES = ("both", "long", "short")
+FUT_LIQ_SOURCES = ("proxy", "feed", "both")
+
+
+def _need_numpy() -> None:
+    if np is None:
+        raise RuntimeError("Vadeli strateji numpy gerektirir: .venv/bin/pip install -r requirements.txt")
+
+
+def np_prev_mean(x, window: int):
+    """Her mum için ÖNCEKİ `window` mumun ortalaması (mumun kendisi hariç); ilk `window` değer NaN."""
+    x = np.asarray(x, dtype=np.float64)
+    out = np.full(len(x), np.nan)
+    if len(x) > window:
+        cs = np.concatenate(([0.0], np.cumsum(x)))
+        out[window:] = (cs[window:-1] - cs[:-window - 1]) / window
+    return out
+
+
+def np_prev_extreme(x, window: int, fn):
+    """Her mum için ÖNCEKİ `window` mumun en düşüğü (fn=np.min) / en yükseği (fn=np.max); ilk `window` değer NaN."""
+    x = np.asarray(x, dtype=np.float64)
+    out = np.full(len(x), np.nan)
+    if len(x) > window:
+        view = np.lib.stride_tricks.sliding_window_view(x, window)
+        out[window:] = fn(view, axis=1)[:-1]
+    return out
+
+
+def np_rsi(close, period: int = 14):
+    """Wilder RSI (indicators.rsi ile aynı hesap); ilk `period` değer NaN."""
+    c = np.asarray(close, dtype=np.float64)
+    n = len(c)
+    out = np.full(n, np.nan)
+    if n <= period:
+        return out
+    d = np.diff(c)
+    gain = np.where(d > 0, d, 0.0).tolist()
+    loss = np.where(d < 0, -d, 0.0).tolist()
+    ag = sum(gain[:period]) / period
+    al = sum(loss[:period]) / period
+    vals = [0.0] * n
+    vals[period] = 100.0 - 100.0 / (1.0 + ag / al) if al > 0 else (100.0 if ag > 0 else 50.0)
+    k = period - 1
+    for i in range(period, n - 1):            # d[i] = c[i+1] - c[i]
+        ag = (ag * k + gain[i]) / period
+        al = (al * k + loss[i]) / period
+        vals[i + 1] = 100.0 - 100.0 / (1.0 + ag / al) if al > 0 else (100.0 if ag > 0 else 50.0)
+    out[period:] = vals[period:]
+    return out
+
+
+def np_ema(x, period: int):
+    """indicators.ema ile aynı: ilk değer ilk `period` değerin basit ortalaması; öncesi NaN."""
+    v = np.asarray(x, dtype=np.float64)
+    n = len(v)
+    out = np.full(n, np.nan)
+    if period <= 0 or n < period:
+        return out
+    k = 2.0 / (period + 1)
+    prev = float(v[:period].mean())
+    vals = v.tolist()
+    res = [0.0] * n
+    res[period - 1] = prev
+    for i in range(period, n):
+        prev = vals[i] * k + prev * (1 - k)
+        res[i] = prev
+    out[period - 1:] = res[period - 1:]
+    return out
+
+
+def futures_features(k: Dict[str, "np.ndarray"], cfg) -> Dict[str, "np.ndarray"]:
+    """5 dk mum dizilerinden (futures_data.FIELDS: o, h, l, c, v, tb) sinyal ölçüleri. Tüm diziler aynı uzunlukta."""
+    _need_numpy()
+    o, h, l, c, v, tb = (np.asarray(k[x], dtype=np.float64) for x in ("o", "h", "l", "c", "v", "tb"))
+    sell = np.maximum(v - tb, 0.0)                      # Piyasa emriyle SATAN tarafın hacmi
+    prev_c = np.concatenate((c[:1], c[:-1]))
+    tr = np.maximum(h - l, np.maximum(np.abs(h - prev_c), np.abs(l - prev_c)))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        vol_ratio = v / np_prev_mean(v, FUT_AVG_BARS)
+        sell_ratio = sell / np_prev_mean(sell, FUT_AVG_BARS)
+        buy_ratio = tb / np_prev_mean(tb, FUT_AVG_BARS)
+    atr_prev = np_prev_mean(tr, FUT_ATR_BARS)
+    low_prev = np_prev_extreme(l, FUT_SWEEP_BARS, np.min)
+    high_prev = np_prev_extreme(h, FUT_SWEEP_BARS, np.max)
+    piv_low = np.zeros(len(c), dtype=bool)
+    piv_high = np.zeros(len(c), dtype=bool)
+    if len(c) > 2 * FUT_PIVOT:
+        m = l[2:-2]
+        piv_low[2:-2] = (m <= l[1:-3]) & (m <= l[:-4]) & (m < l[3:-1]) & (m < l[4:])
+        m = h[2:-2]
+        piv_high[2:-2] = (m >= h[1:-3]) & (m >= h[:-4]) & (m > h[3:-1]) & (m > h[4:])
+    return {"o": o, "h": h, "l": l, "c": c, "vol_ratio": vol_ratio, "sell_ratio": sell_ratio, "buy_ratio": buy_ratio,
+            "atr": atr_prev, "low_prev": low_prev, "high_prev": high_prev, "rsi": np_rsi(c, cfg.rsi_period),
+            "piv_low": piv_low, "piv_high": piv_high,
+            "liq_long": (sell_ratio >= cfg.futures_liq_ratio) & (l < low_prev) & ((o - l) >= atr_prev),
+            "liq_short": (buy_ratio >= cfg.futures_liq_ratio) & (h > high_prev) & ((h - o) >= atr_prev),
+            "vol_ok": vol_ratio >= cfg.futures_volume_ratio}
+
+
+def btc_trend_1h(btc_1h: Dict[str, "np.ndarray"]):
+    """BTC 1 saatlik KAPANMIŞ mumlarından (kapanış zamanı ms, yükseliş, düşüş) dizileri."""
+    _need_numpy()
+    c = np.asarray(btc_1h["c"], dtype=np.float64)
+    fast, slow = np_ema(c, FUT_BTC_EMA_FAST), np_ema(c, FUT_BTC_EMA_SLOW)
+    up = (c > slow) & (fast > slow)
+    down = (c < slow) & (fast < slow)
+    return np.asarray(btc_1h["t"], dtype=np.int64) + FUT_HOUR_MS, up, down
+
+
+def trend_at(close_ms, trend) -> Tuple["np.ndarray", "np.ndarray"]:
+    """Her zaman için (ms) o anda kapanmış son saatlik mumun BTC trendi: (yükseliş, düşüş) maskeleri."""
+    t_end, up, down = trend
+    close_ms = np.atleast_1d(np.asarray(close_ms, dtype=np.int64))
+    j = np.searchsorted(t_end, close_ms, "right") - 1
+    ok = j >= 0
+    u = np.zeros(len(close_ms), dtype=bool)
+    d = np.zeros(len(close_ms), dtype=bool)
+    u[ok], d[ok] = up[j[ok]], down[j[ok]]
+    return u, d
+
+
+def _divergence(f: Dict[str, "np.ndarray"], i: int, side: str, oversold: float, rise: float) -> Optional[dict]:
+    """i. mumda pozitif (long) / negatif (short) RSI uyumsuzluğu: (önceki dip, yeni dip, RSI'lar) ya da None."""
+    r = f["rsi"]
+    lo = max(0, i - FUT_DIV_RECENT + 1)
+    if side == "long":
+        series, pivots = f["l"], f["piv_low"]
+        p2 = lo + int(np.argmin(series[lo:i + 1]))
+    else:
+        series, pivots = f["h"], f["piv_high"]
+        p2 = lo + int(np.argmax(series[lo:i + 1]))
+    r2 = r[p2]
+    if not np.isfinite(r2):
+        return None
+    stop = max(p2 - FUT_DIV_MAX_GAP - 1, FUT_PIVOT - 1)
+    for p1 in range(p2 - FUT_DIV_MIN_GAP, stop, -1):   # Önceki dip / tepe en yakından uzağa (p1 + 2 ≤ i: teyitli)
+        if not pivots[p1] or not np.isfinite(r[p1]):
+            continue
+        if side == "long" and series[p1] > series[p2] and r[p1] <= oversold and r2 >= r[p1] + rise:
+            return {"p1": p1, "p2": p2, "rsi_prev": float(r[p1]), "rsi_now": float(r2)}
+        if (side == "short" and series[p1] < series[p2] and r[p1] >= 100.0 - oversold
+                and r2 <= r[p1] - rise):
+            return {"p1": p1, "p2": p2, "rsi_prev": float(r[p1]), "rsi_now": float(r2)}
+    return None
+
+
+def futures_candidates(f: Dict[str, "np.ndarray"], cfg, up=None, down=None,
+                       liq_long=None, liq_short=None) -> Tuple["np.ndarray", "np.ndarray"]:
+    """Uyumsuzluk dışındaki şartları (likidasyon, hacim, BTC trendi, yön ayarı) sağlayan mumlar: (long, short).
+    `up` / `down` None ise BTC trendi aranmaz (FUTURES_BTC_TREND=false); `liq_*` verilirse vekil ölçütün yerine
+    geçer (canlı likidasyon akışı)."""
+    long_ok = (f["liq_long"] if liq_long is None else liq_long) & f["vol_ok"]
+    short_ok = (f["liq_short"] if liq_short is None else liq_short) & f["vol_ok"]
+    if cfg.futures_btc_trend:
+        long_ok = long_ok & up
+        short_ok = short_ok & down
+    if cfg.futures_sides == "long":
+        short_ok = np.zeros_like(short_ok)
+    elif cfg.futures_sides == "short":
+        long_ok = np.zeros_like(long_ok)
+    return long_ok, short_ok
+
+
+def futures_signal_at(f: Dict[str, "np.ndarray"], i: int, side: str, cfg) -> Optional[dict]:
+    """i. mumda (aday olduğu bilinen) sinyalin ölçüleri; uyumsuzluk yoksa None. Puan = likidasyon gücü (eş zamanlı
+    sinyallerden en güçlüsü alınır)."""
+    div = _divergence(f, i, side, cfg.futures_div_oversold, cfg.futures_div_rise)
+    if div is None:
+        return None
+    o, h, l, c, atr_v = f["o"][i], f["h"][i], f["l"][i], f["c"][i], f["atr"][i]
+    if side == "long":
+        liq, push = f["sell_ratio"][i], (o - l) / atr_v
+        sweep = (f["low_prev"][i] / l - 1) * 100
+    else:
+        liq, push = f["buy_ratio"][i], (h - o) / atr_v
+        sweep = (h / f["high_prev"][i] - 1) * 100
+    return {"side": side, "price": float(c), "liq_ratio": float(liq), "vol_ratio": float(f["vol_ratio"][i]),
+            "push_atr": float(push), "sweep_pct": float(sweep), "rsi_prev": div["rsi_prev"], "rsi_now": div["rsi_now"],
+            "div_bars": float(div["p2"] - div["p1"]), "score": float(liq)}
+
+
+@dataclass
+class FuturesSignal:
+    symbol: str
+    side: str            # "long" | "short"
+    price: float         # Sinyal mumunun kapanışı
+    candle_ms: int       # Sinyal mumunun açılış zamanı
+    score: float
+    metrics: Dict[str, float] = field(default_factory=dict)
+
+    def note(self) -> str:
+        m = self.metrics
+        liq = "zorla satış" if self.side == "long" else "zorla alış"
+        div = "pozitif" if self.side == "long" else "negatif"
+        trend = {1.0: "yükseliş", -1.0: "düşüş"}.get(m.get("btc_trend", 0.0), "kapalı")
+        text = (f"Likidasyon ({liq}) x{m.get('liq_ratio', 0):.1f} | Hacim x{m.get('vol_ratio', 0):.1f} | "
+                f"RSI {div} uyumsuzluk {m.get('rsi_prev', 0):.0f}→{m.get('rsi_now', 0):.0f} | BTC 1s {trend}")
+        if m.get("feed_usdt"):
+            text += f" | Akış {m['feed_usdt']:,.0f} USDT".replace(",", ".")
+        return text
+
+
+class FuturesScalpStrategy(ReboundStrategy):
+    """Vadeli scalping (STRATEGY=futures): FUTURES_COINS'teki coinlerde son kapanan 5 dk mumda 4'lü onay
+    (likidasyon + hacim + RSI uyumsuzluğu + BTC 1 saatlik trend). Veriyi FuturesBot getirir; bu sınıf yalnızca
+    hesaplar (`evaluate`). Spot tarama altyapısı (`scan`) bu strateji için çalışmaz."""
+    name = "futures"
+    interval = FUT_INTERVAL
+    uses_room = False
+    uses_24h_range = False
+    is_futures = True
+    analysis_fields = ("rsi_period", "futures_volume_ratio", "futures_liq_ratio", "futures_div_oversold",
+                       "futures_div_rise", "futures_btc_trend", "futures_sides")
+
+    def scan(self, rules: Dict[str, SymbolRules], excluded_symbols: Set[str], invest_hint: float) -> ScanResult:
+        result = ScanResult()
+        result.market_ok = False
+        result.market_note = "Vadeli strateji spot piyasayı taramaz (FuturesBot kendi taramasını yapar)."
+        return result
+
+    def evaluate(self, klines: Dict[str, Dict[str, "np.ndarray"]], btc_1h: Optional[Dict[str, "np.ndarray"]],
+                 now_ms: int, feed=None) -> Tuple[List[FuturesSignal], Counter]:
+        """Her coinin son KAPANMIŞ 5 dk mumunu değerlendirir. `klines`: sembol → kapanmış mum dizileri (son satır
+        en yeni kapanmış mum). `feed`: liquidations.LiquidationFeed (FUTURES_LIQ_SOURCE=feed/both). (sinyaller
+        en güçlüden zayıfa, elenme nedenleri)."""
+        _need_numpy()
+        cfg = self.cfg
+        rejects: Counter = Counter()
+        trend = btc_trend_1h(btc_1h) if cfg.futures_btc_trend and btc_1h is not None and len(btc_1h["t"]) else None
+        signals: List[FuturesSignal] = []
+        for symbol, k in klines.items():
+            n = len(k["t"])
+            if n < FUT_MIN_BARS:
+                rejects["veri az"] += 1
+                continue
+            i = n - 1
+            close_ms = int(k["t"][i]) + FUT_BAR_MS
+            if now_ms - close_ms > 2 * FUT_BAR_MS:
+                rejects["mum eski"] += 1
+                continue
+            f = futures_features(k, cfg)
+            up = down = None
+            if cfg.futures_btc_trend:
+                if trend is None:
+                    rejects["BTC trendi okunamadı"] += 1
+                    continue
+                up, down = trend_at([close_ms], trend)
+                up = np.concatenate((np.zeros(n - 1, dtype=bool), up))
+                down = np.concatenate((np.zeros(n - 1, dtype=bool), down))
+            liq_long = liq_short = None
+            feed_long = feed_short = 0.0
+            if cfg.futures_liq_source != "proxy":
+                if feed is None:
+                    rejects["likidasyon akışı yok"] += 1
+                    continue
+                feed_long, feed_short = feed.recent(symbol, FUT_BAR_MS / 1000)
+                fl = np.zeros(n, dtype=bool)
+                fs = np.zeros(n, dtype=bool)
+                fl[i] = feed_long >= cfg.futures_liq_min_usdt
+                fs[i] = feed_short >= cfg.futures_liq_min_usdt
+                if cfg.futures_liq_source == "both":
+                    fl &= f["liq_long"]
+                    fs &= f["liq_short"]
+                liq_long, liq_short = fl, fs
+            long_ok, short_ok = futures_candidates(f, cfg, up, down, liq_long, liq_short)
+            found = None
+            for side, ok in (("long", long_ok), ("short", short_ok)):
+                if ok[i]:
+                    found = futures_signal_at(f, i, side, cfg)
+                    if found is not None:
+                        break
+            if found is None:
+                rejects[self._reject_reason(f, i, up, down, liq_long, liq_short)] += 1
+                continue
+            found["btc_trend"] = 1.0 if up is not None and up[i] else -1.0 if down is not None and down[i] else 0.0
+            found["feed_usdt"] = feed_long if found["side"] == "long" else feed_short
+            signals.append(FuturesSignal(symbol, found["side"], found["price"], int(k["t"][i]), found["score"],
+                                         {k2: v for k2, v in found.items() if k2 not in ("side", "price")}))
+        signals.sort(key=lambda s: s.score, reverse=True)
+        return signals, rejects
+
+    def _reject_reason(self, f, i, up, down, liq_long, liq_short) -> str:
+        ll = bool((f["liq_long"] if liq_long is None else liq_long)[i])
+        ls = bool((f["liq_short"] if liq_short is None else liq_short)[i])
+        if not (ll or ls):
+            return "likidasyon dalgası yok"
+        if not f["vol_ok"][i]:
+            return "hacim düşük"
+        if self.cfg.futures_btc_trend and not ((ll and up[i]) or (ls and down[i])):
+            return "BTC trendi ters"
+        if self.cfg.futures_sides != "both" and not ((ll and self.cfg.futures_sides == "long")
+                                                     or (ls and self.cfg.futures_sides == "short")):
+            return "yön kapalı"
+        return "RSI uyumsuzluğu yok"
+
+
 STRATEGY_CLASSES = {"rebound": ReboundStrategy, "trend": TrendPullbackStrategy, "breakout": BreakoutStrategy,
                     "intraday": IntradayStrategy, "swing": SwingBreakoutStrategy, "swing_pullback": SwingPullbackStrategy,
                     "mean_revert": MeanRevertStrategy, "rsi_divergence": RsiDivergenceStrategy,
-                    "rotation": RotationStrategy}
+                    "rotation": RotationStrategy, "futures": FuturesScalpStrategy}
 assert tuple(STRATEGY_CLASSES) == STRATEGIES
 
 

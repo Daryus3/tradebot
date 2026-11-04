@@ -41,6 +41,8 @@ class ExitReason(str, Enum):
     TIME_EXIT = "TIME_EXIT"        # Süre sorusu: yatay kalan pozisyon başabaşta satıldı
     PROFIT_LOCK = "PROFIT_LOCK"    # Piramit sonrası kilit: birleşik pozisyon zarara dönmeden satıldı
     STALE = "STALE"                # Takılan işlem: STALE_EXIT_MINUTES içinde toparlanma başlamadı
+    LIQUIDATION = "LIQUIDATION"    # Vadeli: pozisyon Binance tarafından likide edildi (zarar kes çalışamadı)
+    SAFETY = "SAFETY"              # Vadeli: zarar kes emri Binance'e konamadı, pozisyon korumasız kalmasın diye kapatıldı
 
 
 @dataclass
@@ -78,6 +80,17 @@ class Position:
     lock_pct: Optional[float] = None  # Piramit sonrası: net K/Z bunun altına inerse sat (zarara dönmesin)
     exit_at_breakeven: bool = False   # Süre sorusu "başabaşta sat": net K/Z ≥ 0 olunca satılır
     asked: List[str] = field(default_factory=list)   # Sorulan sorular (her biri pozisyon başına bir kez)
+    # Vadeli işlem (STRATEGY=futures): yön, kaldıraç ve Binance'teki koruma emirleri. cost_usdt = teminat + giriş
+    # komisyonu; net K/Z yüzdesi (pnl_pct) bu yüzden teminata göre (ROE, komisyon dahil) hesaplanır.
+    futures: bool = False
+    side: str = "long"                # "long" | "short"
+    leverage: int = 1
+    margin_usdt: float = 0.0          # Yalıtılmış teminat
+    liq_price: float = 0.0            # Tahmini likidasyon fiyatı
+    sl_price: float = 0.0             # Zarar kes / başabaş stop fiyatı (Binance'te STOP_MARKET)
+    tp_price: float = 0.0             # Kâr Al fiyatı
+    stop_order_id: str = ""           # Binance'teki STOP_MARKET emrinin kimliği (koşullu / algo emir)
+    tp_order_id: str = ""             # Binance'teki Kâr Al emrinin kimliği
 
     def to_dict(self) -> dict:
         return asdict(self)

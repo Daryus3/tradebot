@@ -35,7 +35,7 @@ from risk import (ExitReason, Position, cooldown_minutes, evaluate_exit, kill_sw
 from state import BotState, EquityLog, StateStore, TradeLog
 from strategy import ReboundStrategy, RsiDivergenceStrategy, ScanResult, Signal
 from telegram_bot import (CRITICAL_EXITS, Messages, TelegramNotifier, esc, fmt_duration, fmt_qty, fmt_rate,
-                          fmt_signed, fmt_usdt)
+                          fmt_signed, fmt_usdt, futures_tag)
 
 log = get_logger()
 
@@ -1679,7 +1679,11 @@ class TradingBot:
         lines = []
         for pos in state.positions.values():
             m = self.marks.get(pos.symbol)
-            if m:
+            if m and getattr(pos, "futures", False):
+                lines.append(f"📦 <b>{pos.symbol}</b> {futures_tag(pos)} ROE {fmt_signed(getattr(m, 'roe', m.pnl_pct))}% "
+                             f"(net {fmt_signed(m.pnl_usdt)} {self.cfg.quote_asset}) | "
+                             f"{fmt_duration(self.time_fn() - pos.opened_at)}")
+            elif m:
                 lines.append(f"📦 <b>{pos.symbol}</b> {fmt_signed(m.pnl_pct)}% "
                              f"({fmt_signed(m.pnl_usdt)} {self.cfg.quote_asset}) | "
                              f"{fmt_duration(self.time_fn() - pos.opened_at)}")
