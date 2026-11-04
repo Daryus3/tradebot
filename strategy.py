@@ -1622,7 +1622,15 @@ class RotationStrategy(ReboundStrategy):
 
 
 # ===================================================================== Vadeli işlem scalping (STRATEGY=futures)
-# Binance USDⓈ-M vadeli işlemler, 5 dk mumlar. Son KAPANMIŞ mumda dört şart AYNI ANDA sağlanınca işlem açılır:
+# Binance USDⓈ-M vadeli işlemler, 5 dk mumlar. İki giriş taktiği (FUTURES_TACTIC):
+#
+# crash (varsayılan) — çöküş dönüşü: son KAPANMIŞ 5 dk mumda fiyat son FUTURES_CRASH_HOURS (4) saatte en az
+#   FUTURES_CRASH_DROP_PCT (%10) düşmüşse (likidasyon şelalesi) long. İsteğe bağlı (FUTURES_CRASH_LIQ) o mumda likidasyon
+#   dalgası da şart. 2020-2026 araştırması: 5 dk - 1 saat ufkunda küçük likidasyon dalgalarında maliyeti aşan avantaj
+#   yok; büyük çöküşlerden sonra ise fiyat ortalama toparlanıyor (her yıl, coinlerin çoğunda; seçim 2020-2023 ve
+#   doğrulama 2023-2026 dönemlerinde). Short tarafında avantaj bulunamadı: crash yalnızca long açar.
+#
+# liq4 — ilk sürüm (7 yılın 7'sinde zarar etti, karşılaştırma için): dört şart AYNI ANDA:
 #   1) Likidasyon dalgası: long için zorla SATIŞ (long'lar likide oluyor), short için zorla ALIŞ (short'lar likide).
 #      Vekil ölçüt (canlı ve backtest aynı): mumun piyasa satış hacmi (hacim - taker buy) önceki 20 mumun ortalamasının
 #      en az FUTURES_LIQ_RATIO katı, mum son 1 saatin dibini kırmış (stop / likidasyon kümesi süpürülmüş) ve açılıştan
@@ -1746,7 +1754,12 @@ def futures_features(k: Dict[str, "np.ndarray"], cfg) -> Dict[str, "np.ndarray"]
         piv_low[2:-2] = (m <= l[1:-3]) & (m <= l[:-4]) & (m < l[3:-1]) & (m < l[4:])
         m = h[2:-2]
         piv_high[2:-2] = (m >= h[1:-3]) & (m >= h[:-4]) & (m > h[3:-1]) & (m > h[4:])
-    return {"o": o, "h": h, "l": l, "c": c, "vol_ratio": vol_ratio, "sell_ratio": sell_ratio, "buy_ratio": buy_ratio,
+    bars = max(1, int(getattr(cfg, "futures_crash_hours", 4)) * 12)
+    crash = np.full(len(c), np.nan)
+    if len(c) > bars:
+        crash[bars:] = (c[bars:] / c[:-bars] - 1) * 100
+    return {"o": o, "h": h, "l": l, "c": c, "crash": crash,
+            "vol_ratio": vol_ratio, "sell_ratio": sell_ratio, "buy_ratio": buy_ratio,
             "atr": atr_prev, "low_prev": low_prev, "high_prev": high_prev, "rsi": np_rsi(c, cfg.rsi_period),
             "piv_low": piv_low, "piv_high": piv_high,
             "liq_long": (sell_ratio >= cfg.futures_liq_ratio) & (l < low_prev) & ((o - l) >= atr_prev),
@@ -1806,6 +1819,14 @@ def futures_candidates(f: Dict[str, "np.ndarray"], cfg, up=None, down=None,
     """Uyumsuzluk dışındaki şartları (likidasyon, hacim, BTC trendi, yön ayarı) sağlayan mumlar: (long, short).
     `up` / `down` None ise BTC trendi aranmaz (FUTURES_BTC_TREND=false); `liq_*` verilirse vekil ölçütün yerine
     geçer (canlı likidasyon akışı)."""
+    if getattr(cfg, "futures_tactic", "crash") == "crash":
+        long_ok = f["crash"] <= -cfg.futures_crash_drop_pct
+        if cfg.futures_crash_liq:
+            long_ok = long_ok & (f["liq_long"] if liq_long is None else liq_long)
+        short_ok = np.zeros(len(long_ok), dtype=bool)          # Short tarafında avantaj bulunamadı
+        if cfg.futures_sides == "short":
+            long_ok = np.zeros(len(long_ok), dtype=bool)
+        return long_ok, short_ok
     long_ok = (f["liq_long"] if liq_long is None else liq_long) & f["vol_ok"]
     short_ok = (f["liq_short"] if liq_short is None else liq_short) & f["vol_ok"]
     if cfg.futures_btc_trend:
@@ -1819,8 +1840,13 @@ def futures_candidates(f: Dict[str, "np.ndarray"], cfg, up=None, down=None,
 
 
 def futures_signal_at(f: Dict[str, "np.ndarray"], i: int, side: str, cfg) -> Optional[dict]:
-    """i. mumda (aday olduğu bilinen) sinyalin ölçüleri; uyumsuzluk yoksa None. Puan = likidasyon gücü (eş zamanlı
-    sinyallerden en güçlüsü alınır)."""
+    """i. mumda (aday olduğu bilinen) sinyalin ölçüleri; liq4'te uyumsuzluk yoksa None. Puan: crash'te düşüşün derinliği,
+    liq4'te likidasyon gücü (eş zamanlı sinyallerden en güçlüsü alınır)."""
+    if getattr(cfg, "futures_tactic", "crash") == "crash":
+        drop = float(-f["crash"][i])
+        return {"side": side, "price": float(f["c"][i]), "drop_pct": drop, "liq_ratio": float(f["sell_ratio"][i]),
+                "vol_ratio": float(f["vol_ratio"][i]), "hours": float(cfg.futures_crash_hours), "score": drop,
+                "tactic": 1.0}
     div = _divergence(f, i, side, cfg.futures_div_oversold, cfg.futures_div_rise)
     if div is None:
         return None
@@ -1847,6 +1873,12 @@ class FuturesSignal:
 
     def note(self) -> str:
         m = self.metrics
+        if m.get("tactic") == 1.0:
+            text = (f"Çöküş dönüşü: son {m.get('hours', 4):g} saatte -%{m.get('drop_pct', 0):.1f} | "
+                    f"Satış hacmi x{m.get('liq_ratio', 0):.1f} | Hacim x{m.get('vol_ratio', 0):.1f}")
+            if m.get("feed_usdt"):
+                text += f" | Likidasyon akışı {m['feed_usdt']:,.0f} USDT".replace(",", ".")
+            return text
         liq = "zorla satış" if self.side == "long" else "zorla alış"
         div = "pozitif" if self.side == "long" else "negatif"
         trend = {1.0: "yükseliş", -1.0: "düşüş"}.get(m.get("btc_trend", 0.0), "kapalı")
@@ -1867,7 +1899,13 @@ class FuturesScalpStrategy(ReboundStrategy):
     uses_24h_range = False
     is_futures = True
     analysis_fields = ("rsi_period", "futures_volume_ratio", "futures_liq_ratio", "futures_div_oversold",
-                       "futures_div_rise", "futures_btc_trend", "futures_sides")
+                       "futures_div_rise", "futures_btc_trend", "futures_sides", "futures_tactic",
+                       "futures_crash_hours", "futures_crash_drop_pct", "futures_crash_liq")
+
+    @property
+    def needs_btc_trend(self) -> bool:
+        """BTC 1 saatlik trendi yalnızca liq4 taktiğinde (FUTURES_BTC_TREND=true) kullanılır."""
+        return self.cfg.futures_tactic == "liq4" and self.cfg.futures_btc_trend
 
     def scan(self, rules: Dict[str, SymbolRules], excluded_symbols: Set[str], invest_hint: float) -> ScanResult:
         result = ScanResult()
@@ -1883,7 +1921,7 @@ class FuturesScalpStrategy(ReboundStrategy):
         _need_numpy()
         cfg = self.cfg
         rejects: Counter = Counter()
-        trend = btc_trend_1h(btc_1h) if cfg.futures_btc_trend and btc_1h is not None and len(btc_1h["t"]) else None
+        trend = btc_trend_1h(btc_1h) if self.needs_btc_trend and btc_1h is not None and len(btc_1h["t"]) else None
         signals: List[FuturesSignal] = []
         for symbol, k in klines.items():
             n = len(k["t"])
@@ -1897,7 +1935,7 @@ class FuturesScalpStrategy(ReboundStrategy):
                 continue
             f = futures_features(k, cfg)
             up = down = None
-            if cfg.futures_btc_trend:
+            if self.needs_btc_trend:
                 if trend is None:
                     rejects["BTC trendi okunamadı"] += 1
                     continue
@@ -1906,7 +1944,8 @@ class FuturesScalpStrategy(ReboundStrategy):
                 down = np.concatenate((np.zeros(n - 1, dtype=bool), down))
             liq_long = liq_short = None
             feed_long = feed_short = 0.0
-            if cfg.futures_liq_source != "proxy":
+            uses_liq = cfg.futures_tactic == "liq4" or cfg.futures_crash_liq
+            if uses_liq and cfg.futures_liq_source != "proxy":
                 if feed is None:
                     rejects["likidasyon akışı yok"] += 1
                     continue
@@ -1937,6 +1976,13 @@ class FuturesScalpStrategy(ReboundStrategy):
         return signals, rejects
 
     def _reject_reason(self, f, i, up, down, liq_long, liq_short) -> str:
+        if self.cfg.futures_tactic == "crash":
+            drop = f["crash"][i]
+            if not np.isfinite(drop) or drop > -self.cfg.futures_crash_drop_pct:
+                return "çöküş yok"
+            if self.cfg.futures_sides == "short":
+                return "yön kapalı"
+            return "likidasyon dalgası yok"
         ll = bool((f["liq_long"] if liq_long is None else liq_long)[i])
         ls = bool((f["liq_short"] if liq_short is None else liq_short)[i])
         if not (ll or ls):

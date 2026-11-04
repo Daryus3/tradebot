@@ -242,7 +242,7 @@ geçmiş veriyle etkisini `--tara-ab` gösterir; "sorarak" hali geçmiş veriyle
 | `mean_revert` | **Ortalamaya dönüş:** yalnızca en hacimli `MR_UNIVERSE` (20) coinde, yükseliş trendindeki (1 saatlik EMA50 > EMA200) coinin saatlik kapanışı 20 saatlik ortalamanın `MR_BAND_STD` (2) standart sapma altına inince alır; küçük hedefle satar (önerilen: TP 1.5, SL 5, süre 2880 dk, izleyen stop 1 → 0.5, başabaş 0.7 → 0.2). Kazanma oranı yüksek olur; kâr, kayıpların kazançları silmemesine bağlıdır |
 | `rsi_divergence` | **Pozitif RSI uyumsuzluğu:** en hacimli `RSI_DIV_UNIVERSE` (30) coinde fiyat daha düşük dip yaparken RSI daha yüksek dip yapınca (ilk dipte RSI ≤ `RSI_DIV_OVERSOLD`, ikinci dipte en az `RSI_DIV_RISE` puan yüksek) ve son saatlik mum dönüşü **teyit edince** (yeşil, dipten beri görülen en yüksek seviyenin üstünde, ortalamanın üstünde hacimle) alır. `RSI_DIV_TREND_FILTER=true`: yalnızca fiyat 1 saatlik EMA200'ün üstündeyken. Çıkışlar `mean_revert` ile aynı grup (küçük hedef, 2 gün) |
 | `rotation` | Haftalık momentum rotasyonu: en hacimli 30 coinden son 4 haftanın en güçlü 3'ünü tutar, BTC 50 günlük ortalamasının altına inince USDT'ye geçer (`STOP_LOSS_PCT=20`, `BACKUP_STOP_PCT=25` önerilir) |
-| `futures` | **Vadeli işlem scalping (Binance USDⓈ-M, kaldıraçlı long / short):** ayrıntılar aşağıda (⚡ Vadeli işlem scalping). ⚠️ 2020-2026 testinde 7 yılın 7'sinde de zarar etti |
+| `futures` | **Vadeli işlem, çöküş dönüşü (Binance USDⓈ-M, 2x):** 4 saatte %10 düşen coinde long, TP +%6 / SL −%4 / 30 dk; 2020-2026 testinde seçim ve doğrulama dönemlerinde kârlı, kazanma %70. Ayrıntılar aşağıda (⚡ Vadeli işlem) |
 | `rotation` + `ROTATION_COINS` | **Büyük coin trendi:** yalnızca seçilen coinler. `ROTATION_COINS=BTC`, `ROTATION_TOP_N=1`: BTC'nin son 4 haftası artıda ve BTC 50 günlük ortalamasının üstündeyken BTC'yi tutar, değilse USDT'de bekler (haftada bir bakar; trend bozulunca ertesi gün satar). `ROTATION_COINS=BTC,ETH`: ikisinden güçlü olanı (`ROTATION_TOP_N=2`: ikisini birden). Yılda birkaç işlem yapar; amaç sık al-sat değil, büyük düşüşlerin dışında kalmak |
 
 Gün içi taktiklerini aynı veriyle karşılaştırmak için `python main.py --backtest --strateji intraday --gun 365
@@ -256,50 +256,61 @@ mean_revert ve rsi_divergence'ta backtest varsayılanı 365 gün, rotasyonda 3 y
 --strateji-karsilastir`, `--strateji mean_revert --strateji-karsilastir` = mean_revert / rsi_divergence,
 `--strateji rotation`). Rotasyon sonucu her zaman "BTC'yi alıp tutmak"la kıyaslanır.
 
-### ⚡ Vadeli işlem scalping (`STRATEGY=futures`)
-Binance **USDⓈ-M vadeli** işlemlerde (CCXT, `defaultType: future`) kaldıraçlı long / short. Ayrı bir motor
+### ⚡ Vadeli işlem (`STRATEGY=futures`): çöküş dönüşü
+Binance **USDⓈ-M vadeli** işlemlerde (CCXT, `defaultType: future`) kaldıraçlı işlem. Ayrı bir motor
 (`futures_trader.FuturesBot`) çalışır ama Telegram menüleri, `/durum`, `/pano`, raporlar ve kill-switch aynıdır.
 
 **Kurulum:** Binance'te USDT'yi Spot'tan *USDⓈ-M Vadeli* cüzdanına aktarın; API anahtarında **Enable Futures** izni
-açık olsun (IP kısıtlaması: sunucunun IP'si). `.env`'de `STRATEGY=futures` (veya Telegram → 🧭 Strateji → Vadeli
-scalping). Önce test modunda (`TRADING_MODE=paper`) çalıştırın: piyasa verisi gerçek, emirler sanal. Kontrol:
+açık olsun (IP kısıtlaması: sunucunun IP'si). `.env`'de `STRATEGY=futures` (veya Telegram → 🧭 Strateji → Vadeli).
+Önce test modunda (`TRADING_MODE=paper`) çalıştırın: piyasa verisi gerçek, emirler sanal. Kontrol:
 `.venv/bin/python main.py --selftest` (CCXT bağlantısı, pozisyon modu, vadeli bakiye).
 
-**Giriş: son kapanan 5 dk mumda dört şart BİRLİKTE** (`FUTURES_COINS`, varsayılan Kasım 2023'ün ilk 10'u):
-1. **Likidasyon dalgası:** long için zorla satış (long'lar likide oluyor), short için zorla alış. Ölçüm
-   (`FUTURES_LIQ_SOURCE=proxy`, backtest ile birebir aynı): piyasa satış hacmi önceki 20 mumun ortalamasının
-   ≥ `FUTURES_LIQ_RATIO` (3) katı + son 1 saatin dibi kırıldı (stop / likidasyon kümesi süpürüldü) + mum ≥ 1 ATR itti.
-   Gerçek likidasyon kayıtlarıyla doğrulandı (Binance COIN-M, Haz 2023 – Mar 2024): işaretlenen mumların BTC'de
-   %21'i, ETH'de %26'sı gerçek likidasyonların en yoğun %1'lik dilimine denk geldi (rastgele %1). `feed` / `both`:
-   Binance'in anlık likidasyon akışı (son 5 dk'da ≥ `FUTURES_LIQ_MIN_USDT`); geçmişi olmadığından backtest edilemez.
-2. **Hacim onayı:** mum hacmi önceki 20 mumun ortalamasının ≥ `FUTURES_VOLUME_RATIO` (2.5) katı.
-3. **RSI uyumsuzluğu:** long: fiyat yeni dip yaptı ama RSI(14), 5-30 mum önceki dipten (RSI ≤ 40) en az 3 puan yüksek
-   (pozitif); short: tersi (negatif).
-4. **BTC trendi:** 1 saatlik BTC kapanışı EMA50 üstünde ve EMA20 > EMA50 → yalnızca long; tersi → yalnızca short.
+**Taktik (`FUTURES_TACTIC=crash`, varsayılan): çöküş dönüşü.** `FUTURES_COINS`'teki (varsayılan Kasım 2023'ün ilk 10'u)
+bir coin son `FUTURES_CRASH_HOURS` (4) saatte en az `FUTURES_CRASH_DROP_PCT` (%10) düştüyse (likidasyon şelalesi),
+5 dk mum kapanışında **long** açılır; aynı anda birden çok coin çökerse en derin düşen alınır. Çıkışlar (fiyat %):
+**Kâr Al +%6** (Binance'te limit emir), **Zarar Kes −%4** (Binance'te STOP_MARKET; konamazsa pozisyon hemen kapatılır),
+**başabaş** fiyat +%1.5'e gelince stop girişin +%0.3 üstüne, **zaman stopu 30 dk**; zararla kapanan coine **4 saat**
+(`LOSS_COOLDOWN_MINUTES=240`) tekrar girilmez. **Kaldıraç 2x** (`FUTURES_LEVERAGE`, Telegram'da 1x-20x düğmeleri;
+3x üstü önerilmez). `FUTURES_CRASH_LIQ=true`: çöküş mumunda likidasyon dalgası da şart (kazanma %76-79, daha az işlem).
+`FUTURES_TACTIC=liq4`: ilk 4'lü onay sürümü (likidasyon + hacim + RSI uyumsuzluğu + BTC trendi; aşağıda neden
+bırakıldığı).
 
-**İşlem:** her girişten HEMEN önce `set_margin_mode('isolated')` + `set_leverage(FUTURES_LEVERAGE)`; vadeli
-cüzdandaki serbest bakiyenin `FUTURES_MARGIN_USAGE_PCT`'si (95) teminat × kaldıraç (bileşik); miktar / fiyat CCXT
-`amount_to_precision` / `price_to_precision` ile; tutar Binance'in en küçük emir tutarının altındaysa işlem pas
-geçilir ve Telegram'a yazılır (bot çökmez). Hesap tek yönlü (One-Way) olmalı: açılışta API'den teyit edilir.
-- **Kâr Al** fiyat +%1.2 (10x'te ROE ~+%12; Binance'te bekleyen limit emir), **Zarar Kes** fiyat −%0.9 (Binance'te
-  `STOP_MARKET`; konamazsa pozisyon hemen kapatılır), **başabaş kalkanı** fiyat +%0.5'e gelince stop girişin
-  +%0.2 üstüne taşınır (short'ta altına), **zaman stopu** 60 dk sonra piyasa emriyle. Yüzdeler FİYAT hareketidir.
-- Telegram: pozisyonlarda `[LONG 10X]` / `[SHORT 10X]` ve anlık ROE (`/pano`, `/durum`, `/pozisyon`);
-  ⚙️ Ayarlar'da kaldıraç 1x-20x düğmeleri (sonraki işlemde uygulanır), TP / SL 0.1'lik adımlarla.
-- Durum ve işlem kaydı spot'tan ayrıdır: `data/state_futures_<mod>.json`, `data/trades_futures_<mod>.csv`.
+**İşlem altyapısı:** her girişten HEMEN önce `set_margin_mode('isolated')` + `set_leverage`; vadeli cüzdandaki serbest
+bakiyenin `FUTURES_MARGIN_USAGE_PCT`'si (95) teminat × kaldıraç (bileşik); miktar / fiyat CCXT `amount_to_precision` /
+`price_to_precision` ile; tutar Binance'in en küçük emir tutarının altındaysa işlem pas geçilir ve Telegram'a yazılır
+(bot çökmez). Hesap tek yönlü (One-Way) olmalı: açılışta API'den teyit edilir. Telegram: pozisyonlarda `[LONG 2X]`
+ve anlık ROE (`/pano`, `/durum`, `/pozisyon`); ⚙️ Ayarlar'da kaldıraç düğmeleri ve taktik. Durum ve işlem kaydı
+spot'tan ayrıdır: `data/state_futures_<mod>.json`, `data/trades_futures_<mod>.csv`.
 
-**Backtest (2020-2026):** `python main.py --backtest --strateji futures --tum-donem` (Telegram: 🧪 Backtest →
-Strateji: Vadeli → Süre: Tüm dönem). Veri Binance'in herkese açık arşivinden (data.binance.vision) indirilir;
-çıkışlar 1 dk mumlarla izlenir, gerçek fonlama oranları, maker / taker komisyonu, kayma, en küçük emir tutarı ve
-yalıtılmış teminatta likidasyon hesaba katılır. Rapor: (A) 30 USDT ile tek hesap, (B) her yıl yeniden başlama,
-(C) sabit pozisyonla stratejinin kendisi; yıllara göre kazanma oranı, maks. düşüş, kayıp serisi, likidasyon riski,
-kaldıraç ve TP / SL duyarlılığı; grafik Telegram'a gelir.
+**Nasıl bulundu (Kasım 2026 araştırması):** 15 coin, Ocak 2020 – Kasım 2026, 5 dk mumlar; ayarlar yalnızca
+**seçim dönemi** (2020-01 → 2023-10) verisiyle seçildi, **doğrulama dönemi** (2023-11 → 2026-11, farklı coin listesi)
+hiç kullanılmadan sonra sınandı.
+- 5 dk – 1 saat ufkunda (scalping) 37 farklı sinyal ailesinden hiçbiri maliyeti (~%0.14 / işlem) aşmadı; ilk 4'lü onay
+  sürümü (liq4) 7 yılın 7'sinde zarar etti. Short tarafında hiçbir ailede avantaj yok.
+- Büyük çöküşlerden (4 saatte ≥ %7-10) sonra fiyat ortalama toparlanıyor: rastgele long girişler 24 saatte ≈ %0 net
+  getirirken bu girişler her yıl ve coinlerin çoğunda pozitif; denenen 1.944 çıkış ayarının %97'sinden fazlası iki
+  dönemde de kârlı.
 
-⚠️ **Sonuç (Ocak 2020 – Kasım 2026, her dönem kendi başındaki ilk 10 coin, 10x, 30 USDT): strateji 7 yılın 7'sinde
-de zarar etti.** 2.770 işlem, kazanma %47, işlem başı net −%0.14 (10x'te teminatın −%1.4'ü); 30 USDT 10 ayda eridi
-(Kasım 2020), her yıl 30 USDT ile yeniden başlansa da her yıl −%97…−98. Kaldıraç (1x-20x), TP / SL (1.0-1.5 /
-0.8-1.0), başabaş, zaman stopu, eşikler, yön ve uyumsuzluk tanımı değiştirilince de hiçbir yıl kârlı olmadı;
-komisyonsuz ve kaymasız bile işlem başı ≈ 0. Gerçek parayla kullanmayın; yalnızca test modunda izleyin.
+| Kaldıraç | Seçim 2020-01 → 2023-10 | Doğrulama 2023-11 → 2026-11 |
+|---|---|---|
+| 1x | 30 → 189 USDT, yıllık +%62, en büyük düşüş %33 | 30 → 65 USDT, yıllık +%29, düşüş %12 |
+| **2x** | **30 → 694 USDT, yıllık +%127, düşüş %56** | **30 → 127 USDT, yıllık +%61, düşüş %25** |
+| 3x | 30 → 1.679 USDT, yıllık +%186, düşüş %72 | 30 → 225 USDT, yıllık +%95, düşüş %38 |
+
+Kazanma oranı %70-71, 1 dk çıkışlar, maker / taker komisyonu, kayma, gerçek fonlama oranları, en küçük emir tutarı,
+coin beklemeleri ve art arda zarar molası (canlıyla aynı kurallar) dahil; likidasyon yok. Tüm dönem (2x, tek hesap):
+30 USDT → ~2.900 USDT; işlem başı sonuç 7 yılın 7'sinde pozitif. 10x'te aynı strateji Mart 2020'de hesabı eritti.
+Stres testlerinde (5 kat kayma, 2 kat komisyon, 1-3 dk gecikmeli giriş, stopun fitilin yarısında dolması) kârlı kaldı.
+
+⚠️ **Riskler:** en büyük düşüş COVID çöküşünde (Mart 2020) 2x'te %56: kill-switch (−%40) o gün botu durdururdu. Ani
+çöküşlerde (ör. 10 Ekim 2025) zarar kes emri stop fiyatının çok ötesinde dolabilir, borsa gecikebilir; listedeki bir
+coin tamamen çökerse (LUNA, FTT gibi; test listelerinde yoktu) art arda kayıp yaşanır. Geçmiş sonuç gelecek garantisi
+değildir: önce test modunda izleyin, küçük tutarla başlayın.
+
+**Backtest:** `python main.py --backtest --strateji futures --tum-donem` (Telegram: 🧪 Backtest → Strateji: Vadeli →
+Süre: Tüm dönem). Veri Binance'in herkese açık arşivinden indirilir. Rapor: (A) 30 USDT ile tek hesap, (B) her yıl
+yeniden başlama, (C) sabit pozisyonla stratejinin kendisi; yıllara göre kazanma oranı, maks. düşüş, kayıp serisi,
+likidasyon riski, kaldıraç / TP-SL duyarlılığı, tek kural değişince; grafik Telegram'a gelir.
 
 ### 🏆 Strateji turnuvası (`--turnuva`)
 Hangi strateji türünün sizin dönemde işe yaradığını **tek komutla** görmek için:

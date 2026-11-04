@@ -59,7 +59,7 @@ STRATEGY_SHORT = {"rebound": "Rebound (5 dk dip)", "trend": "Trend (5 dk)", "bre
                   "intraday": "Gün içi (10 büyük coin, 5 dk)",
                   "swing": "Swing kırılım (1 saat)", "swing_pullback": "Swing geri çekilme (1 saat)",
                   "mean_revert": "Ortalamaya dönüş (1 saat)", "rsi_divergence": "RSI uyumsuzluğu (1 saat)",
-                  "rotation": "Rotasyon (haftalık)", "futures": "Vadeli scalping (kaldıraçlı, 5 dk)"}
+                  "rotation": "Rotasyon (haftalık)", "futures": "Vadeli: çöküş dönüşü (kaldıraçlı, 5 dk)"}
 
 
 def _on(flag: bool) -> str:
@@ -316,7 +316,10 @@ class ControlPanel:
         cfg = self.bot.cfg
         lev = cfg.futures_leverage
         room = futures_liq_distance_pct(lev, cfg.futures_mmr_pct)
+        tactic = (f"çöküş dönüşü ({cfg.futures_crash_hours} saatte ≥%{cfg.futures_crash_drop_pct:g} düşüş, long)"
+                  if cfg.futures_tactic == "crash" else "4'lü onay (likidasyon + hacim + RSI uyumsuzluğu + BTC trendi)")
         text = (f"⚙️ <b>Dinamik Ayarlar — Vadeli</b>\n{LINE}\n"
+                f"🧭 Taktik: {tactic}\n"
                 f"⚡ Kaldıraç: <b>{lev}x</b> (isolated) | likidasyon ~%{room:.1f} fiyat hareketinde\n"
                 f"🎯 Kâr Al: fiyat +%{cfg.take_profit_pct:g} → ROE ~+%{cfg.take_profit_pct * lev:.0f}\n"
                 f"🛑 Zarar Kes: fiyat -%{cfg.stop_loss_pct:g} → ROE ~-%{cfg.stop_loss_pct * lev:.0f}\n"

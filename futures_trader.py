@@ -207,6 +207,8 @@ class FuturesBot(TradingBot):
         closed_ms = now_ms // FUT_BAR_MS * FUT_BAR_MS          # Az önce kapanan mumun kapanış zamanı
         if now_ms - closed_ms > MAX_SCAN_LAG_SEC * 1000:
             return
+        state = self.state
+        state.cooldowns = {s: t for s, t in state.cooldowns.items() if t > now}   # Süresi dolan beklemeler
         klines, errors = {}, []
         for coin in futures_coin_list(cfg):
             symbol = coin + "USDT"
@@ -219,7 +221,7 @@ class FuturesBot(TradingBot):
                 continue
             if len(k["t"]) and int(k["t"][-1]) + FUT_BAR_MS == closed_ms:   # Yalnızca az önce kapanan mum
                 klines[symbol] = k
-        btc_1h = ex.klines("BTCUSDT", "1h", FUT_BTC_1H_LIMIT) if cfg.futures_btc_trend else None
+        btc_1h = ex.klines("BTCUSDT", "1h", FUT_BTC_1H_LIMIT) if self.strategy.needs_btc_trend else None
         signals, rejects = self.strategy.evaluate(klines, btc_1h, now_ms, feed=self.smart.liq_feed)
         if errors:
             log.warning("Vadeli tarama: %d coinin mumları alınamadı (%s)", len(errors), "; ".join(errors[:3]))

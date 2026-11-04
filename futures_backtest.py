@@ -49,7 +49,10 @@ BNB_FUTURES_DISCOUNT = 0.10             # Vadeli işlemde BNB ile komisyon indir
 LEVERAGES = (1, 3, 5, 10, 15, 20)
 TP_GRID = (1.0, 1.2, 1.5)
 SL_GRID = (0.8, 0.9, 1.0)
+CRASH_TP_GRID = (3.0, 4.0, 6.0, 8.0)
+CRASH_SL_GRID = (3.0, 4.0, 5.0)
 MAX_WINDOW_MIN = 240                    # Çıkış penceresi (zaman stopu duyarlılığı için en uzun süre)
+LONG_WINDOW_MIN = 720                   # Bundan uzun tutma sürelerinde çıkışlar 5 dk mumlarla izlenir (bellek)
 # Dönem başında piyasa değeri en büyük 10 coin (stabil coinler hariç; o tarihte USDⓈ-M vadeli işlemi olanlar).
 # Dönem dönem değişen liste, bugünün büyük coinlerini geçmişe taşımanın yaratacağı "hayatta kalan" yanılgısını önler.
 HISTORY_SEGMENTS = (
@@ -186,16 +189,21 @@ def find_signals(cfg, data: FutData) -> Tuple[List[FutSignal], Funnel]:
         nxt_ok[:-1] = t[1:] == close[:-1]                 # Bir sonraki mum boşluksuz geliyor (giriş yapılabilir)
         active &= nxt_ok
         up = down = None
-        if cfg.futures_btc_trend:
+        crash = cfg.futures_tactic == "crash"
+        if cfg.futures_btc_trend and not crash:
             up, down = trend_at(close, data.btc_trend)
         long_ok, short_ok = futures_candidates(f, cfg, up, down)
-        liq_any = (f["liq_long"] | f["liq_short"]) & active
-        vol_any = ((f["liq_long"] | f["liq_short"]) & f["vol_ok"]) & active
-        funnel.candles += int(active.sum())
-        funnel.liq += int(liq_any.sum())
-        funnel.liq_vol += int(vol_any.sum())
         both = (long_ok | short_ok) & active
-        funnel.liq_vol_trend += int(both.sum())
+        funnel.candles += int(active.sum())
+        if crash:   # Huni: çöküş → (likidasyon dalgası) → sinyal
+            drop = (f["crash"] <= -cfg.futures_crash_drop_pct) & active
+            funnel.liq += int(drop.sum())
+            funnel.liq_vol += int((drop & f["liq_long"]).sum())
+            funnel.liq_vol_trend += int(both.sum())
+        else:
+            funnel.liq += int(((f["liq_long"] | f["liq_short"]) & active).sum())
+            funnel.liq_vol += int(((f["liq_long"] | f["liq_short"]) & f["vol_ok"] & active).sum())
+            funnel.liq_vol_trend += int(both.sum())
         for i in np.flatnonzero(both):
             found = None
             for side, ok in (("long", long_ok), ("short", short_ok)):   # Canlıdaki sıra: önce long
@@ -227,7 +235,7 @@ def load_windows(data: FutData, signals: Sequence[FutSignal], minutes: int = MAX
             by_symbol.setdefault(s.symbol, []).append(s)
     for symbol, sigs in by_symbol.items():
         k5 = data.k5[symbol]
-        if data.exit_interval == "1m":
+        if data.exit_interval == "1m" and minutes <= LONG_WINDOW_MIN:
             months: Dict[Tuple[int, int], List[FutSignal]] = {}
             for s in sigs:
                 d = datetime.fromtimestamp(s.close_ms / 1000, tz=timezone.utc)
@@ -271,6 +279,14 @@ class SimParams:
     start_capital: float
     kill_pct: float
     max_notional: float = MAX_NOTIONAL
+    symbol_cooldown_min: int = 0        # Her işlemden sonra aynı coine bekleme (SYMBOL_COOLDOWN_MINUTES, canlıyla aynı)
+    harsh_stops: bool = False           # Stres: stop emri, mumun stopun ötesindeki fitilinin yarısında dolar
+    # Canlı botun risk sigortaları (trader._after_close ile aynı): art arda zarar kes molası, günlük zarar / kâr limiti
+    loss_streak_limit: int = 0
+    loss_streak_pause_h: float = 4.0
+    daily_loss_pct: float = 0.0
+    daily_profit_pct: float = 0.0
+    loss_cooldown_min: int = 0          # Zararla kapanınca (daha uzunsa) bekleme (LOSS_COOLDOWN_MINUTES)
 
 
 def params_from_cfg(cfg, **over) -> SimParams:
@@ -281,7 +297,10 @@ def params_from_cfg(cfg, **over) -> SimParams:
                   margin_usage_pct=cfg.futures_margin_usage_pct, taker_fee=cfg.futures_taker_fee * discount,
                   maker_fee=cfg.futures_maker_fee * discount, slippage_pct=cfg.futures_slippage_pct,
                   tp_limit=cfg.futures_tp_order == "limit", mmr_pct=cfg.futures_mmr_pct,
-                  start_capital=cfg.start_capital, kill_pct=cfg.max_total_loss_pct)
+                  start_capital=cfg.start_capital, kill_pct=cfg.max_total_loss_pct,
+                  symbol_cooldown_min=cfg.symbol_cooldown_minutes, loss_cooldown_min=cfg.loss_cooldown_minutes,
+                  loss_streak_limit=cfg.loss_streak_limit, loss_streak_pause_h=cfg.loss_streak_pause_hours,
+                  daily_loss_pct=cfg.daily_loss_limit_pct, daily_profit_pct=cfg.daily_profit_target_pct)
     return replace(p, **over) if over else p
 
 
@@ -395,7 +414,8 @@ def run_trade(p: SimParams, s: FutSignal, window: tuple, margin: float, notional
         adverse_first = cj >= oj if side > 0 else cj <= oj
         if adverse_first:
             if worse(aj, stop):
-                exit_price, reason, exit_ms = stop * (1 - side * slip), "BE" if be_on else "SL", tj
+                fill = (stop + aj) / 2 if p.harsh_stops else stop
+                exit_price, reason, exit_ms = fill * (1 - side * slip), "BE" if be_on else "SL", tj
                 break
             if reached(fj, tp):
                 exit_price = tp if p.tp_limit else tp * (1 - side * slip)
@@ -416,7 +436,8 @@ def run_trade(p: SimParams, s: FutSignal, window: tuple, margin: float, notional
                 be_on = True
                 stop = be_stop if worse(stop, be_stop) else stop
             if worse(aj, stop):
-                exit_price, reason, exit_ms = stop * (1 - side * slip), "BE" if be_on else "SL", tj
+                fill = (stop + aj) / 2 if p.harsh_stops else stop
+                exit_price, reason, exit_ms = fill * (1 - side * slip), "BE" if be_on else "SL", tj
                 break
     if exit_price is None:                                  # Veri penceresi bitti (son mumun kapanışı)
         last = n - 1
@@ -456,6 +477,10 @@ def simulate(p: SimParams, data: FutData, signals: Sequence[FutSignal], windows:
     skipped: Counter = Counter()
     busy_until = -1
     last_entry = -1
+    cooldown: Dict[str, int] = {}
+    freeze_until = -1
+    sl_streak = 0
+    day_key, day_pnl = -1, 0.0
     ruined = kill_ms = None
     usage = p.margin_usage_pct / 100
     kill_level = p.start_capital * (1 - p.kill_pct / 100) if p.kill_pct else -1.0
@@ -465,6 +490,12 @@ def simulate(p: SimParams, data: FutData, signals: Sequence[FutSignal], windows:
             continue
         if s.close_ms == last_entry:
             skipped["aynı mumda daha güçlü sinyal alındı"] += 1
+            continue
+        if s.close_ms < cooldown.get(s.symbol, -1):
+            skipped["coin beklemede (önceki işlemden sonra)"] += 1
+            continue
+        if s.close_ms < freeze_until:
+            skipped["risk sigortası (zarar serisi / günlük limit)"] += 1
             continue
         if fixed_notional:
             notional = fixed_notional
@@ -492,6 +523,24 @@ def simulate(p: SimParams, data: FutData, signals: Sequence[FutSignal], windows:
         # stopu mum açılışında kapanır, aynı 5 dk kapanışındaki yeni sinyal alınabilir (canlı: önce çıkış, sonra tarama)
         busy_until = tr.exit_ms if tr.reason == "TIME" else tr.exit_ms + tr.bar_ms
         last_entry = s.close_ms
+        wait = (max(p.symbol_cooldown_min, p.loss_cooldown_min) if tr.pnl < 0 and p.loss_cooldown_min > 0
+                else p.symbol_cooldown_min)                # canlıdaki risk.cooldown_minutes ile aynı
+        if wait > 0:
+            cooldown[s.symbol] = tr.exit_ms + tr.bar_ms + wait * MIN_MS
+        # Canlıdaki risk sigortaları (trader._after_close): günlük zarar / kâr limiti ve art arda zarar kes molası
+        day = tr.exit_ms // DAY_MS
+        if day != day_key:
+            day_key, day_pnl = day, 0.0
+        day_pnl += tr.pnl
+        midnight = (day + 1) * DAY_MS
+        if p.daily_loss_pct > 0 and day_pnl <= -p.start_capital * p.daily_loss_pct / 100:
+            freeze_until = max(freeze_until, midnight)
+        if p.daily_profit_pct > 0 and day_pnl >= p.start_capital * p.daily_profit_pct / 100:
+            freeze_until = max(freeze_until, midnight)
+        sl_streak = sl_streak + 1 if tr.reason == "SL" else 0
+        if p.loss_streak_limit > 0 and sl_streak >= p.loss_streak_limit:
+            freeze_until = max(freeze_until, tr.exit_ms + int(p.loss_streak_pause_h * FUT_HOUR_MS))
+            sl_streak = 0
         if fixed_notional:
             continue
         if kill_ms is None and equity <= kill_level:
@@ -653,14 +702,34 @@ def leverage_table(cfg, data: FutData, signals, windows) -> List[Tuple[int, Opti
 
 
 def exit_grid(cfg, data: FutData, signals, windows) -> List[Tuple[float, float, Evaluation]]:
+    tps, sls = (CRASH_TP_GRID, CRASH_SL_GRID) if cfg.futures_tactic == "crash" else (TP_GRID, SL_GRID)
     return [(tp, sl, evaluate(params_from_cfg(cfg, tp_pct=tp, sl_pct=sl), data, signals, windows))
-            for tp in TP_GRID for sl in SL_GRID]
+            for tp in tps for sl in sls]
 
 
 def variant_rows(cfg, data: FutData, signals, windows) -> List[Tuple[str, Evaluation]]:
     """Tek bir kuralı değiştirmenin etkisi (diğer her şey aynı)."""
     def ev(sigs=signals, **over):
         return evaluate(params_from_cfg(cfg, **over), data, sigs, windows)
+    if cfg.futures_tactic == "crash":
+        def other(**changes):
+            c2 = replace(cfg, **changes)
+            sigs, _f = find_signals(c2, data)
+            load_windows(data, sigs, max(MAX_WINDOW_MIN, cfg.max_hold_minutes + 10), cache=windows)
+            return evaluate(params_from_cfg(c2), data, sigs, windows)
+        return [("Başabaş kalkanı kapalı", ev(be_enabled=False)),
+                ("Zaman stopu 60 dk", ev(hold_min=60)),
+                ("Zaman stopu 120 dk", ev(hold_min=120)),
+                ("Zarardan sonra bekleme yok", ev(loss_cooldown_min=0)),
+                ("Kayma 5 kat (%0.10)", ev(slippage_pct=0.10)),
+                ("Komisyon 2 kat", ev(taker_fee=params_from_cfg(cfg).taker_fee * 2,
+                                      maker_fee=params_from_cfg(cfg).maker_fee * 2)),
+                ("Kâr Al piyasa emriyle (taker)", ev(tp_limit=False)),
+                ("Kötümser stop dolumu (fitilin yarısı)", ev(harsh_stops=True)),
+                (f"Çöküş eşiği %{cfg.futures_crash_drop_pct - 2:g}", other(futures_crash_drop_pct=cfg.futures_crash_drop_pct - 2)),
+                (f"Çöküş eşiği %{cfg.futures_crash_drop_pct + 2:g}", other(futures_crash_drop_pct=cfg.futures_crash_drop_pct + 2)),
+                ("+likidasyon dalgası şartı" if not cfg.futures_crash_liq else "Likidasyon şartı kapalı",
+                 other(futures_crash_liq=not cfg.futures_crash_liq))]
     out = [("Başabaş kalkanı kapalı", ev(be_enabled=False)),
            ("Zaman stopu 30 dk", ev(hold_min=30)),
            ("Zaman stopu 120 dk", ev(hold_min=120)),
@@ -716,13 +785,27 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
              f"gerçek fonlama oranları; çıkışlar {'1 dk' if data.exit_interval == '1m' else '5 dk'} mumlarla")
     L.append(f"Likidasyon ({p.leverage}x): fiyat ~%{room:.1f} ters giderse; zarar kes bundan {room - p.sl_pct:.1f} "
              f"puan önce çalışır")
+    crash = cfg.futures_tactic == "crash"
+    if crash:
+        L.append(f"Taktik: ÇÖKÜŞ DÖNÜŞÜ — son {cfg.futures_crash_hours} saatte en az %{cfg.futures_crash_drop_pct:g} düşen "
+                 f"coinde long" + (" (+ likidasyon dalgası şartı)" if cfg.futures_crash_liq else "")
+                 + f"; aynı coine işlemden sonra {p.symbol_cooldown_min} dk, zarardan sonra "
+                 f"{max(p.symbol_cooldown_min, p.loss_cooldown_min)} dk girilmez")
+    else:
+        L.append("Taktik: 4'lü onay (likidasyon + hacim + RSI uyumsuzluğu + BTC 1 saatlik trendi)")
     L.append("")
-    L.append("🔎 4'lü onay hunisi (aktif dönemdeki 5 dk mumlar):")
-    L.append(f"  {_num(funnel.candles, 0)} mum → likidasyon dalgası {_num(funnel.liq, 0)} → + hacim "
-             f"≥{cfg.futures_volume_ratio:g}x {_num(funnel.liq_vol, 0)} → + BTC 1s trend yönünde "
-             f"{_num(funnel.liq_vol_trend, 0)} → + RSI uyumsuzluğu {_num(funnel.signals, 0)} sinyal "
-             f"(ayda ~{funnel.signals / max(days / 30.4, 1e-9):.0f}; tek pozisyon kuralıyla işleme dönüşen "
-             f"{len(fixed)})")
+    per_month = funnel.signals / max(days / 30.4, 1e-9)
+    if crash:
+        L.append("🔎 Sinyal hunisi (aktif dönemdeki 5 dk mumlar):")
+        L.append(f"  {_num(funnel.candles, 0)} mum → {cfg.futures_crash_hours} saatte ≥%{cfg.futures_crash_drop_pct:g} "
+                 f"düşüş {_num(funnel.liq, 0)} (likidasyon dalgalı: {_num(funnel.liq_vol, 0)}) → {_num(funnel.signals, 0)} "
+                 f"sinyal mumu (tek pozisyon ve bekleme kurallarıyla işleme dönüşen {len(fixed)})")
+    else:
+        L.append("🔎 4'lü onay hunisi (aktif dönemdeki 5 dk mumlar):")
+        L.append(f"  {_num(funnel.candles, 0)} mum → likidasyon dalgası {_num(funnel.liq, 0)} → + hacim "
+                 f"≥{cfg.futures_volume_ratio:g}x {_num(funnel.liq_vol, 0)} → + BTC 1s trend yönünde "
+                 f"{_num(funnel.liq_vol_trend, 0)} → + RSI uyumsuzluğu {_num(funnel.signals, 0)} sinyal "
+                 f"(ayda ~{per_month:.0f}; tek pozisyon kuralıyla işleme dönüşen {len(fixed)})")
     L.append("")
     L.append(f"💰 A) {p.start_capital:g} USDT ile {_date(data.start_ms)}'de başlayıp para eklemeseydiniz (tek hesap)")
     L.append(f"  Son bakiye: {_num(res.final_equity)} USDT ({_pct(res.net_pct)}) | BTC al-tut {_pct(btc_hold_pct(data))}")
@@ -785,10 +868,12 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
         worst = min(fixed, key=lambda tr: tr.roe_pct)
         L.append(f"  En kötü işlem: {worst.symbol} {worst.side.upper()} {_date(worst.entry_ms)}: ROE {worst.roe_pct:+.1f}%"
                  f" ({REASON_TR[worst.reason]}, fiyat %{worst.mae_pct:.2f} ters)")
-        slips = [tr.mae_pct - p.sl_pct for tr in fixed if tr.reason == "SL"]
-        if slips:
-            L.append(f"  Zarar kesin ötesine en fazla kayma: fiyat %{max(0.0, max(slips)):.2f} (ROE'de "
-                     f"~%{max(0.0, max(slips)) * p.leverage:.0f} ek kayıp)")
+        wicks = sorted((tr.mae_pct - p.sl_pct for tr in fixed if tr.reason in ("SL", "BE")), reverse=True)
+        if wicks and wicks[0] > 0:
+            big = sum(1 for w in wicks if w >= 2)
+            L.append(f"  Zarar kes mumunda fiyatın stopun ötesine sarktığı en uzun fitil: %{wicks[0]:.1f} (≥%2 fitilli "
+                     f"stop: {big}). Backtest stopu stop fiyatından doldurur; böyle anlarda gerçek dolum daha kötü "
+                     f"olabilir (bkz. 'Kötümser stop dolumu' satırı).")
         wm = np.array([tr.window_mae_pct for tr in fixed])
         L.append(f"  Zarar kes OLMASAYDI: {p.hold_min} dk içinde fiyatın likidasyon mesafesini aştığı işlem:")
         L.append("    " + " | ".join(f"{lev}x (%{futures_liq_distance_pct(lev, p.mmr_pct):.1f}): "
@@ -817,9 +902,14 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
         for name, ev2 in variants:
             L.append(f"  {name:26s} " + _eval_line(ev2))
     L.append("")
-    L.append("ℹ️ Likidasyon dalgası mumlardan ölçülür (zorla satış/alış hacmi ≥ ortalamanın "
-             f"{cfg.futures_liq_ratio:g} katı + son 1 saatin dibi/zirvesi kırıldı + ≥1 ATR itiş); Binance geçmiş "
-             "USDⓈ-M likidasyon kaydı yayımlamıyor. Geçmiş sonuç gelecek garantisi değildir.")
+    if crash:
+        L.append("⚠️ Çöküşte alım riskleri: ani çöküşlerde (ör. 10 Ekim 2025) zarar kes emri stop fiyatının çok ötesinde "
+                 "dolabilir ve borsa gecikebilir; listedeki bir coin tamamen çökerse (LUNA, FTT gibi) art arda kayıp "
+                 "yaşanır (test listelerinde böyle bir coin yoktu). Geçmiş sonuç gelecek garantisi değildir.")
+    else:
+        L.append("ℹ️ Likidasyon dalgası mumlardan ölçülür (zorla satış/alış hacmi ≥ ortalamanın "
+                 f"{cfg.futures_liq_ratio:g} katı + son 1 saatin dibi/zirvesi kırıldı + ≥1 ATR itiş); Binance geçmiş "
+                 "USDⓈ-M likidasyon kaydı yayımlamıyor. Geçmiş sonuç gelecek garantisi değildir.")
     for note in data.notes:
         L.append(f"ℹ️ {note}")
     return "\n".join(L)
@@ -927,10 +1017,11 @@ def run_cli(cfg, days: Optional[int], end_ms: Optional[int], out_dir: Path, char
     """Backtesti çalıştırır; (rapor, grafik yolu, değerlendirme). İşlemler CSV olarak `out_dir`'e yazılır."""
     start, end, segments = period(cfg, days, end_ms, full_history)
     data = prepare(cfg, start, end, segments, exit_interval=exit_interval, progress=progress)
-    progress("🔎 Sinyaller aranıyor (4'lü onay)...")
+    progress("🔎 Sinyaller aranıyor ("
+             + ("çöküş dönüşü" if cfg.futures_tactic == "crash" else "4'lü onay") + ")...")
     signals, funnel = find_signals(cfg, data)
     progress(f"   {len(signals)} sinyal; çıkışlar için mumlar okunuyor...")
-    windows = load_windows(data, signals, MAX_WINDOW_MIN, progress)
+    windows = load_windows(data, signals, max(MAX_WINDOW_MIN, cfg.max_hold_minutes + 10), progress)
     ev = evaluate(params_from_cfg(cfg), data, signals, windows)
     levs = grid = variants = None
     if sensitivity:

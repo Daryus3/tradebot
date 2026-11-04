@@ -570,7 +570,8 @@ def run_bot(cfg, store, args, log) -> int:
             print("\n" + "!" * 64)
             print(f"  ⚠️  CANLI VADELİ MOD: {cfg.futures_leverage}x KALDIRAÇLA gerçek parayla işlem yapılacak!")
             print(f"  Zarar kes fiyat -%{cfg.stop_loss_pct:g} = teminatın ~%{cfg.stop_loss_pct * cfg.futures_leverage:.0f}'i. "
-                  f"Backtestte (2020-2026) bu strateji her yıl zarar etti.")
+                  + ("Backtestte (2020-2026) bu taktik (liq4) her yıl zarar etti." if cfg.futures_tactic == "liq4" else
+                     "Çöküş dönüşü backtestinde 2x'te en büyük düşüş %56 (Mart 2020); 3x üstü önerilmez."))
             print("!" * 64)
             if not args.yes and not confirm("Devam etmek için EVET yazın: "):
                 print("İptal edildi.")

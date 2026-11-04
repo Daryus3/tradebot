@@ -16,7 +16,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Dict, Optional, Sequence, Tuple
 
-from config import (ACTION_MODES, FUTURES_LIQ_SOURCES, FUTURES_SIDES, FUTURES_TP_ORDERS, NOTIFY_MODES,
+from config import (ACTION_MODES, FUTURES_LIQ_SOURCES, FUTURES_SIDES, FUTURES_TACTICS, FUTURES_TP_ORDERS, NOTIFY_MODES,
                     SIGNAL_APPROVAL_MODES, Config, ConfigError, _setting_notes)
 
 
@@ -110,6 +110,11 @@ EDITABLE: Dict[str, Setting] = {
     "INTRADAY_VOLUME_RATIO": Setting("intraday_volume_ratio", "float", "Gün içi: kırılım hacmi (ortalamanın katı)"),
     "INTRADAY_MIN_ATR_PCT": Setting("intraday_min_atr_pct", "float", "Gün içi: en düşük 5 dk oynaklık (ATR %)"),
     # Vadeli işlem scalping (STRATEGY=futures)
+    "FUTURES_TACTIC": Setting("futures_tactic", "choice", "Vadeli taktik (crash = çöküş dönüşü / liq4 = 4'lü onay)",
+                              FUTURES_TACTICS),
+    "FUTURES_CRASH_DROP_PCT": Setting("futures_crash_drop_pct", "float", "Çöküş eşiği (%, FUTURES_CRASH_HOURS içinde)"),
+    "FUTURES_CRASH_HOURS": Setting("futures_crash_hours", "int", "Çöküşün ölçüldüğü süre (saat)"),
+    "FUTURES_CRASH_LIQ": Setting("futures_crash_liq", "bool", "Çöküşte likidasyon dalgası da şart"),
     "FUTURES_LEVERAGE": Setting("futures_leverage", "int", "Vadeli kaldıraç (1-20x; sonraki işlemde uygulanır)"),
     "FUTURES_COINS": Setting("futures_coins", "str", "Vadeli coinler (virgülle, ör. BTC,ETH,SOL)"),
     "FUTURES_SIDES": Setting("futures_sides", "choice", "Vadeli yön (both / long / short)", FUTURES_SIDES),
@@ -187,6 +192,7 @@ OVERRIDE_BLOCKED = frozenset({
 OVERRIDE_CHOICES = {"dca_mode": ACTION_MODES, "pyramid_mode": ACTION_MODES, "time_exit_mode": ACTION_MODES,
                     "escape_mode": ACTION_MODES, "signal_approval": SIGNAL_APPROVAL_MODES, "notify_mode": NOTIFY_MODES,
                     "futures_sides": FUTURES_SIDES, "futures_liq_source": FUTURES_LIQ_SOURCES,
+                    "futures_tactic": FUTURES_TACTICS,
                     "futures_tp_order": FUTURES_TP_ORDERS}
 # Serbest metin olarak değiştirilebilenler (doğrulamayı Config yapar)
 OVERRIDE_TEXT = frozenset({"rotation_coins", "intraday_coins", "intraday_tactic", "futures_coins"})

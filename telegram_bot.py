@@ -578,8 +578,12 @@ class Messages:
             f"🔒 Başabaş kalkanı: +%{cfg.breakeven_trigger_pct:g} → stop girişin +%{cfg.breakeven_floor_pct:g} "
             f"üstüne | ⏱️ Zaman stopu: {cfg.max_hold_minutes} dk\n"
             f"💀 Likidasyon fiyatı ~%{liq:.1f} uzakta (zarar kes ondan önce Binance'te bekler)\n"
-            f"🔎 4'lü onay: likidasyon dalgası ({cfg.futures_liq_source}) + hacim ≥{cfg.futures_volume_ratio:g}x + RSI "
-            f"uyumsuzluğu + BTC 1s trendi | 5 dk mum kapanışlarında\n"
+            + (f"🔎 Çöküş dönüşü: son {cfg.futures_crash_hours} saatte ≥%{cfg.futures_crash_drop_pct:g} düşen coinde long"
+               + (" (+ likidasyon dalgası)" if cfg.futures_crash_liq else "")
+               + f" | zarardan sonra aynı coine {max(cfg.symbol_cooldown_minutes, cfg.loss_cooldown_minutes)} dk girilmez\n"
+               if cfg.futures_tactic == "crash" else
+               f"🔎 4'lü onay: likidasyon dalgası ({cfg.futures_liq_source}) + hacim ≥{cfg.futures_volume_ratio:g}x + RSI "
+               f"uyumsuzluğu + BTC 1s trendi | 5 dk mum kapanışlarında\n") +
             f"🪙 Coinler ({pairs}): {esc(', '.join(coins))}\n"
             f"☠️ Kill-switch: toplam zarar sermayenin %{loss_pct:.4g}'i (şu an {fmt_usdt(loss_limit)} {cfg.quote_asset})"
             + (f"\n{esc(mode_note)}" if mode_note else "")

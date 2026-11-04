@@ -155,6 +155,16 @@ def fcfg(cfg):
     return new
 
 
+@pytest.fixture
+def lcfg(fcfg):
+    """İlk sürüm taktik (liq4: 4'lü onay) ve onun çıkışları."""
+    new = replace(fcfg, futures_tactic="liq4", take_profit_pct=1.2, stop_loss_pct=0.9, breakeven_trigger_pct=0.5,
+                  breakeven_floor_pct=0.2, max_hold_minutes=60, trailing_activation_pct=1.0, trailing_floor_pct=0.5,
+                  loss_cooldown_minutes=0, futures_leverage=10)
+    new.validate()
+    return new
+
+
 def make_fbot(fcfg, tmp_path, live=False, fake=None, clock=None):
     fake = fake or FakeCcxt()
     clock = clock or Clock(BASE_MS / 1000 + 3)          # 5 dk mum kapanışından 3 sn sonra (canlıdaki tarama anı)
@@ -220,15 +230,15 @@ def btc_hourly(up=True, end_ms=None):
             "tb": np.ones(n), "qv": np.ones(n), "n": np.ones(n)}
 
 
-def test_long_signal_needs_all_four_conditions(fcfg):
+def test_long_signal_needs_all_four_conditions(lcfg):
     k = flush_series()
     close_ms = int(k["t"][-1]) + FUT_BAR_MS
-    strat = FuturesScalpStrategy(None, fcfg)
+    strat = FuturesScalpStrategy(None, lcfg)
     sigs, rejects = strat.evaluate({"XRPUSDT": k}, btc_hourly(True, close_ms), close_ms + 3000)
     assert len(sigs) == 1 and sigs[0].side == "long" and sigs[0].symbol == "XRPUSDT"
     m = sigs[0].metrics
-    assert m["liq_ratio"] >= fcfg.futures_liq_ratio and m["vol_ratio"] >= fcfg.futures_volume_ratio
-    assert m["rsi_now"] >= m["rsi_prev"] + fcfg.futures_div_rise and m["rsi_prev"] <= fcfg.futures_div_oversold
+    assert m["liq_ratio"] >= lcfg.futures_liq_ratio and m["vol_ratio"] >= lcfg.futures_volume_ratio
+    assert m["rsi_now"] >= m["rsi_prev"] + lcfg.futures_div_rise and m["rsi_prev"] <= lcfg.futures_div_oversold
     assert "LONG" not in sigs[0].note() and "uyumsuzluk" in sigs[0].note()
     # BTC 1 saatlik trend düşüşteyken long açılmaz
     sigs, rejects = strat.evaluate({"XRPUSDT": k}, btc_hourly(False, close_ms), close_ms + 3000)
@@ -243,18 +253,18 @@ def test_long_signal_needs_all_four_conditions(fcfg):
     assert not sigs and rejects["mum eski"] == 1
 
 
-def test_short_signal_mirror_and_side_setting(fcfg):
+def test_short_signal_mirror_and_side_setting(lcfg):
     k = flush_series(mirror=True)
     close_ms = int(k["t"][-1]) + FUT_BAR_MS
-    sigs, _ = FuturesScalpStrategy(None, fcfg).evaluate({"ETHUSDT": k}, btc_hourly(False, close_ms), close_ms + 1000)
+    sigs, _ = FuturesScalpStrategy(None, lcfg).evaluate({"ETHUSDT": k}, btc_hourly(False, close_ms), close_ms + 1000)
     assert len(sigs) == 1 and sigs[0].side == "short"
-    only_long = replace(fcfg, futures_sides="long")
+    only_long = replace(lcfg, futures_sides="long")
     sigs, rejects = FuturesScalpStrategy(None, only_long).evaluate({"ETHUSDT": k}, btc_hourly(False, close_ms),
                                                                     close_ms + 1000)
     assert not sigs and rejects["yön kapalı"] == 1
 
 
-def test_liquidation_feed_source(fcfg):
+def test_liquidation_feed_source(lcfg):
     k = flush_series()
     close_ms = int(k["t"][-1]) + FUT_BAR_MS
 
@@ -265,7 +275,7 @@ def test_liquidation_feed_source(fcfg):
         def recent(self, symbol, seconds):
             return self.long_usdt, 0.0
 
-    cfg = replace(fcfg, futures_liq_source="both", futures_liq_min_usdt=50_000)
+    cfg = replace(lcfg, futures_liq_source="both", futures_liq_min_usdt=50_000)
     strat = FuturesScalpStrategy(None, cfg)
     assert strat.evaluate({"BTCUSDT": k}, btc_hourly(True, close_ms), close_ms, feed=Feed(80_000))[0]
     sigs, rejects = strat.evaluate({"BTCUSDT": k}, btc_hourly(True, close_ms), close_ms, feed=Feed(10_000))
@@ -274,7 +284,7 @@ def test_liquidation_feed_source(fcfg):
     assert not sigs and rejects["likidasyon akışı yok"] == 1
 
 
-def test_backtest_and_live_use_same_signal(fcfg):
+def test_backtest_and_live_use_same_signal(lcfg):
     """Backtest'in tüm geçmişe uyguladığı değerlendirme, canlının son mumda bulduğuyla aynı sinyali verir."""
     k = flush_series()
     close_ms = int(k["t"][-1]) + FUT_BAR_MS
@@ -283,7 +293,7 @@ def test_backtest_and_live_use_same_signal(fcfg):
     nxt["t"][-1] = close_ms
     data = fb.FutData(int(k["t"][0]), close_ms + FUT_BAR_MS, [fb.Segment(int(k["t"][0]), close_ms + 1, ("XRP",))],
                       {"XRPUSDT": nxt}, fb.btc_trend_1h(btc), (btc["t"], btc["c"]), {}, None, "5m")
-    signals, funnel = fb.find_signals(fcfg, data)
+    signals, funnel = fb.find_signals(lcfg, data)
     assert [(s.symbol, s.side, s.close_ms) for s in signals] == [("XRPUSDT", "long", close_ms)]
     assert funnel.signals == 1 and funnel.liq >= 1
 
@@ -291,13 +301,16 @@ def test_backtest_and_live_use_same_signal(fcfg):
 # ====================================================================== ayarlar
 def test_futures_profile_and_validation(fcfg, cfg):
     assert strategy_family("futures") == "futures"
-    assert (fcfg.take_profit_pct, fcfg.stop_loss_pct, fcfg.breakeven_trigger_pct, fcfg.breakeven_floor_pct,
-            fcfg.max_hold_minutes, fcfg.futures_leverage) == (1.2, 0.9, 0.5, 0.2, 60, 10)
+    assert (fcfg.futures_tactic, fcfg.take_profit_pct, fcfg.stop_loss_pct, fcfg.breakeven_trigger_pct,
+            fcfg.breakeven_floor_pct, fcfg.max_hold_minutes, fcfg.loss_cooldown_minutes,
+            fcfg.futures_leverage) == ("crash", 6.0, 4.0, 1.5, 0.3, 30, 240, 2)
     with pytest.raises(ConfigError):
         replace(fcfg, futures_leverage=25).validate()
-    with pytest.raises(ConfigError):     # 20x'te likidasyon ~%4.5: zarar kes %4.5 çok yakın
-        replace(fcfg, futures_leverage=20, stop_loss_pct=4.5).validate()
+    with pytest.raises(ConfigError):     # 20x'te likidasyon ~%4.5: zarar kes %4 çok yakın
+        replace(fcfg, futures_leverage=20).validate()
     replace(fcfg, futures_leverage=20, stop_loss_pct=1.0).validate()
+    with pytest.raises(ConfigError):
+        replace(fcfg, futures_tactic="xyz").validate()
     assert futures_liq_distance_pct(10, 0.5) == pytest.approx(9.5)
     new, _ = apply_settings(fcfg, {"FUTURES_LEVERAGE": "15"})
     assert new.futures_leverage == 15
@@ -354,11 +367,11 @@ def test_open_position_order_sequence_live(fcfg, tmp_path):
     orders = [c for c in fake.calls if c[0] == "create_order"]
     assert [o[2] for o in orders] == ["market", "STOP_MARKET", "limit"]
     market, stop, tp = orders
-    assert market[4] == pytest.approx(int(30 * 0.95 * 10 / 100 * 1000) / 1000)   # tüm serbest bakiye × kaldıraç
-    assert stop[4] is None and stop[6]["closePosition"] is True and stop[6]["stopPrice"] == pytest.approx(99.1)
-    assert tp[3] == "sell" and tp[6]["reduceOnly"] is True and tp[5] == pytest.approx(101.2)
-    assert pos.futures and pos.side == "long" and pos.leverage == 10 and pos.regime == "LONG 10X"
-    assert any("[LONG 10X]" in m and "POZİSYON AÇILDI" in m for m in notes.messages)
+    assert market[4] == pytest.approx(int(30 * 0.95 * 2 / 100 * 1000) / 1000)   # tüm serbest bakiye × kaldıraç
+    assert stop[4] is None and stop[6]["closePosition"] is True and stop[6]["stopPrice"] == pytest.approx(96.0)
+    assert tp[3] == "sell" and tp[6]["reduceOnly"] is True and tp[5] == pytest.approx(106.0)
+    assert pos.futures and pos.side == "long" and pos.leverage == 2 and pos.regime == "LONG 2X"
+    assert any("[LONG 2X]" in m and "POZİSYON AÇILDI" in m for m in notes.messages)
 
 
 def test_min_notional_skips_trade_and_notifies(fcfg, tmp_path):
@@ -390,26 +403,26 @@ def test_breakeven_shield_moves_stop(fcfg, tmp_path):
     bot, fake, notes, clock = make_fbot(fcfg, tmp_path, live=True)
     pos = bot.open_futures(signal(), clock.t)
     old_stop = pos.stop_order_id
-    fake.prices["BTCUSDT"] = 100.6                       # +%0.6 > +%0.5 tetik
+    fake.prices["BTCUSDT"] = 101.6                       # +%1.6 > +%1.5 tetik
     bot.manage_positions(clock.t + 60)
-    assert pos.breakeven_active and pos.sl_price == pytest.approx(100.2)
+    assert pos.breakeven_active and pos.sl_price == pytest.approx(100.3)
     assert ("cancel_order", old_stop, {"trigger": True}) in fake.calls
     new = [c for c in fake.calls if c[0] == "create_order" and c[2] == "STOP_MARKET"][-1]
-    assert new[6]["stopPrice"] == pytest.approx(100.2)
+    assert new[6]["stopPrice"] == pytest.approx(100.3)
     assert any("başabaş kalkanı devrede" in m for m in notes.messages)
 
 
 def test_time_stop_and_exchange_tp_live(fcfg, tmp_path):
     bot, fake, notes, clock = make_fbot(fcfg, tmp_path, live=True)
     bot.open_futures(signal(), clock.t)
-    bot.manage_positions(clock.t + 59 * 60)
+    bot.manage_positions(clock.t + 29 * 60)
     assert bot.state.positions
-    bot.manage_positions(clock.t + 61 * 60)            # 1 saat doldu: piyasa emriyle kapatılır
+    bot.manage_positions(clock.t + 31 * 60)            # 30 dk doldu: piyasa emriyle kapatılır
     assert not bot.state.positions and bot.state.trades == 1
     assert any("ZAMAN STOPU" in m for m in notes.messages)
     # Kâr Al Binance'te doldu (pozisyon kayboldu): bot kapanışı kaydeder
     pos = bot.open_futures(signal(), clock.t + 3600 * 2)
-    fake.orders[pos.tp_order_id].update(status="closed", filled=pos.qty, average=101.2)
+    fake.orders[pos.tp_order_id].update(status="closed", filled=pos.qty, average=106.0)
     fake.positions.clear()
     bot.manage_positions(clock.t + 3600 * 2 + 30)
     assert not bot.state.positions and bot.state.trades == 2
@@ -419,14 +432,14 @@ def test_time_stop_and_exchange_tp_live(fcfg, tmp_path):
 def test_paper_stop_loss_accounting(fcfg, tmp_path):
     bot, fake, notes, clock = make_fbot(fcfg, tmp_path, live=False)
     pos = bot.open_futures(signal("ETHUSDT", "short"), clock.t)
-    assert pos.side == "short" and pos.sl_price == pytest.approx(pos.entry_price * 1.009, abs=0.01)
-    fake.prices["ETHUSDT"] = 101.0                       # Short'ta fiyat yükseldi: stop
+    assert pos.side == "short" and pos.sl_price == pytest.approx(pos.entry_price * 1.04, abs=0.01)
+    fake.prices["ETHUSDT"] = 104.1                       # Short'ta fiyat yükseldi: stop
     bot.manage_positions(clock.t + 120)
     assert not bot.state.positions
     pnl = bot.state.realized_pnl
-    assert -4.0 < pnl < -2.5                              # ~%1 fiyat × 10x × 28.5 USDT teminat + komisyon
+    assert -2.6 < pnl < -2.2                              # ~%4 fiyat × 2x × 28.5 USDT teminat + komisyon
     assert bot.exchange.total_balance() == pytest.approx(30.0 + pnl, abs=1e-6)
-    assert any("ZARAR KES" in m and "[SHORT 10X]" in m for m in notes.messages)
+    assert any("ZARAR KES" in m and "[SHORT 2X]" in m for m in notes.messages)
 
 
 def test_board_status_and_position_show_tag_and_roe(fcfg, tmp_path):
@@ -436,12 +449,12 @@ def test_board_status_and_position_show_tag_and_roe(fcfg, tmp_path):
     bot.manage_positions(clock.t + 10)
     board = bot.smart.board_text(clock.t + 10)
     pos = bot.state.positions["BTCUSDT"]
-    roe = (100.3 / pos.entry_price - 1) * 100 * 10        # Binance'teki gibi: fiyat hareketi × kaldıraç
-    assert "[LONG 10X]" in board and f"ROE <b>+{roe:.2f}%" in board
+    roe = (100.3 / pos.entry_price - 1) * 100 * 2         # Binance'teki gibi: fiyat hareketi × kaldıraç
+    assert "[LONG 2X]" in board and f"ROE <b>+{roe:.2f}%" in board
     bot.commands.handle(Command("pozisyon", []))
-    assert "[LONG 10X]" in notes.messages[-1] and "Likidasyon" in notes.messages[-1]
+    assert "[LONG 2X]" in notes.messages[-1] and "Likidasyon" in notes.messages[-1]
     bot.send_status(silent=True)
-    assert "[LONG 10X] ROE" in notes.messages[-1]
+    assert "[LONG 2X] ROE" in notes.messages[-1]
 
 
 def test_leverage_buttons_in_dynamic_settings(fcfg, tmp_path):
@@ -458,7 +471,7 @@ def test_leverage_buttons_in_dynamic_settings(fcfg, tmp_path):
     bot.commands.handle(Command(CALLBACK, ["adj", "LEV", "+"], kind="callback", message_id=5))
     assert bot.cfg.futures_leverage == 16
     bot.commands.handle(Command(CALLBACK, ["adj", "TP", "+"], kind="callback", message_id=5))
-    assert bot.cfg.take_profit_pct == pytest.approx(1.3)   # Vadeli: 0.1'lik adım
+    assert bot.cfg.take_profit_pct == pytest.approx(6.1)   # Vadeli: 0.1'lik adım
 
 
 # ====================================================================== backtest
@@ -534,3 +547,83 @@ def test_archive_csv_parse_and_resample():
     assert micro["t"][0] == start
     hourly = futures_data.resample(a, HOUR)
     assert len(hourly["t"]) == 1 and hourly["v"][0] == 120 and hourly["h"][0] == 112   # Eksik 2. saat atılır
+
+
+# ====================================================================== çöküş dönüşü (varsayılan taktik)
+def crash_series(drop=12.0, n=120):
+    """Son 4 saatte (48 mum) `drop` % düşen fiyat; öncesi yatay."""
+    c = np.full(n, 100.0)
+    c[n - 48:] = np.linspace(100.0, 100.0 * (1 - drop / 100), 48)
+    o = np.concatenate(([100.0], c[:-1]))
+    h = np.maximum(o, c) + 0.05
+    l = np.minimum(o, c) - 0.05
+    v = np.full(n, 10.0)
+    tb = np.full(n, 5.0)
+    t = BASE_MS + np.arange(n, dtype=np.int64) * FUT_BAR_MS
+    return {"t": t, "o": o, "h": h, "l": l, "c": c, "v": v, "tb": tb, "qv": v * c, "n": v}
+
+
+def test_crash_signal_live_and_thresholds(fcfg):
+    k = crash_series(12.0)
+    close_ms = int(k["t"][-1]) + FUT_BAR_MS
+    strat = FuturesScalpStrategy(None, fcfg)
+    assert not strat.needs_btc_trend
+    sigs, _ = strat.evaluate({"SOLUSDT": k}, None, close_ms + 3000)      # BTC trendi gerekmez
+    assert len(sigs) == 1 and sigs[0].side == "long" and sigs[0].metrics["drop_pct"] >= 10
+    assert "Çöküş dönüşü" in sigs[0].note()
+    sigs, rejects = strat.evaluate({"SOLUSDT": crash_series(8.0)}, None, close_ms + 3000)
+    assert not sigs and rejects["çöküş yok"] == 1
+    liq = FuturesScalpStrategy(None, replace(fcfg, futures_crash_liq=True))   # Düzgün düşüşte likidasyon dalgası yok
+    sigs, rejects = liq.evaluate({"SOLUSDT": k}, None, close_ms + 3000)
+    assert not sigs and rejects["likidasyon dalgası yok"] == 1
+
+
+def test_crash_backtest_matches_live(fcfg):
+    k = crash_series(12.0)
+    close_ms = int(k["t"][-1]) + FUT_BAR_MS
+    nxt = {key: np.concatenate((val, val[-1:])) for key, val in k.items()}
+    nxt["t"][-1] = close_ms
+    btc = btc_hourly(True, close_ms)
+    data = fb.FutData(int(k["t"][0]), close_ms + FUT_BAR_MS, [fb.Segment(int(k["t"][0]), close_ms + 1, ("SOL",))],
+                      {"SOLUSDT": nxt}, fb.btc_trend_1h(btc), (btc["t"], btc["c"]), {}, None, "5m")
+    signals, funnel = fb.find_signals(fcfg, data)
+    live, _ = FuturesScalpStrategy(None, fcfg).evaluate({"SOLUSDT": k}, None, close_ms + 3000)
+    assert signals and signals[-1].close_ms == close_ms and signals[-1].side == live[0].side == "long"
+    assert signals[-1].score == pytest.approx(live[0].score)
+    assert funnel.liq >= 1
+
+
+def test_simulate_loss_cooldown_matches_live_rule():
+    data = fb.FutData(BASE_MS, BASE_MS + 30 * HOUR, [], {}, None, (np.zeros(0), np.zeros(0)), {}, None, "1m")
+    s1 = sig(close_ms=BASE_MS, symbol="XRPUSDT")
+    s2 = sig(close_ms=BASE_MS + 2 * HOUR, symbol="XRPUSDT")       # Zarardan 2 saat sonra: 4 saat beklemede
+    s3 = sig(close_ms=BASE_MS + 2 * HOUR + 300_000, symbol="ADAUSDT")
+    s4 = sig(close_ms=BASE_MS + 6 * HOUR, symbol="XRPUSDT")       # Bekleme bitti
+    losing = window([(100, 100.1, 98.0, 98.5)])
+    windows = {(x.symbol, x.close_ms): window([(100, 100.1, 98.0, 98.5)], start=x.close_ms) for x in (s1, s2, s3, s4)}
+    res = fb.simulate(params(symbol_cooldown_min=60, loss_cooldown_min=240), data, [s1, s2, s3, s4], windows)
+    assert [t.symbol for t in res.trades] == ["XRPUSDT", "ADAUSDT", "XRPUSDT"]
+    assert res.skipped["coin beklemede (önceki işlemden sonra)"] == 1
+    assert losing is not None
+
+
+def test_futures_bot_prunes_expired_cooldowns(fcfg, tmp_path):
+    bot, fake, notes, clock = make_fbot(fcfg, tmp_path, live=False)
+    bot.state.cooldowns = {"BTCUSDT": clock.t - 10, "ETHUSDT": clock.t + 600}
+    bot.exchange.klines = lambda *a, **k: {"t": np.zeros(0, dtype=np.int64), "o": np.zeros(0), "h": np.zeros(0),
+                                           "l": np.zeros(0), "c": np.zeros(0), "v": np.zeros(0), "tb": np.zeros(0),
+                                           "qv": np.zeros(0), "n": np.zeros(0)}
+    bot.scan_and_enter(clock.t)
+    assert bot.state.cooldowns == {"ETHUSDT": clock.t + 600}
+
+
+def test_simulate_loss_streak_pause_like_live():
+    """Canlıdaki LOSS_STREAK_LIMIT: art arda 3 zarar kesten sonra LOSS_STREAK_PAUSE_HOURS yeni işlem yok."""
+    data = fb.FutData(BASE_MS, BASE_MS + 30 * HOUR, [], {}, None, (np.zeros(0), np.zeros(0)), {}, None, "1m")
+    coins = ("XRPUSDT", "ADAUSDT", "DOTUSDT", "SOLUSDT", "LTCUSDT")
+    sigs = [sig(close_ms=BASE_MS + k * HOUR, symbol=c) for k, c in enumerate(coins[:4])]
+    sigs.append(sig(close_ms=BASE_MS + 8 * HOUR, symbol=coins[4]))      # Mola bitti
+    windows = {(x.symbol, x.close_ms): window([(100, 100.1, 98.0, 98.5)], start=x.close_ms) for x in sigs}
+    res = fb.simulate(params(loss_streak_limit=3, loss_streak_pause_h=4.0), data, sigs, windows)
+    assert [t.symbol for t in res.trades] == ["XRPUSDT", "ADAUSDT", "DOTUSDT", "LTCUSDT"]
+    assert res.skipped["risk sigortası (zarar serisi / günlük limit)"] == 1
