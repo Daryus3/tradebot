@@ -390,6 +390,56 @@ class FuturesExchange:
         out["t"] = data[:, 0].astype(np.int64)
         return out
 
+    def eligible_symbols(self, min_age_days: float = 0.0) -> List[str]:
+        """En hacimli N evrenine girebilecek pariteler (futures_universe.market_eligible) ve en az min_age_days
+        gündür listelenmiş olanlar (Binance onboardDate)."""
+        from futures_universe import DAY_MS, market_eligible
+        now_ms = int(self.time_fn() * 1000)
+        out = []
+        for m in (getattr(self.ex, "markets", None) or {}).values():
+            if not market_eligible(m, now_ms, QUOTE):
+                continue
+            created = m.get("created") or (m.get("info") or {}).get("onboardDate")
+            try:
+                age_ok = not min_age_days or (created and now_ms - int(created) >= min_age_days * DAY_MS)
+            except (TypeError, ValueError):
+                age_ok = False
+            if age_ok and m.get("id"):
+                out.append(m["id"])
+        return sorted(set(out))
+
+    def average_volume(self, symbol: str, days: int) -> float:
+        """Son `days` tamamlanmış günün ortalama USDT hacmi (günlük mumlar)."""
+        k = self.klines(symbol, "1d", int(days) + 1)
+        qv = k["qv"][-int(days):] if len(k["t"]) else []
+        return float(sum(qv) / len(qv)) if len(qv) else 0.0
+
+    def seasoned_ranking(self, min_age_days: float, avg_days: int) -> List[Tuple[str, float]]:
+        """FUTURES_UNIVERSE sıralaması: en az min_age_days gündür listelenen kripto süresiz pariteler, son avg_days
+        günün ortalama USDT hacmine göre (büyükten küçüğe). Parite başına bir istek: günde bir kez çağrılır."""
+        rows = []
+        for symbol in self.eligible_symbols(min_age_days):
+            try:
+                rows.append((symbol, self.average_volume(symbol, avg_days)))
+            except FuturesError as exc:
+                log.warning("%s hacim geçmişi alınamadı: %s", symbol, exc)
+        rows.sort(key=lambda r: -r[1])
+        return [r for r in rows if r[1] > 0]
+
+    def tickers_24h(self) -> Dict[str, dict]:
+        """Tüm USDⓈ-M paritelerinin 24 saatlik özeti (tek istek): parite → {last, high, low, qv}."""
+        rows = self._call("Vadeli 24 saatlik özetler alınamadı", self.ex.fapiPublicGetTicker24hr)
+        out: Dict[str, dict] = {}
+        for row in rows or []:
+            try:
+                out[row["symbol"]] = {"last": float(row.get("lastPrice") or 0.0),
+                                      "high": float(row.get("highPrice") or 0.0),
+                                      "low": float(row.get("lowPrice") or 0.0),
+                                      "qv": float(row.get("quoteVolume") or 0.0)}
+            except (KeyError, TypeError, ValueError):
+                continue
+        return out
+
     def bid_ask(self, symbol: str) -> Tuple[float, float]:
         book = self._call(f"{symbol} fiyat alınamadı", self.ex.fetch_order_book, ccxt_symbol(symbol), 5)
         bid = float(book["bids"][0][0]) if book.get("bids") else 0.0

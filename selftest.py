@@ -250,8 +250,9 @@ def _check_futures(cfg) -> List[Result]:
     try:
         ex = FuturesExchange(cfg, exchange=make_ccxt(cfg, with_keys=cfg.has_binance_keys))
         pairs = ex.load_markets()
-        coins = futures_coin_list(cfg)
+        coins = futures_coin_list(cfg) if cfg.futures_universe <= 0 else []
         missing = [c for c in coins if not ex.has_market(c + "USDT")]
+        seasoned = len(ex.eligible_symbols(cfg.futures_universe_min_age_days)) if cfg.futures_universe > 0 else 0
         k5 = ex.klines("BTCUSDT", "5m", 300)
         k1 = ex.klines("BTCUSDT", "1h", 300)
         sigs, rejects = make_strategy(None, cfg).evaluate({"BTCUSDT": k5}, k1, int(time.time() * 1000))
@@ -259,7 +260,10 @@ def _check_futures(cfg) -> List[Result]:
         out.append((WARN if missing else OK, "Binance Vadeli (USDⓈ-M, CCXT)",
                     f"ccxt {ccxt.__version__}, {pairs} USDT sürekli vadeli parite, BTC 5 dk: {len(k5['t'])} mum, "
                     f"1 saat: {len(k1['t'])} mum; son mum değerlendirmesi: {why}"
-                    + (f"\n     ⚠️ Bulunamayan coinler: {', '.join(missing)}" if missing else "")))
+                    + (f"\n     ⚠️ Bulunamayan coinler: {', '.join(missing)}" if missing else "")
+                    + (f"\n     🪙 En hacimli {cfg.futures_universe} köklü coin: en az "
+                       f"{cfg.futures_universe_min_age_days} günlük {seasoned} uygun parite" if cfg.futures_universe > 0
+                       else "")))
     except Exception as exc:  # noqa: BLE001
         return [(FAIL, "Binance Vadeli (USDⓈ-M, CCXT)", str(exc))]
     if cfg.has_binance_keys:

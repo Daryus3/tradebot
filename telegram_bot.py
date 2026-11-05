@@ -562,6 +562,14 @@ class Messages:
     @staticmethod
     def futures_started(cfg, capital: float, realized: float, pairs: int, coins: List[str], loss_limit: float,
                         loss_pct: float, mode_note: str = "", free: Optional[float] = None) -> str:
+        if cfg.futures_universe > 0:
+            shown = ", ".join(coins[:12]) + (" ..." if len(coins) > 12 else "")
+            coin_line = (f"🪙 Coinler: <b>en hacimli {cfg.futures_universe}</b> USDT paritesi (24 saatlik hacim, her "
+                         f"taramada yenilenir)" + (f": {esc(shown)}" if coins else "") + "\n")
+        else:
+            coin_line = f"🪙 Coinler ({pairs}): {esc(', '.join(coins))}\n"
+        trail = (f"📈 İzleyen stop: fiyat +%{cfg.futures_trailing_act_pct:g}'de devreye girer, tepenin "
+                 f"%{cfg.futures_trailing_gap_pct:g} gerisinden izler\n" if cfg.futures_trailing else "")
         mode = "🧪 TEST (sanal bakiye, gerçek para kullanılmaz)" if cfg.is_paper else "💵 CANLI (gerçek para, KALDIRAÇLI!)"
         lev = cfg.futures_leverage
         liq = 100.0 / lev - cfg.futures_mmr_pct
@@ -577,14 +585,14 @@ class Messages:
             f"fiyat -%{cfg.stop_loss_pct:g} (ROE ~-%{cfg.stop_loss_pct * lev:.0f})\n"
             f"🔒 Başabaş kalkanı: +%{cfg.breakeven_trigger_pct:g} → stop girişin +%{cfg.breakeven_floor_pct:g} "
             f"üstüne | ⏱️ Zaman stopu: {cfg.max_hold_minutes} dk\n"
-            f"💀 Likidasyon fiyatı ~%{liq:.1f} uzakta (zarar kes ondan önce Binance'te bekler)\n"
+            f"{trail}💀 Likidasyon fiyatı ~%{liq:.1f} uzakta (zarar kes ondan önce Binance'te bekler)\n"
             + (f"🔎 Çöküş dönüşü: son {cfg.futures_crash_hours} saatte ≥%{cfg.futures_crash_drop_pct:g} düşen coinde long"
                + (" (+ likidasyon dalgası)" if cfg.futures_crash_liq else "")
                + f" | zarardan sonra aynı coine {max(cfg.symbol_cooldown_minutes, cfg.loss_cooldown_minutes)} dk girilmez\n"
                if cfg.futures_tactic == "crash" else
                f"🔎 4'lü onay: likidasyon dalgası ({cfg.futures_liq_source}) + hacim ≥{cfg.futures_volume_ratio:g}x + RSI "
                f"uyumsuzluğu + BTC 1s trendi | 5 dk mum kapanışlarında\n") +
-            f"🪙 Coinler ({pairs}): {esc(', '.join(coins))}\n"
+            f"{coin_line}"
             f"☠️ Kill-switch: toplam zarar sermayenin %{loss_pct:.4g}'i (şu an {fmt_usdt(loss_limit)} {cfg.quote_asset})"
             + (f"\n{esc(mode_note)}" if mode_note else "")
         )
@@ -633,6 +641,12 @@ class Messages:
             f"💰 Bakiye: <b>{fmt_usdt(balance)} {q}</b>\n"
             f"📊 Toplam K/Z: {fmt_signed(total_pnl)} {q} | İşlem: {trades} (✅{wins} / ❌{losses})"
         )
+
+    @staticmethod
+    def futures_trailing(pos, price: float, stop_price: float, roe: float, cfg) -> str:
+        return (f"📈 <b>{esc(pos.symbol)}</b> {futures_tag(pos)} izleyen stop devrede: fiyat {fmt_price(price)} "
+                f"(ROE {fmt_signed(roe)}%). Zarar kes {fmt_price(stop_price)} seviyesine çekildi; fiyat yükseldikçe "
+                f"tepenin %{cfg.futures_trailing_gap_pct:g} gerisinden izleyecek.")
 
     @staticmethod
     def futures_breakeven(pos, price: float, stop_price: float, roe: float) -> str:

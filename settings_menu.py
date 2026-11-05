@@ -38,6 +38,14 @@ SIDE_LABELS = {"both": "↕️ İki yön", "long": "📈 Yalnız long", "short":
 SOURCE_LABELS = {"proxy": "📊 Mumlardan", "feed": "📡 Canlı akış", "both": "🔗 İkisi"}
 TP_ORDER_LABELS = {"limit": "📌 Kâr Al: limit emir", "market": "⚡ Kâr Al: piyasa"}
 LEVERAGE_CHOICES = (1, 2, 3, 5, 10, 15, 20)
+UNIVERSE_CHOICES = (0, 10, 20, 40, 60, 80, 100)     # 0 = FUTURES_COINS listesi
+# En hacimli N evreninin backtest özeti (Kasım 2026 araştırması; ayrıntı README)
+UNIVERSE_HINT = ("Test (doğrulama 2023-11 → 2026-10, 2x, en az 3 yıllık coinler, 6 ay ort. hacim): sabit liste "
+                 "+%62/yıl; ilk 10 +%55, ilk 20 +%81 (en büyük düşüş %33), ilk 40 +%11 (düşüş %78), ilk 60 -%8, "
+                 "ilk 80 -%42. Yaş filtresi olmadan (yeni / hype coinler dahil) her N'de hesap eridi.")
+TRAIL_HINT = ("Test (2023-11 → 2026-10): izleyen stop bu stratejide sonucu iyileştirmedi (sabit listede çoğu ayarda "
+              "+%62 → +%27-48/yıl); başabaş +1.5 → +0.3 en düşük düşüşü verdi, +4 / +5 tetik getiri kazandırmadan "
+              "düşüşü %25'ten %39'a çıkardı.")
 # Coin sayfasındaki seçenekler: varsayılan 10 coin (backtestte kullanılanlar) + vadelisi eski ve hacimli büyük coinler
 FUTURES_COIN_CHOICES = tuple(DEFAULT_FUTURES_COINS.split(",")) + ("AVAX", "LTC", "BCH", "XLM", "NEAR", "ATOM")
 
@@ -96,6 +104,17 @@ def _liq4(cfg) -> bool:
 
 def _by_tactic(crash, liq4):
     return lambda cfg: crash if _crash(cfg) else liq4
+
+
+def _be_triggers(cfg) -> tuple:
+    """Başabaş tetiği seçenekleri (tabandan büyük olanlar; çöküş dönüşünde %5'e kadar)."""
+    base = (1, 1.5, 2, 3, 4, 5) if _crash(cfg) else (0.3, 0.5, 0.7, 1.0, 1.5, 2.0)
+    return tuple(v for v in base if v > cfg.breakeven_floor_pct)
+
+
+def _be_floors(cfg) -> tuple:
+    """Başabaş stopu (kilitlenen kâr) seçenekleri: tetikten küçük olanlar."""
+    return tuple(v for v in (0.1, 0.3, 0.5, 1, 2, 3) if v < cfg.breakeven_trigger_pct)
 
 
 def _pct(v) -> str:
@@ -157,9 +176,9 @@ PAGES: Dict[str, Page] = {
             step=1, step_cb="adj:LEV", name="⚡", unit="x"),
         Row("FUTURES_MARGIN_USAGE_PCT", icon="💵", values=(25, 50, 75, 95), fmt=_pct),
         (Link(lambda m: "🧭 Giriş sinyali", "pg:fe"), Link(lambda m: "🎯 Çıkış ve emirler", "pg:fx")),
-        (Link(lambda m: f"🪙 Coinler ({len(futures_coin_list(m.cfg))})", "pg:fc"),
-         Link(lambda m: "☠️ Kill-switch", "pg:ks")),
-        (Link(lambda m: "🧯 Risk sigortaları", "risk"), Link(lambda m: "🔔 Bildirim ve raporlar", "ntf")),
+        (Link(lambda m: m.protect_label(), "pg:fb"), Link(lambda m: m.coins_label(), "pg:fc")),
+        (Link(lambda m: "☠️ Kill-switch", "pg:ks"), Link(lambda m: "🧯 Risk sigortaları", "risk")),
+        (Link(lambda m: "🔔 Bildirim ve raporlar", "ntf"),),
     ), back=(("⬅️ Menü", "menu"),), futures=True),
     "fe": Page("🧭 Vadeli Giriş Sinyali", rows=(
         Row("FUTURES_TACTIC", values=FUTURES_TACTICS, fmt=TACTIC_LABELS.get, cb="ftac", per_row=2),
@@ -180,14 +199,32 @@ PAGES: Dict[str, Page] = {
         Row("STOP_LOSS_PCT", icon="🛑", values=_by_tactic((3, 4, 5), (0.8, 0.9, 1.0)), fmt=_pct),
         (Row("TAKE_PROFIT_PCT", step=_by_tactic(0.5, 0.1), name="🎯"),
          Row("STOP_LOSS_PCT", step=_by_tactic(0.5, 0.1), name="🛑")),
-        Row("BREAKEVEN_TRIGGER_PCT", icon="🔒", values=_by_tactic((1, 1.5, 2, 3), (0.3, 0.5, 0.7, 1.0)),
-            fmt=lambda v: f"+%{v:g}"),
-        Row("BREAKEVEN_FLOOR_PCT", icon="🧷", values=(0.1, 0.2, 0.3, 0.5), fmt=lambda v: f"+%{v:g}"),
-        Row("MAX_HOLD_MINUTES", icon="⏱️", values=(15, 30, 60, 120), fmt=_mins),
-        (Row("BREAKEVEN_ENABLED", name="Başabaş"), Row("FUTURES_EXCHANGE_STOP", name="Stop güvencesi")),
+        Row("MAX_HOLD_MINUTES", icon="⏱️", values=(15, 30, 60, 120, 240), fmt=_mins, per_row=5),
+        Link(lambda m: m.protect_label(), "pg:fb"),
+        Row("FUTURES_EXCHANGE_STOP", name="🛡️ Stop güvencesi (stop konamazsa pozisyonu kapat)"),
         Row("FUTURES_TP_ORDER", values=FUTURES_TP_ORDERS, fmt=TP_ORDER_LABELS.get, per_row=2),
     ), back=(("⬅️ Vadeli ayarlar", "cfg"), ("🏠 Menü", "menu")), futures=True),
-    "fc": Page("🪙 Vadeli Coinler", back=(("⬅️ Vadeli ayarlar", "cfg"), ("🏠 Menü", "menu")), futures=True),
+    "fb": Page("🔒 Başabaş ve İzleyen Stop", rows=(
+        Row("BREAKEVEN_ENABLED", name="🔒 Başabaş kalkanı"),
+        Row("BREAKEVEN_TRIGGER_PCT", icon="🔒", values=_be_triggers, fmt=lambda v: f"+%{v:g}", per_row=3,
+            show=lambda cfg: cfg.breakeven_enabled),
+        Row("BREAKEVEN_FLOOR_PCT", icon="🧷", values=_be_floors, fmt=lambda v: f"+%{v:g}", per_row=3,
+            show=lambda cfg: cfg.breakeven_enabled),
+        (Row("BREAKEVEN_TRIGGER_PCT", step=0.5, name="🔒", show=lambda cfg: cfg.breakeven_enabled),
+         Row("BREAKEVEN_FLOOR_PCT", step=0.1, name="🧷", lo=0, show=lambda cfg: cfg.breakeven_enabled)),
+        Row("FUTURES_TRAILING", name="📈 İzleyen stop"),
+        Row("FUTURES_TRAILING_ACT_PCT", icon="📈", values=(1, 2, 3, 4, 5, 6), fmt=lambda v: f"+%{v:g}", per_row=3,
+            show=lambda cfg: cfg.futures_trailing),
+        Row("FUTURES_TRAILING_GAP_PCT", icon="↩️", values=(0.5, 1, 1.5, 2, 3), fmt=_pct, per_row=5,
+            show=lambda cfg: cfg.futures_trailing),
+        (Row("FUTURES_TRAILING_ACT_PCT", step=0.5, name="📈", lo=0.5, show=lambda cfg: cfg.futures_trailing),
+         Row("FUTURES_TRAILING_GAP_PCT", step=0.25, name="↩️", lo=0.25, show=lambda cfg: cfg.futures_trailing)),
+    ), back=(("🎯 Çıkışlar", "pg:fx"), ("⬅️ Vadeli ayarlar", "cfg"), ("🏠 Menü", "menu")), futures=True),
+    "fc": Page("🪙 Vadeli Coinler", rows=(
+        Row("FUTURES_UNIVERSE", values=UNIVERSE_CHOICES, fmt=lambda v: f"🔝 {v}" if v else "📋 Liste", per_row=4),
+        Row("FUTURES_UNIVERSE_MIN_AGE_DAYS", icon="🎂", values=(365, 730, 1095, 1460),
+            fmt=lambda v: f"≥{int(v) // 365} yıl", show=lambda cfg: cfg.futures_universe > 0),
+    ), back=(("⬅️ Vadeli ayarlar", "cfg"), ("🏠 Menü", "menu")), futures=True),
     # ------------------------------------------------------------ kill-switch ve risk sigortaları
     "ks": Page("☠️ Kill-switch", rows=(
         Row("MAX_TOTAL_LOSS_PCT", icon="☠️", values=(10, 20, 30, 40, 50, 60), fmt=_pct, per_row=3),
@@ -275,7 +312,7 @@ class SettingsMenu:
                      "olur.")
         if note:
             text += f"\n\n{note}"
-        keyboard = (self._coin_buttons() if pid == "fc" else []) + self.keyboard(pid)
+        keyboard = (self._coin_buttons() if pid == "fc" and self.cfg.futures_universe <= 0 else []) + self.keyboard(pid)
         self.proc.reply_menu(text, keyboard, mid)
 
     def keyboard(self, pid: str) -> List[List[Button]]:
@@ -410,6 +447,18 @@ class SettingsMenu:
         return rows + [[("↺ Varsayılan 10 coin", "fc:default")]]
 
     # ------------------------------------------------------------ metinler
+    def protect_label(self) -> str:
+        cfg = self.cfg
+        be = f"+%{cfg.breakeven_trigger_pct:g}" if cfg.breakeven_enabled else "kapalı"
+        trail = f"+%{cfg.futures_trailing_act_pct:g}" if cfg.futures_trailing else "kapalı"
+        return f"🔒 Başabaş {be} | 📈 İzleyen {trail}"
+
+    def coins_label(self) -> str:
+        cfg = self.cfg
+        if cfg.futures_universe > 0:
+            return f"🪙 Coinler (en hacimli {cfg.futures_universe})"
+        return f"🪙 Coinler ({len(futures_coin_list(cfg))})"
+
     def kill_label(self) -> str:
         bot = self.bot
         return f"☠️ Kill-switch: %{bot.loss_pct:.4g} (−{fmt_usdt(bot.loss_limit)} {self.cfg.quote_asset}) ›"
@@ -438,7 +487,8 @@ class SettingsMenu:
                 f"🛑 Zarar Kes: fiyat -%{cfg.stop_loss_pct:g} → ROE ~-%{cfg.stop_loss_pct * lev:.0f}\n"
                 f"🔒 Başabaş: {be} | ⏱️ Zaman stopu: {cfg.max_hold_minutes} dk\n"
                 f"💵 Teminat: serbest bakiyenin %{cfg.futures_margin_usage_pct:g} kadarı{sides} | 🪙 "
-                f"{len(futures_coin_list(cfg))} coin\n"
+                + (f"en hacimli {cfg.futures_universe} köklü coin" if cfg.futures_universe > 0
+                   else f"{len(futures_coin_list(cfg))} coin") + "\n"
                 f"🛡️ Stop güvencesi: {'açık' if cfg.futures_exchange_stop else '⚠️ kapalı'} | Kâr Al emri: "
                 f"{'limit' if cfg.futures_tp_order == 'limit' else 'piyasa'}\n"
                 f"{self.kill_line()}\n{LINE}\n"
@@ -477,8 +527,10 @@ class SettingsMenu:
         cfg = self.cfg
         lev = cfg.futures_leverage
         room = futures_liq_distance_pct(lev, cfg.futures_mmr_pct)
-        be = (f"açık — fiyat +%{cfg.breakeven_trigger_pct:g} olunca zarar kes girişin +%{cfg.breakeven_floor_pct:g} "
-              f"üstüne çekilir" if cfg.breakeven_enabled else "kapalı")
+        be = (f"+%{cfg.breakeven_trigger_pct:g} → +%{cfg.breakeven_floor_pct:g}" if cfg.breakeven_enabled
+              else "kapalı")
+        be += (f" | 📈 İzleyen stop: +%{cfg.futures_trailing_act_pct:g}'de, %{cfg.futures_trailing_gap_pct:g} geriden"
+               if cfg.futures_trailing else " | 📈 İzleyen stop: kapalı")
         tp_order = ("limit emir (Binance'te bekler, maker komisyon)" if cfg.futures_tp_order == "limit"
                     else "piyasa emri (hedefte bot kapatır, taker komisyon)")
         stop = ("pozisyon hemen kapatılır (güvenli)" if cfg.futures_exchange_stop
@@ -495,12 +547,48 @@ class SettingsMenu:
                 "değişmez); zaman stopu ve başabaş açık pozisyona da uygulanır. Testte seçilen (çöküş dönüşü): Kâr Al "
                 "%6, Zarar Kes %4, başabaş 1.5 → 0.3, 30 dk.</i>")
 
+    def _text_fb(self) -> str:
+        cfg = self.cfg
+        lev = cfg.futures_leverage
+        be = (f"açık — fiyat +%{cfg.breakeven_trigger_pct:g} olunca zarar kes girişin +%{cfg.breakeven_floor_pct:g} "
+              f"üstüne çekilir (teminatın ~%{cfg.breakeven_floor_pct * lev:.0f}'i kilitlenir)" if cfg.breakeven_enabled
+              else "kapalı")
+        trail = (f"açık — fiyat +%{cfg.futures_trailing_act_pct:g} olunca devreye girer; zarar kes, görülen en iyi "
+                 f"fiyatın %{cfg.futures_trailing_gap_pct:g} gerisinden izler (yalnızca lehte ilerler)"
+                 if cfg.futures_trailing else "kapalı")
+        warn = []
+        if cfg.futures_trailing and cfg.futures_trailing_act_pct >= cfg.take_profit_pct:
+            warn.append(f"⚠️ İzleyen stop başlangıcı Kâr Al'dan (+%{cfg.take_profit_pct:g}) büyük: önce Kâr Al çalışır, "
+                        f"izleyen stop hiç devreye girmez. Kâr Al'ı yükseltin veya başlangıcı düşürün.")
+        if cfg.breakeven_enabled and cfg.breakeven_trigger_pct >= cfg.take_profit_pct:
+            warn.append(f"⚠️ Başabaş tetiği Kâr Al'dan (+%{cfg.take_profit_pct:g}) büyük: başabaş hiç devreye girmez.")
+        return (f"🔒 <b>Başabaş ve İzleyen Stop</b> (fiyat %, girişten)\n{LINE}\n"
+                f"🔒 Başabaş: {be}\n📈 İzleyen stop: {trail}\n"
+                + ("\n".join(warn) + "\n" if warn else "") + f"{LINE}\n"
+                f"<i>{TRAIL_HINT} İkisi birlikte açıksa hangisi daha yukarıdaysa zarar kes orada durur. Binance'teki "
+                f"stop emri de taşınır (izleyen stopta en sık 10 sn'de bir); bot arada fiyatı kendisi izler.</i>")
+
     def _text_fc(self) -> str:
-        coins = futures_coin_list(self.cfg)
+        cfg = self.cfg
+        if cfg.futures_universe > 0:
+            now = getattr(self.bot, "universe", []) or []
+            shown = ", ".join(s[:-4] for s in now[:20]) + (" ..." if len(now) > 20 else "")
+            return (f"🪙 <b>Vadeli Coinler</b>: en hacimli <b>{cfg.futures_universe}</b> köklü coin\n{LINE}\n"
+                    f"En az {cfg.futures_universe_min_age_days} gündür ({cfg.futures_universe_min_age_days / 365:.0f} "
+                    f"yıl) Binance USDⓈ-M'de olan kripto paritelerden, son {cfg.futures_universe_avg_days} günün "
+                    f"ortalama USDT hacmine göre ilk {cfg.futures_universe} (günde bir yenilenir; stabil coin, endeks, "
+                    f"hisse / emtia vadelileri ve kaldırılması planlanan pariteler hariç)."
+                    + (f"\nŞu an: {esc(shown)}" if now else "\nListe ilk taramada oluşur.")
+                    + f"\n{LINE}\n<i>{self._universe_hint()} Elle seçilen liste için 📋 Liste.</i>")
+        coins = futures_coin_list(cfg)
         return (f"🪙 <b>Vadeli Coinler</b> ({len(coins)} seçili)\n{LINE}\n✅ {esc(', '.join(coins))}\n{LINE}\n"
                 "<i>Bot yalnızca seçili coinlerin USDT vadeli paritelerinde işlem açar. Varsayılan 10 coin "
                 "backtestte kullanılan büyük coinlerdir; eklediğiniz diğer coinler test edilmedi. Binance'te "
-                "vadelisi olmayan coin taranmaz. Listede olmayan bir coin için: /ayar FUTURES_COINS BTC,ETH,...</i>")
+                "vadelisi olmayan coin taranmaz. Listede olmayan bir coin için: /ayar FUTURES_COINS BTC,ETH,... "
+                f"Ya da yukarıdan en hacimli 20-100 coin.</i>")
+
+    def _universe_hint(self) -> str:
+        return UNIVERSE_HINT
 
     def _text_ks(self) -> str:
         bot, cfg = self.bot, self.cfg

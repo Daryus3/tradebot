@@ -86,6 +86,7 @@ FUTURES_SIDES = ("both", "long", "short")
 FUTURES_LIQ_SOURCES = ("proxy", "feed", "both")
 FUTURES_TP_ORDERS = ("limit", "market")
 FUTURES_MAX_LEVERAGE = 20
+FUTURES_MAX_UNIVERSE = 150              # FUTURES_UNIVERSE: en hacimli en fazla 150 parite taranır
 # Kasım 2023'te piyasa değeri en büyük 10 coin (stabil coinler, TON ve MATIC/POL hariç; vadeli testin son dönemi)
 DEFAULT_FUTURES_COINS = "BTC,ETH,BNB,XRP,SOL,ADA,DOGE,TRX,LINK,DOT"
 # Gün içi (intraday) giriş taktikleri; INTRADAY_TACTIC virgülle birden çoğunu alabilir (sıradaki ilk sinyal alınır):
@@ -500,6 +501,18 @@ class Config:
     futures_slippage_pct: float = 0.02     # Test modu / backtest: piyasa emirlerinde kayma (%)
     futures_mmr_pct: float = 0.5           # Bakım teminatı oranı (likidasyon fiyatı tahmini için, %)
     futures_exchange_stop: bool = True     # Girişten hemen sonra Binance'e STOP_MARKET; konamazsa pozisyon kapatılır
+    # 0 = yalnızca FUTURES_COINS listesi; N = "en hacimli N köklü coin": en az FUTURES_UNIVERSE_MIN_AGE_DAYS gündür
+    # listelenen kripto USDT süresiz paritelerinden son FUTURES_UNIVERSE_AVG_DAYS günün ortalama USDT hacmine göre ilk N
+    # (stabil coin, endeks, hisse / emtia ve kaldırılması planlanan pariteler hariç; sıralama günde bir yenilenir).
+    # Test (2020-2026): yaş filtresi olmadan her N'de hesap eridi; köklü ilk 10-20 kârlı, 40 ve üstü zayıf / zararlı.
+    futures_universe: int = 0
+    futures_universe_min_age_days: int = 1095
+    futures_universe_avg_days: int = 180
+    # İzleyen stop: fiyat girişten +FUTURES_TRAILING_ACT_PCT gidince zarar kes, görülen en iyi fiyatın
+    # FUTURES_TRAILING_GAP_PCT gerisine taşınır (yalnızca lehte yönde; Binance'teki stop emri de taşınır)
+    futures_trailing: bool = False
+    futures_trailing_act_pct: float = 3.0
+    futures_trailing_gap_pct: float = 1.5
     futures_data_url: str = "https://data.binance.vision"   # Backtest geçmiş verisi (Binance'in herkese açık arşivi)
     signal_confirm_scans: int = 1          # 1 = kapalı (2 = sinyal art arda 2 taramada görülmeli)
     # 31) Oynaklık (ATR) filtresi — 5 dk ATR(14) / fiyat (%)
@@ -751,6 +764,12 @@ class Config:
         if self.futures_volume_ratio <= 0 or self.futures_liq_ratio <= 0 or self.futures_liq_min_usdt < 0:
             errors.append("FUTURES_VOLUME_RATIO ve FUTURES_LIQ_RATIO sıfırdan büyük, FUTURES_LIQ_MIN_USDT negatif "
                           "olmamalı")
+        if not 0 <= self.futures_universe <= FUTURES_MAX_UNIVERSE:
+            errors.append(f"FUTURES_UNIVERSE 0 (FUTURES_COINS listesi) ile {FUTURES_MAX_UNIVERSE} arasında olmalı")
+        if not 30 <= self.futures_universe_min_age_days <= 3650 or not 30 <= self.futures_universe_avg_days <= 365:
+            errors.append("FUTURES_UNIVERSE_MIN_AGE_DAYS 30-3650, FUTURES_UNIVERSE_AVG_DAYS 30-365 gün olmalı")
+        if not 0 < self.futures_trailing_act_pct <= 50 or not 0 < self.futures_trailing_gap_pct <= 20:
+            errors.append("FUTURES_TRAILING_ACT_PCT 0-50, FUTURES_TRAILING_GAP_PCT 0-20 arasında olmalı (fiyat %)")
         if self.futures_tactic not in FUTURES_TACTICS:
             errors.append("FUTURES_TACTIC şunlardan biri olmalı: " + ", ".join(FUTURES_TACTICS))
         if not 1 <= self.futures_crash_hours <= 24 or not 2 <= self.futures_crash_drop_pct <= 50:
@@ -1006,6 +1025,12 @@ def load_config(env_file: Optional[str] = None, mode_override: Optional[str] = N
         futures_slippage_pct=_env_float("FUTURES_SLIPPAGE_PCT", 0.02),
         futures_mmr_pct=_env_float("FUTURES_MMR_PCT", 0.5),
         futures_exchange_stop=_env_bool("FUTURES_EXCHANGE_STOP", True),
+        futures_universe=_env_int("FUTURES_UNIVERSE", 0),
+        futures_universe_min_age_days=_env_int("FUTURES_UNIVERSE_MIN_AGE_DAYS", 1095),
+        futures_universe_avg_days=_env_int("FUTURES_UNIVERSE_AVG_DAYS", 180),
+        futures_trailing=_env_bool("FUTURES_TRAILING", False),
+        futures_trailing_act_pct=_env_float("FUTURES_TRAILING_ACT_PCT", 3.0),
+        futures_trailing_gap_pct=_env_float("FUTURES_TRAILING_GAP_PCT", 1.5),
         futures_data_url=_env_str("FUTURES_DATA_URL", "https://data.binance.vision"),
         signal_confirm_scans=_env_int("SIGNAL_CONFIRM_SCANS", 1),
         min_atr_pct=_env_float("MIN_ATR_PCT", 0.25),
@@ -1169,6 +1194,15 @@ def _setting_notes(cfg: Config) -> List[str]:
             notes.append(f"FUTURES_TACTIC=crash, FUTURES_LEVERAGE={cfg.futures_leverage}: zarar kes %{cfg.stop_loss_pct:g} "
                          f"teminatın ~%{cfg.stop_loss_pct * cfg.futures_leverage:.0f}'i demek; testte 3x üstünde düşüşler "
                          f"%60-90'a çıktı. Önerilen kaldıraç 2x (en fazla 3x).")
+        if cfg.futures_universe > 20:
+            notes.append(f"FUTURES_UNIVERSE={cfg.futures_universe}: 2023-2026 testinde 20'den fazla köklü coin sonucu "
+                         f"zayıflattı (40: ~%0-35/yıl, 60-80: zarar); 10-20 coin kârlıydı. Önce 🧪 Backtest.")
+        if cfg.futures_universe > 0 and cfg.futures_universe_min_age_days < 730:
+            notes.append(f"FUTURES_UNIVERSE_MIN_AGE_DAYS={cfg.futures_universe_min_age_days}: yaş filtresi kısa; testte "
+                         f"yeni / hype coinler (TRUMP, FARTCOIN, WIF...) çöküşten toparlanmadı, hesap eridi. Önerilen ≥ 1095.")
+        if cfg.futures_trailing:
+            notes.append("FUTURES_TRAILING=true: izleyen stop 2023-2026 testinde bu stratejinin sonucunu iyileştirmedi "
+                         "(sabit listede çoğu ayarda yıllık getiri +%62'den +%27-48'e indi).")
         if cfg.futures_liq_source != "proxy":
             notes.append(f"FUTURES_LIQ_SOURCE={cfg.futures_liq_source}: canlı likidasyon akışı kullanılır; bu ölçüm "
                          f"backtest edilemez (backtest mumlardan ölçer), sonuçlar backtestten farklı olabilir.")

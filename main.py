@@ -459,10 +459,18 @@ def run_futures_backtest_cli(cfg, args, out_dir) -> int:
     if cfg.futures_liq_source != "proxy":
         print(f"ℹ️ FUTURES_LIQ_SOURCE={cfg.futures_liq_source}: Binance geçmiş likidasyon kaydı yayımlamadığı için "
               f"backtest likidasyon dalgasını mumlardan (vekil ölçüt) ölçer.")
-    what = "Ocak 2020'den bugüne (her dönem kendi başındaki ilk 10 coinle)" if args.tum_donem else (
-        f"{'Belirtilen tarihte biten' if end_ms else 'Son'} {args.gun or 365} gün ({cfg.futures_coins})")
+    if cfg.futures_universe > 0:
+        coins = (f"her ay en hacimli {cfg.futures_universe} köklü coin: en az {cfg.futures_universe_min_age_days} "
+                 f"günlük, son {cfg.futures_universe_avg_days} gün ort. hacim")
+        what = (f"Ocak 2020'den bugüne ({coins})" if args.tum_donem else
+                f"{'Belirtilen tarihte biten' if end_ms else 'Son'} {args.gun or 365} gün ({coins})")
+    else:
+        what = "Ocak 2020'den bugüne (her dönem kendi başındaki ilk 10 coinle)" if args.tum_donem else (
+            f"{'Belirtilen tarihte biten' if end_ms else 'Son'} {args.gun or 365} gün ({cfg.futures_coins})")
     print(f"⏳ Vadeli scalping backtesti: {what}, {cfg.futures_leverage}x, {cfg.start_capital:g} USDT. Veri Binance "
-          f"arşivinden indirilir (ilk seferde birkaç dakika - tüm dönem için ~1-2 GB)...")
+          f"arşivinden indirilir (ilk seferde birkaç dakika - tüm dönem için ~1-2 GB"
+          + ("; en hacimli N için önce ~22 bin küçük aylık hacim dosyası" if cfg.futures_universe > 0 else "")
+          + ")...")
     try:
         report, chart, _ev = futures_backtest.run_cli(cfg, args.gun, end_ms, out_dir, chart=not args.grafiksiz,
                                                       full_history=args.tum_donem, progress=print)

@@ -154,8 +154,10 @@ Bot **yalnızca sizin sohbetinizden** (`TELEGRAM_CHAT_ID`) gelen komutları ve m
 **⚡ Vadeli stratejide ⚙️ Ayarlar:** kaldıraç (1x-20x hazır + ±1x), teminat (serbest bakiyenin %25 / 50 / 75 / 95'i)
 ve alt sayfalar: **🧭 Giriş sinyali** (taktik; çöküş eşiği %6-15, ölçüm süresi 1-24 saat, likidasyon dalgası şartı;
 4'lü onayda yön, hacim ve likidasyon eşikleri, ölçüm kaynağı, BTC trendi), **🎯 Çıkış ve emirler** (Kâr Al / Zarar Kes
-hazır değerler + ±, başabaş tetiği ve tabanı, zaman stopu, Kâr Al emri limit / piyasa, stop güvencesi), **🪙 Coinler**
-(16 büyük coini tek tek aç / kapa, varsayılan 10'a dön), **☠️ Kill-switch**. Her sayfada seçili değer ✅ ile görünür.
+hazır değerler + ±, zaman stopu 15 dk-4 saat, Kâr Al emri limit / piyasa, stop güvencesi), **🔒 Başabaş ve izleyen
+stop** (başabaş tetiği +%1-5, tabanı +%0.1-3, ± adımlar; izleyen stop aç / kapa, başlangıç +%1-6, mesafe %0.5-3),
+**🪙 Coinler** (16 büyük coini tek tek aç / kapa ya da 🔝 en hacimli 10-100 köklü coin; aşağıdaki araştırmaya bakın),
+**☠️ Kill-switch**. Her sayfada seçili değer ✅ ile görünür; sayfalarda backtest sonuçlarının özeti yazar.
 
 Menüden değiştirilen her ayar doğrulanır, hemen uygulanır ve sunucudaki `.env`'nin sonuna yazılır (bot yeniden
 başlasa da kalır; `.env`, `ayarlar.env`'yi ezer). Diğer ayarlar için `/ayar ANAHTAR DEĞER` (örn. `/ayar tp 2.5`,
@@ -321,6 +323,38 @@ Süre: Tüm dönem). Veri Binance'in herkese açık arşivinden indirilir. Rapor
 yeniden başlama, (C) sabit pozisyonla stratejinin kendisi; yıllara göre kazanma oranı, maks. düşüş, kayıp serisi,
 likidasyon riski, kaldıraç / TP-SL duyarlılığı, tek kural değişince; grafik Telegram'a gelir.
 
+#### Daha çok coin, izleyen stop, başabaş (Kasım 2026 araştırması)
+Aynı kurallar (2x, Kâr Al %6, Zarar Kes %4, başabaş +1.5 → +0.3, 30 dk, 30 USDT), Binance arşivindeki **913 USDT
+süresiz paritesinin tamamı** (sonradan kaldırılanlar dahil; stabil coin, endeks ve 2026'da açılan hisse / emtia
+vadelileri hariç). Her ay, bir önceki aya kadarki hacme göre evren seçildi (geleceği görmeden); ayarlar seçim
+döneminde (2020-01 → 2023-10) seçildi, doğrulama döneminde (2023-11 → 2026-10) sınandı.
+
+| Coinler | Seçim dönemi | Doğrulama dönemi |
+|---|---|---|
+| **Sabit liste (varsayılan, 10 büyük coin)** | +%110/yıl, düşüş %56 | **+%62/yıl, düşüş %25** |
+| Son ayın en hacimli 10 / 20 / 40 / 60 / 80'i | +%226 … +%697/yıl | **hepsinde hesap eridi** (30 USDT → 7 USDT ya da sıfır) |
+| En az 3 yıllık, 6 ay ort. hacim: ilk 10 | +%262/yıl, düşüş %55 | +%55/yıl, düşüş %28 |
+| … ilk 20 | +%200/yıl, düşüş %59 | +%81/yıl, düşüş %33 |
+| … ilk 40 | +%224/yıl | +%11/yıl, düşüş %78 |
+| … ilk 60 / 80 | +%247/yıl | −%8 / −%42/yıl |
+
+Ham hacim sıralaması 2024-2026'da yeni çıkan hype / meme coinleri (TRUMP, FARTCOIN, WIF, 1000PEPE, RIVER, MYX ...)
+öne çıkarıyor: bunların çöküşleri toparlanmadı. Bu yüzden `FUTURES_UNIVERSE=N` "en hacimli N **köklü** coin"dir: en az
+`FUTURES_UNIVERSE_MIN_AGE_DAYS` (1095 gün = 3 yıl) gündür listelenen kripto paritelerden son `FUTURES_UNIVERSE_AVG_DAYS`
+(180) günün ortalama USDT hacmine göre ilk N (canlıda sıralama günde bir yenilenir; çöküş taktiğinde her taramada tek
+istekle 24 saatlik özet alınır, yalnızca tepesinden yeterince düşmüş coinlerin mumları istenir; kaldırılması planlanan
+ve 30 günden yeni pariteler alınmaz). Telegram: ⚙️ Ayarlar → 🪙 Coinler → 📋 Liste / 🔝 10 · 20 · 40 · 60 · 80 · 100,
+🎂 en az 1-4 yıl. Backtest aynı kuralı geçmişe uygular (ilk çalıştırmada ~22 bin küçük aylık hacim dosyası iner).
+
+- **İzleyen stop** (`FUTURES_TRAILING`, varsayılan kapalı; fiyat +`FUTURES_TRAILING_ACT_PCT` gidince zarar kes en iyi
+  fiyatın `FUTURES_TRAILING_GAP_PCT` gerisine çekilir, Binance'teki stop emri de taşınır): seçim döneminde çoğu ayarda
+  sonucu iyileştirdi ama doğrulama döneminde iyileştirmedi (sabit listede mevcut çıkışlara eklenince +%62 → +%27-48/yıl;
+  köklü ilk 20'de tüm 7 ayar daha kötü). Bu stratejide getiriyi sabit Kâr Al'ın 30 dk içinde yakaladığı ilk sıçrama
+  sağlıyor; izleyen stop gürültüde erken çıkarıyor.
+- **Başabaş** (Telegram'da tetik +%5'e, taban +%3'e kadar): +1.5 → +0.3 en düşük düşüşü verdi (%25). Tetik +4 / +5
+  getiri kazandırmadı (+%41-62/yıl), düşüşü %39'a çıkardı; köklü ilk 20'de getiriyi +%1-10/yıla indirdi.
+- Zaman stopu 60 / 120 dk (izleyensiz): doğrulama döneminde +%51 / +%54/yıl (30 dk: +%62).
+
 ### 🏆 Strateji turnuvası (`--turnuva`)
 Hangi strateji türünün sizin dönemde işe yaradığını **tek komutla** görmek için:
 ```bash
@@ -414,6 +448,7 @@ tradebot/
 ├── commands.py        # Telegram komutları
 ├── control_panel.py   # Telegram kontrol paneli (/menu): düğmeler, ayar değiştirme, strateji seçimi, reset
 ├── settings_menu.py   # Ayrıntılı ayar sayfaları: vadeli işlem, kill-switch, risk sigortaları, raporlar
+├── futures_universe.py # Vadeli "en hacimli N köklü coin" evreni (canlı uygunluk kuralları + geçmiş hacim sıralaması)
 ├── runtime_settings.py  # Telegram'dan değiştirilebilen ayarlar ve .env'ye güvenli yazma
 ├── entry_filters.py   # Ek giriş filtreleri (fitil, VWAP, aşırı ısınma, RSI uyumsuzluğu, emir defteri, tape)
 ├── ip_monitor.py      # Sunucunun dış IP'sini izler, değişirse alarm

@@ -91,6 +91,7 @@ class Position:
     tp_price: float = 0.0             # Kâr Al fiyatı
     stop_order_id: str = ""           # Binance'teki STOP_MARKET emrinin kimliği (koşullu / algo emir)
     tp_order_id: str = ""             # Binance'teki Kâr Al emrinin kimliği
+    peak_price: float = 0.0           # Girişten beri görülen en iyi fiyat (izleyen stop; long: en yüksek, short: en düşük)
 
     def to_dict(self) -> dict:
         return asdict(self)

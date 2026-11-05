@@ -21,7 +21,9 @@ Yüzdeler (Kâr Al, Zarar Kes, başabaş) FİYAT hareketidir; 10x'te fiyat +%1.2
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
+
+import requests
 
 from config import futures_coin_list, futures_liq_distance_pct
 from futures_exchange import FuturesError, MinNotionalError, describe_error
@@ -39,6 +41,10 @@ MAX_SCAN_LAG_SEC = 90         # Mum kapanışından bu kadar sonra (kesinti / ya
 MARGIN_RETRY_FACTOR = 0.9     # "Margin is insufficient" (-2019): miktar %10 küçültülüp bir kez daha denenir
 SOFT_STOP_GRACE_PCT = 0.15    # Fiyat stopu bu kadar (fiyat %) geçtiği hâlde Binance emri çalışmadıysa bot kapatır
 BE_RETRY_SEC = 30             # Başabaş stopu taşınamadıysa bu kadar sonra tekrar denenir
+TRAIL_MOVE_SEC = 10           # İzleyen stop: Binance'teki stop emri en sık bu aralıkla taşınır (bot arada kendisi izler)
+TRAIL_MIN_STEP_PCT = 0.1      # ...ve yeni seviye eskisinden en az bu kadar (fiyat %) iyiyse
+PREFILTER_SLACK_PCT = 1.0     # En hacimli N + çöküş: 24 saatlik tepeye göre ön elemede pay (fiyat puanı)
+UNIVERSE_REFRESH_SEC = 24 * 3600   # En hacimli N köklü coin sıralaması günde bir yenilenir (parite başına 1 istek)
 
 
 @dataclass
@@ -55,6 +61,13 @@ def _worse(pos, price: float, level: float) -> bool:
     return price <= level if pos.side == "long" else price >= level
 
 
+def _stop_reason(pos) -> ExitReason:
+    """Binance'teki stop emri çalıştığında kapanış nedeni: izleyen stop > başabaş > zarar kes."""
+    if pos.trailing_active:
+        return ExitReason.TRAILING_STOP
+    return ExitReason.BREAKEVEN if pos.breakeven_active else ExitReason.STOP_LOSS
+
+
 def _reached(pos, price: float, level: float) -> bool:
     """Fiyat lehte seviyeye ulaştı mı (long: üstünde, short: altında)?"""
     return price >= level if pos.side == "long" else price <= level
@@ -68,6 +81,11 @@ class FuturesBot(TradingBot):
         self.next_scan_at = self._next_close(self.time_fn()) + SCAN_DELAY_SEC
         self.last_signals: List[FuturesSignal] = []
         self._be_retry_at: Dict[str, float] = {}
+        self._trail_at: Dict[str, float] = {}
+        self.universe: List[str] = []          # FUTURES_UNIVERSE: en hacimli N köklü parite (sıralamanın ilk N'i)
+        self._ranking: List[str] = []          # Tüm köklü pariteler, ortalama hacme göre
+        self._ranking_at = 0.0
+        self._ranking_key: tuple = ()
 
     # ================================================================ kapasite
     def slots(self) -> int:
@@ -88,8 +106,13 @@ class FuturesBot(TradingBot):
     def startup(self) -> None:
         cfg, ex = self.cfg, self.exchange
         ex.load_markets()
-        coins = list(futures_coin_list(cfg))
-        missing = [c for c in coins if not ex.has_market(c + "USDT")]
+        if cfg.futures_universe > 0:
+            self._refresh_universe(self.time_fn())
+            coins = [s[:-4] for s in self.universe]
+            missing: List[str] = []
+        else:
+            coins = list(futures_coin_list(cfg))
+            missing = [c for c in coins if not ex.has_market(c + "USDT")]
         mode_note = ex.check_one_way(has_positions=bool(self.state.positions))
         free = None if ex.is_paper else ex.free_balance()
         now = self.time_fn()
@@ -202,7 +225,7 @@ class FuturesBot(TradingBot):
 
     # ================================================================ tarama ve giriş
     def scan_and_enter(self, now: float) -> None:
-        cfg, ex = self.cfg, self.exchange
+        ex = self.exchange
         now_ms = int(now * 1000)
         closed_ms = now_ms // FUT_BAR_MS * FUT_BAR_MS          # Az önce kapanan mumun kapanış zamanı
         if now_ms - closed_ms > MAX_SCAN_LAG_SEC * 1000:
@@ -210,8 +233,8 @@ class FuturesBot(TradingBot):
         state = self.state
         state.cooldowns = {s: t for s, t in state.cooldowns.items() if t > now}   # Süresi dolan beklemeler
         klines, errors = {}, []
-        for coin in futures_coin_list(cfg):
-            symbol = coin + "USDT"
+        symbols, skipped = self._scan_symbols()
+        for symbol in symbols:
             if not ex.has_market(symbol) or symbol in self._scan_excluded():
                 continue
             try:
@@ -226,7 +249,9 @@ class FuturesBot(TradingBot):
         if errors:
             log.warning("Vadeli tarama: %d coinin mumları alınamadı (%s)", len(errors), "; ".join(errors[:3]))
             rejects["veri alınamadı"] += len(errors)
-        result = ScanResult(signals=list(signals), candidates=len(futures_coin_list(cfg)), analyzed=len(klines),
+        if skipped:
+            rejects["çöküş yok (24 saatlik tepeye yakın)"] += skipped
+        result = ScanResult(signals=list(signals), candidates=len(symbols) + skipped, analyzed=len(klines),
                             rejects=rejects)
         self._record_scan(result, now)
         self.last_signals = list(signals)
@@ -244,6 +269,52 @@ class FuturesBot(TradingBot):
             log.error("Vadeli pozisyon açılamadı: %s", exc)
             self.notifier.send(Messages.error(f"{sig.symbol} {sig.side.upper()} pozisyonu açılamadı: "
                                               f"{describe_error(exc)}"))
+
+    def _refresh_universe(self, now: float, force: bool = False) -> None:
+        """En hacimli N köklü parite listesini (gerekirse) yeniler: günde bir ya da ayar değişince."""
+        cfg = self.cfg
+        key = (cfg.futures_universe_min_age_days, cfg.futures_universe_avg_days)
+        if not force and self._ranking and key == self._ranking_key and now - self._ranking_at < UNIVERSE_REFRESH_SEC:
+            self.universe = self._ranking[:cfg.futures_universe]
+            return
+        log.info("En hacimli köklü pariteler sıralanıyor (en az %d günlük, son %d gün ortalaması)...", *key)
+        try:
+            ranking = [s for s, _qv in self.exchange.seasoned_ranking(*key)]
+        except (FuturesError, requests.ConnectionError) as exc:
+            log.warning("Hacim sıralaması alınamadı (önceki liste kullanılıyor): %s", exc)
+            self._ranking_at = now - UNIVERSE_REFRESH_SEC + 600          # 10 dk sonra tekrar dene
+            self.universe = self._ranking[:cfg.futures_universe]
+            return
+        if ranking:
+            self._ranking, self._ranking_key, self._ranking_at = ranking, key, now
+        self.universe = self._ranking[:cfg.futures_universe]
+        log.info("En hacimli %d köklü parite: %s", len(self.universe), ", ".join(s[:-4] for s in self.universe))
+
+    def _scan_symbols(self) -> Tuple[List[str], int]:
+        """Taranacak pariteler ve ön elemede atlananların sayısı.
+
+        FUTURES_UNIVERSE=0: FUTURES_COINS listesi. N > 0: en hacimli N köklü parite (sıralama günde bir yenilenir).
+        Çöküş taktiğinde, fiyatı 24 saatlik tepesinin (eşik - pay) kadar altında olmayan coinlerin mumları hiç
+        istenmez: son FUTURES_CRASH_HOURS (≤ 24) saatte %X düşen coin, 24 saatlik tepesinin de en az %X altındadır."""
+        cfg = self.cfg
+        if cfg.futures_universe <= 0:
+            return [c + "USDT" for c in futures_coin_list(cfg)], 0
+        self._refresh_universe(self.time_fn())
+        symbols = list(self.universe)
+        if cfg.futures_tactic != "crash" or not symbols:
+            return symbols, 0
+        try:
+            tickers = self.exchange.tickers_24h()
+        except (FuturesError, requests.ConnectionError) as exc:
+            log.warning("24 saatlik özetler alınamadı (ön eleme yapılmadı): %s", exc)
+            return symbols, 0
+        need = max(0.0, cfg.futures_crash_drop_pct - PREFILTER_SLACK_PCT) / 100
+        keep = []
+        for symbol in symbols:
+            t = tickers.get(symbol)
+            if t is None or t["high"] <= 0 or t["last"] <= t["high"] * (1 - need):
+                keep.append(symbol)                  # Özet yoksa temkinli: mumlara bakılır
+        return keep, len(symbols) - len(keep)
 
     def open_futures(self, sig: FuturesSignal, now: float) -> Optional[Position]:
         cfg, ex = self.cfg, self.exchange
@@ -353,6 +424,8 @@ class FuturesBot(TradingBot):
                 self.close_position(pos, reason)
                 continue
             self._check_breakeven(pos, price, mark, now)
+            if pos.symbol in self.state.positions:
+                self._check_trailing(pos, price, mark, now)
         if now - self._last_position_log >= POSITION_LOG_SEC:
             self._last_position_log = now
             for pos in self.state.positions.values():
@@ -367,7 +440,7 @@ class FuturesBot(TradingBot):
         cfg = self.cfg
         if self.cfg.max_hold_minutes > 0 and now - pos.opened_at >= cfg.max_hold_minutes * 60:
             return ExitReason.MAX_HOLD                           # Zaman stopu: piyasa emriyle kapat
-        stop_reason = ExitReason.BREAKEVEN if pos.breakeven_active else ExitReason.STOP_LOSS
+        stop_reason = _stop_reason(pos)
         if _worse(pos, price, pos.sl_price):
             # Binance'teki stop normalde kendisi çalışır; emir yoksa ya da fiyat stopu belirgin geçtiyse bot kapatır
             beyond = abs(price / pos.sl_price - 1) * 100 if pos.sl_price else 0.0
@@ -389,6 +462,52 @@ class FuturesBot(TradingBot):
         if _worse(pos, price, new_stop):
             self.close_position(pos, ExitReason.BREAKEVEN)
             return
+        if not _worse(pos, pos.sl_price, new_stop):      # İzleyen stop zaten daha iyi bir yerde
+            pos.breakeven_active = True
+            self.store.save(self.state)
+            return
+        if not self._move_stop(pos, new_stop, now, "başabaş"):
+            return
+        pos.breakeven_active = True
+        self.store.save(self.state)
+        self.notifier.notify(Messages.futures_breakeven(pos, price, new_stop, getattr(mark, "roe", 0.0)), "update")
+
+    def _check_trailing(self, pos: Position, price: float, mark: Mark, now: float) -> None:
+        """İzleyen stop: en iyi fiyat girişten +FUTURES_TRAILING_ACT_PCT gidince zarar kes, o tepenin
+        FUTURES_TRAILING_GAP_PCT gerisine çekilir ve yalnızca lehte ilerler. Bot her kontrolde tepeyi izler ve
+        seviye geçilirse hemen kapatır; Binance'teki stop emri de (en sık TRAIL_MOVE_SEC'de bir) taşınır."""
+        cfg, ex = self.cfg, self.exchange
+        if pos.peak_price <= 0 or _reached(pos, price, pos.peak_price):
+            pos.peak_price = price
+        if not cfg.futures_trailing:
+            return
+        sign = _sign(pos)
+        if not _reached(pos, pos.peak_price, pos.entry_price * (1 + sign * cfg.futures_trailing_act_pct / 100)):
+            return
+        level = ex.price_to_precision(pos.symbol, pos.peak_price * (1 - sign * cfg.futures_trailing_gap_pct / 100))
+        if not _worse(pos, pos.sl_price, level) or level == pos.sl_price:
+            return                                       # Mevcut stop (başabaş / önceki izleyen) daha iyi
+        if _worse(pos, price, level):                    # Tepeden mesafe kadar geri döndü
+            log.info("%s izleyen stop: fiyat %.8g, seviye %.8g (tepe %.8g)", pos.symbol, price, level, pos.peak_price)
+            self.close_position(pos, ExitReason.TRAILING_STOP)
+            return
+        first = not pos.trailing_active
+        step = abs(level / pos.sl_price - 1) * 100 if pos.sl_price else 100.0
+        if not first and (step < TRAIL_MIN_STEP_PCT or now < self._trail_at.get(pos.symbol, 0.0)):
+            return
+        self._trail_at[pos.symbol] = now + TRAIL_MOVE_SEC
+        if not self._move_stop(pos, level, now, "izleyen stop"):
+            return
+        pos.trailing_active = True
+        self.store.save(self.state)
+        if first:
+            self.notifier.notify(Messages.futures_trailing(pos, price, level, getattr(mark, "roe", 0.0), cfg),
+                                 "update")
+
+    def _move_stop(self, pos: Position, new_stop: float, now: float, what: str) -> bool:
+        """Binance'teki STOP_MARKET emrini yeni seviyeye taşır (iptal + yeni emir). Olmazsa eski stopu geri koyar ve
+        False döner (bir süre sonra tekrar denenir); eski de konamazsa pozisyon güvenlik için kapatılır."""
+        ex = self.exchange
         old_id, old_stop = pos.stop_order_id, pos.sl_price
         try:
             if old_id:
@@ -396,23 +515,22 @@ class FuturesBot(TradingBot):
             pos.stop_order_id = ex.place_stop(pos.symbol, pos.side, new_stop)
         except FuturesError as exc:
             self._be_retry_at[pos.symbol] = now + BE_RETRY_SEC
-            log.warning("%s başabaş stopu taşınamadı: %s", pos.symbol, exc)
+            self._trail_at[pos.symbol] = now + BE_RETRY_SEC
+            log.warning("%s %s Binance'e taşınamadı: %s", pos.symbol, what, exc)
             try:                                                    # Eski stopu geri koy: korumasız kalmasın
                 pos.stop_order_id = ex.place_stop(pos.symbol, pos.side, old_stop)
             except FuturesError as exc2:
                 self.notifier.send(Messages.error(f"{pos.symbol} stop emri yeniden konamadı ({exc2}); pozisyon "
                                                   f"güvenlik için kapatılıyor."), critical=True)
                 self.close_position(pos, ExitReason.SAFETY)
-                return
-            self.notifier.send_error(f"be-{pos.symbol}", Messages.warning(
-                f"{pos.symbol} başabaş stopu Binance'e taşınamadı ({exc}); eski zarar kes duruyor, tekrar "
-                f"denenecek."), cooldown_sec=300)
+                return False
+            self.notifier.send_error(f"stop-{pos.symbol}", Messages.warning(
+                f"{pos.symbol} {what} Binance'e taşınamadı ({exc}); eski zarar kes duruyor, tekrar denenecek."),
+                cooldown_sec=300)
             self.store.save(self.state)
-            return
+            return False
         pos.sl_price = new_stop
-        pos.breakeven_active = True
-        self.store.save(self.state)
-        self.notifier.notify(Messages.futures_breakeven(pos, price, new_stop, getattr(mark, "roe", 0.0)), "update")
+        return True
 
     # ================================================================ kapanış
     def close_position(self, pos: Position, reason: ExitReason) -> bool:
@@ -455,7 +573,7 @@ class FuturesBot(TradingBot):
         else:
             exit_price = price * (1 - _sign(pos) * slip)              # STOP_MARKET: tetiklenince piyasa fiyatından
             fee = pos.qty * exit_price * cfg.futures_taker_fee
-            reason = ExitReason.BREAKEVEN if pos.breakeven_active else ExitReason.STOP_LOSS
+            reason = _stop_reason(pos)
         self._finalize_futures(pos, exit_price, fee, reason)
 
     def _closed_on_exchange(self, pos: Position) -> None:
@@ -463,7 +581,7 @@ class FuturesBot(TradingBot):
         ex = self.exchange
         since = int(pos.opened_at * 1000)
         fill = ex.closing_fill(pos.symbol, since, pos.side)
-        stop_reason = ExitReason.BREAKEVEN if pos.breakeven_active else ExitReason.STOP_LOSS
+        stop_reason = _stop_reason(pos)
         if pos.tp_order_id and ex.order_filled(pos.symbol, pos.tp_order_id) is not None:
             reason = ExitReason.TAKE_PROFIT
         elif pos.stop_order_id and ex.order_filled(pos.symbol, pos.stop_order_id, conditional=True) is not None:
@@ -512,6 +630,7 @@ class FuturesBot(TradingBot):
         state.cooldowns[pos.symbol] = now + cooldown_minutes(self.cfg, pnl) * 60
         self.marks.pop(pos.symbol, None)
         self._be_retry_at.pop(pos.symbol, None)
+        self._trail_at.pop(pos.symbol, None)
         self.store.save(state)
         try:
             logged = self.trade_log.append(pos, exit_price, proceeds, pos.buy_fee_usdt + exit_fee, reason.value, now)

@@ -141,6 +141,12 @@ EDITABLE: Dict[str, Setting] = {
                                 FUTURES_TP_ORDERS),
     "FUTURES_EXCHANGE_STOP": Setting("futures_exchange_stop", "bool",
                                      "Vadeli: zarar kes Binance'e konamazsa pozisyonu hemen kapat"),
+    "FUTURES_UNIVERSE": Setting("futures_universe", "int", "Vadeli: en hacimli N köklü coin (0 = FUTURES_COINS listesi)"),
+    "FUTURES_UNIVERSE_MIN_AGE_DAYS": Setting("futures_universe_min_age_days", "int",
+                                             "Vadeli: en hacimli N için en az listelenme süresi (gün)"),
+    "FUTURES_TRAILING": Setting("futures_trailing", "bool", "Vadeli: izleyen stop"),
+    "FUTURES_TRAILING_ACT_PCT": Setting("futures_trailing_act_pct", "float", "Vadeli: izleyen stop başlangıcı (fiyat %)"),
+    "FUTURES_TRAILING_GAP_PCT": Setting("futures_trailing_gap_pct", "float", "Vadeli: izleyen stop mesafesi (fiyat %)"),
     "BREAKEVEN_TRIGGER_PCT": Setting("breakeven_trigger_pct", "float", "Başabaş tetiği (%)"),
     "BREAKEVEN_FLOOR_PCT": Setting("breakeven_floor_pct", "float", "Başabaş stopu (%)"),
 }

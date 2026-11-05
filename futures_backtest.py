@@ -60,7 +60,8 @@ HISTORY_SEGMENTS = (
     ("2020-11-01", "BTC,ETH,XRP,LINK,BCH,LTC,DOT,BNB,ADA,XLM"),
     ("2023-11-01", "BTC,ETH,BNB,XRP,SOL,ADA,DOGE,TRX,LINK,DOT"),
 )
-REASON_TR = {"TP": "Kâr Al", "SL": "Zarar Kes", "BE": "Başabaş stopu", "TIME": "Zaman stopu", "LIQ": "LİKİDASYON",
+REASON_TR = {"TP": "Kâr Al", "SL": "Zarar Kes", "BE": "Başabaş stopu", "TRAIL": "İzleyen stop", "TIME": "Zaman stopu",
+             "LIQ": "LİKİDASYON",
              "END": "Veri bitti"}
 
 
@@ -100,6 +101,10 @@ class FutData:
     archive: FuturesArchive
     exit_interval: str = "1m"
     notes: List[str] = field(default_factory=list)
+    # En hacimli N köklü coin (FUTURES_UNIVERSE): 5 dk mumlar bellekte tutulmaz, coin coin diskten okunur
+    loader: Optional[Callable[[str], Dict[str, np.ndarray]]] = None
+    lean_symbols: List[str] = field(default_factory=list)
+    universe_note: str = ""
 
 
 def history_segments(end_ms: int, start_ms: Optional[int] = None) -> List[Segment]:
@@ -114,11 +119,50 @@ def history_segments(end_ms: int, start_ms: Optional[int] = None) -> List[Segmen
     return out
 
 
+def universe_segments(cfg, start_ms: int, end_ms: int, archive: FuturesArchive,
+                      progress: Optional[Callable[[str], None]] = None) -> List[Segment]:
+    """FUTURES_UNIVERSE: her takvim ayı için o ayın "en hacimli N köklü coin" listesi (canlıyla aynı kural, geçmiş
+    aylık hacimlerle; sonradan kaldırılan pariteler dahil)."""
+    from futures_universe import universe_months
+    return [Segment(a, b, coins) for a, b, coins in universe_months(cfg, start_ms, end_ms, archive, progress)]
+
+
+def prepare_universe(cfg, start_ms: int, end_ms: int, segments: List[Segment], archive: FuturesArchive,
+                     exit_interval: str = "1m", progress: Optional[Callable[[str], None]] = None) -> FutData:
+    """Evren modu: her coinin yalnızca evrende olduğu aylar (+ bir önceki ay, göstergeler için) okunur ve sinyaller
+    coin coin bulunur; tüm coinlerin mumları aynı anda belleğe alınmaz (80 coin × 7 yıl ≈ 5 GB olurdu)."""
+    from futures_universe import month_add, month_ms, months_between
+    say = progress or (lambda _m: None)
+    months: Dict[str, set] = {}
+    for seg in segments:
+        for key in months_between(seg.start_ms, seg.end_ms):
+            for coin in seg.coins:
+                months.setdefault(coin + "USDT", set()).update({key, month_add(key, -1)})
+
+    def loader(symbol: str) -> Dict[str, np.ndarray]:
+        parts = [archive.klines(symbol, month_ms(k), month_ms(month_add(k, 1)), "5m")
+                 for k in sorted(months.get(symbol, ())) if k >= "2020-01"]
+        return concat(parts)
+
+    say(f"📥 BTCUSDT: trend için 5 dk mumlar | evren: {len(months)} farklı coin")
+    btc = archive.klines("BTCUSDT", start_ms - WARMUP_MS, end_ms, "5m")
+    inside = slice_range(btc, start_ms, end_ms)
+    age, avg = cfg.futures_universe_min_age_days, cfg.futures_universe_avg_days
+    note = (f"her ay en hacimli {cfg.futures_universe} köklü coin (en az {age} gün listelenmiş, son {avg} gün "
+            f"ortalama hacim; toplam {len(months)} farklı coin)")
+    return FutData(start_ms, end_ms, segments, {}, btc_trend_1h(resample(btc, FUT_HOUR_MS)), (inside["t"], inside["c"]),
+                   {}, archive, exit_interval, ["Evren modunda fonlama için ortalama oran (8 saatte %0.01) kullanıldı."],
+                   loader=loader, lean_symbols=sorted(months), universe_note=note)
+
+
 def prepare(cfg, start_ms: int, end_ms: int, segments: Optional[List[Segment]] = None, cache_dir=None,
             exit_interval: str = "1m", archive: Optional[FuturesArchive] = None,
             progress: Optional[Callable[[str], None]] = None) -> FutData:
     """Dönemin 5 dk mumlarını (ısınmalı), BTC 1 saatlik trendini ve fonlama oranlarını indirir / önbellekten okur."""
     archive = archive or FuturesArchive(cache_dir or DATA_DIR / "futures_cache", cfg.futures_data_url)
+    if getattr(cfg, "futures_universe", 0) > 0:      # Sabit liste / dönem listeleri yerine aylık en hacimli N
+        segments = universe_segments(cfg, start_ms, end_ms, archive, progress)
+        return prepare_universe(cfg, start_ms, end_ms, segments, archive, exit_interval, progress)
     segments = segments or [Segment(start_ms, end_ms, futures_coin_list(cfg))]
     coins = sorted({c for s in segments for c in s.coins})
     say = progress or (lambda _m: None)
@@ -175,11 +219,22 @@ def _active_mask(t_close: np.ndarray, coin: str, segments: List[Segment]) -> np.
     return mask
 
 
+def _series(data: FutData):
+    """(parite, 5 dk mumlar): bellekteki veri ya da evren modunda coin coin diskten."""
+    if data.loader is None:
+        yield from data.k5.items()
+        return
+    for symbol in data.lean_symbols:
+        k = data.loader(symbol)
+        if len(k["t"]) >= 500:
+            yield symbol, k
+
+
 def find_signals(cfg, data: FutData) -> Tuple[List[FutSignal], Funnel]:
     """Canlı botun her 5 dk kapanışında yaptığı değerlendirmenin tüm geçmişe uygulanışı."""
     signals: List[FutSignal] = []
     funnel = Funnel()
-    for symbol, k in data.k5.items():
+    for symbol, k in _series(data):
         coin = symbol[:-4]
         t = k["t"]
         close = t + FUT_BAR_MS
@@ -227,6 +282,8 @@ def load_windows(data: FutData, signals: Sequence[FutSignal], minutes: int = MAX
                  cache: Optional[Dict[Tuple[str, int], tuple]] = None) -> Dict[Tuple[str, int], tuple]:
     """Her sinyal için girişten itibaren `minutes` dakikalık mumlar: (aralık ms, t, o, h, l, c). 1 dk mumlar ay ay
     okunur (bellek: bir coinin tüm 1 dk geçmişi GB'larca olurdu); 1 dk verisi yoksa 5 dk mumlar kullanılır."""
+    if data.loader is not None:                  # Evren modu: pencereler günlük dosyalardan, gerektiğinde
+        return cache if isinstance(cache, LazyWindows) else LazyWindows(data, minutes)
     out: Dict[Tuple[str, int], tuple] = {} if cache is None else cache
     span = minutes * MIN_MS
     by_symbol: Dict[str, List[FutSignal]] = {}
@@ -260,6 +317,40 @@ def load_windows(data: FutData, signals: Sequence[FutSignal], minutes: int = MAX
     return out
 
 
+class LazyWindows(dict):
+    """(parite, giriş ms) → çıkış penceresi; günlük 1 dk (uzun pencerede 5 dk) dosyalardan gerektiğinde okunur.
+    Simülasyon yalnızca gerçekten açılan işlemlerin penceresini ister: binlerce sinyalin hepsi belleğe alınmaz."""
+
+    def __init__(self, data: FutData, minutes: int):
+        super().__init__()
+        self.data = data
+        self.span = minutes * MIN_MS
+        self.interval = "1m" if data.exit_interval == "1m" and minutes <= LONG_WINDOW_MIN else "5m"
+        self.bar = MIN_MS if self.interval == "1m" else FUT_BAR_MS
+        self.days: Dict[Tuple[str, int], tuple] = {}
+
+    def _day(self, symbol: str, day_ms: int) -> tuple:
+        key = (symbol, day_ms)
+        if key not in self.days:
+            arr = self.data.archive.day(symbol, self.interval, datetime.fromtimestamp(day_ms / 1000, tz=timezone.utc))
+            self.days[key] = tuple(arr[k] for k in ("t", "o", "h", "l", "c"))
+        return self.days[key]
+
+    def get(self, key, default=None):
+        if dict.__contains__(self, key):
+            return dict.__getitem__(self, key)
+        symbol, close_ms = key
+        first = close_ms // DAY_MS * DAY_MS
+        parts = [self._day(symbol, d) for d in range(first, close_ms + self.span, DAY_MS)]
+        cols = [np.concatenate([p[i] for p in parts]) for i in range(5)]
+        t = cols[0]
+        i, j = np.searchsorted(t, close_ms), np.searchsorted(t, close_ms + self.span)
+        win = (self.bar, t[i:j], cols[1][i:j], cols[2][i:j], cols[3][i:j], cols[4][i:j]) \
+            if j > i and int(t[i]) == close_ms else None
+        dict.__setitem__(self, key, win)
+        return win if win is not None else default
+
+
 # ===================================================================== simülasyon
 @dataclass(frozen=True)
 class SimParams:
@@ -287,6 +378,11 @@ class SimParams:
     daily_loss_pct: float = 0.0
     daily_profit_pct: float = 0.0
     loss_cooldown_min: int = 0          # Zararla kapanınca (daha uzunsa) bekleme (LOSS_COOLDOWN_MINUTES)
+    # İzleyen stop (fiyat %): görülen en iyi fiyat girişten +trail_act_pct'ye ulaşınca stop, o tepenin trail_gap_pct
+    # gerisine taşınır ve yalnızca lehte yönde ilerler (canlı: FuturesBot._check_trailing)
+    trail_enabled: bool = False
+    trail_act_pct: float = 3.0
+    trail_gap_pct: float = 1.5
 
 
 def params_from_cfg(cfg, **over) -> SimParams:
@@ -300,7 +396,9 @@ def params_from_cfg(cfg, **over) -> SimParams:
                   start_capital=cfg.start_capital, kill_pct=cfg.max_total_loss_pct,
                   symbol_cooldown_min=cfg.symbol_cooldown_minutes, loss_cooldown_min=cfg.loss_cooldown_minutes,
                   loss_streak_limit=cfg.loss_streak_limit, loss_streak_pause_h=cfg.loss_streak_pause_hours,
-                  daily_loss_pct=cfg.daily_loss_limit_pct, daily_profit_pct=cfg.daily_profit_target_pct)
+                  daily_loss_pct=cfg.daily_loss_limit_pct, daily_profit_pct=cfg.daily_profit_target_pct,
+                  trail_enabled=cfg.futures_trailing, trail_act_pct=cfg.futures_trailing_act_pct,
+                  trail_gap_pct=cfg.futures_trailing_gap_pct)
     return replace(p, **over) if over else p
 
 
@@ -369,7 +467,7 @@ def _funding_count(a_ms: int, b_ms: int) -> int:
 
 def run_trade(p: SimParams, s: FutSignal, window: tuple, margin: float, notional: float,
               data: Optional[FutData] = None) -> FutTrade:
-    """Tek işlem: giriş, başabaş, Kâr Al / Zarar Kes / zaman stopu, likidasyon (yalıtılmış teminat)."""
+    """Tek işlem: giriş, başabaş, izleyen stop, Kâr Al / Zarar Kes / zaman stopu, likidasyon (yalıtılmış teminat)."""
     bar_ms, t, o, h, l, c = window
     side = 1 if s.side == "long" else -1
     slip = p.slippage_pct / 100
@@ -378,9 +476,13 @@ def run_trade(p: SimParams, s: FutSignal, window: tuple, margin: float, notional
     sl = entry * (1 - side * p.sl_pct / 100)
     be_trig = entry * (1 + side * p.be_trigger_pct / 100)
     be_stop = entry * (1 + side * p.be_floor_pct / 100)
+    trail_trig = entry * (1 + side * p.trail_act_pct / 100)
+    trail_gap = p.trail_gap_pct / 100
     liq = entry * (1 - side * (1 / p.leverage - p.mmr_pct / 100))
     deadline = s.close_ms + p.hold_min * MIN_MS
-    stop, be_on = sl, False
+    stop, kind = sl, "SL"                                   # Geçerli stop ve türü (SL → BE → TRAIL)
+    be_on = trail_on = False
+    peak = entry
     exit_price, reason, exit_ms, gap, liquidated = None, "END", None, False, False
     worst = 0.0
 
@@ -390,55 +492,59 @@ def run_trade(p: SimParams, s: FutSignal, window: tuple, margin: float, notional
     def reached(price: float, level: float) -> bool:    # Fiyat lehte seviyeye ulaştı
         return price >= level if side > 0 else price <= level
 
+    def favorable(fj: float) -> None:
+        """Mumun lehteki ucu görüldü: başabaş tetiği ve izleyen stop (stop yalnızca lehte yönde ilerler)."""
+        nonlocal stop, kind, be_on, trail_on, peak
+        if p.be_enabled and not be_on and reached(fj, be_trig):
+            be_on = True
+            if worse(stop, be_stop):
+                stop, kind = be_stop, "BE"
+        if p.trail_enabled:
+            if reached(fj, peak):
+                peak = fj
+            if not trail_on and reached(peak, trail_trig):
+                trail_on = True
+            level = peak * (1 - side * trail_gap)
+            if trail_on and worse(stop, level) and stop != level:
+                stop, kind = level, "TRAIL"
+
     adverse = l if side > 0 else h
-    favorable = h if side > 0 else l
+    best = h if side > 0 else l
     n = len(t)
     for j in range(n):
         tj = int(t[j])
         if tj >= deadline:
             exit_price, reason, exit_ms = o[j] * (1 - side * slip), "TIME", tj
             break
-        oj, aj, fj = o[j], adverse[j], favorable[j]
+        oj, aj, fj = o[j], adverse[j], best[j]
         if worse(oj, liq):                                  # Likidasyon fiyatının ötesinde açıldı: stop çalışamadı
             exit_price, reason, exit_ms, gap, liquidated = oj, "LIQ", tj, True, True
             worst = max(worst, side * (entry - oj) / entry * 100)
             break
         if worse(oj, stop):                                 # Stopun ötesinde açıldı (fiyat boşluğu)
-            exit_price, reason, exit_ms, gap = oj * (1 - side * slip), "BE" if be_on else "SL", tj, True
+            exit_price, reason, exit_ms, gap = oj * (1 - side * slip), kind, tj, True
             worst = max(worst, side * (entry - oj) / entry * 100)
             break
         worst = max(worst, side * (entry - aj) / entry * 100)
         # Mum içi sıra (standart OHLC varsayımı): yükselen mum açılış → dip → tepe → kapanış, düşen mum açılış →
-        # tepe → dip → kapanış. Pozisyonun ters tarafı önce görüldüyse önce stop, sonra hedef / başabaş bakılır.
+        # tepe → dip → kapanış. Pozisyonun ters tarafı önce görüldüyse önce stop, sonra hedef / başabaş / izleyen
+        # stop bakılır; tepeden kapanışa inerken yeni stop geçildiyse o mumda stoptan çıkılır.
         cj = c[j]
         adverse_first = cj >= oj if side > 0 else cj <= oj
-        if adverse_first:
-            if worse(aj, stop):
-                fill = (stop + aj) / 2 if p.harsh_stops else stop
-                exit_price, reason, exit_ms = fill * (1 - side * slip), "BE" if be_on else "SL", tj
-                break
-            if reached(fj, tp):
-                exit_price = tp if p.tp_limit else tp * (1 - side * slip)
-                reason, exit_ms = "TP", tj
-                break
-            if p.be_enabled and not be_on and reached(fj, be_trig):
-                be_on = True
-                stop = be_stop if worse(stop, be_stop) else stop
-                if worse(cj, stop):                         # Tepeden sonra kapanışa inerken başabaş stopu geçildi
-                    exit_price, reason, exit_ms = stop * (1 - side * slip), "BE", tj
-                    break
-        else:
-            if reached(fj, tp):
-                exit_price = tp if p.tp_limit else tp * (1 - side * slip)
-                reason, exit_ms = "TP", tj
-                break
-            if p.be_enabled and not be_on and reached(fj, be_trig):
-                be_on = True
-                stop = be_stop if worse(stop, be_stop) else stop
-            if worse(aj, stop):
-                fill = (stop + aj) / 2 if p.harsh_stops else stop
-                exit_price, reason, exit_ms = fill * (1 - side * slip), "BE" if be_on else "SL", tj
-                break
+        if adverse_first and worse(aj, stop):
+            fill = (stop + aj) / 2 if p.harsh_stops else stop
+            exit_price, reason, exit_ms = fill * (1 - side * slip), kind, tj
+            break
+        if reached(fj, tp):
+            exit_price = tp if p.tp_limit else tp * (1 - side * slip)
+            reason, exit_ms = "TP", tj
+            break
+        favorable(fj)
+        after = cj if adverse_first else aj                 # Tepeden sonra görülen en kötü fiyat
+        if worse(after, stop):
+            fill = (stop + after) / 2 if p.harsh_stops and not adverse_first else stop
+            exit_price, reason, exit_ms = fill * (1 - side * slip), kind, tj
+            break
     if exit_price is None:                                  # Veri penceresi bitti (son mumun kapanışı)
         last = n - 1
         exit_price = (c[last] if n else entry) * (1 - side * slip)
@@ -717,7 +823,12 @@ def variant_rows(cfg, data: FutData, signals, windows) -> List[Tuple[str, Evalua
             sigs, _f = find_signals(c2, data)
             load_windows(data, sigs, max(MAX_WINDOW_MIN, cfg.max_hold_minutes + 10), cache=windows)
             return evaluate(params_from_cfg(c2), data, sigs, windows)
+        base = params_from_cfg(cfg)
+        trail = (("İzleyen stop kapalı", ev(trail_enabled=False)) if base.trail_enabled else
+                 ("İzleyen stop +%3 / %1.5", ev(trail_enabled=True, trail_act_pct=3.0, trail_gap_pct=1.5)))
         return [("Başabaş kalkanı kapalı", ev(be_enabled=False)),
+                trail,
+                ("Başabaş +%5 → +%2", ev(be_enabled=True, be_trigger_pct=5.0, be_floor_pct=2.0)),
                 ("Zaman stopu 60 dk", ev(hold_min=60)),
                 ("Zaman stopu 120 dk", ev(hold_min=120)),
                 ("Zarardan sonra bekleme yok", ev(loss_cooldown_min=0)),
@@ -775,14 +886,21 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
     fixed = ev.trades
     size = p.start_capital * p.margin_usage_pct / 100 * p.leverage
     L = [f"📊 VADELİ SCALPING BACKTESTİ — {_date(data.start_ms)} → {_date(data.end_ms)} ({days:.0f} gün)", "━" * 30]
-    L.append("Coinler: " + "; ".join(f"{_date(s.start_ms)}'den: {','.join(s.coins)}" for s in data.segments))
+    if data.universe_note:
+        last = data.segments[-1].coins if data.segments else ()
+        L.append(f"Coinler: {data.universe_note}; son ay: {','.join(last[:20])}" + (" ..." if len(last) > 20 else ""))
+    else:
+        L.append("Coinler: " + "; ".join(f"{_date(s.start_ms)}'den: {','.join(s.coins)}" for s in data.segments))
     L.append(f"Kaldıraç {p.leverage}x isolated | teminat: serbest bakiyenin %{p.margin_usage_pct:g}'i (bileşik) | "
              f"başlangıç {p.start_capital:g} USDT")
     L.append(f"Kâr Al +%{p.tp_pct:g} ({'limit, maker' if p.tp_limit else 'piyasa'}) | Zarar Kes -%{p.sl_pct:g} | "
              + (f"başabaş +%{p.be_trigger_pct:g} → stop +%{p.be_floor_pct:g}" if p.be_enabled else "başabaş kapalı")
+             + (f" | izleyen stop +%{p.trail_act_pct:g}'de, tepenin %{p.trail_gap_pct:g} gerisinden"
+                if p.trail_enabled else "")
              + f" | zaman stopu {p.hold_min} dk (fiyat %, girişten)")
     L.append(f"Komisyon: piyasa %{p.taker_fee * 100:.3f} / limit %{p.maker_fee * 100:.3f}, kayma %{p.slippage_pct:g}, "
-             f"gerçek fonlama oranları; çıkışlar {'1 dk' if data.exit_interval == '1m' else '5 dk'} mumlarla")
+             + ("ortalama fonlama oranı (8 saatte %0.01)" if data.loader is not None else "gerçek fonlama oranları")
+             + f"; çıkışlar {'1 dk' if data.exit_interval == '1m' else '5 dk'} mumlarla")
     L.append(f"Likidasyon ({p.leverage}x): fiyat ~%{room:.1f} ters giderse; zarar kes bundan {room - p.sl_pct:.1f} "
              f"puan önce çalışır")
     crash = cfg.futures_tactic == "crash"
@@ -849,7 +967,7 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
                  f"{p.leverage}x'te teminatın {np.mean(moves) * p.leverage:+.2f}%'i")
         L.append("")
         L.append("📌 Çıkış nedenleri (C):")
-        for reason in ("TP", "BE", "SL", "TIME", "LIQ", "END"):
+        for reason in ("TP", "TRAIL", "BE", "SL", "TIME", "LIQ", "END"):
             group = [tr for tr in fixed if tr.reason == reason]
             if group:
                 L.append(f"  {REASON_TR[reason]:14s} {len(group):5d} (%{len(group) / len(fixed) * 100:4.1f}) | ort. ROE "
@@ -868,7 +986,7 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
         worst = min(fixed, key=lambda tr: tr.roe_pct)
         L.append(f"  En kötü işlem: {worst.symbol} {worst.side.upper()} {_date(worst.entry_ms)}: ROE {worst.roe_pct:+.1f}%"
                  f" ({REASON_TR[worst.reason]}, fiyat %{worst.mae_pct:.2f} ters)")
-        wicks = sorted((tr.mae_pct - p.sl_pct for tr in fixed if tr.reason in ("SL", "BE")), reverse=True)
+        wicks = sorted((tr.mae_pct - p.sl_pct for tr in fixed if tr.reason in ("SL", "BE", "TRAIL")), reverse=True)
         if wicks and wicks[0] > 0:
             big = sum(1 for w in wicks if w >= 2)
             L.append(f"  Zarar kes mumunda fiyatın stopun ötesine sarktığı en uzun fitil: %{wicks[0]:.1f} (≥%2 fitilli "
