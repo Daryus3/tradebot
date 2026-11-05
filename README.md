@@ -139,11 +139,11 @@ Bot **yalnızca sizin sohbetinizden** (`TELEGRAM_CHAT_ID`) gelen komutları ve m
 | Düğme | Ne yapar? |
 |---|---|
 | 📊 Durum · ⏸️ Durdur / ▶️ Devam | `/durum`, `/durdur`, `/devam` ile aynı |
-| ⚙️ Ayarlar | Kâr Al, Zarar Kes, izleyen stop (±0.5) ve en fazla pozisyon (±1); hemen uygulanır |
+| ⚙️ Ayarlar | Kâr Al, Zarar Kes, izleyen stop (±0.5) ve en fazla pozisyon (±1); **🔧 Çıkış ayrıntıları**: izleyen stop tabanı, maks. süre, başabaş kalkanı (aç / kapa, tetik, taban), Binance yedek stopu. Vadeli stratejide ayrı sayfa (aşağıda) |
 | 💰 Sermaye (yedek akçe) | İlk giriş yüzdesi: %100 (kapalı) / %75 / %50 / %33 — kalan pay USDT olarak yedekte bekler |
 | 🧭 Strateji | Hazır stratejiler arasında geçiş (onay ister, bot yeniden başlar; grubun çıkış ayarları yüklenir, eski grubunkiler saklanır) |
-| 🔔 Bildirim | Tümü / Sadece Kapanışlar / Sessiz Mod (komut cevapları ve acil uyarılar her zaman gelir) |
-| 🛡️ Filtreler · 🧯 Risk | Ek giriş filtrelerini ve risk sigortalarını açar / kapatır |
+| 🔔 Bildirim | Tümü / Sadece Kapanışlar / Sessiz Mod (komut cevapları ve acil uyarılar her zaman gelir); durum raporu aralığı (kapalı / 1 / 4 / 12 saat), günlük özet saati, haftalık özet, sessiz saatler |
+| 🛡️ Filtreler · 🧯 Risk / Kill-switch | Ek giriş filtreleri; **☠️ kill-switch limiti** (%10-60, ±5 puan), günlük zarar limiti ve kâr hedefi, zarar serisi sigortası ve bekleme süresi, her çıkıştan / zarardan sonra aynı coine bekleme, coin karnesi, kayma alarmı |
 | 🧠 Akıllı Yönetim | Aşağıdaki tablodaki özellikleri açar / kapatır; DCA, piramit, süre ve kaçış için kapalı / sorarak / otomatik |
 | 📈 Canlı Pano · 🧹 Toz → BNB | 5 sn'de bir güncellenen tek K/Z mesajı; küçük bakiyeleri BNB'ye çevirme (canlı mod) |
 | 🧪 Backtest | Backtest'i Telegram'dan düğmelerle kurup başlatır, sonuçları (rapor, grafik, CSV) Telegram'a gönderir (aşağıda) |
@@ -151,10 +151,18 @@ Bot **yalnızca sizin sohbetinizden** (`TELEGRAM_CHAT_ID`) gelen komutları ve m
 | 📶 Gecikme · 📜 Son Loglar · 🌐 IP | Binance'e ms gecikme, son 15 log satırı, sunucunun dış IP'si |
 | 🔄 Sunucu Reset | Bot servisini yeniden başlatır (onay ister; ayrıntı VPS_KURULUM.md) |
 
+**⚡ Vadeli stratejide ⚙️ Ayarlar:** kaldıraç (1x-20x hazır + ±1x), teminat (serbest bakiyenin %25 / 50 / 75 / 95'i)
+ve alt sayfalar: **🧭 Giriş sinyali** (taktik; çöküş eşiği %6-15, ölçüm süresi 1-24 saat, likidasyon dalgası şartı;
+4'lü onayda yön, hacim ve likidasyon eşikleri, ölçüm kaynağı, BTC trendi), **🎯 Çıkış ve emirler** (Kâr Al / Zarar Kes
+hazır değerler + ±, başabaş tetiği ve tabanı, zaman stopu, Kâr Al emri limit / piyasa, stop güvencesi), **🪙 Coinler**
+(16 büyük coini tek tek aç / kapa, varsayılan 10'a dön), **☠️ Kill-switch**. Her sayfada seçili değer ✅ ile görünür.
+
 Menüden değiştirilen her ayar doğrulanır, hemen uygulanır ve sunucudaki `.env`'nin sonuna yazılır (bot yeniden
 başlasa da kalır; `.env`, `ayarlar.env`'yi ezer). Diğer ayarlar için `/ayar ANAHTAR DEĞER` (örn. `/ayar tp 2.5`,
-`/ayar DAILY_LOSS_LIMIT_PCT 3`, giriş taramasının önerdiği `/ayar MIN_ROOM_RATIO 0.5`, `/ayar MAX_24H_DROP_PCT 15`,
-`/ayar MIN_SIGNAL_SCORE 16.3`). API anahtarları, mod, sermaye ve kill-switch Telegram'dan değiştirilemez.
+`/ayar DAILY_LOSS_LIMIT_PCT 3`, `/ayar kill 30`, `/ayar QUIET_HOURS 01:00-09:00`, giriş taramasının önerdiği
+`/ayar MIN_ROOM_RATIO 0.5`). API anahtarları, mod ve sermaye Telegram'dan değiştirilemez. **Onay isteyenler:**
+kill-switch'i gevşetmek (limiti büyütmek; sıkılaştırmak hemen uygulanır, şu anki toplam zararın altında bir limit hiç
+seçilemez), vadelide stop güvencesini kapatmak ve vadeli taktiği değiştirmek (o taktiğin çıkış ayarları da yüklenir).
 
 | Komut | Ne yapar? |
 |---|---|
@@ -279,7 +287,8 @@ bırakıldığı).
 bakiyenin `FUTURES_MARGIN_USAGE_PCT`'si (95) teminat × kaldıraç (bileşik); miktar / fiyat CCXT `amount_to_precision` /
 `price_to_precision` ile; tutar Binance'in en küçük emir tutarının altındaysa işlem pas geçilir ve Telegram'a yazılır
 (bot çökmez). Hesap tek yönlü (One-Way) olmalı: açılışta API'den teyit edilir. Telegram: pozisyonlarda `[LONG 2X]`
-ve anlık ROE (`/pano`, `/durum`, `/pozisyon`); ⚙️ Ayarlar'da kaldıraç düğmeleri ve taktik. Durum ve işlem kaydı
+ve anlık ROE (`/pano`, `/durum`, `/pozisyon`); ⚙️ Ayarlar'da kaldıraç, teminat, taktik, eşikler, çıkışlar, coinler ve
+kill-switch düğmeleri (yukarıda). Durum ve işlem kaydı
 spot'tan ayrıdır: `data/state_futures_<mod>.json`, `data/trades_futures_<mod>.csv`.
 
 **Nasıl bulundu (Kasım 2026 araştırması):** 15 coin, Ocak 2020 – Kasım 2026, 5 dk mumlar; ayarlar yalnızca
@@ -404,6 +413,7 @@ tradebot/
 ├── telegram_bot.py    # Telegram bildirimleri
 ├── commands.py        # Telegram komutları
 ├── control_panel.py   # Telegram kontrol paneli (/menu): düğmeler, ayar değiştirme, strateji seçimi, reset
+├── settings_menu.py   # Ayrıntılı ayar sayfaları: vadeli işlem, kill-switch, risk sigortaları, raporlar
 ├── runtime_settings.py  # Telegram'dan değiştirilebilen ayarlar ve .env'ye güvenli yazma
 ├── entry_filters.py   # Ek giriş filtreleri (fitil, VWAP, aşırı ısınma, RSI uyumsuzluğu, emir defteri, tape)
 ├── ip_monitor.py      # Sunucunun dış IP'sini izler, değişirse alarm

@@ -262,11 +262,13 @@ class ConflictError(Exception):
 
 @dataclass
 class PendingConfirm:
-    action: str            # sell | sellall | close | addcap | restart | strategy (symbol = strateji adı)
+    action: str            # sell | sellall | close | addcap | restart | strategy (symbol = strateji adı) |
+    #                        setting (symbol = ayar sayfası, values = yazılacak ayarlar)
     symbol: str = ""
     amount: float = 0.0
     expires: float = 0.0
     token: str = ""        # Onay düğmesinin kimliği: eski bir mesajdaki düğme sonraki bir işlemi onaylayamaz
+    values: Optional[Dict[str, object]] = None
 
 
 class CommandProcessor:
@@ -686,6 +688,8 @@ class CommandProcessor:
             self.panel.restart("Telegram'dan yeniden başlatma istendi")
         elif pending.action == "strategy":
             self.panel.apply_strategy(pending.symbol)
+        elif pending.action == "setting":
+            self.panel.apply_confirmed(pending)
         elif pending.action == "question":
             token, _, choice = pending.symbol.partition(":")
             self.bot.smart.answer(token, choice, confirmed=True)

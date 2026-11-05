@@ -3,7 +3,9 @@ Telegram kontrol paneli: /menu ile açılan düğmeli menü ve alt menüleri.
 
 Düğmeler YALNIZCA .env'deki TELEGRAM_CHAT_ID sohbetinde çalışır (bkz. commands.TelegramCommandListener).
 Ayar değişiklikleri doğrulanır, hemen uygulanır ve sunucudaki .env'ye kaydedilir (bkz. runtime_settings).
-Satış / yeniden başlatma / strateji değişikliği gibi işlemler yine onay ister (COMMAND_PIN ayarlıysa /evet PIN).
+Ayrıntılı ayar sayfaları (vadeli işlem, kill-switch, risk, raporlar) settings_menu'dedir.
+Satış / yeniden başlatma / strateji değişikliği / kill-switch'i gevşetme gibi işlemler onay ister (COMMAND_PIN
+ayarlıysa /evet PIN).
 """
 from __future__ import annotations
 
@@ -19,10 +21,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 from config import (LOG_DIR, PROFILE_ATTRS, PROFILES, STRATEGY_NAMES, Config, ConfigError, divergence_trading,
-                    futures_liq_distance_pct, is_futures, is_rotation, strategy_family, with_strategy)
+                    is_futures, is_rotation, strategy_family, with_strategy)
 from entry_filters import DIV_FILTER_RECENT_BARS
 from logger import get_logger, redact
+from risk import kill_switch_hit
 from runtime_settings import EDITABLE, apply_settings, env_values, find_key, format_value, write_env_values
+from settings_menu import NOTIFY_LABELS, PAGES, SettingsMenu
 from telegram_bot import LINE, Messages, esc, fmt_duration, fmt_signed, fmt_usdt
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -35,16 +39,11 @@ LOG_TAIL_LINES = 15
 BLACKLIST_HOURS = 24
 # Tarama sürerken de hemen çalışan (yalnızca bilgi gösteren / menüde gezinen) düğmeler
 READ_ONLY_CALLBACKS = frozenset({"menu", "st", "cfg", "cap", "strat", "ntf", "flt", "risk", "scan", "lat", "log",
-                                 "ip", "x", "rst", "smart", "board", "dust", "bt"})
-NOTIFY_LABELS = {"all": "Tümü", "closes": "Sadece Kapanışlar", "silent": "Sessiz Mod"}
-NOTIFY_HELP = {"all": "her alım, satış, izleyen stop ve rapor",
-               "closes": "yalnızca pozisyon kapanışları (alım ve periyodik raporlar gelmez)",
-               "silent": "yalnızca acil durumlar (zarar kes, kill-switch, hatalar)"}
+                                 "ip", "x", "rst", "smart", "board", "dust", "bt", "pg"})
 # Ayar düğmeleri: kısa ad → (ayar, adım)
 STEPS = {"TP": ("TAKE_PROFIT_PCT", 0.5), "SL": ("STOP_LOSS_PCT", 0.5), "TR": ("TRAILING_ACTIVATION_PCT", 0.5),
          "POS": ("MAX_OPEN_POSITIONS", 1), "LEV": ("FUTURES_LEVERAGE", 1)}
 FUTURES_STEPS = {"TP": 0.1, "SL": 0.1}          # Vadeli: Kâr Al / Zarar Kes fiyat yüzdesi, ince adım
-LEVERAGE_CHOICES = (1, 3, 5, 10, 15, 20)
 CAPITAL_CHOICES = (100, 75, 50, 33)
 FILTER_KEYS = ("BTC_FILTER", "SPREAD_FILTER", "FAKEOUT_FILTER", "VWAP_FILTER", "OVERHEAT_FILTER", "RSI_DIV_FILTER",
                "PRIOR_TREND_FILTER", "OB_WALL_FILTER", "OB_IMBALANCE_FILTER", "TAPE_FILTER")
@@ -115,6 +114,7 @@ class ControlPanel:
         from market_scan import scan_market
         self.scan_fn = scan_market               # Testlerde değiştirilebilir
         self.backtest = BacktestMenu(proc)       # /backtest düğmeleri
+        self.pages = SettingsMenu(self)          # Ayrıntılı ayar sayfaları (pg: / kv: / fc: / ftac: düğmeleri)
 
     @property
     def bot(self):
@@ -182,6 +182,14 @@ class ControlPanel:
             self._choose("LOSS_STREAK_LIMIT", arg, self.show_risk, mid)
         elif action == "stp":
             self.ask_strategy(arg)
+        elif action == "pg":
+            self.pages.show(arg, mid)
+        elif action == "kv" and len(args) == 3:
+            self.pages.set(args[0], args[1], args[2], mid)
+        elif action == "fc" and arg:
+            self.pages.toggle_coin(arg, mid)
+        elif action == "ftac":
+            self.pages.ask_tactic(arg, mid)
         elif action in ("bl", "nobl"):
             self.blacklist(arg, action == "bl", mid)
         else:
@@ -202,12 +210,13 @@ class ControlPanel:
                 f"{status}\n"
                 f"📦 Açık pozisyon: {len(state.positions)}/{bot.target_slots()} | 💼 Sermaye: "
                 f"{fmt_usdt(state.capital)} {cfg.quote_asset}\n"
+                f"{self.pages.kill_line()}\n"
                 f"🔔 Bildirim: {NOTIFY_LABELS.get(cfg.notify_mode, cfg.notify_mode)}")
         keyboard = [
             [("📊 Durum", "st"), ("▶️ Devam", "resume") if state.paused else ("⏸️ Durdur", "pause")],
             [("⚙️ Ayarlar", "cfg"), ("💰 Sermaye", "cap")],
             [("🧭 Strateji", "strat"), ("🔔 Bildirim", "ntf")],
-            [("🛡️ Filtreler", "flt"), ("🧯 Risk", "risk")],
+            [("🛡️ Filtreler", "flt"), ("🧯 Risk / Kill-switch", "risk")],
             [("🧠 Akıllı Yönetim", "smart"), ("📈 Canlı Pano", "board")],
             [("🧪 Backtest", "bt")],
             [("🔎 Piyasayı Tara", "scan"), ("📶 Gecikme", "lat")],
@@ -240,11 +249,14 @@ class ControlPanel:
         try:
             new, notes = apply_settings(bot.cfg, values)
         except ConfigError as exc:
-            return False, f"⚠️ {esc(str(exc).replace('Ayar hataları:', '').strip())}"
+            return False, self._config_error(exc)
         saved = ""
         if bot.settings_path is not None:
+            lines: Dict[str, Optional[str]] = dict(env_values(new, list(values)))
+            if "MAX_TOTAL_LOSS_PCT" in values:
+                lines["MAX_TOTAL_LOSS_USDT"] = None   # Eski sabit USDT kill-switch satırı yüzdelik ayara geçince silinir
             try:
-                write_env_values(bot.settings_path, env_values(new, list(values)))
+                write_env_values(bot.settings_path, lines)
             except OSError as exc:
                 saved = f"\n⚠️ .env dosyasına yazılamadı ({esc(type(exc).__name__)}); değişiklik yalnızca bot " \
                         f"yeniden başlayana kadar geçerli."
@@ -258,22 +270,95 @@ class ControlPanel:
             msg += "\n" + "\n".join(f"⚠️ {esc(n)}" for n in notes)
         return True, msg
 
+    @staticmethod
+    def _config_error(exc: Exception) -> str:
+        return f"⚠️ {esc(str(exc).replace('Ayar hataları:', '').strip())}"
+
     def _choose(self, key: str, value: str, view, mid: Optional[int]) -> None:
         _ok, msg = self.set_values({key: value})
         view(mid, msg)
 
+    def request_change(self, values: Dict[str, object], done, mid: Optional[int] = None, origin: str = "",
+                       ask: Optional[str] = None, question: str = "Ayar değiştirilsin mi?") -> None:
+        """Düğmelerin ve /ayar'ın ortak giriş noktası: doğrular, riskli değişiklikte onay ister, yoksa hemen uygular.
+
+        `done(mid, mesaj)` sonucu gösterir (genelde ayar sayfasını yeniler). `origin` onaydan sonra gösterilecek ayar
+        sayfası, `ask` doluysa (ör. vadeli taktik değişimi) değişiklik her durumda onay ister."""
+        try:
+            new, _notes = apply_settings(self.bot.cfg, values)
+        except ConfigError as exc:
+            done(mid, self._config_error(exc))
+            return
+        refuse, extra = self._guard(new, values)
+        if refuse:
+            done(mid, refuse)
+            return
+        detail = (ask or "") + (extra or "")
+        if detail:
+            from commands import PendingConfirm
+            self.proc._ask(PendingConfirm("setting", origin, values=dict(values)), detail, question)
+            return
+        _ok, msg = self.set_values(values)
+        done(mid, msg)
+
+    def _guard(self, new: Config, values: Dict[str, object]) -> Tuple[Optional[str], Optional[str]]:
+        """(reddetme nedeni, onay sorusuna eklenecek açıklama). Kill-switch: şu anki zararın altına inemez,
+        gevşetmek onay ister. Binance'teki zarar kes güvencesini kapatmak onay ister."""
+        bot, cfg = self.bot, self.bot.cfg
+        q = cfg.quote_asset
+        asks = []
+        if "MAX_TOTAL_LOSS_PCT" in values:
+            st = bot.state
+            if st.killed:
+                return ("⛔ Kill-switch zaten tetiklenmiş; limit değiştirmek kilidi açmaz. Servisi durdurup sunucuda "
+                        f"<code>python main.py --mode {cfg.trading_mode} --reset-state</code> çalıştırın."), None
+            old_limit = bot.loss_limit
+            new_limit = new.loss_limit(st.start_capital, st.capital_added)
+            unreal = bot.unrealized()
+            if kill_switch_hit(st.realized_pnl, unreal, new_limit):
+                return (f"⚠️ Kill-switch %{new.max_total_loss_pct:g} (−{fmt_usdt(new_limit)} {q}) seçilemez: toplam "
+                        f"K/Z şu an {fmt_signed(st.realized_pnl + unreal)} {q}, limit hemen tetiklenir ve bot tüm "
+                        f"pozisyonları kapatıp kilitlenirdi."), None
+            if new_limit > old_limit + 0.005:
+                asks.append(f"\n☠️ Kill-switch gevşetiliyor: −{fmt_usdt(old_limit)} → <b>−{fmt_usdt(new_limit)} {q}</b> "
+                            f"(sermayenin %{new.max_total_loss_pct:g}). Bot durmadan önce daha fazla zarar edebilir.")
+        if "FUTURES_EXCHANGE_STOP" in values and cfg.futures_exchange_stop and not new.futures_exchange_stop:
+            asks.append("\n🛡️ Zarar kes emri Binance'e konamazsa pozisyon artık KAPATILMAYACAK: bot kapanır ya da "
+                        "bağlantı koparsa pozisyon korumasız kalabilir.")
+        return None, "".join(asks) or None
+
+    def apply_confirmed(self, pending) -> None:
+        """/evet ile onaylanan ayar değişikliği (onay beklerken durum değiştiyse yeniden denetlenir)."""
+        values = dict(pending.values or {})
+        if not values:
+            return
+        try:
+            new, _notes = apply_settings(self.bot.cfg, values)
+        except ConfigError as exc:
+            self.proc.reply(self._config_error(exc))
+            return
+        refuse, _extra = self._guard(new, values)
+        if refuse:
+            self.proc.reply(refuse)
+            return
+        _ok, msg = self.set_values(values)
+        if pending.symbol in PAGES:
+            self.pages.show(pending.symbol, None, msg)
+        else:
+            self.proc.reply(msg)
+
     def set_from_text(self, args) -> None:
         if len(args) < 2:
             keys = ", ".join(EDITABLE)
-            self.proc.reply("Kullanım: /ayar ANAHTAR DEĞER  (örn. /ayar tp 2.5, /ayar FAKEOUT_FILTER acik)\n"
+            self.proc.reply("Kullanım: /ayar ANAHTAR DEĞER  (örn. /ayar tp 2.5, /ayar FAKEOUT_FILTER acik, "
+                            "/ayar kill 30)\n"
                             f"Değiştirilebilen ayarlar: {esc(keys)}\nStrateji için /menu → Strateji.")
             return
         key = find_key(args[0])
         if key is None:
             self.proc.reply(f"❓ {esc(args[0])} Telegram'dan değiştirilemez. Liste için /ayar")
             return
-        _ok, msg = self.set_values({key: " ".join(args[1:])})
-        self.proc.reply(msg)
+        self.request_change({key: " ".join(args[1:])}, lambda _mid, msg: self.proc.reply(msg))
 
     def adjust(self, short: str, direction: str, mid: Optional[int]) -> None:
         if short not in STEPS or direction not in ("+", "-"):
@@ -301,43 +386,21 @@ class ControlPanel:
                 f"📦 En fazla pozisyon: {cfg.max_open_positions} (şu an {self.bot.target_slots()})\n"
                 f"⏱️ Maks. süre: {hold}{rot}\n{LINE}\n"
                 "<i>Değişiklik hemen uygulanır (açık pozisyonların hedefleri de) ve sunucudaki .env'ye kaydedilir. "
-                "Diğer ayarlar için: /ayar ANAHTAR DEĞER</i>" + (f"\n\n{note}" if note else ""))
+                "Başabaş, maks. süre ve Binance yedek stopu: 🔧 Çıkış ayrıntıları. Diğer ayarlar için: /ayar ANAHTAR "
+                "DEĞER</i>" + (f"\n\n{note}" if note else ""))
         keyboard = [
             [("🎯 TP −0.5", "adj:TP:-"), ("🎯 TP +0.5", "adj:TP:+")],
             [("🛑 SL −0.5", "adj:SL:-"), ("🛑 SL +0.5", "adj:SL:+")],
             [("📈 İz. −0.5", "adj:TR:-"), ("📈 İz. +0.5", "adj:TR:+")],
             [("📦 Poz. −1", "adj:POS:-"), ("📦 Poz. +1", "adj:POS:+")],
+            [("🔧 Çıkış ayrıntıları", "pg:sx"), ("☠️ Kill-switch", "pg:ks")],
             self._back(),
         ]
         self.proc.reply_menu(text, keyboard, mid)
 
     def show_futures_settings(self, mid: Optional[int] = None, note: str = "") -> None:
-        """Vadeli işlem için Dinamik Ayarlar: kaldıraç (1x-20x), fiyat yüzdesi olarak Kâr Al / Zarar Kes."""
-        cfg = self.bot.cfg
-        lev = cfg.futures_leverage
-        room = futures_liq_distance_pct(lev, cfg.futures_mmr_pct)
-        tactic = (f"çöküş dönüşü ({cfg.futures_crash_hours} saatte ≥%{cfg.futures_crash_drop_pct:g} düşüş, long)"
-                  if cfg.futures_tactic == "crash" else "4'lü onay (likidasyon + hacim + RSI uyumsuzluğu + BTC trendi)")
-        text = (f"⚙️ <b>Dinamik Ayarlar — Vadeli</b>\n{LINE}\n"
-                f"🧭 Taktik: {tactic}\n"
-                f"⚡ Kaldıraç: <b>{lev}x</b> (isolated) | likidasyon ~%{room:.1f} fiyat hareketinde\n"
-                f"🎯 Kâr Al: fiyat +%{cfg.take_profit_pct:g} → ROE ~+%{cfg.take_profit_pct * lev:.0f}\n"
-                f"🛑 Zarar Kes: fiyat -%{cfg.stop_loss_pct:g} → ROE ~-%{cfg.stop_loss_pct * lev:.0f}\n"
-                f"🔒 Başabaş: +%{cfg.breakeven_trigger_pct:g} → stop +%{cfg.breakeven_floor_pct:g} | ⏱️ Zaman stopu: "
-                f"{cfg.max_hold_minutes} dk\n"
-                f"💵 Teminat: serbest bakiyenin %{cfg.futures_margin_usage_pct:g}'i | yön: {cfg.futures_sides}\n{LINE}\n"
-                "<i>Kaldıraç değişikliği hemen kaydedilir ve SONRAKİ işlemde (girişten hemen önce Binance'te) "
-                "uygulanır; açık pozisyonun kaldıracı değişmez. Zarar kes likidasyondan en az 0.5 puan önce "
-                "olmalı. Diğerleri: /ayar ANAHTAR DEĞER (örn. /ayar FUTURES_SIDES long)</i>"
-                + (f"\n\n{note}" if note else ""))
-        keyboard = [
-            [("⚡ −1x", "adj:LEV:-"), ("⚡ +1x", "adj:LEV:+")],
-            [(("✅ " if c == lev else "") + f"{c}x", f"lev:{c}") for c in LEVERAGE_CHOICES],
-            [("🎯 TP −0.1", "adj:TP:-"), ("🎯 TP +0.1", "adj:TP:+")],
-            [("🛑 SL −0.1", "adj:SL:-"), ("🛑 SL +0.1", "adj:SL:+")],
-            self._back(),
-        ]
-        self.proc.reply_menu(text, keyboard, mid)
+        """Vadeli işlem için Dinamik Ayarlar: kaldıraç (1x-20x), teminat ve ayrıntılı ayar sayfalarına geçiş."""
+        self.pages.show("fut", mid, note)
 
     def show_capital(self, mid: Optional[int] = None, note: str = "") -> None:
         bot, cfg = self.bot, self.bot.cfg
@@ -358,14 +421,7 @@ class ControlPanel:
         self.proc.reply_menu(text, [row[:2], row[2:], self._back()], mid)
 
     def show_notify(self, mid: Optional[int] = None, note: str = "") -> None:
-        mode = self.bot.cfg.notify_mode
-        text = (f"🔔 <b>Bildirim Ayarı</b>\n{LINE}\n"
-                + "\n".join(f"{'✅' if m == mode else '▫️'} <b>{NOTIFY_LABELS[m]}</b>: {NOTIFY_HELP[m]}"
-                            for m in NOTIFY_LABELS)
-                + "\n<i>Komut cevapları, uyarılar ve hatalar her modda gelir. Susturulan mesajlar loglara yazılır.</i>"
-                + (f"\n\n{note}" if note else ""))
-        keyboard = [[(("✅ " if m == mode else "") + label, f"ntfset:{m}")] for m, label in NOTIFY_LABELS.items()]
-        self.proc.reply_menu(text, keyboard + [self._back()], mid)
+        self.pages.show("ntf", mid, note)
 
     def show_filters(self, mid: Optional[int] = None, note: str = "") -> None:
         cfg = self.bot.cfg
@@ -395,40 +451,7 @@ class ControlPanel:
         self.proc.reply_menu(text, keyboard, mid)
 
     def show_risk(self, mid: Optional[int] = None, note: str = "") -> None:
-        bot, cfg = self.bot, self.bot.cfg
-        q = cfg.quote_asset
-        day_pnl = bot.today_pnl()
-        daily = (f"%{cfg.daily_loss_limit_pct:g} (≈{fmt_usdt(bot.daily_loss_usdt())} {q})"
-                 if cfg.daily_loss_limit_pct > 0 else "kapalı")
-        target = f"%{cfg.daily_profit_target_pct:g}" if cfg.daily_profit_target_pct > 0 else "kapalı"
-        streak = (f"üst üste {cfg.loss_streak_limit} zarar kes → {cfg.loss_streak_pause_hours:g} saat alım yok "
-                  f"(şu an seri: {bot.state.sl_streak})" if cfg.loss_streak_limit > 0 else "kapalı")
-        karne = (f"aynı coinde üst üste {cfg.coin_sl_limit} zarar kes → {BLACKLIST_HOURS} saat kara liste teklifi"
-                 if cfg.coin_sl_limit > 0 else "kapalı")
-        slip = (f"son 10 alımın ortalaması sınırı aşarsa uyarır (sınır %{cfg.slippage_alert_pct:g})"
-                if cfg.slippage_alert_pct > 0 else "kapalı")
-        cool = (f"zararla kapanan coine {fmt_duration(cfg.loss_cooldown_minutes * 60)} girilmez"
-                if cfg.loss_cooldown_minutes > cfg.symbol_cooldown_minutes else
-                f"normal ({cfg.symbol_cooldown_minutes} dk, her çıkıştan sonra)")
-        frozen = bot.freeze_note()
-        text = (f"🧯 <b>Risk Sigortaları</b>\n{LINE}\n"
-                f"📉 Günlük zarar limiti: {daily} | bugün: {fmt_signed(day_pnl)} {q}\n"
-                f"🎯 Günlük kâr hedefi: {target}\n🔁 Zarar serisi sigortası: {streak}\n"
-                f"📒 Coin karnesi: {karne}\n💧 Kayma alarmı: {slip}\n⏳ Zarardan sonra bekleme: {cool}\n"
-                f"{frozen or '▶️ Alımlar dondurulmamış'}\n{LINE}\n"
-                "<i>Sigortalar yalnızca YENİ alımları durdurur; açık pozisyonların takibi sürer. Diğerleri için: "
-                "/ayar DAILY_PROFIT_TARGET_PCT 3, /ayar COIN_SL_LIMIT 0 ...</i>" + (f"\n\n{note}" if note else ""))
-        dl = [(("✅ " if abs(cfg.daily_loss_limit_pct - c) < 0.01 else "") + ("Limit yok" if c == 0 else f"Gün -%{c}"),
-               f"dl:{c}") for c in DAILY_LIMIT_CHOICES]
-        ls = [(("✅ " if cfg.loss_streak_limit == c else "") + ("Seri yok" if c == 0 else f"{c} SL"), f"ls:{c}")
-              for c in STREAK_CHOICES]
-        lc = [(("✅ " if cfg.loss_cooldown_minutes == c else "") + ("Zarar sonrası: normal" if c == 0 else
-                                                                  f"{c // 60} sa"), f"lcd:{c}")
-              for c in LOSS_COOLDOWN_CHOICES]
-        keyboard = [dl, ls, lc]
-        if frozen:
-            keyboard.append([("▶️ Dondurmayı kaldır", "unfreeze")])
-        self.proc.reply_menu(text, keyboard + [self._back()], mid)
+        self.pages.show("risk", mid, note)
 
     def show_smart(self, mid: Optional[int] = None, note: str = "") -> None:
         cfg = self.bot.cfg

@@ -185,6 +185,16 @@ FUTURES_PROFILE = {
     "BACKUP_STOP_PCT": 8.0,
     "LOSS_COOLDOWN_MINUTES": 240,
 }
+# Telegram'da vadeli taktik değişince (onaydan sonra) o taktiğin çıkışları da yüklenir: çöküş dönüşü saatlerce süren
+# büyük toparlanmayı, 4'lü onay ise ilk sürümdeki %1-1.5'lik hızlı scalping hareketini hedefler.
+FUTURES_TACTIC_EXITS = {
+    "crash": {k: FUTURES_PROFILE[k] for k in ("TAKE_PROFIT_PCT", "STOP_LOSS_PCT", "TRAILING_ACTIVATION_PCT",
+                                              "TRAILING_FLOOR_PCT", "MAX_HOLD_MINUTES", "BREAKEVEN_TRIGGER_PCT",
+                                              "BREAKEVEN_FLOOR_PCT", "LOSS_COOLDOWN_MINUTES")},
+    "liq4": {"TAKE_PROFIT_PCT": 1.2, "STOP_LOSS_PCT": 0.9, "TRAILING_ACTIVATION_PCT": 1.0, "TRAILING_FLOOR_PCT": 0.5,
+             "MAX_HOLD_MINUTES": 60, "BREAKEVEN_TRIGGER_PCT": 0.5, "BREAKEVEN_FLOOR_PCT": 0.2,
+             "LOSS_COOLDOWN_MINUTES": 0},
+}
 PROFILE_ATTRS = {
     "TAKE_PROFIT_PCT": "take_profit_pct", "STOP_LOSS_PCT": "stop_loss_pct",
     "TRAILING_ACTIVATION_PCT": "trailing_activation_pct", "TRAILING_FLOOR_PCT": "trailing_floor_pct",
@@ -647,7 +657,9 @@ class Config:
             errors.append("TAKE_PROFIT_PCT sıfırdan büyük olmalı")
         if not 0 <= self.trailing_floor_pct < self.trailing_activation_pct:
             errors.append("TRAILING_FLOOR_PCT, TRAILING_ACTIVATION_PCT'den küçük olmalı")
-        if self.trailing_activation_pct >= self.take_profit_pct:
+        # Vadeli motor izleyen stop ve spot yedek stopu kullanmaz (zarar kes Binance'te STOP_MARKET olarak bekler):
+        # bu iki kural vadelide Kâr Al / Zarar Kes seçimini gereksiz yere kısıtlamasın
+        if self.trailing_activation_pct >= self.take_profit_pct and not is_futures(self.strategy):
             errors.append("TRAILING_ACTIVATION_PCT, TAKE_PROFIT_PCT'den küçük olmalı")
         if not 0 <= self.fee_rate < 0.01:
             errors.append("FEE_RATE 0 ile 0.01 arasında olmalı (örn. 0.001 = %0.1)")
@@ -663,7 +675,7 @@ class Config:
             errors.append("MAX_CANDIDATES en az 1 olmalı")
         if not 0 < self.backup_stop_pct < 100:
             errors.append("BACKUP_STOP_PCT 0-100 arasında olmalı")
-        if self.backup_stop_enabled and self.backup_stop_pct <= self.stop_loss_pct:
+        if self.backup_stop_enabled and self.backup_stop_pct <= self.stop_loss_pct and not is_futures(self.strategy):
             errors.append("BACKUP_STOP_PCT, STOP_LOSS_PCT'den büyük olmalı (yedek emir botun zarar kesinin altında beklemeli)")
         if self.breakeven_enabled and not 0 <= self.breakeven_floor_pct < self.breakeven_trigger_pct:
             errors.append("BREAKEVEN_FLOOR_PCT, BREAKEVEN_TRIGGER_PCT'den küçük olmalı")
@@ -763,6 +775,8 @@ class Config:
                               f"likidasyondan önce çalışmalı. Kaldıracı düşürün veya zarar kesi daraltın.")
             if self.max_hold_minutes <= 0:
                 errors.append("Vadeli: MAX_HOLD_MINUTES (zaman stopu) sıfırdan büyük olmalı (örn. 60)")
+        if self.status_report_minutes < 0 or self.symbol_cooldown_minutes < 0 or self.max_hold_minutes < 0:
+            errors.append("STATUS_REPORT_MINUTES, SYMBOL_COOLDOWN_MINUTES ve MAX_HOLD_MINUTES 0 veya pozitif olmalı")
         if self.signal_confirm_scans < 1:
             errors.append("SIGNAL_CONFIRM_SCANS en az 1 olmalı")
         if self.min_atr_pct >= self.max_atr_pct:

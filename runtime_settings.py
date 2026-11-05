@@ -1,8 +1,9 @@
 """
 Telegram menüsünden (/menu, /ayar) değiştirilebilen ayarlar.
 
-- Yalnızca `EDITABLE` listesindeki ayarlar değiştirilebilir. API anahtarları, Telegram token'ı, çalışma modu,
-  sermaye ve kill-switch gibi ayarlar Telegram'dan DEĞİŞTİRİLEMEZ.
+- Yalnızca `EDITABLE` listesindeki ayarlar değiştirilebilir. API anahtarları, Telegram token'ı, çalışma modu ve
+  sermaye Telegram'dan DEĞİŞTİRİLEMEZ. Kill-switch limiti (MAX_TOTAL_LOSS_PCT) değiştirilebilir ama gevşetmek onay
+  ister ve şu anki zararın altına indirilemez (bkz. control_panel.ControlPanel.request_change).
 - Yeni değer önce doğrulanır (Config.validate); geçerliyse çalışan bota hemen uygulanır ve sunucudaki .env
   dosyasına yazılır, böylece bot yeniden başlasa da kalır (.env, GitHub'daki ayarlar.env'yi ezer).
 - .env'ye yazma atomiktir (önce geçici dosya, sonra yer değiştirme) ve dosya izinleri korunur. Dosyadaki diğer
@@ -23,7 +24,7 @@ from config import (ACTION_MODES, FUTURES_LIQ_SOURCES, FUTURES_SIDES, FUTURES_TA
 @dataclass(frozen=True)
 class Setting:
     attr: str           # Config alanı
-    kind: str           # float | int | bool | choice
+    kind: str           # float | int | bool | choice | str | time (SS:DD) | trange (SS:DD-SS:DD)
     label: str          # Telegram'da görünen ad
     choices: Tuple[str, ...] = ()
 
@@ -67,6 +68,17 @@ EDITABLE: Dict[str, Setting] = {
     "SLIPPAGE_ALERT_PCT": Setting("slippage_alert_pct", "float", "Kayma alarmı (ortalama %, 0 = kapalı)"),
     "LOSS_COOLDOWN_MINUTES": Setting("loss_cooldown_minutes", "int",
                                      "Zarardan sonra aynı coine bekleme (dk, 0 = normal bekleme)"),
+    "SYMBOL_COOLDOWN_MINUTES": Setting("symbol_cooldown_minutes", "int", "Her çıkıştan sonra aynı coine bekleme (dk)"),
+    # Kill-switch: gevşetmek (limiti büyütmek) onay ister; şu anki toplam zararın altına indirilemez
+    "MAX_TOTAL_LOSS_PCT": Setting("max_total_loss_pct", "float", "Kill-switch: toplam zarar limiti (sermayenin %'si)"),
+    # Çıkış ayrıntıları ve Binance'teki yedek stop
+    "BREAKEVEN_ENABLED": Setting("breakeven_enabled", "bool", "Başabaş kalkanı"),
+    "BACKUP_STOP_PCT": Setting("backup_stop_pct", "float", "Binance yedek stop (net zarar %, yeni pozisyonlarda)"),
+    # Raporlar ve sessiz saatler
+    "STATUS_REPORT_MINUTES": Setting("status_report_minutes", "int", "Durum raporu aralığı (dk, 0 = kapalı)"),
+    "DAILY_REPORT_TIME": Setting("daily_report_time", "time", "Günlük özet saati (SS:DD, kapalı = gönderme)"),
+    "WEEKLY_REPORT": Setting("weekly_report", "bool", "Haftalık özet (pazar)"),
+    "QUIET_HOURS": Setting("quiet_hours", "trange", "Sessiz saatler (SS:DD-SS:DD, kapalı = yok)"),
     # Akıllı pozisyon yönetimi ve giriş
     "ATR_TARGETS": Setting("atr_targets", "bool", "ATR hedefleri"),
     "ATR_TP_MULT": Setting("atr_tp_mult", "float", "ATR Kâr Al çarpanı"),
@@ -127,12 +139,16 @@ EDITABLE: Dict[str, Setting] = {
     "FUTURES_BTC_TREND": Setting("futures_btc_trend", "bool", "Vadeli: BTC 1 saatlik trend filtresi"),
     "FUTURES_TP_ORDER": Setting("futures_tp_order", "choice", "Vadeli: Kâr Al emri (limit / market)",
                                 FUTURES_TP_ORDERS),
+    "FUTURES_EXCHANGE_STOP": Setting("futures_exchange_stop", "bool",
+                                     "Vadeli: zarar kes Binance'e konamazsa pozisyonu hemen kapat"),
     "BREAKEVEN_TRIGGER_PCT": Setting("breakeven_trigger_pct", "float", "Başabaş tetiği (%)"),
     "BREAKEVEN_FLOOR_PCT": Setting("breakeven_floor_pct", "float", "Başabaş stopu (%)"),
 }
 
 _TRUE = {"1", "true", "yes", "on", "evet", "e", "acik", "açık"}
 _FALSE = {"0", "false", "no", "off", "hayir", "hayır", "h", "kapali", "kapalı"}
+_NONE = {"", "0", "-", "off", "none", "yok", "kapali", "kapalı"}     # Saat ayarlarında "kapalı"
+_HHMM = r"([01]?\d|2[0-3]):?([0-5]\d)"
 _KEY_RE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=")
 
 
@@ -141,7 +157,8 @@ def find_key(text: str) -> Optional[str]:
     key = text.strip().upper()
     aliases = {"TP": "TAKE_PROFIT_PCT", "SL": "STOP_LOSS_PCT", "POZISYON": "MAX_OPEN_POSITIONS",
                "GIRIS": "CAPITAL_USAGE_PCT", "BILDIRIM": "NOTIFY_MODE", "KALDIRAC": "FUTURES_LEVERAGE",
-               "KALDIRAÇ": "FUTURES_LEVERAGE", "LEVERAGE": "FUTURES_LEVERAGE"}
+               "KALDIRAÇ": "FUTURES_LEVERAGE", "LEVERAGE": "FUTURES_LEVERAGE", "KILL": "MAX_TOTAL_LOSS_PCT",
+               "KILLSWITCH": "MAX_TOTAL_LOSS_PCT", "KILL_SWITCH": "MAX_TOTAL_LOSS_PCT"}
     key = aliases.get(key, key)
     return key if key in EDITABLE else None
 
@@ -158,6 +175,16 @@ def cast_value(kind: str, raw, key: str, choices: Tuple[str, ...] = ()) -> objec
         return raw
     if kind == "str":                  # Serbest metin (ör. ROTATION_COINS=BTC,ETH): virgül ondalık sayılmaz
         return raw.strip()
+    if kind in ("time", "trange"):     # "23:55" / "2355" / "kapalı" → "23:55" / "" (biçimi Config doğrular)
+        text = raw.strip().replace(" ", "")
+        if text.lower() in _NONE:
+            return ""
+        pattern = _HHMM if kind == "time" else f"{_HHMM}-{_HHMM}"
+        m = re.fullmatch(pattern, text)
+        if m is None:
+            return text
+        parts = [f"{int(m.group(i)):02d}:{m.group(i + 1)}" for i in range(1, m.lastindex, 2)]
+        return "-".join(parts)
     text = raw.strip().replace(",", ".")
     try:
         if kind == "float":
@@ -257,6 +284,8 @@ def apply_settings(cfg: Config, values: Dict[str, object]) -> Tuple[Config, Tupl
         if key not in EDITABLE:
             raise ConfigError(f"{key} Telegram'dan değiştirilemez")
         changes[EDITABLE[key].attr] = parse_value(key, raw)
+    if "max_total_loss_pct" in changes:
+        changes["legacy_loss_usdt"] = None     # Yüzdelik limit, eski sabit USDT ayarının (MAX_TOTAL_LOSS_USDT) yerine geçer
     new = replace(cfg, **changes)
     new.validate()
     old_notes = set(_setting_notes(cfg))

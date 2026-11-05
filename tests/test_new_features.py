@@ -131,7 +131,9 @@ class FakeResp:
 
 def test_quiet_hours_silence_routine_but_not_critical(monkeypatch):
     sent = []
-    n = TelegramNotifier("t" * 10, "1", async_mode=False, quiet_window=parse_time_range("00:00-23:59"))
+    noon = time.mktime((2026, 1, 15, 12, 0, 0, 0, 0, -1))      # Saat 23:59'da çalışınca da aynı sonuç
+    n = TelegramNotifier("t" * 10, "1", async_mode=False, quiet_window=parse_time_range("00:00-23:59"),
+                         now_fn=lambda: noon)
     monkeypatch.setattr(n.session, "post", lambda url, json, timeout: sent.append(json) or FakeResp())
     n.send("rutin")
     n.send("stop-loss", critical=True)

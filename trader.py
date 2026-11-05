@@ -278,12 +278,17 @@ class TradingBot:
         self.store.save(self.state)
 
     def apply_config(self, cfg) -> None:
-        """Telegram menüsünden değişen ayarları çalışan bota uygular (strateji, filtreler, bildirim modu)."""
-        self.cfg = cfg
+        """Telegram menüsünden değişen ayarları çalışan bota uygular (strateji, filtreler, bildirim modu, raporlar)."""
+        old, self.cfg = self.cfg, cfg
         for part in (self.strategy, getattr(self.strategy, "coin_filter", None), getattr(self.strategy, "regime", None)):
             if part is not None and hasattr(part, "cfg"):
                 part.cfg = cfg
         self.notifier.mode = cfg.notify_mode
+        if hasattr(self.notifier, "quiet_window"):
+            self.notifier.quiet_window = cfg.quiet_window
+        if cfg.status_report_minutes != old.status_report_minutes:   # Yeni aralık şimdiden sayılır (0 = kapalı)
+            self.next_status_at = (self.time_fn() + cfg.status_report_minutes * 60
+                                   if cfg.status_report_minutes > 0 else float("inf"))
         if self.running:
             self._sync_liq_feed()
 
