@@ -20,7 +20,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Tuple
 
-from config import (DEFAULT_FUTURES_COINS, FUTURES_LIQ_SOURCES, FUTURES_SIDES, FUTURES_TACTIC_EXITS, FUTURES_TACTICS,
+from config import (DEFAULT_FUTURES_COINS, FUTURES_LIQ_SOURCES, FUTURES_RECOMMENDED, FUTURES_SIDES,
+                    FUTURES_TACTIC_EXITS, FUTURES_TACTICS,
                     FUTURES_TP_ORDERS, futures_coin_list, futures_liq_distance_pct, is_futures, is_rotation)
 from runtime_settings import EDITABLE, format_value
 from telegram_bot import LINE, esc, fmt_duration, fmt_signed, fmt_usdt
@@ -40,7 +41,9 @@ TP_ORDER_LABELS = {"limit": "📌 Kâr Al: limit emir", "market": "⚡ Kâr Al: 
 LEVERAGE_CHOICES = (1, 2, 3, 5, 10, 15, 20)
 UNIVERSE_CHOICES = (0, 10, 20, 40, 60, 80, 100)     # 0 = FUTURES_COINS listesi
 # En hacimli N evreninin backtest özeti (Kasım 2026 araştırması; ayrıntı README)
-UNIVERSE_HINT = ("Test (doğrulama 2023-11 → 2026-10, 2x, en az 3 yıllık coinler, 6 ay ort. hacim): sabit liste "
+UNIVERSE_HINT = ("En iyi sonuç: 📋 liste + en hacimli 20 köklü coin (beklemesiz): doğrulamada yılda 137 işlem, +%99/yıl "
+                 "(yalnızca liste: 53 işlem, +%62). Test (doğrulama 2023-11 → 2026-10, 2x, en az 3 yıllık coinler, 6 ay "
+                 "ort. hacim, liste olmadan): sabit liste "
                  "+%62/yıl; ilk 10 +%55, ilk 20 +%81 (en büyük düşüş %33), ilk 40 +%11 (düşüş %78), ilk 60 -%8, "
                  "ilk 80 -%42. Yaş filtresi olmadan (yeni / hype coinler dahil) her N'de hesap eridi.")
 TRAIL_HINT = ("Test (2023-11 → 2026-10): izleyen stop bu stratejide sonucu iyileştirmedi (sabit listede çoğu ayarda "
@@ -178,7 +181,7 @@ PAGES: Dict[str, Page] = {
         (Link(lambda m: "🧭 Giriş sinyali", "pg:fe"), Link(lambda m: "🎯 Çıkış ve emirler", "pg:fx")),
         (Link(lambda m: m.protect_label(), "pg:fb"), Link(lambda m: m.coins_label(), "pg:fc")),
         (Link(lambda m: "☠️ Kill-switch", "pg:ks"), Link(lambda m: "🧯 Risk sigortaları", "risk")),
-        (Link(lambda m: "🔔 Bildirim ve raporlar", "ntf"),),
+        (Link(lambda m: "🔔 Bildirim ve raporlar", "ntf"), Link(lambda m: "⭐ Önerilen ayarlar", "frec")),
     ), back=(("⬅️ Menü", "menu"),), futures=True),
     "fe": Page("🧭 Vadeli Giriş Sinyali", rows=(
         Row("FUTURES_TACTIC", values=FUTURES_TACTICS, fmt=TACTIC_LABELS.get, cb="ftac", per_row=2),
@@ -224,6 +227,8 @@ PAGES: Dict[str, Page] = {
         Row("FUTURES_UNIVERSE", values=UNIVERSE_CHOICES, fmt=lambda v: f"🔝 {v}" if v else "📋 Liste", per_row=4),
         Row("FUTURES_UNIVERSE_MIN_AGE_DAYS", icon="🎂", values=(365, 730, 1095, 1460),
             fmt=lambda v: f"≥{int(v) // 365} yıl", show=lambda cfg: cfg.futures_universe > 0),
+        Row("FUTURES_UNIVERSE_WITH_LIST", name="📋 Listemi de tara (aşağıdaki coinler)",
+            show=lambda cfg: cfg.futures_universe > 0),
     ), back=(("⬅️ Vadeli ayarlar", "cfg"), ("🏠 Menü", "menu")), futures=True),
     # ------------------------------------------------------------ kill-switch ve risk sigortaları
     "ks": Page("☠️ Kill-switch", rows=(
@@ -237,7 +242,7 @@ PAGES: Dict[str, Page] = {
         Row("LOSS_STREAK_LIMIT", values=(0, 2, 3, 4), cb="ls", fmt=_off("Seri yok", lambda v: f"{v} SL")),
         Row("LOSS_STREAK_PAUSE_HOURS", icon="⏸️", values=(2, 4, 8, 24), fmt=lambda v: f"{v:g} sa",
             show=lambda cfg: cfg.loss_streak_limit > 0),
-        Row("SYMBOL_COOLDOWN_MINUTES", icon="⏳", values=(15, 30, 60, 120), fmt=_mins),
+        Row("SYMBOL_COOLDOWN_MINUTES", icon="⏳", values=(0, 15, 30, 60, 120), fmt=_off("Yok", _mins), per_row=5),
         Row("LOSS_COOLDOWN_MINUTES", values=(0, 240, 720, 1440), cb="lcd",
             fmt=_off("Zarar sonrası: normal", lambda v: f"{int(v) // 60} sa")),
         Row("COIN_SL_LIMIT", icon="📒", values=(0, 2, 3, 5), fmt=_off("Karne yok", lambda v: f"{v} SL")),
@@ -312,7 +317,9 @@ class SettingsMenu:
                      "olur.")
         if note:
             text += f"\n\n{note}"
-        keyboard = (self._coin_buttons() if pid == "fc" and self.cfg.futures_universe <= 0 else []) + self.keyboard(pid)
+        cfg = self.cfg
+        grid = pid == "fc" and (cfg.futures_universe <= 0 or cfg.futures_universe_with_list)
+        keyboard = (self._coin_buttons() if grid else []) + self.keyboard(pid)
         self.proc.reply_menu(text, keyboard, mid)
 
     def keyboard(self, pid: str) -> List[List[Button]]:
@@ -438,6 +445,24 @@ class SettingsMenu:
             detail += "\n📦 Açık pozisyon kendi Kâr Al / Zarar Kes emirleriyle devam eder."
         self.panel.request_change(values, self._view("fe"), mid, origin="fe", ask=detail,
                                   question="Vadeli taktik değiştirilsin mi?")
+
+    def ask_recommended(self, mid: Optional[int]) -> None:
+        """⭐ Önerilen vadeli ayarlar: araştırmada iki dönemde de en iyi sonucu veren set (onaydan sonra yazılır)."""
+        cfg = self.cfg
+        values = {k: format_value(v) for k, v in FUTURES_RECOMMENDED.items()}
+        changed = [f"{k}={v}" for k, v in values.items() if v != format_value(getattr(cfg, EDITABLE[k].attr))]
+        if not changed:
+            self.show("fut", mid, "✅ Zaten önerilen ayarlar kullanılıyor.")
+            return
+        detail = ("\n⭐ Kasım 2026 işlem sayısı araştırmasında (2020-2026, seçim / doğrulama dönemi) en iyi sonucu veren "
+                  "set: liste + en hacimli 20 köklü coin, kârla kapanan coine hemen tekrar giriş, zarar sonrası 4 saat, "
+                  "zarar serisi molası yok. Test: yılda ~140-240 işlem (şimdikinin 1.5-2.5 katı), getiri iki dönemde "
+                  "de daha yüksek, en büyük düşüş %30-57 (şimdiki %25-56)."
+                  f"\n⚙️ Değişecekler: {esc(', '.join(changed))}")
+        if self.bot.state.positions:
+            detail += "\n📦 Açık pozisyon kendi emirleriyle devam eder."
+        self.panel.request_change(values, self._view("fut"), mid, origin="fut", ask=detail,
+                                  question="Önerilen vadeli ayarlar yüklensin mi?")
 
     def _coin_buttons(self) -> List[List[Button]]:
         chosen = futures_coin_list(self.cfg)
@@ -579,6 +604,8 @@ class SettingsMenu:
                     f"ortalama USDT hacmine göre ilk {cfg.futures_universe} (günde bir yenilenir; stabil coin, endeks, "
                     f"hisse / emtia vadelileri ve kaldırılması planlanan pariteler hariç)."
                     + (f"\nŞu an: {esc(shown)}" if now else "\nListe ilk taramada oluşur.")
+                    + (f"\n📋 + listeniz: {esc(', '.join(futures_coin_list(cfg)))}" if cfg.futures_universe_with_list
+                       else "")
                     + f"\n{LINE}\n<i>{self._universe_hint()} Elle seçilen liste için 📋 Liste.</i>")
         coins = futures_coin_list(cfg)
         return (f"🪙 <b>Vadeli Coinler</b> ({len(coins)} seçili)\n{LINE}\n✅ {esc(', '.join(coins))}\n{LINE}\n"
@@ -634,7 +661,8 @@ class SettingsMenu:
                 f"{self.kill_line()}\n"
                 f"📉 Günlük zarar limiti: {daily} | bugün: {fmt_signed(day_pnl)} {q}\n"
                 f"🎯 Günlük kâr hedefi: {target}\n🔁 Zarar serisi sigortası: {streak}\n"
-                f"⏳ Her çıkıştan sonra aynı coine bekleme: {_mins(cfg.symbol_cooldown_minutes)}\n"
+                f"⏳ Her çıkıştan sonra aynı coine bekleme: "
+                f"{_mins(cfg.symbol_cooldown_minutes) if cfg.symbol_cooldown_minutes else 'yok (hemen tekrar girilebilir)'}\n"
                 f"🚫 Zarardan sonra bekleme: {cool}\n"
                 f"📒 Coin karnesi: {karne}\n" + ("" if is_futures(cfg.strategy) else f"💧 Kayma alarmı: {slip}\n") +
                 f"{frozen or '▶️ Alımlar dondurulmamış'}\n{LINE}\n"

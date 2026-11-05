@@ -62,7 +62,7 @@ META = {"NEW": {"onboardDate": str(NOW_MS - 5 * DAY_MS)},          # 5 günlük:
 
 @pytest.fixture
 def ucfg(fcfg):
-    return replace(fcfg, futures_universe=3)
+    return replace(fcfg, futures_universe=3, futures_universe_with_list=False)
 
 
 def test_market_eligibility_rules():
@@ -249,7 +249,7 @@ def test_protection_page_and_universe_buttons(fcfg, tmp_path):
     assert "fc:BTC" in data_of(notes) and "kv:fc:FUTURES_UNIVERSE:40" in data_of(notes)
     press(bot, "kv:fc:FUTURES_UNIVERSE:40")
     assert bot.cfg.futures_universe == 40 and "FUTURES_UNIVERSE=40" in env.read_text(encoding="utf-8")
-    assert "fc:BTC" not in data_of(notes) and "en hacimli <b>40</b>" in notes.menus[-1][0]
+    assert "fc:BTC" in data_of(notes) and "en hacimli <b>40</b>" in notes.menus[-1][0]   # Liste de taranıyor
     press(bot, "cfg")
     assert any("en hacimli 40" in label for row in notes.menus[-1][1] for label, _d in row)
     press(bot, "kv:fc:FUTURES_UNIVERSE:0")
@@ -354,3 +354,62 @@ def test_lean_universe_backtest_pipeline(fcfg, tmp_path):
     res = fb.simulate(fb.params_from_cfg(cfg), data, signals, windows)
     assert res.trades and res.trades[0].reason == "TP" and archive.day_calls
     assert archive.day_calls[0][1] == "1m"
+
+
+# ------------------------------------------------------------------ liste ∪ köklü N, önerilen ayarlar, profil
+def test_universe_plus_list_live_scan(ucfg, tmp_path):
+    fake = UniCcxt(TICKERS, META)
+    cfg = replace(ucfg, futures_universe_with_list=True, futures_coins="DOGE,BTC")
+    bot, fake, notes, clock = make_fbot(cfg, tmp_path, fake=fake)
+    assert bot._universe_symbols() == ["BTCUSDT", "ETHUSDT", "SOLUSDT", "DOGEUSDT"]   # Liste coini eklendi
+    assert "+ listeniz" in notes.messages[0]
+    fake.tickers["DOGEUSDT"] = (0.08, 0.1, 1e9)                         # DOGE de 24 saatlik tepesinin %20 altında
+    fake.calls.clear()
+    bot.scan_and_enter(clock.t)
+    assert sorted(c[1] for c in fake.calls if c[0] == "klines" and c[2] == "5m") == ["DOGEUSDT", "ETHUSDT"]
+
+
+def test_backtest_with_list_merges_period_lists():
+    month = fu.month_ms("2023-11")
+    segs = [fb.Segment(month - 30 * DAY_MS, month, ("SOL", "BTC")), fb.Segment(month, month + 30 * DAY_MS, ("SOL",))]
+    lists = [fb.Segment(0, month, ("BTC", "XLM")), fb.Segment(month, month + 99 * DAY_MS, ("BTC", "DOGE"))]
+    merged = fb.with_list(segs, lists)
+    assert [s.coins for s in merged] == [("SOL", "BTC", "XLM"), ("SOL", "BTC", "DOGE")]
+
+
+def test_futures_profile_cooldowns_and_spot_restore(cfg):
+    from config import with_strategy
+    spot = replace(cfg, symbol_cooldown_minutes=30, loss_streak_limit=3)
+    fut, _ = with_strategy(spot, "futures")
+    assert (fut.symbol_cooldown_minutes, fut.loss_streak_limit, fut.loss_cooldown_minutes) == (0, 0, 240)
+    back, _ = with_strategy(fut, "rebound")                             # Vadelinin beklemesizliği spota taşınmaz
+    assert (back.symbol_cooldown_minutes, back.loss_streak_limit) == (30, 3)
+
+
+def test_recommended_futures_settings_button(fcfg, tmp_path):
+    bot, fake, notes, clock = make_fbot(replace(fcfg, symbol_cooldown_minutes=30, loss_streak_limit=3,
+                                                futures_universe=0), tmp_path)
+    env = tmp_path / ".env"
+    env.write_text("BINANCE_API_KEY=gizli\n", encoding="utf-8")
+    bot.settings_path = env
+    press(bot, "cfg")
+    assert "frec" in data_of(notes)
+    press(bot, "frec")
+    pending = bot.commands.pending
+    assert pending.action == "setting" and "FUTURES_UNIVERSE=20" in notes.menus[-1][0]
+    assert bot.cfg.futures_universe == 0                                 # Onaydan önce değişmez
+    press(bot, f"yes:{pending.token}")
+    cfg = bot.cfg
+    assert (cfg.futures_universe, cfg.futures_universe_with_list, cfg.symbol_cooldown_minutes,
+            cfg.loss_streak_limit, cfg.loss_cooldown_minutes) == (20, True, 0, 0, 240)
+    text = env.read_text(encoding="utf-8")
+    assert "SYMBOL_COOLDOWN_MINUTES=0" in text and "FUTURES_UNIVERSE=20" in text and "BINANCE_API_KEY=gizli" in text
+    press(bot, "frec")
+    assert "Zaten önerilen" in notes.menus[-1][0] and bot.commands.pending is None
+    press(bot, "risk")
+    assert "kv:risk:SYMBOL_COOLDOWN_MINUTES:0" in data_of(notes) and "yok (hemen tekrar" in notes.menus[-1][0]
+    press(bot, "pg:fc")                                                  # Liste de taranıyor: coin ızgarası görünür
+    data = data_of(notes)
+    assert "kv:fc:FUTURES_UNIVERSE_WITH_LIST:t" in data and "fc:BTC" in data
+    press(bot, "kv:fc:FUTURES_UNIVERSE_WITH_LIST:t")
+    assert not bot.cfg.futures_universe_with_list and "fc:BTC" not in data_of(notes)

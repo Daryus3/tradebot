@@ -127,6 +127,15 @@ def universe_segments(cfg, start_ms: int, end_ms: int, archive: FuturesArchive,
     return [Segment(a, b, coins) for a, b, coins in universe_months(cfg, start_ms, end_ms, archive, progress)]
 
 
+def with_list(segments: List[Segment], lists: List[Segment]) -> List[Segment]:
+    """Aylık evrene o tarihteki liste coinlerini ekler (tüm dönemde dönem başı listeleri, aksi hâlde FUTURES_COINS)."""
+    out = []
+    for seg in segments:
+        extra = next((ls.coins for ls in lists if ls.start_ms <= seg.start_ms < ls.end_ms), ())
+        out.append(Segment(seg.start_ms, seg.end_ms, tuple(dict.fromkeys(tuple(seg.coins) + tuple(extra)))))
+    return out
+
+
 def prepare_universe(cfg, start_ms: int, end_ms: int, segments: List[Segment], archive: FuturesArchive,
                      exit_interval: str = "1m", progress: Optional[Callable[[str], None]] = None) -> FutData:
     """Evren modu: her coinin yalnızca evrende olduğu aylar (+ bir önceki ay, göstergeler için) okunur ve sinyaller
@@ -148,8 +157,9 @@ def prepare_universe(cfg, start_ms: int, end_ms: int, segments: List[Segment], a
     btc = archive.klines("BTCUSDT", start_ms - WARMUP_MS, end_ms, "5m")
     inside = slice_range(btc, start_ms, end_ms)
     age, avg = cfg.futures_universe_min_age_days, cfg.futures_universe_avg_days
-    note = (f"her ay en hacimli {cfg.futures_universe} köklü coin (en az {age} gün listelenmiş, son {avg} gün "
-            f"ortalama hacim; toplam {len(months)} farklı coin)")
+    note = (f"her ay en hacimli {cfg.futures_universe} köklü coin"
+            + (" + liste" if getattr(cfg, "futures_universe_with_list", False) else "")
+            + f" (en az {age} gün listelenmiş, son {avg} gün ortalama hacim; toplam {len(months)} farklı coin)")
     return FutData(start_ms, end_ms, segments, {}, btc_trend_1h(resample(btc, FUT_HOUR_MS)), (inside["t"], inside["c"]),
                    {}, archive, exit_interval, ["Evren modunda fonlama için ortalama oran (8 saatte %0.01) kullanıldı."],
                    loader=loader, lean_symbols=sorted(months), universe_note=note)
@@ -160,8 +170,11 @@ def prepare(cfg, start_ms: int, end_ms: int, segments: Optional[List[Segment]] =
             progress: Optional[Callable[[str], None]] = None) -> FutData:
     """Dönemin 5 dk mumlarını (ısınmalı), BTC 1 saatlik trendini ve fonlama oranlarını indirir / önbellekten okur."""
     archive = archive or FuturesArchive(cache_dir or DATA_DIR / "futures_cache", cfg.futures_data_url)
-    if getattr(cfg, "futures_universe", 0) > 0:      # Sabit liste / dönem listeleri yerine aylık en hacimli N
+    if getattr(cfg, "futures_universe", 0) > 0:      # Aylık en hacimli N köklü coin (+ liste)
+        lists = segments or [Segment(start_ms, end_ms, futures_coin_list(cfg))]
         segments = universe_segments(cfg, start_ms, end_ms, archive, progress)
+        if cfg.futures_universe_with_list:
+            segments = with_list(segments, lists)
         return prepare_universe(cfg, start_ms, end_ms, segments, archive, exit_interval, progress)
     segments = segments or [Segment(start_ms, end_ms, futures_coin_list(cfg))]
     coins = sorted({c for s in segments for c in s.coins})

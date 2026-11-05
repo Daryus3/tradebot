@@ -564,8 +564,10 @@ class Messages:
                         loss_pct: float, mode_note: str = "", free: Optional[float] = None) -> str:
         if cfg.futures_universe > 0:
             shown = ", ".join(coins[:12]) + (" ..." if len(coins) > 12 else "")
-            coin_line = (f"🪙 Coinler: <b>en hacimli {cfg.futures_universe}</b> USDT paritesi (24 saatlik hacim, her "
-                         f"taramada yenilenir)" + (f": {esc(shown)}" if coins else "") + "\n")
+            coin_line = (f"🪙 Coinler: <b>en hacimli {cfg.futures_universe} köklü coin</b>"
+                         + (" + listeniz" if cfg.futures_universe_with_list else "")
+                         + f" (en az {cfg.futures_universe_min_age_days} günlük, sıralama günde bir yenilenir)"
+                         + (f": {esc(shown)}" if coins else "") + "\n")
         else:
             coin_line = f"🪙 Coinler ({pairs}): {esc(', '.join(coins))}\n"
         trail = (f"📈 İzleyen stop: fiyat +%{cfg.futures_trailing_act_pct:g}'de devreye girer, tepenin "

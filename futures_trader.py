@@ -108,7 +108,7 @@ class FuturesBot(TradingBot):
         ex.load_markets()
         if cfg.futures_universe > 0:
             self._refresh_universe(self.time_fn())
-            coins = [s[:-4] for s in self.universe]
+            coins = [s[:-4] for s in self._universe_symbols()]
             missing: List[str] = []
         else:
             coins = list(futures_coin_list(cfg))
@@ -290,6 +290,13 @@ class FuturesBot(TradingBot):
         self.universe = self._ranking[:cfg.futures_universe]
         log.info("En hacimli %d köklü parite: %s", len(self.universe), ", ".join(s[:-4] for s in self.universe))
 
+    def _universe_symbols(self) -> List[str]:
+        """En hacimli N köklü parite (+ FUTURES_UNIVERSE_WITH_LIST açıksa FUTURES_COINS listesindekiler)."""
+        symbols = list(self.universe)
+        if self.cfg.futures_universe_with_list:
+            symbols += [c + "USDT" for c in futures_coin_list(self.cfg) if c + "USDT" not in symbols]
+        return symbols
+
     def _scan_symbols(self) -> Tuple[List[str], int]:
         """Taranacak pariteler ve ön elemede atlananların sayısı.
 
@@ -300,7 +307,7 @@ class FuturesBot(TradingBot):
         if cfg.futures_universe <= 0:
             return [c + "USDT" for c in futures_coin_list(cfg)], 0
         self._refresh_universe(self.time_fn())
-        symbols = list(self.universe)
+        symbols = self._universe_symbols()
         if cfg.futures_tactic != "crash" or not symbols:
             return symbols, 0
         try:

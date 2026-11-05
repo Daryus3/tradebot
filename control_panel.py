@@ -190,6 +190,8 @@ class ControlPanel:
             self.pages.toggle_coin(arg, mid)
         elif action == "ftac":
             self.pages.ask_tactic(arg, mid)
+        elif action == "frec":
+            self.pages.ask_recommended(mid)
         elif action in ("bl", "nobl"):
             self.blacklist(arg, action == "bl", mid)
         else:

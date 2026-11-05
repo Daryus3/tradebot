@@ -142,6 +142,8 @@ EDITABLE: Dict[str, Setting] = {
     "FUTURES_EXCHANGE_STOP": Setting("futures_exchange_stop", "bool",
                                      "Vadeli: zarar kes Binance'e konamazsa pozisyonu hemen kapat"),
     "FUTURES_UNIVERSE": Setting("futures_universe", "int", "Vadeli: en hacimli N köklü coin (0 = FUTURES_COINS listesi)"),
+    "FUTURES_UNIVERSE_WITH_LIST": Setting("futures_universe_with_list", "bool",
+                                          "Vadeli: en hacimli N'e FUTURES_COINS listesini de ekle"),
     "FUTURES_UNIVERSE_MIN_AGE_DAYS": Setting("futures_universe_min_age_days", "int",
                                              "Vadeli: en hacimli N için en az listelenme süresi (gün)"),
     "FUTURES_TRAILING": Setting("futures_trailing", "bool", "Vadeli: izleyen stop"),

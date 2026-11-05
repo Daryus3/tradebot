@@ -185,6 +185,21 @@ FUTURES_PROFILE = {
     "MAX_24H_GAIN_PCT": 25.0,
     "BACKUP_STOP_PCT": 8.0,
     "LOSS_COOLDOWN_MINUTES": 240,
+    # İşlem sayısı araştırması (Kasım 2026): kârla kapanan coine hemen tekrar girilebilir (çöküş sürüyorsa yeni sinyal
+    # alınır), zarar serisi molası yok. 1 dk çıkışlarla iki dönemde de işlem sayısını ve getiriyi artırdı.
+    "SYMBOL_COOLDOWN_MINUTES": 0,
+    "LOSS_STREAK_LIMIT": 0,
+}
+# Vadeliden spot bir stratejiye dönülürken (o grubun saklanmış ayarı yoksa) bu iki risk ayarı spot varsayılanına döner
+SPOT_RISK_DEFAULTS = {"SYMBOL_COOLDOWN_MINUTES": 30, "LOSS_STREAK_LIMIT": 3}
+# Telegram → ⚙️ Ayarlar → ⭐ Önerilen: araştırmada iki dönemde de en iyi sonucu veren vadeli ayar seti (tek düğme)
+FUTURES_RECOMMENDED = {
+    "FUTURES_TACTIC": "crash", "FUTURES_CRASH_HOURS": 4, "FUTURES_CRASH_DROP_PCT": 10, "FUTURES_CRASH_LIQ": False,
+    "FUTURES_LEVERAGE": 2, "FUTURES_MARGIN_USAGE_PCT": 95, "TAKE_PROFIT_PCT": 6, "STOP_LOSS_PCT": 4,
+    "TRAILING_ACTIVATION_PCT": 5, "TRAILING_FLOOR_PCT": 2.5, "BREAKEVEN_ENABLED": True,
+    "BREAKEVEN_TRIGGER_PCT": 1.5, "BREAKEVEN_FLOOR_PCT": 0.3, "MAX_HOLD_MINUTES": 30, "FUTURES_TRAILING": False,
+    "LOSS_COOLDOWN_MINUTES": 240, "SYMBOL_COOLDOWN_MINUTES": 0, "LOSS_STREAK_LIMIT": 0, "FUTURES_UNIVERSE": 20,
+    "FUTURES_UNIVERSE_WITH_LIST": True, "FUTURES_UNIVERSE_MIN_AGE_DAYS": 1095,
 }
 # Telegram'da vadeli taktik değişince (onaydan sonra) o taktiğin çıkışları da yüklenir: çöküş dönüşü saatlerce süren
 # büyük toparlanmayı, 4'lü onay ise ilk sürümdeki %1-1.5'lik hızlı scalping hareketini hedefler.
@@ -203,6 +218,7 @@ PROFILE_ATTRS = {
     "BREAKEVEN_FLOOR_PCT": "breakeven_floor_pct", "MIN_SIGNAL_SCORE": "min_signal_score",
     "MIN_ROOM_RATIO": "min_room_ratio", "MAX_24H_GAIN_PCT": "max_24h_gain_pct",
     "BACKUP_STOP_PCT": "backup_stop_pct", "LOSS_COOLDOWN_MINUTES": "loss_cooldown_minutes",
+    "SYMBOL_COOLDOWN_MINUTES": "symbol_cooldown_minutes", "LOSS_STREAK_LIMIT": "loss_streak_limit",
 }
 PROFILES = {"swing": SWING_EXIT_PROFILE, "mr": MEAN_REVERSION_PROFILE, "rotation": ROTATION_PROFILE,
             "intraday": INTRADAY_PROFILE, "futures": FUTURES_PROFILE}
@@ -506,6 +522,7 @@ class Config:
     # (stabil coin, endeks, hisse / emtia ve kaldırılması planlanan pariteler hariç; sıralama günde bir yenilenir).
     # Test (2020-2026): yaş filtresi olmadan her N'de hesap eridi; köklü ilk 10-20 kârlı, 40 ve üstü zayıf / zararlı.
     futures_universe: int = 0
+    futures_universe_with_list: bool = True     # En hacimli N'e FUTURES_COINS listesi de eklenir (liste ∪ köklü N)
     futures_universe_min_age_days: int = 1095
     futures_universe_avg_days: int = 180
     # İzleyen stop: fiyat girişten +FUTURES_TRAILING_ACT_PCT gidince zarar kes, görülen en iyi fiyatın
@@ -1026,6 +1043,7 @@ def load_config(env_file: Optional[str] = None, mode_override: Optional[str] = N
         futures_mmr_pct=_env_float("FUTURES_MMR_PCT", 0.5),
         futures_exchange_stop=_env_bool("FUTURES_EXCHANGE_STOP", True),
         futures_universe=_env_int("FUTURES_UNIVERSE", 0),
+        futures_universe_with_list=_env_bool("FUTURES_UNIVERSE_WITH_LIST", True),
         futures_universe_min_age_days=_env_int("FUTURES_UNIVERSE_MIN_AGE_DAYS", 1095),
         futures_universe_avg_days=_env_int("FUTURES_UNIVERSE_AVG_DAYS", 180),
         futures_trailing=_env_bool("FUTURES_TRAILING", False),
@@ -1280,6 +1298,10 @@ def with_strategy(cfg: Config, strategy: str) -> Tuple[Config, bool]:
     changes = {"strategy": strategy}
     family = strategy_family(strategy)
     profile = family != strategy_family(cfg.strategy) and family in PROFILES
+    if strategy_family(cfg.strategy) == "futures" and family != "futures":
+        # Vadeli profilinin bekleme / seri sigortası değerleri spot stratejiye taşınmasın
+        changes.update({PROFILE_ATTRS[k]: v for k, v in SPOT_RISK_DEFAULTS.items()
+                        if k not in PROFILES.get(family, {})})
     if profile:
         # Profildeki türle (1.5 → float, 2880 → int): mevcut değerin türüne çevirmek 1.5'i 1'e kırpabilirdi
         changes.update({PROFILE_ATTRS[k]: v for k, v in PROFILES[family].items()})

@@ -156,8 +156,8 @@ ve alt sayfalar: **🧭 Giriş sinyali** (taktik; çöküş eşiği %6-15, ölç
 4'lü onayda yön, hacim ve likidasyon eşikleri, ölçüm kaynağı, BTC trendi), **🎯 Çıkış ve emirler** (Kâr Al / Zarar Kes
 hazır değerler + ±, zaman stopu 15 dk-4 saat, Kâr Al emri limit / piyasa, stop güvencesi), **🔒 Başabaş ve izleyen
 stop** (başabaş tetiği +%1-5, tabanı +%0.1-3, ± adımlar; izleyen stop aç / kapa, başlangıç +%1-6, mesafe %0.5-3),
-**🪙 Coinler** (16 büyük coini tek tek aç / kapa ya da 🔝 en hacimli 10-100 köklü coin; aşağıdaki araştırmaya bakın),
-**☠️ Kill-switch**. Her sayfada seçili değer ✅ ile görünür; sayfalarda backtest sonuçlarının özeti yazar.
+**🪙 Coinler** (16 büyük coini tek tek aç / kapa, 🔝 en hacimli 10-100 köklü coin, 📋 listeyi de ekle; varsayılan liste ∪ köklü 20 — aşağıdaki araştırmaya bakın),
+**☠️ Kill-switch**, **⭐ Önerilen ayarlar** (araştırmada en iyi çıkan set, tek düğme + onay). Her sayfada seçili değer ✅ ile görünür; sayfalarda backtest sonuçlarının özeti yazar.
 
 Menüden değiştirilen her ayar doğrulanır, hemen uygulanır ve sunucudaki `.env`'nin sonuna yazılır (bot yeniden
 başlasa da kalır; `.env`, `ayarlar.env`'yi ezer). Diğer ayarlar için `/ayar ANAHTAR DEĞER` (örn. `/ayar tp 2.5`,
@@ -354,6 +354,32 @@ ve 30 günden yeni pariteler alınmaz). Telegram: ⚙️ Ayarlar → 🪙 Coinle
 - **Başabaş** (Telegram'da tetik +%5'e, taban +%3'e kadar): +1.5 → +0.3 en düşük düşüşü verdi (%25). Tetik +4 / +5
   getiri kazandırmadı (+%41-62/yıl), düşüşü %39'a çıkardı; köklü ilk 20'de getiriyi +%1-10/yıla indirdi.
 - Zaman stopu 60 / 120 dk (izleyensiz): doğrulama döneminde +%51 / +%54/yıl (30 dk: +%62).
+
+#### İşlem sayısını artırmak (Kasım 2026 araştırması, varsayılanlar buna göre)
+Aynı veri ve dönemler; önce 5 dk çıkışlarla ~150 senaryo tarandı, finalistler 1 dk çıkışlarla doğrulandı. Önceki
+varsayılanla en büyük kayıp "fırsat kaçırma"ydı: tüm dönemde 17.885 sinyal mumunun 11.861'i açık pozisyon, 3.797'si
+coin beklemesi, 1.138'i zarar serisi molası yüzünden atlanıyordu.
+
+| Ayar | 2020-01 → 2023-10 | 2023-11 → 2026-10 |
+|---|---|---|
+| Önceki (liste, coin bekleme 30 dk, zarar sonrası 240 dk, 3 zarar kes → 4 sa mola) | 161 işlem/yıl, +%123/yıl, düşüş %56 | 53 işlem/yıl, +%62/yıl, düşüş %25 |
+| **Yeni: liste ∪ köklü 20, kârdan sonra beklemesiz, zarar sonrası 240 dk, mola yok** | **242/yıl, +%379/yıl, düşüş %57** | **137/yıl, +%99/yıl, düşüş %30** |
+| Yeni + "1 saatte ≥%6" ek kuralı (eklenmedi) | 366/yıl, +%189/yıl, düşüş %74 | 235/yıl, +%182/yıl, düşüş %38 |
+| Yeni + aynı anda 2 pozisyon (eklenmedi) | 333/yıl, +%277/yıl, düşüş %81 | 184/yıl, +%147/yıl, düşüş %45 |
+
+Yıl yıl (her yıl 30 USDT ile): yeni ayarlar 7/7 yıl kârlı (2020 +%190, 2021 +%4.157, 2022 +%114, 2023 +%117,
+2024 +%229, 2025 +%46, 2026 +%13); önceki ayarlar 2020'de −%11'di. Tüm dönem tek hesap: 30 → ~101.000 USDT (önceki
+~2.800), 1.337 işlem (önceki 778); kill-switch hiç tetiklenmedi. Stres: 5 kat kayma +%38/yıl (önceki +%40), 2 kat
+komisyon +%54/yıl; stopların fitilin yarısında dolduğu kötümser varsayımda −%1/yıl (önceki −%5).
+
+Denenip **alınmayanlar**: aynı anda birden çok pozisyon (bakiye bölünerek: işlem ↑ ama getiri ↓; tam büyüklükte:
+düşüş %80'e çıktı), daha düşük eşik (4 sa ≥ %7-9: seçim döneminde kâr düştü), 8 / 12 / 24 saatlik pencereler (zayıf),
+1 saatlik ek kural (≥ %6 doğrulamada iyi ama ≥ %7 iki dönemde de kötü: tutarsız), likidasyon şartıyla daha düşük eşik,
+daha kısa zaman stopu (kâr ↓), köklü 30 ve üstü (doğrulamada bozuldu), short / pompa sönmesi (çoğu ayarda zarar).
+
+Canlı bota uygulamak için: Telegram → ⚙️ Ayarlar → **⭐ Önerilen ayarlar** (onay ister; bekleme, mola, evren ve
+çıkışları birlikte yazar). Bekleme ve mola değerleri vadeli profilindedir: spot bir stratejiye dönünce spot
+varsayılanları (30 dk, 3 zarar kes) geri gelir.
 
 ### 🏆 Strateji turnuvası (`--turnuva`)
 Hangi strateji türünün sizin dönemde işe yaradığını **tek komutla** görmek için:
