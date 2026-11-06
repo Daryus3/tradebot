@@ -12,6 +12,7 @@ aç / kapa düğmesini gösterir. Düğme verisi (Telegram sınırı 64 bayt):
   kv:<sayfa>:<AYAR>:+ | - | t | n  bir adım artır / azalt, aç-kapa, sıradaki seçenek
   fc:<COIN> | fc:default           vadeli coin listesine ekle / çıkar, varsayılan listeye dön
   ftac:<taktik>                    vadeli taktik (onaydan sonra o taktiğin çıkış ayarları da yüklenir)
+  fgp:<n>                          ızgara testinin n. en iyi giriş kuralı (onaydan sonra birlikte yazılır)
 Değişiklik ControlPanel.request_change ile doğrulanır, hemen uygulanır ve .env'ye yazılır. Kill-switch'i gevşetmek
 ve Binance'teki zarar kes güvencesini kapatmak onay ister; şu anki zararın altında bir kill-switch seçilemez.
 """
@@ -20,9 +21,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Tuple
 
-from config import (DEFAULT_FUTURES_COINS, FUTURES_LIQ_SOURCES, FUTURES_RECOMMENDED, FUTURES_SIDES,
-                    FUTURES_TACTIC_EXITS, FUTURES_TACTICS,
-                    FUTURES_TP_ORDERS, futures_coin_list, futures_liq_distance_pct, is_futures, is_rotation)
+from config import (DEFAULT_FUTURES_COINS, FUTURES_CONFIRMS, FUTURES_GRID_PRESETS, FUTURES_LIQ_SOURCES,
+                    FUTURES_RECOMMENDED, FUTURES_SIDES, FUTURES_TACTIC_EXITS, FUTURES_TACTICS, FUTURES_TP_ORDERS,
+                    futures_coin_list, futures_crash_rules, futures_liq_distance_pct, is_futures, is_rotation,
+                    parse_crash_rules)
 from runtime_settings import EDITABLE, format_value
 from telegram_bot import LINE, esc, fmt_duration, fmt_signed, fmt_usdt
 
@@ -38,6 +40,14 @@ TACTIC_LABELS = {"crash": "💥 Çöküş dönüşü", "liq4": "🧩 4'lü onay"
 SIDE_LABELS = {"both": "↕️ İki yön", "long": "📈 Yalnız long", "short": "📉 Yalnız short"}
 SOURCE_LABELS = {"proxy": "📊 Mumlardan", "feed": "📡 Canlı akış", "both": "🔗 İkisi"}
 TP_ORDER_LABELS = {"limit": "📌 Kâr Al: limit emir", "market": "⚡ Kâr Al: piyasa"}
+CONFIRM_LABELS = {"close": "⚡ Sadece kapanış", "volume": "📊 Hacim zirvesi", "green": "🟢 İlk yeşil mum",
+                  "either": "🔀 Hacim veya yeşil"}
+CONFIRM_TEXT = {"close": "yok — çöküş mumunun kapanışında hemen alınır",
+                "volume": "hacim zirvesi (kapitülasyon: mum hacmi önceki 20 mumun {ratio:g} katı)",
+                "green": "ilk yeşil mum (kapanış > açılış)",
+                "either": "hacim zirvesi ({ratio:g}x) ya da ilk yeşil mum, hangisi önce gelirse"}
+# Ek çöküş pencereleri (ana kurala VEYA ile): boş, ızgara testinin öne çıkanları, mikro + makro
+CRASH_EXTRA_CHOICES = ("", "1:7", "1:6", "1:6,12:15", "1:7,12:15", "1:5,12:15")
 LEVERAGE_CHOICES = (1, 2, 3, 5, 10, 15, 20)
 UNIVERSE_CHOICES = (0, 10, 20, 40, 60, 80, 100)     # 0 = FUTURES_COINS listesi
 # En hacimli N evreninin backtest özeti (Kasım 2026 araştırması; ayrıntı README)
@@ -147,6 +157,23 @@ def _hours_range(v: str) -> str:
     return "-".join(part[:2] if part.endswith(":00") else part for part in v.split("-")) if v else ""
 
 
+def _rules_label(rules) -> str:
+    """((1, 6.0), (12, 15.0)) → '1 sa %6 + 12 sa %15'."""
+    return " + ".join(f"{h} sa %{p:g}" for h, p in rules)
+
+
+def _extra_label(v: str) -> str:
+    try:
+        rules = parse_crash_rules(v)
+    except ValueError:
+        return v
+    return f"+ {_rules_label(rules)}" if rules else "Ek pencere yok"
+
+
+def _watching(cfg) -> bool:
+    return _crash(cfg) and cfg.futures_confirm != "close"
+
+
 def _thousands(v: float) -> str:
     return f"{v:,.0f}".replace(",", ".")
 
@@ -163,12 +190,13 @@ def _same(a, b) -> bool:
     return a == b
 
 
-def encode(value) -> str:
-    """Değerin düğme verisindeki yazımı: ':' düğme verisini böldüğü için saatlerde atılır, boş = 'off'."""
+def encode(value, kind: str = "") -> str:
+    """Değerin düğme verisindeki yazımı: ':' düğme verisini böldüğü için saatlerde atılır, çöküş pencerelerinde
+    'h' olur (1:5 → 1h5), boş = 'off'."""
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, str):
-        return value.replace(":", "") or "off"
+        return (value.replace(":", "h") if kind == "rules" else value.replace(":", "")) or "off"
     return format_value(value)
 
 
@@ -188,7 +216,19 @@ PAGES: Dict[str, Page] = {
         Row("FUTURES_CRASH_DROP_PCT", icon="📉", values=(6, 8, 10, 12, 15), fmt=_pct, show=_crash, per_row=5),
         Row("FUTURES_CRASH_HOURS", icon="🕓", values=(1, 2, 4, 8, 12, 24), fmt=lambda v: f"{v} sa", show=_crash,
             per_row=3),
+        Row("FUTURES_CRASH_EXTRA", icon="➕", values=CRASH_EXTRA_CHOICES, fmt=_extra_label, show=_crash, per_row=2),
+        Row("FUTURES_CRASH_Z", icon="📐", values=(0, 2.5, 3, 4), fmt=_off("Sabit %", lambda v: f"{v:g}σ"),
+            show=_crash),
+        Row("FUTURES_CRASH_Z_MIN_PCT", icon="🔻", values=(2, 3, 5, 8), fmt=lambda v: f"≥%{v:g}",
+            show=lambda cfg: _crash(cfg) and cfg.futures_crash_z > 0),
+        Row("FUTURES_CONFIRM", values=FUTURES_CONFIRMS, fmt=CONFIRM_LABELS.get, show=_crash, per_row=2),
+        Row("FUTURES_CONFIRM_BARS", icon="⏳", values=(3, 6, 12, 24), fmt=lambda v: _mins(int(v) * 5),
+            show=_watching),
+        Row("FUTURES_CONFIRM_VOLUME_RATIO", icon="📊", values=(2, 3, 4, 5), fmt=_x,
+            show=lambda cfg: _watching(cfg) and cfg.futures_confirm in ("volume", "either")),
         Row("FUTURES_CRASH_LIQ", name="💥 Likidasyon dalgası şartı", show=_crash),
+        Link(lambda m: m.grid_label(1), "fgp:1", show=lambda m: _crash(m.cfg) and len(FUTURES_GRID_PRESETS) >= 1),
+        Link(lambda m: m.grid_label(2), "fgp:2", show=lambda m: _crash(m.cfg) and len(FUTURES_GRID_PRESETS) >= 2),
         Row("FUTURES_SIDES", values=FUTURES_SIDES, fmt=SIDE_LABELS.get, show=_liq4, per_row=3),
         Row("FUTURES_VOLUME_RATIO", icon="📊", values=(1.5, 2, 2.5, 3), fmt=_x, show=_liq4),
         Row("FUTURES_LIQ_RATIO", icon="💥", values=(2, 3, 4, 5), fmt=_x, show=_liq4),
@@ -352,7 +392,8 @@ class SettingsMenu:
                     label = f"{item.icon} {label}"
                 if _same(value, current):
                     label = f"✅ {label}"
-                data = f"{item.cb}:{encode(value)}" if item.cb else f"kv:{pid}:{item.key}:{encode(value)}"
+                code = encode(value, setting.kind)
+                data = f"{item.cb}:{code}" if item.cb else f"kv:{pid}:{item.key}:{code}"
                 row.append((label, data))
             lines += [row[i:i + item.per_row] for i in range(0, len(row), item.per_row)]
         step = item.step_of(cfg)
@@ -446,6 +487,34 @@ class SettingsMenu:
         self.panel.request_change(values, self._view("fe"), mid, origin="fe", ask=detail,
                                   question="Vadeli taktik değiştirilsin mi?")
 
+    def grid_label(self, n: int) -> str:
+        preset = FUTURES_GRID_PRESETS[n - 1]
+        on = all(format_value(getattr(self.cfg, EDITABLE[k].attr)) == format_value(v)
+                 for k, v in preset["values"].items())
+        return f"{'✅ ' if on else ''}{preset['icon']} Izgara #{n}: {preset['name']}"
+
+    def ask_grid_preset(self, arg: str, mid: Optional[int]) -> None:
+        """fgp:<n>: ızgara testinin n. en iyi yapılandırması (giriş kuralı + çıkışlar + testteki evren / beklemeler)."""
+        try:
+            preset = FUTURES_GRID_PRESETS[int(arg) - 1]
+        except (ValueError, IndexError):
+            self._invalid()
+            return
+        cfg = self.cfg
+        values = {k: format_value(v) for k, v in preset["values"].items()}
+        changed = [f"{k}={v or 'kapalı'}" for k, v in values.items()
+                   if v != format_value(getattr(cfg, EDITABLE[k].attr))]
+        if not changed:
+            self.show("fe", mid, f"✅ Izgara #{arg} zaten kullanılıyor.")
+            return
+        detail = (f"\n{preset['icon']} <b>Izgara #{arg}: {esc(preset['name'])}</b>\n{esc(preset['detail'])}"
+                  f"\n⚙️ Değişecekler: {esc(', '.join(changed))}"
+                  "\n🧪 Önce test modunda (paper) izleyin.")
+        if self.bot.state.positions:
+            detail += "\n📦 Açık pozisyon kendi emirleriyle devam eder."
+        self.panel.request_change(values, self._view("fe"), mid, origin="fe", ask=detail,
+                                  question=f"Izgara #{arg} ayarları yüklensin mi?")
+
     def ask_recommended(self, mid: Optional[int]) -> None:
         """⭐ Önerilen vadeli ayarlar: araştırmada iki dönemde de en iyi sonucu veren set (onaydan sonra yazılır)."""
         cfg = self.cfg
@@ -500,7 +569,7 @@ class SettingsMenu:
         cfg = self.cfg
         lev = cfg.futures_leverage
         room = futures_liq_distance_pct(lev, cfg.futures_mmr_pct)
-        tactic = (f"çöküş dönüşü ({cfg.futures_crash_hours} saatte ≥%{cfg.futures_crash_drop_pct:g} düşüş, long)"
+        tactic = (f"çöküş dönüşü ({self.rules_text()}, long)"
                   if _crash(cfg) else "4'lü onay (likidasyon + hacim + RSI uyumsuzluğu + BTC trendi)")
         be = (f"+%{cfg.breakeven_trigger_pct:g} → stop +%{cfg.breakeven_floor_pct:g}" if cfg.breakeven_enabled
               else "kapalı")
@@ -521,18 +590,46 @@ class SettingsMenu:
                 "uygulanır; açık pozisyonun kaldıracı değişmez. Zarar kes likidasyondan en az 0.5 puan önce "
                 "olmalı. Ayrıntılı ayarlar aşağıdaki sayfalarda; diğerleri: /ayar ANAHTAR DEĞER</i>")
 
+    def rules_text(self) -> str:
+        """Çöküş kuralları kısaca: '4 sa ≥%10 veya 1 sa ≥%6' / '4 sa ≥3σ (en az %3)' (+ teyit)."""
+        cfg = self.cfg
+        rules = futures_crash_rules(cfg)
+        if cfg.futures_crash_z:
+            text = " veya ".join(f"{h} sa" for h, _p in rules) + (f" ≥{cfg.futures_crash_z:g}σ "
+                                                                  f"(en az %{cfg.futures_crash_z_min_pct:g})")
+        else:
+            text = " veya ".join(f"{h} sa ≥%{p:g}" for h, p in rules)
+        if cfg.futures_confirm != "close":
+            text += f" + {CONFIRM_LABELS[cfg.futures_confirm].split(' ', 1)[1].lower()} teyidi"
+        return text
+
     def _text_fe(self) -> str:
         cfg = self.cfg
         if _crash(cfg):
-            liq = "açık (çöküş mumunda likidasyon dalgası da şart)" if cfg.futures_crash_liq else "kapalı"
-            body = (f"Taktik: <b>{TACTIC_LABELS['crash']}</b> — coin son {cfg.futures_crash_hours} saatte en az "
-                    f"%{cfg.futures_crash_drop_pct:g} düştüyse 5 dk mum kapanışında <b>LONG</b> açılır; aynı anda "
-                    f"birden çok coin çökerse en derin düşen alınır.\n"
-                    f"📉 Çöküş eşiği: %{cfg.futures_crash_drop_pct:g} | 🕓 Ölçüm süresi: {cfg.futures_crash_hours} "
-                    f"saat\n💥 Likidasyon dalgası şartı: {liq}")
-            hint = ("Eşik büyüdükçe daha az ama daha derin çöküşlerde işlem açılır. Testte seçilen: %10 / 4 saat, "
-                    "şart kapalı (açıkken kazanma oranı %76-79, işlem sayısı daha az). Değişikliği önce 🧪 Backtest "
-                    "ile deneyin. Taktik değişince o taktiğin çıkış ayarları da yüklenir (onay ister).")
+            liq = "açık (giriş mumunda likidasyon dalgası da şart)" if cfg.futures_crash_liq else "kapalı"
+            rules = futures_crash_rules(cfg)
+            extra = [r for r in rules if r != (cfg.futures_crash_hours, cfg.futures_crash_drop_pct)]
+            body = (f"Taktik: <b>{TACTIC_LABELS['crash']}</b> — coin aşağıdaki pencerelerden <b>herhangi birinde</b> "
+                    f"yeterince düştüyse 5 dk mum kapanışında <b>LONG</b> açılır; aynı anda birden çok coin çökerse "
+                    f"eşiğini en çok aşan alınır.\n"
+                    f"📉 Ana kural: son {cfg.futures_crash_hours} saatte ≥%{cfg.futures_crash_drop_pct:g}\n"
+                    f"➕ Ek pencereler (VEYA): {_rules_label(extra) if extra else 'yok'}\n")
+            if cfg.futures_crash_z:
+                body += (f"📐 Oynaklık eşiği: <b>{cfg.futures_crash_z:g} standart sapma</b> — sabit yüzdeler yerine "
+                         f"coinin o süredeki olağan hareketinin {cfg.futures_crash_z:g} katı (önceki 24 saatten), en "
+                         f"az %{cfg.futures_crash_z_min_pct:g}\n")
+            else:
+                body += "📐 Oynaklık eşiği: kapalı (sabit yüzdeler)\n"
+            confirm = CONFIRM_TEXT[cfg.futures_confirm].format(ratio=cfg.futures_confirm_volume_ratio)
+            if cfg.futures_confirm != "close":
+                confirm += f"; çöküşten sonra en fazla {_mins(cfg.futures_confirm_bars * 5)} beklenir"
+            body += f"✅ Teyit (izleme modu): {confirm}\n💥 Likidasyon dalgası şartı: {liq}"
+            hint = ("Izgara testi (2020-2026, 1 dk çıkışlarla doğrulandı; ayrıntı README): '1 sa %6' ek penceresi "
+                    "başabaş +1 → +0.3 ve SL 5 ile işlem sayısını 1.8-2.1 katına çıkarıp kazanma oranını ve kârı "
+                    "artırdı (🏆 / 🥈 düğmeleri bu iki seti yükler); mevcut çıkışlarla ek pencere kârı düşürür. "
+                    "'🟢 İlk yeşil mum' teyidi kârı düşürdü, '📊 Hacim zirvesi' işlemi azalttı, oynaklık (σ) eşiği "
+                    "sabit yüzdeden kötü çıktı. Önce test modunda deneyin; komut satırında: python main.py --backtest "
+                    "--strateji futures --izgara. Taktik değişince o taktiğin çıkış ayarları da yüklenir (onay ister).")
         else:
             source = SOURCE_LABELS.get(cfg.futures_liq_source, cfg.futures_liq_source)
             if cfg.futures_liq_source != "proxy":

@@ -25,11 +25,11 @@ from typing import Dict, List, Optional, Tuple
 
 import requests
 
-from config import futures_coin_list, futures_liq_distance_pct
+from config import futures_coin_list, futures_crash_rules, futures_liq_distance_pct
 from futures_exchange import FuturesError, MinNotionalError, describe_error
 from logger import get_logger
 from risk import ExitReason, Position, cooldown_minutes, kill_switch_hit
-from strategy import FUT_BAR_MS, FUT_BTC_1H_LIMIT, FUT_KLINE_LIMIT, FuturesSignal, ScanResult
+from strategy import FUT_BAR_MS, FUT_BTC_1H_LIMIT, FuturesSignal, ScanResult, futures_kline_limit
 from telegram_bot import CRITICAL_EXITS, Messages, esc, fmt_duration, fmt_price, fmt_signed, fmt_usdt, futures_tag
 from trader import ALIVE_SAVE_SEC, POSITION_LOG_SEC, RULES_REFRESH_SEC, Mark, TradingBot
 
@@ -234,11 +234,12 @@ class FuturesBot(TradingBot):
         state.cooldowns = {s: t for s, t in state.cooldowns.items() if t > now}   # Süresi dolan beklemeler
         klines, errors = {}, []
         symbols, skipped = self._scan_symbols()
+        limit = futures_kline_limit(self.cfg)       # En uzun pencere + izleme süresi + oynaklık geçmişi
         for symbol in symbols:
             if not ex.has_market(symbol) or symbol in self._scan_excluded():
                 continue
             try:
-                k = ex.klines(symbol, "5m", FUT_KLINE_LIMIT)
+                k = ex.klines(symbol, "5m", limit)
             except FuturesError as exc:
                 errors.append(f"{symbol}: {exc}")
                 continue
@@ -301,8 +302,10 @@ class FuturesBot(TradingBot):
         """Taranacak pariteler ve ön elemede atlananların sayısı.
 
         FUTURES_UNIVERSE=0: FUTURES_COINS listesi. N > 0: en hacimli N köklü parite (sıralama günde bir yenilenir).
-        Çöküş taktiğinde, fiyatı 24 saatlik tepesinin (eşik - pay) kadar altında olmayan coinlerin mumları hiç
-        istenmez: son FUTURES_CRASH_HOURS (≤ 24) saatte %X düşen coin, 24 saatlik tepesinin de en az %X altındadır."""
+        Çöküş taktiğinde, fiyatı 24 saatlik tepesinin (en küçük eşik - pay) kadar altında olmayan coinlerin mumları
+        hiç istenmez: son H (≤ 24) saatte %X düşen coin, 24 saatlik tepesinin de en az %X altındadır. Teyit beklenirken
+        (izleme modu) fiyat çöküşten sonra toparlanmış olabilir: o zaman 24 saatlik DİP tepenin %X altında mı diye
+        bakılır (pencere + izleme süresi 24 saati aşarsa ön eleme yapılmaz)."""
         cfg = self.cfg
         if cfg.futures_universe <= 0:
             return [c + "USDT" for c in futures_coin_list(cfg)], 0
@@ -310,16 +313,23 @@ class FuturesBot(TradingBot):
         symbols = self._universe_symbols()
         if cfg.futures_tactic != "crash" or not symbols:
             return symbols, 0
+        rules = futures_crash_rules(cfg)
+        watch = cfg.futures_confirm != "close"
+        reach_h = max(h for h, _p in rules) + (cfg.futures_confirm_bars / 12 if watch else 0)
+        if reach_h > 24:
+            return symbols, 0
+        least = cfg.futures_crash_z_min_pct if cfg.futures_crash_z > 0 else min(p for _h, p in rules)
         try:
             tickers = self.exchange.tickers_24h()
         except (FuturesError, requests.ConnectionError) as exc:
             log.warning("24 saatlik özetler alınamadı (ön eleme yapılmadı): %s", exc)
             return symbols, 0
-        need = max(0.0, cfg.futures_crash_drop_pct - PREFILTER_SLACK_PCT) / 100
+        need = max(0.0, least - PREFILTER_SLACK_PCT) / 100
         keep = []
         for symbol in symbols:
             t = tickers.get(symbol)
-            if t is None or t["high"] <= 0 or t["last"] <= t["high"] * (1 - need):
+            price = t.get("low", 0.0) if t is not None and watch else (t or {}).get("last", 0.0)
+            if t is None or t["high"] <= 0 or price <= 0 or price <= t["high"] * (1 - need):
                 keep.append(symbol)                  # Özet yoksa temkinli: mumlara bakılır
         return keep, len(symbols) - len(keep)
 

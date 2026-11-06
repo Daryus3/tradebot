@@ -77,8 +77,8 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from binance_client import BinanceClient, RateLimitError
-from config import (STRATEGY_NAMES, fee_from_coin, intraday_coin_list, intraday_tactic_list, rotation_coin_list,
-                    rotation_hold_count)
+from config import (STRATEGY_NAMES, fee_from_coin, futures_crash_rules, intraday_coin_list, intraday_tactic_list,
+                    rotation_coin_list, rotation_hold_count)
 from rotation import RotationPlan, btc_trend, momentum_pct, plan_rotation
 from exchange import SymbolRules
 from entry_filters import candle_reject, prior_trend_reject
@@ -1664,6 +1664,9 @@ FUT_BTC_1H_LIMIT = 300       # Canlı: BTC 1 saatlik mum (EMA50 için yeterli ge
 FUT_MIN_BARS = 80            # Bundan az kapanmış mum varsa sinyal aranmaz
 FUT_SIDES = ("both", "long", "short")
 FUT_LIQ_SOURCES = ("proxy", "feed", "both")
+FUT_Z_LOOKBACK_BARS = 288    # Oynaklık eşiği: pencereden önceki 24 saatin (288 × 5 dk) getirilerinin standart sapması
+FUT_CONFIRM_AVG_BARS = FUT_AVG_BARS   # Hacim zirvesi teyidi: önceki 20 mumun ortalama hacmine göre
+FUT_KLINE_MAX = 1500         # Binance tek istekte en fazla 1500 mum verir
 
 
 def _need_numpy() -> None:
@@ -1758,13 +1761,158 @@ def futures_features(k: Dict[str, "np.ndarray"], cfg) -> Dict[str, "np.ndarray"]
     crash = np.full(len(c), np.nan)
     if len(c) > bars:
         crash[bars:] = (c[bars:] / c[:-bars] - 1) * 100
-    return {"o": o, "h": h, "l": l, "c": c, "crash": crash,
+    return {"o": o, "h": h, "l": l, "c": c, "v": v, "crash": crash,
             "vol_ratio": vol_ratio, "sell_ratio": sell_ratio, "buy_ratio": buy_ratio,
             "atr": atr_prev, "low_prev": low_prev, "high_prev": high_prev, "rsi": np_rsi(c, cfg.rsi_period),
             "piv_low": piv_low, "piv_high": piv_high,
             "liq_long": (sell_ratio >= cfg.futures_liq_ratio) & (l < low_prev) & ((o - l) >= atr_prev),
             "liq_short": (buy_ratio >= cfg.futures_liq_ratio) & (h > high_prev) & ((h - o) >= atr_prev),
             "vol_ok": vol_ratio >= cfg.futures_volume_ratio}
+
+
+# ------------------------------------------------------------------ dinamik çöküş (çok pencere, oynaklık, teyit)
+def _memo(f: Dict, key, fn):
+    """f sözlüğünde önbellek: aynı mum dizileri için pencere başına hesap bir kez yapılır (ızgara testi)."""
+    out = f.get(key)
+    if out is None:
+        out = f[key] = fn()
+    return out
+
+
+def crash_drop_pct(f: Dict[str, "np.ndarray"], hours: int):
+    """Son `hours` saatte kapanıştan kapanışa düşüş (%; pozitif = düşüş). İlk hours × 12 mum NaN."""
+    def calc():
+        c = f["c"]
+        bars = max(1, int(hours) * 12)
+        out = np.full(len(c), np.nan)
+        if len(c) > bars:
+            out[bars:] = (1 - c[bars:] / c[:-bars]) * 100
+        return out
+    return _memo(f, ("drop", int(hours)), calc)
+
+
+def window_sigma(c, bars: int, lookback: int = FUT_Z_LOOKBACK_BARS):
+    """`bars` mumluk pencerenin olağan hareketi (log, 1 standart sapma): pencere başlangıcından önceki `lookback`
+    mumun 5 dk log getirilerinin standart sapması × √bars. Çöküşün kendisi ölçüye karışmaz."""
+    c = np.asarray(c, dtype=np.float64)
+    n = len(c)
+    out = np.full(n, np.nan)
+    if n <= bars + lookback:
+        return out
+    r = np.zeros(n)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        r[1:] = np.diff(np.log(c))
+    cs = np.concatenate(([0.0], np.cumsum(r)))
+    cs2 = np.concatenate(([0.0], np.cumsum(r * r)))
+    k = np.arange(lookback, n)                       # r[k - lookback + 1 .. k] (r[0] hariç)
+    s1 = (cs[k + 1] - cs[k + 1 - lookback]) / lookback
+    s2 = (cs2[k + 1] - cs2[k + 1 - lookback]) / lookback
+    sd = np.full(n, np.nan)
+    sd[lookback:] = np.sqrt(np.maximum(s2 - s1 * s1, 0.0))
+    out[bars:] = sd[:-bars] * math.sqrt(bars)        # i. mumda biten pencere i - bars'ta başlar
+    return out
+
+
+def crash_sigma_pct(f: Dict[str, "np.ndarray"], hours: int, z: float):
+    """Oynaklık eşiği (%): fiyatın `hours` saatte z standart sapma düşmesi = 1 - e^(-z·σ)."""
+    sig = _memo(f, ("sigma", int(hours), FUT_Z_LOOKBACK_BARS),
+                lambda: window_sigma(f["c"], max(1, int(hours) * 12), FUT_Z_LOOKBACK_BARS))
+    return (1 - np.exp(-z * sig)) * 100
+
+
+def crash_state(f: Dict[str, "np.ndarray"], cfg):
+    """Çöküş kuralları (config.futures_crash_rules; FUTURES_CRASH_Z > 0 ise sabit yüzdeler yerine oynaklık eşiği)
+    her mum için: (tetik, en güçlü kuralın şiddeti = düşüş / eşik, o kuralın düşüşü %, saati, eşiği %)."""
+    rules = futures_crash_rules(cfg)
+    z = float(getattr(cfg, "futures_crash_z", 0.0) or 0.0)
+    z_min = float(getattr(cfg, "futures_crash_z_min_pct", 3.0))
+    key = (rules, z, z_min if z > 0 else None, FUT_Z_LOOKBACK_BARS if z > 0 else None)
+    hit = f.get("_crash_state")
+    if hit is not None and hit[0] == key:
+        return hit[1]
+    n = len(f["c"])
+    trig = np.zeros(n, dtype=bool)
+    sev, drop_b, hours_b, thr_b = np.zeros(n), np.zeros(n), np.zeros(n), np.zeros(n)
+    for hours, pct in rules:
+        drop = crash_drop_pct(f, hours)
+        thr = np.maximum(crash_sigma_pct(f, hours, z), z_min) if z > 0 else np.full(n, float(pct))
+        with np.errstate(invalid="ignore", divide="ignore"):
+            ok = drop >= thr                                   # NaN (yetersiz geçmiş) → False
+            s = np.where(np.isfinite(drop) & (thr > 0), drop / thr, 0.0)
+        trig |= ok
+        better = s > sev
+        sev = np.where(better, s, sev)
+        drop_b = np.where(better, drop, drop_b)
+        hours_b = np.where(better, float(hours), hours_b)
+        thr_b = np.where(better, thr, thr_b)
+    out = (trig, sev, drop_b, hours_b, thr_b)
+    f["_crash_state"] = (key, out)
+    return out
+
+
+def crash_peak(f: Dict[str, "np.ndarray"], cfg, idx):
+    """Giriş mumları `idx` için izleme penceresindeki (son FUTURES_CONFIRM_BARS mum, giriş mumu dahil) en güçlü çöküş
+    mumunun indeksi; close teyidinde giriş mumunun kendisi. Eşitlikte en eski mum."""
+    idx = np.atleast_1d(np.asarray(idx, dtype=np.int64))
+    if getattr(cfg, "futures_confirm", "close") == "close" or not len(idx):
+        return idx
+    trig, sev = crash_state(f, cfg)[:2]
+    masked = np.where(trig, sev, -1.0)
+    win = idx[:, None] + np.arange(-int(cfg.futures_confirm_bars), 1)[None, :]
+    vals = np.where(win >= 0, masked[np.maximum(win, 0)], -2.0)
+    return np.maximum(win, 0)[np.arange(len(idx)), np.argmax(vals, axis=1)]
+
+
+def crash_scores(f: Dict[str, "np.ndarray"], cfg, idx):
+    """Eş zamanlı sinyallerin sıralama puanı (giriş mumları `idx`): tek sabit kuralda düşüş (%); birden çok kural ya
+    da oynaklık eşiğinde düşüş / eşik × ana kuralın yüzdesi (eşiğini en çok aşan önce)."""
+    trig, sev, drop = crash_state(f, cfg)[:3]
+    p = crash_peak(f, cfg, idx)
+    if len(futures_crash_rules(cfg)) == 1 and not getattr(cfg, "futures_crash_z", 0.0):
+        return drop[p]
+    return sev[p] * float(cfg.futures_crash_drop_pct)
+
+
+def confirm_volume_ratio(f: Dict[str, "np.ndarray"]):
+    """Hacim zirvesi teyidi için mum hacmi / önceki FUT_CONFIRM_AVG_BARS mumun ortalaması."""
+    if FUT_CONFIRM_AVG_BARS == FUT_AVG_BARS and "vol_ratio" in f:
+        return f["vol_ratio"]
+
+    def calc():
+        with np.errstate(divide="ignore", invalid="ignore"):
+            return f["v"] / np_prev_mean(f["v"], FUT_CONFIRM_AVG_BARS)
+    return _memo(f, ("vr", FUT_CONFIRM_AVG_BARS), calc)
+
+
+def crash_entries(f: Dict[str, "np.ndarray"], cfg, trig):
+    """Teyit (izleme modu): close → tetik mumunun kendisi; volume / green / either → son FUTURES_CONFIRM_BARS mum
+    içinde (bu mum dahil) tetik görülmüş ve bu mum teyit veriyor (hacim zirvesi / yeşil mum). Durumsuz: canlı bot
+    yeniden başlasa da aynı mumda aynı karar verilir."""
+    mode = getattr(cfg, "futures_confirm", "close")
+    if mode == "close":
+        return trig
+    w = int(cfg.futures_confirm_bars)
+    cs = np.cumsum(trig, dtype=np.int64)
+    recent = cs.copy()
+    if len(cs) > w + 1:
+        recent[w + 1:] -= cs[:-(w + 1)]
+    conf = np.zeros(len(trig), dtype=bool)
+    if mode in ("volume", "either"):
+        with np.errstate(invalid="ignore"):
+            conf |= confirm_volume_ratio(f) >= cfg.futures_confirm_volume_ratio
+    if mode in ("green", "either"):
+        conf |= f["c"] > f["o"]
+    return (recent > 0) & conf
+
+
+def futures_kline_limit(cfg) -> int:
+    """Canlı: coin başına istenecek 5 dk mum sayısı (en uzun pencere + izleme süresi + oynaklık geçmişi)."""
+    need = max(h for h, _p in futures_crash_rules(cfg)) * 12 + FUT_AVG_BARS + 20
+    if getattr(cfg, "futures_confirm", "close") != "close":
+        need += int(cfg.futures_confirm_bars)
+    if float(getattr(cfg, "futures_crash_z", 0.0) or 0.0) > 0:
+        need += FUT_Z_LOOKBACK_BARS
+    return int(min(FUT_KLINE_MAX, max(FUT_KLINE_LIMIT, need)))
 
 
 def btc_trend_1h(btc_1h: Dict[str, "np.ndarray"]):
@@ -1820,8 +1968,8 @@ def futures_candidates(f: Dict[str, "np.ndarray"], cfg, up=None, down=None,
     `up` / `down` None ise BTC trendi aranmaz (FUTURES_BTC_TREND=false); `liq_*` verilirse vekil ölçütün yerine
     geçer (canlı likidasyon akışı)."""
     if getattr(cfg, "futures_tactic", "crash") == "crash":
-        long_ok = f["crash"] <= -cfg.futures_crash_drop_pct
-        if cfg.futures_crash_liq:
+        long_ok = crash_entries(f, cfg, crash_state(f, cfg)[0])
+        if cfg.futures_crash_liq:                               # Likidasyon dalgası giriş mumunda
             long_ok = long_ok & (f["liq_long"] if liq_long is None else liq_long)
         short_ok = np.zeros(len(long_ok), dtype=bool)          # Short tarafında avantaj bulunamadı
         if cfg.futures_sides == "short":
@@ -1843,10 +1991,21 @@ def futures_signal_at(f: Dict[str, "np.ndarray"], i: int, side: str, cfg) -> Opt
     """i. mumda (aday olduğu bilinen) sinyalin ölçüleri; liq4'te uyumsuzluk yoksa None. Puan: crash'te düşüşün derinliği,
     liq4'te likidasyon gücü (eş zamanlı sinyallerden en güçlüsü alınır)."""
     if getattr(cfg, "futures_tactic", "crash") == "crash":
-        drop = float(-f["crash"][i])
-        return {"side": side, "price": float(f["c"][i]), "drop_pct": drop, "liq_ratio": float(f["sell_ratio"][i]),
-                "vol_ratio": float(f["vol_ratio"][i]), "hours": float(cfg.futures_crash_hours), "score": drop,
-                "tactic": 1.0}
+        _trig, _sev, drop, hours, thr = crash_state(f, cfg)
+        mode = getattr(cfg, "futures_confirm", "close")
+        p = int(crash_peak(f, cfg, [i])[0])                    # İzlemedeki en güçlü çöküş mumu (close: bu mum)
+        out = {"side": side, "price": float(f["c"][i]), "drop_pct": float(drop[p]),
+               "liq_ratio": float(f["sell_ratio"][i]), "vol_ratio": float(f["vol_ratio"][i]), "hours": float(hours[p]),
+               "score": float(crash_scores(f, cfg, [i])[0]), "tactic": 1.0, "thr_pct": float(thr[p])}
+        if getattr(cfg, "futures_crash_z", 0.0):
+            out["z"] = float(cfg.futures_crash_z)
+        if mode != "close":
+            vr = float(confirm_volume_ratio(f)[i])
+            by_volume = np.isfinite(vr) and vr >= cfg.futures_confirm_volume_ratio and mode in ("volume", "either")
+            out["confirm"] = 1.0 if by_volume else 2.0               # 1 = hacim zirvesi, 2 = yeşil mum
+            out["confirm_vol"] = vr
+            out["confirm_bars"] = float(i - p)
+        return out
     div = _divergence(f, i, side, cfg.futures_div_oversold, cfg.futures_div_rise)
     if div is None:
         return None
@@ -1874,8 +2033,17 @@ class FuturesSignal:
     def note(self) -> str:
         m = self.metrics
         if m.get("tactic") == 1.0:
-            text = (f"Çöküş dönüşü: son {m.get('hours', 4):g} saatte -%{m.get('drop_pct', 0):.1f} | "
-                    f"Satış hacmi x{m.get('liq_ratio', 0):.1f} | Hacim x{m.get('vol_ratio', 0):.1f}")
+            text = f"Çöküş dönüşü: son {m.get('hours', 4):g} saatte -%{m.get('drop_pct', 0):.1f}"
+            if m.get("z"):
+                text += f" (eşik %{m.get('thr_pct', 0):.1f} = {m['z']:g} standart sapma)"
+            if m.get("confirm") == 1.0:
+                text += f" | Teyit: hacim zirvesi x{m.get('confirm_vol', 0):.1f}"
+            elif m.get("confirm") == 2.0:
+                text += " | Teyit: ilk yeşil mum"
+            if m.get("confirm"):
+                bars = int(m.get("confirm_bars", 0))
+                text += f" (çöküşten {bars * 5} dk sonra)" if bars else " (çöküş mumunda)"
+            text += f" | Satış hacmi x{m.get('liq_ratio', 0):.1f} | Hacim x{m.get('vol_ratio', 0):.1f}"
             if m.get("feed_usdt"):
                 text += f" | Likidasyon akışı {m['feed_usdt']:,.0f} USDT".replace(",", ".")
             return text
@@ -1900,7 +2068,9 @@ class FuturesScalpStrategy(ReboundStrategy):
     is_futures = True
     analysis_fields = ("rsi_period", "futures_volume_ratio", "futures_liq_ratio", "futures_div_oversold",
                        "futures_div_rise", "futures_btc_trend", "futures_sides", "futures_tactic",
-                       "futures_crash_hours", "futures_crash_drop_pct", "futures_crash_liq")
+                       "futures_crash_hours", "futures_crash_drop_pct", "futures_crash_liq", "futures_crash_extra",
+                       "futures_crash_z", "futures_crash_z_min_pct", "futures_confirm", "futures_confirm_bars",
+                       "futures_confirm_volume_ratio")
 
     @property
     def needs_btc_trend(self) -> bool:
@@ -1977,11 +2147,17 @@ class FuturesScalpStrategy(ReboundStrategy):
 
     def _reject_reason(self, f, i, up, down, liq_long, liq_short) -> str:
         if self.cfg.futures_tactic == "crash":
-            drop = f["crash"][i]
-            if not np.isfinite(drop) or drop > -self.cfg.futures_crash_drop_pct:
+            cfg = self.cfg
+            trig = crash_state(f, cfg)[0]
+            mode = getattr(cfg, "futures_confirm", "close")
+            w = 0 if mode == "close" else int(cfg.futures_confirm_bars)
+            if not trig[max(0, i - w):i + 1].any():
                 return "çöküş yok"
-            if self.cfg.futures_sides == "short":
+            if cfg.futures_sides == "short":
                 return "yön kapalı"
+            if not crash_entries(f, cfg, trig)[i]:
+                return {"volume": "teyit bekleniyor (hacim zirvesi)", "green": "teyit bekleniyor (yeşil mum)"}.get(
+                    mode, "teyit bekleniyor (hacim zirvesi / yeşil mum)")
             return "likidasyon dalgası yok"
         ll = bool((f["liq_long"] if liq_long is None else liq_long)[i])
         ls = bool((f["liq_short"] if liq_short is None else liq_short)[i])

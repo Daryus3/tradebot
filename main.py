@@ -22,6 +22,7 @@ Kullanım:
     python main.py --backtest --strateji rsi_divergence   # Pozitif RSI uyumsuzluğu + dönüş teyidiyle alım (1 saat)
     python main.py --backtest --turnuva             # Tüm strateji türleri × çıkış profilleri aynı yılda, sıralı tablo
     python main.py --backtest --strateji futures --tum-donem   # Vadeli scalping: Ocak 2020'den bugüne, yıllara göre
+    python main.py --backtest --strateji futures --izgara      # Vadeli ızgara testi: çöküş kuralları × teyit × σ + çıkışlar
     python main.py --backtest --gun 90 --tara-ab    # Her giriş filtresini açıp / kapatıp kâra etkisini karşılaştırır
     python main.py --backtest --deney --gun 540     # Zarar azaltma deneyi: önerilen ayar birleşimleri, kill-switch açık
     python main.py --backtest --ayar TAKE_PROFIT_PCT=3 --ayar VWAP_FILTER=true  # Ayarı yalnızca bu test için değiştirir
@@ -102,6 +103,11 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--tum-donem", action="store_true",
                         help="Vadeli backtest (STRATEGY=futures): Ocak 2020'den (arşivin başı) bugüne, her dönem kendi "
                              "başındaki en büyük 10 coinle; yıllara göre kazanma oranı / getiri / düşüş")
+    parser.add_argument("--izgara", action="store_true",
+                        help="Vadeli ızgara testi (STRATEGY=futures, çöküş dönüşü): düşüş süreleri [1, 2, 4, 8 saat] × "
+                             "oranları [%%5, 8, 10, 15] × teyit [sadece kapanış, hacim zirvesi, ilk yeşil mum] + "
+                             "mikro/standart/makro (VEYA) + oynaklık (σ) eşiği; en iyilerle çıkış denemeleri ve 1 dk "
+                             "doğrulama. --gun verilmezse Ocak 2020'den bugüne (~10-30 dk)")
     parser.add_argument("--strateji-karsilastir", action="store_true",
                         help="Backtest: aynı mum aralığındaki stratejileri aynı veriyle karşılaştırır "
                              "(5 dk: rebound / trend / breakout, 1 saat: swing / swing_pullback, "
@@ -323,6 +329,9 @@ def run_backtest_cli(cfg, args) -> int:
         print("⚙️ Yalnızca bu test için değiştirilen ayarlar: " + " ".join(f"{k}={v}" for k, v in overrides.items()))
     if is_futures(cfg.strategy) and not args.turnuva:
         return run_futures_backtest_cli(cfg, args, out_dir)
+    if args.izgara:
+        print("❌ --izgara yalnızca vadeli strateji içindir: --strateji futures ekleyin")
+        return EXIT_CONFIG
     days = args.gun if args.gun is not None else (
         1095 if is_rotation(cfg.strategy) and not args.turnuva else
         365 if args.turnuva or args.deney or is_long_horizon(cfg.strategy) or is_mean_reversion(cfg.strategy)
@@ -459,6 +468,8 @@ def run_futures_backtest_cli(cfg, args, out_dir) -> int:
     if cfg.futures_liq_source != "proxy":
         print(f"ℹ️ FUTURES_LIQ_SOURCE={cfg.futures_liq_source}: Binance geçmiş likidasyon kaydı yayımlamadığı için "
               f"backtest likidasyon dalgasını mumlardan (vekil ölçüt) ölçer.")
+    if args.izgara:
+        return run_futures_grid_cli(cfg, args, end_ms, out_dir)
     if cfg.futures_universe > 0:
         coins = (f"her ay en hacimli {cfg.futures_universe} köklü coin: en az {cfg.futures_universe_min_age_days} "
                  f"günlük, son {cfg.futures_universe_avg_days} gün ort. hacim")
@@ -491,6 +502,31 @@ def run_futures_backtest_cli(cfg, args, out_dir) -> int:
                 print("📤 Grafik ve rapor Telegram'a gönderildi.")
             except Exception as exc:  # noqa: BLE001
                 print(f"⚠️ Telegram'a gönderilemedi: {exc}")
+    return EXIT_OK
+
+
+def run_futures_grid_cli(cfg, args, end_ms, out_dir) -> int:
+    """--izgara: vadeli çöküş kurallarının ızgara testi (futures_backtest.run_grid_cli); rapor dosyası + Telegram."""
+    import futures_backtest
+    full = args.gun is None or args.tum_donem
+    what = "Ocak 2020'den bugüne" if full else f"{'belirtilen tarihte biten' if end_ms else 'son'} {args.gun} gün"
+    print(f"⏳ Vadeli ızgara testi ({what}): {len(futures_backtest.grid_variants(cfg))} giriş kuralı, ardından en "
+          f"iyilerle çıkış denemeleri ve 1 dk doğrulama. İlk seferde 1 dk mumlar indirilir (10-30 dk sürebilir)...")
+    try:
+        report, _rows, path = futures_backtest.run_grid_cli(cfg, None if full else args.gun, end_ms, out_dir,
+                                                            full_history=full, progress=print)
+    except Exception as exc:  # noqa: BLE001
+        print(f"❌ Izgara testi çalıştırılamadı: {exc}")
+        return EXIT_CONFIG
+    print(report)
+    if path is not None and not args.cikti_klasoru and cfg.has_telegram:   # Komut satırından: Telegram'a da gönder
+        from telegram_bot import TelegramNotifier
+        notifier = TelegramNotifier(cfg.telegram_bot_token, cfg.telegram_chat_id, async_mode=False)
+        try:
+            notifier.send_document(path, "🧮 Vadeli ızgara testi raporu")
+            print("📤 Rapor Telegram'a gönderildi.")
+        except Exception as exc:  # noqa: BLE001
+            print(f"⚠️ Telegram'a gönderilemedi: {exc}")
     return EXIT_OK
 
 

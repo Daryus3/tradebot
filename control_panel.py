@@ -192,6 +192,8 @@ class ControlPanel:
             self.pages.ask_tactic(arg, mid)
         elif action == "frec":
             self.pages.ask_recommended(mid)
+        elif action == "fgp":
+            self.pages.ask_grid_preset(arg, mid)
         elif action in ("bl", "nobl"):
             self.blacklist(arg, action == "bl", mid)
         else:

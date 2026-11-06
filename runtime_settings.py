@@ -17,14 +17,15 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Dict, Optional, Sequence, Tuple
 
-from config import (ACTION_MODES, FUTURES_LIQ_SOURCES, FUTURES_SIDES, FUTURES_TACTICS, FUTURES_TP_ORDERS, NOTIFY_MODES,
-                    SIGNAL_APPROVAL_MODES, Config, ConfigError, _setting_notes)
+from config import (ACTION_MODES, FUTURES_CONFIRMS, FUTURES_LIQ_SOURCES, FUTURES_SIDES, FUTURES_TACTICS,
+                    FUTURES_TP_ORDERS, NOTIFY_MODES, SIGNAL_APPROVAL_MODES, Config, ConfigError, _setting_notes,
+                    format_crash_rules, parse_crash_rules)
 
 
 @dataclass(frozen=True)
 class Setting:
     attr: str           # Config alanı
-    kind: str           # float | int | bool | choice | str | time (SS:DD) | trange (SS:DD-SS:DD)
+    kind: str           # float | int | bool | choice | str | time (SS:DD) | trange (SS:DD-SS:DD) | rules (saat:%,…)
     label: str          # Telegram'da görünen ad
     choices: Tuple[str, ...] = ()
 
@@ -127,6 +128,16 @@ EDITABLE: Dict[str, Setting] = {
     "FUTURES_CRASH_DROP_PCT": Setting("futures_crash_drop_pct", "float", "Çöküş eşiği (%, FUTURES_CRASH_HOURS içinde)"),
     "FUTURES_CRASH_HOURS": Setting("futures_crash_hours", "int", "Çöküşün ölçüldüğü süre (saat)"),
     "FUTURES_CRASH_LIQ": Setting("futures_crash_liq", "bool", "Çöküşte likidasyon dalgası da şart"),
+    "FUTURES_CRASH_EXTRA": Setting("futures_crash_extra", "rules",
+                                   "Ek çöküş pencereleri (saat:%, ör. 1:6 ya da 1:5,12:15; kapalı = yok)"),
+    "FUTURES_CRASH_Z": Setting("futures_crash_z", "float", "Oynaklık eşiği (standart sapma; 0 = sabit %)"),
+    "FUTURES_CRASH_Z_MIN_PCT": Setting("futures_crash_z_min_pct", "float", "Oynaklık eşiğinde en az düşüş (%)"),
+    "FUTURES_CONFIRM": Setting("futures_confirm", "choice",
+                               "Çöküş teyidi (close = kapanış / volume = hacim zirvesi / green = yeşil mum / either)",
+                               FUTURES_CONFIRMS),
+    "FUTURES_CONFIRM_BARS": Setting("futures_confirm_bars", "int", "Teyit için izleme süresi (5 dk mum)"),
+    "FUTURES_CONFIRM_VOLUME_RATIO": Setting("futures_confirm_volume_ratio", "float",
+                                            "Hacim zirvesi teyidi (önceki 20 mum ortalamasının katı)"),
     "FUTURES_LEVERAGE": Setting("futures_leverage", "int", "Vadeli kaldıraç (1-20x; sonraki işlemde uygulanır)"),
     "FUTURES_COINS": Setting("futures_coins", "str", "Vadeli coinler (virgülle, ör. BTC,ETH,SOL)"),
     "FUTURES_SIDES": Setting("futures_sides", "choice", "Vadeli yön (both / long / short)", FUTURES_SIDES),
@@ -183,6 +194,13 @@ def cast_value(kind: str, raw, key: str, choices: Tuple[str, ...] = ()) -> objec
         return raw
     if kind == "str":                  # Serbest metin (ör. ROTATION_COINS=BTC,ETH): virgül ondalık sayılmaz
         return raw.strip()
+    if kind == "rules":                # Çöküş pencereleri: "1:5,12:15" / düğmeden "1h5,12h15" / "kapalı" → ""
+        if raw.strip().lower() in _NONE:
+            return ""
+        try:
+            return format_crash_rules(parse_crash_rules(raw))
+        except ValueError as exc:
+            raise ConfigError(f"{key}: {exc}") from None
     if kind in ("time", "trange"):     # "23:55" / "2355" / "kapalı" → "23:55" / "" (biçimi Config doğrular)
         text = raw.strip().replace(" ", "")
         if text.lower() in _NONE:
@@ -227,10 +245,11 @@ OVERRIDE_BLOCKED = frozenset({
 OVERRIDE_CHOICES = {"dca_mode": ACTION_MODES, "pyramid_mode": ACTION_MODES, "time_exit_mode": ACTION_MODES,
                     "escape_mode": ACTION_MODES, "signal_approval": SIGNAL_APPROVAL_MODES, "notify_mode": NOTIFY_MODES,
                     "futures_sides": FUTURES_SIDES, "futures_liq_source": FUTURES_LIQ_SOURCES,
-                    "futures_tactic": FUTURES_TACTICS,
+                    "futures_tactic": FUTURES_TACTICS, "futures_confirm": FUTURES_CONFIRMS,
                     "futures_tp_order": FUTURES_TP_ORDERS}
 # Serbest metin olarak değiştirilebilenler (doğrulamayı Config yapar)
-OVERRIDE_TEXT = frozenset({"rotation_coins", "intraday_coins", "intraday_tactic", "futures_coins"})
+OVERRIDE_TEXT = frozenset({"rotation_coins", "intraday_coins", "intraday_tactic", "futures_coins",
+                           "futures_crash_extra"})
 
 
 def override_spec(key: str) -> Optional[Tuple[str, str, Tuple[str, ...]]]:
@@ -243,6 +262,8 @@ def override_spec(key: str) -> Optional[Tuple[str, str, Tuple[str, ...]]]:
         return attr, f.type, ()
     if f.type == "str" and attr in OVERRIDE_CHOICES:
         return attr, "choice", OVERRIDE_CHOICES[attr]
+    if attr == "futures_crash_extra":
+        return attr, "rules", ()
     if f.type == "str" and attr in OVERRIDE_TEXT:
         return attr, "str", ()
     return None

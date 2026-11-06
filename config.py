@@ -82,6 +82,11 @@ FUTURES_STRATEGIES = frozenset({"futures"})
 #   liq4  = ilk sürüm: likidasyon dalgası + hacim + RSI uyumsuzluğu + BTC 1 saatlik trendi (long / short). Aynı testte
 #           7 yılın 7'sinde zarar etti; yalnızca karşılaştırma için.
 FUTURES_TACTICS = ("crash", "liq4")
+# Çöküş teyidi (izleme modu): close = çöküş mumunun kapanışında hemen al (ilk sürüm) | volume = çöküşten sonraki
+# FUTURES_CONFIRM_BARS mum içinde hacmi ortalamanın FUTURES_CONFIRM_VOLUME_RATIO katına çıkan mumda (kapitülasyon) |
+# green = aynı süre içinde ilk yeşil (kapanışı açılışından yüksek) mumda | either = ikisinden hangisi önce gelirse
+FUTURES_CONFIRMS = ("close", "volume", "green", "either")
+FUTURES_MAX_CRASH_EXTRA = 6             # FUTURES_CRASH_EXTRA: en fazla 6 ek pencere
 FUTURES_SIDES = ("both", "long", "short")
 FUTURES_LIQ_SOURCES = ("proxy", "feed", "both")
 FUTURES_TP_ORDERS = ("limit", "market")
@@ -201,6 +206,26 @@ FUTURES_RECOMMENDED = {
     "LOSS_COOLDOWN_MINUTES": 240, "SYMBOL_COOLDOWN_MINUTES": 0, "LOSS_STREAK_LIMIT": 0, "FUTURES_UNIVERSE": 20,
     "FUTURES_UNIVERSE_WITH_LIST": True, "FUTURES_UNIVERSE_MIN_AGE_DAYS": 1095,
 }
+# Telegram → 🧭 Giriş sinyali → 🏆 Izgara #1 / #2: --izgara testinin (Kasım 2026; 2020-2026, seçim / doğrulama dönemi,
+# 1 dk mumlarla doğrulandı) en iyi iki yapılandırması. Test ⭐ önerilen ayarların üzerine yapıldığı için set onları da
+# içerir; yalnızca giriş kuralı ve çıkışlar farklıdır (onaydan sonra birlikte yazılır).
+FUTURES_GRID_PRESETS = (
+    {"icon": "🏆", "name": "4s %10 + 1s %6 + 12s %15 (yılda ~410 işlem)",
+     "detail": "Çöküş: son 4 saatte %10 VEYA 1 saatte %6 VEYA 12 saatte %15. Çıkış: TP +8, SL -5, başabaş +1 → +0.3, "
+               "45 dk. Test (2020-2026, 1 dk): yılda ~410 işlem (şimdiki ~195), kazanma %80 (şimdiki %70), toplam kâr "
+               "+%38; yıllık getiri seçim döneminde +%721, doğrulamada +%146 (şimdiki +%385 / +%99); en büyük düşüş "
+               "%66 / %54 (şimdiki %57 / %30). Zayıf yanı: 2022 ve 2023 yaklaşık başabaş / hafif zarar (-%1, -%11).",
+     "values": {**FUTURES_RECOMMENDED, "FUTURES_CRASH_EXTRA": "1:6,12:15", "FUTURES_CRASH_Z": 0,
+                "FUTURES_CONFIRM": "close", "TAKE_PROFIT_PCT": 8, "STOP_LOSS_PCT": 5, "BREAKEVEN_ENABLED": True,
+                "BREAKEVEN_TRIGGER_PCT": 1, "BREAKEVEN_FLOOR_PCT": 0.3, "MAX_HOLD_MINUTES": 45}},
+    {"icon": "🥈", "name": "4s %10 + 1s %6 (dengeli, 7/7 yıl)",
+     "detail": "Çöküş: son 4 saatte %10 VEYA 1 saatte %6. Çıkış: TP +8, SL -5, başabaş +1 → +0.3, 45 dk. Test: yılda "
+               "~345 işlem, kazanma %81, toplam kâr +%37; yıllık getiri +%587 / +%213 (şimdiki +%385 / +%99), en "
+               "büyük düşüş %52 / %39; 7 yılın 7'si kârlı ve kayma 3 katına çıksa da şimdiki ayardan iyi.",
+     "values": {**FUTURES_RECOMMENDED, "FUTURES_CRASH_EXTRA": "1:6", "FUTURES_CRASH_Z": 0, "FUTURES_CONFIRM": "close",
+                "TAKE_PROFIT_PCT": 8, "STOP_LOSS_PCT": 5, "BREAKEVEN_ENABLED": True, "BREAKEVEN_TRIGGER_PCT": 1,
+                "BREAKEVEN_FLOOR_PCT": 0.3, "MAX_HOLD_MINUTES": 45}},
+)
 # Telegram'da vadeli taktik değişince (onaydan sonra) o taktiğin çıkışları da yüklenir: çöküş dönüşü saatlerce süren
 # büyük toparlanmayı, 4'lü onay ise ilk sürümdeki %1-1.5'lik hızlı scalping hareketini hedefler.
 FUTURES_TACTIC_EXITS = {
@@ -275,6 +300,61 @@ def intraday_coin_list(cfg) -> Tuple[str, ...]:
 def futures_coin_list(cfg) -> Tuple[str, ...]:
     """FUTURES_COINS → ("BTC", "ETH", ...) (ROTATION_COINS ile aynı yazım)."""
     return _coin_list(getattr(cfg, "futures_coins", ""), getattr(cfg, "quote_asset", "USDT").upper())
+
+
+def parse_crash_rules(text: str) -> Tuple[Tuple[int, float], ...]:
+    """FUTURES_CRASH_EXTRA "1:5, 12:15" → ((1, 5.0), (12, 15.0)): "saat:yüzde" çiftleri (saat 1-24, yüzde 2-50;
+    "1s:%5", "1h:5%" ve Telegram düğmesindeki "1h5" de olur). Boş metin → (). Hatalı yazımda ValueError."""
+    out: List[Tuple[int, float]] = []
+    for raw in (text or "").replace(";", ",").split(","):
+        tok = raw.strip().lower().replace(" ", "").replace("%", "")
+        if not tok:
+            continue
+        if ":" not in tok and "h" in tok:              # Düğme verisinde ":" kullanılamaz: "1h5" = 1:5
+            tok = tok.replace("h", ":", 1)
+        if ":" not in tok:
+            raise ValueError(f"'{raw.strip()}' saat:yüzde biçiminde değil (ör. 1:5)")
+        h_txt, p_txt = tok.split(":", 1)
+        for suffix in ("saat", "sa", "s", "h"):
+            if h_txt.endswith(suffix):
+                h_txt = h_txt[:-len(suffix)]
+                break
+        try:
+            hours, pct = int(h_txt), float(p_txt.replace(",", "."))
+        except ValueError:
+            raise ValueError(f"'{raw.strip()}' okunamadı (ör. 1:5 = 1 saatte %5)") from None
+        if not 1 <= hours <= 24 or not 2 <= pct <= 50:
+            raise ValueError(f"'{raw.strip()}': saat 1-24, yüzde 2-50 arasında olmalı")
+        out.append((hours, pct))
+    return tuple(out)
+
+
+def format_crash_rules(rules) -> str:
+    """((1, 5.0), (12, 15.0)) → "1:5,12:15" (FUTURES_CRASH_EXTRA'nın kayıt biçimi)."""
+    return ",".join(f"{h}:{p:g}" for h, p in rules)
+
+
+def canonical_crash_extra(text: str) -> str:
+    """FUTURES_CRASH_EXTRA yazımını tek biçime getirir ("1h:%5 ; 12:15" → "1:5,12:15"); hatalıysa olduğu gibi
+    bırakır (doğrulama hatayı gösterir)."""
+    try:
+        return format_crash_rules(parse_crash_rules(text))
+    except ValueError:
+        return (text or "").strip()
+
+
+def futures_crash_rules(cfg) -> Tuple[Tuple[int, float], ...]:
+    """Çöküş kuralları (saat, %): ana kural FUTURES_CRASH_HOURS / FUTURES_CRASH_DROP_PCT + FUTURES_CRASH_EXTRA, saat
+    sırasıyla. Herhangi biri sağlanınca çöküş sayılır (VEYA); aynı saat iki kez yazıldıysa küçük eşik geçerlidir.
+    Hatalı ek pencere yazımı atlanır (ayar doğrulaması zaten uyarır)."""
+    rules = {int(cfg.futures_crash_hours): float(cfg.futures_crash_drop_pct)}
+    try:
+        extra = parse_crash_rules(getattr(cfg, "futures_crash_extra", ""))
+    except ValueError:
+        extra = ()
+    for hours, pct in extra:
+        rules[hours] = min(pct, rules.get(hours, pct))
+    return tuple(sorted(rules.items()))
 
 
 def futures_liq_distance_pct(leverage: float, mmr_pct: float) -> float:
@@ -501,6 +581,20 @@ class Config:
     futures_crash_hours: int = 4           # crash: düşüşün ölçüldüğü süre (saat)
     futures_crash_drop_pct: float = 10.0   # crash: bu sürede en az bu kadar (%) düşmüş olmalı
     futures_crash_liq: bool = False        # crash: çöküş mumunda likidasyon dalgası da şart (daha az ama daha isabetli)
+    # Dinamik çöküş (Kasım 2026; hepsi varsayılan kapalı, ana kural yukarıdaki iki ayardır):
+    # FUTURES_CRASH_EXTRA: ana kurala VEYA ile eklenen pencereler "saat:%" (ör. "1:5,12:15" = son 1 saatte %5 ya da
+    # son 12 saatte %15 düşüş de yeter; ana kural 4:10 ile mikro / standart / makro çöküş)
+    futures_crash_extra: str = ""
+    # FUTURES_CRASH_Z > 0: sabit yüzdeler yerine oynaklık eşiği. Her pencerede düşüş, coinin o süredeki olağan
+    # hareketinin (pencereden önceki 24 saatin 5 dk getirilerinin standart sapması × √mum sayısı) en az Z katı olmalı
+    # (ör. 3 = "son 4 saatte 3 standart sapma düştüyse"); yine de en az FUTURES_CRASH_Z_MIN_PCT (%) düşüş aranır.
+    futures_crash_z: float = 0.0
+    futures_crash_z_min_pct: float = 3.0
+    # Teyit / izleme modu (bkz. FUTURES_CONFIRMS): çöküş görülünce FUTURES_CONFIRM_BARS mum (12 × 5 dk = 1 saat)
+    # boyunca teyit beklenir; hacim zirvesi = mum hacmi önceki 20 mumun ortalamasının FUTURES_CONFIRM_VOLUME_RATIO katı
+    futures_confirm: str = "close"
+    futures_confirm_bars: int = 12
+    futures_confirm_volume_ratio: float = 3.0
     futures_leverage: int = 2              # Kaldıraç 1-20; her girişten hemen önce Binance'te ayarlanır
     futures_margin_usage_pct: float = 95.0  # Serbest bakiyenin teminata giden yüzdesi (bileşik; kalan pay komisyon için)
     futures_volume_ratio: float = 2.5      # Hacim onayı: sinyal mumu hacmi önceki 20 mumun ortalamasının en az bu katı
@@ -791,6 +885,20 @@ class Config:
             errors.append("FUTURES_TACTIC şunlardan biri olmalı: " + ", ".join(FUTURES_TACTICS))
         if not 1 <= self.futures_crash_hours <= 24 or not 2 <= self.futures_crash_drop_pct <= 50:
             errors.append("FUTURES_CRASH_HOURS 1-24, FUTURES_CRASH_DROP_PCT 2-50 arasında olmalı")
+        try:
+            extra = parse_crash_rules(self.futures_crash_extra)
+            if len(extra) > FUTURES_MAX_CRASH_EXTRA:
+                errors.append(f"FUTURES_CRASH_EXTRA en fazla {FUTURES_MAX_CRASH_EXTRA} pencere alabilir")
+        except ValueError as exc:
+            errors.append(f"FUTURES_CRASH_EXTRA hatalı: {exc}")
+        if not (self.futures_crash_z == 0 or 1 <= self.futures_crash_z <= 10):
+            errors.append("FUTURES_CRASH_Z 0 (kapalı) ya da 1-10 standart sapma olmalı")
+        if not 0.5 <= self.futures_crash_z_min_pct <= 50:
+            errors.append("FUTURES_CRASH_Z_MIN_PCT 0.5-50 arasında olmalı (%)")
+        if self.futures_confirm not in FUTURES_CONFIRMS:
+            errors.append("FUTURES_CONFIRM şunlardan biri olmalı: " + ", ".join(FUTURES_CONFIRMS))
+        if not 1 <= self.futures_confirm_bars <= 24 or not 1 <= self.futures_confirm_volume_ratio <= 20:
+            errors.append("FUTURES_CONFIRM_BARS 1-24 mum, FUTURES_CONFIRM_VOLUME_RATIO 1-20 kat olmalı")
         if self.futures_liq_source not in FUTURES_LIQ_SOURCES:
             errors.append("FUTURES_LIQ_SOURCE şunlardan biri olmalı: " + ", ".join(FUTURES_LIQ_SOURCES))
         if self.futures_sides not in FUTURES_SIDES:
@@ -1026,6 +1134,12 @@ def load_config(env_file: Optional[str] = None, mode_override: Optional[str] = N
         futures_crash_hours=_env_int("FUTURES_CRASH_HOURS", 4),
         futures_crash_drop_pct=_env_float("FUTURES_CRASH_DROP_PCT", 10.0),
         futures_crash_liq=_env_bool("FUTURES_CRASH_LIQ", False),
+        futures_crash_extra=canonical_crash_extra(_env_str("FUTURES_CRASH_EXTRA", "")),
+        futures_crash_z=_env_float("FUTURES_CRASH_Z", 0.0),
+        futures_crash_z_min_pct=_env_float("FUTURES_CRASH_Z_MIN_PCT", 3.0),
+        futures_confirm=_env_str("FUTURES_CONFIRM", "close").lower(),
+        futures_confirm_bars=_env_int("FUTURES_CONFIRM_BARS", 12),
+        futures_confirm_volume_ratio=_env_float("FUTURES_CONFIRM_VOLUME_RATIO", 3.0),
         futures_leverage=_env_int("FUTURES_LEVERAGE", 2),
         futures_margin_usage_pct=_env_float("FUTURES_MARGIN_USAGE_PCT", 95.0),
         futures_volume_ratio=_env_float("FUTURES_VOLUME_RATIO", 2.5),
@@ -1221,6 +1335,23 @@ def _setting_notes(cfg: Config) -> List[str]:
         if cfg.futures_trailing:
             notes.append("FUTURES_TRAILING=true: izleyen stop 2023-2026 testinde bu stratejinin sonucunu iyileştirmedi "
                          "(sabit listede çoğu ayarda yıllık getiri +%62'den +%27-48'e indi).")
+        if cfg.futures_tactic == "crash":
+            if cfg.futures_confirm in ("green", "either"):
+                notes.append(f"FUTURES_CONFIRM={cfg.futures_confirm}: ızgara testinde (2020-2026) ilk yeşil mum teyidi "
+                             f"her pencerede işlem başı kârı düşürdü (ör. 4 saat %10: +%0.46 → +%0.05). Önce 🧪 Backtest.")
+            if cfg.futures_crash_z > 0:
+                notes.append("FUTURES_CRASH_Z: ızgara testinde oynaklık (σ) eşiği aynı işlem sayısında sabit yüzde "
+                             "eşiğinden kötü çıktı. Önce 🧪 Backtest.")
+            if (cfg.futures_crash_extra and cfg.breakeven_enabled
+                    and (cfg.breakeven_trigger_pct > 1.2 or cfg.max_hold_minutes < 45)):
+                notes.append("FUTURES_CRASH_EXTRA: testte ek pencereler başabaş +1 → +0.3 ve 45-60 dk zaman stopuyla "
+                             "kârlı oldu; şimdiki çıkışlarla (başabaş +%g, %d dk) kâr düşebilir. Telegram → 🧭 Giriş "
+                             "sinyali → 🏆 / 🥈 Izgara setleri çıkışları da yazar." % (cfg.breakeven_trigger_pct,
+                                                                                    cfg.max_hold_minutes))
+            if cfg.breakeven_enabled and cfg.breakeven_floor_pct < 0.3:
+                notes.append(f"BREAKEVEN_FLOOR_PCT={cfg.breakeven_floor_pct:g}: başabaş stopu maliyetlere (komisyon + "
+                             f"kayma ≈ %0.14) çok yakın; testte kayma biraz artınca bu küçük kazançlar zarara döndü. "
+                             f"Önerilen en az +0.3.")
         if cfg.futures_liq_source != "proxy":
             notes.append(f"FUTURES_LIQ_SOURCE={cfg.futures_liq_source}: canlı likidasyon akışı kullanılır; bu ölçüm "
                          f"backtest edilemez (backtest mumlardan ölçer), sonuçlar backtestten farklı olabilir.")

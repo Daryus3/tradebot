@@ -80,6 +80,7 @@ Normal durdurma, Telegram `/kapat`, ayar hatası ve kill-switch'te bot yeniden *
 | `python main.py --backtest --turnuva` | Ortalamaya dönüş / RSI uyumsuzluğu / swing / rotasyon stratejilerini farklı çıkış kurallarıyla aynı yılda dener, sıralar |
 | `python main.py --backtest --strateji rsi_divergence` | Pozitif RSI uyumsuzluğu + dönüş teyidiyle alım stratejisini dener (1 saatlik mumlar, 365 gün) |
 | `python main.py --backtest --deney --gun 540 --coin-sayisi 100` | **Zarar azaltma deneyi:** mevcut ayarlar, önerilen ayar listesi ve takılan işlem / zarardan sonra bekleme / önceki trend birleşimlerini **kill-switch açıkken** (canlıdaki gibi) aynı veriyle dener; en iyisi için `/ayar` satırlarını verir |
+| `python main.py --backtest --strateji futures --izgara` | **Vadeli ızgara testi:** çöküş süresi × oranı × teyit + mikro/makro + σ eşiği (96 kural), en iyilerle çıkış denemeleri, 1 dk ve 3 kat kaymayla doğrulama; en iyi 2 yapılandırmanın ayarlarını verir (Ocak 2020'den bugüne, 10-30 dk) |
 | `python main.py --backtest --gun 90 --strateji-karsilastir` | rebound / trend / breakout stratejilerini karşılaştırır |
 | `python main.py --backtest --gun 90 --bitis 2026-07-01` | O tarihte biten (daha eski) bir dönemi dener: bulunan ayarı bağımsız dönemde doğrulamak için |
 | `python main.py --telegram-chat-id` | Telegram chat ID'nizi bulur |
@@ -152,7 +153,7 @@ Bot **yalnızca sizin sohbetinizden** (`TELEGRAM_CHAT_ID`) gelen komutları ve m
 | 🔄 Sunucu Reset | Bot servisini yeniden başlatır (onay ister; ayrıntı VPS_KURULUM.md) |
 
 **⚡ Vadeli stratejide ⚙️ Ayarlar:** kaldıraç (1x-20x hazır + ±1x), teminat (serbest bakiyenin %25 / 50 / 75 / 95'i)
-ve alt sayfalar: **🧭 Giriş sinyali** (taktik; çöküş eşiği %6-15, ölçüm süresi 1-24 saat, likidasyon dalgası şartı;
+ve alt sayfalar: **🧭 Giriş sinyali** (taktik; çöküş eşiği %6-15, ölçüm süresi 1-24 saat, ➕ ek pencereler (VEYA: 1 sa %5-7, 12 sa %15), 📐 oynaklık eşiği (σ), ✅ teyit (sadece kapanış / hacim zirvesi / ilk yeşil mum, izleme süresi), 🏆 / 🥈 ızgara testinin en iyi iki seti, likidasyon dalgası şartı;
 4'lü onayda yön, hacim ve likidasyon eşikleri, ölçüm kaynağı, BTC trendi), **🎯 Çıkış ve emirler** (Kâr Al / Zarar Kes
 hazır değerler + ±, zaman stopu 15 dk-4 saat, Kâr Al emri limit / piyasa, stop güvencesi), **🔒 Başabaş ve izleyen
 stop** (başabaş tetiği +%1-5, tabanı +%0.1-3, ± adımlar; izleyen stop aç / kapa, başlangıç +%1-6, mesafe %0.5-3),
@@ -192,7 +193,7 @@ Sunucuya bağlanmadan, düğmelerle:
 
 | Düğme | Seçenekler |
 |---|---|
-| 📋 Tür | Normal backtest, çıkış taraması (`--tara`), giriş taraması, filtre gevşetme, A/B filtre testi, strateji karşılaştırma, strateji turnuvası, zarar azaltma deneyi, tüm taramalar birden |
+| 📋 Tür | Normal backtest, çıkış taraması (`--tara`), giriş taraması, filtre gevşetme, A/B filtre testi, strateji karşılaştırma, strateji turnuvası, zarar azaltma deneyi, tüm taramalar birden, vadeli ızgara testi (`--izgara`) |
 | 🧭 Strateji | Botun stratejisi veya herhangi bir strateji (yalnızca bu test için) |
 | 🗓️ Süre · 📅 Bitiş | 7 günden 3 yıla; bitiş bugün, N gün önce, **önceki dönem** ya da **iki dönem önce** (bulunan ayarları başka dönemlerde doğrulamak için; 3 yılda iki dönem önce = 2017-2020, 2018 düşüşü dahil) |
 | 💼 Sermaye · 🪙 Coin | Ayardaki / botun güncel sermayesi veya 11-1000 USDT; en hacimli 10-100 coin |
@@ -380,6 +381,57 @@ daha kısa zaman stopu (kâr ↓), köklü 30 ve üstü (doğrulamada bozuldu), 
 Canlı bota uygulamak için: Telegram → ⚙️ Ayarlar → **⭐ Önerilen ayarlar** (onay ister; bekleme, mola, evren ve
 çıkışları birlikte yazar). Bekleme ve mola değerleri vadeli profilindedir: spot bir stratejiye dönünce spot
 varsayılanları (30 dk, 3 zarar kes) geri gelir.
+
+#### Dinamik çöküş kuralları ve ızgara testi (`--izgara`, Kasım 2026)
+Mevcut ana kural (`FUTURES_CRASH_HOURS` / `FUTURES_CRASH_DROP_PCT`) aynen duruyor; aşağıdakiler ona **eklenir** ve
+hepsi varsayılan kapalıdır (açılmadıkça bot eskisi gibi çalışır). Canlı bot ve backtest aynı fonksiyonları kullanır
+(`strategy.crash_state` / `crash_entries`). Telegram: ⚙️ Ayarlar → 🧭 Giriş sinyali.
+
+| Ayar | Ne yapar |
+|---|---|
+| `FUTURES_CRASH_EXTRA` | Ana kurala **VEYA** ile eklenen pencereler `saat:%`, ör. `1:5,12:15` = mikro (1 saatte %5) / standart (ana kural, 4 saatte %10) / makro (12 saatte %15) çöküş: herhangi biri yeter |
+| `FUTURES_CRASH_Z` (+ `_MIN_PCT`) | Sabit yüzdeler yerine **oynaklık eşiği**: düşüş, coinin o süredeki olağan hareketinin (pencereden önceki 24 saatin 5 dk getirilerinin standart sapması × √mum sayısı) en az Z katı olmalı ("son 4 saatte 3 standart sapma"); en az `FUTURES_CRASH_Z_MIN_PCT` (%3) düşüş de aranır |
+| `FUTURES_CONFIRM` (+ `_BARS`, `_VOLUME_RATIO`) | **İzleme modu / kapitülasyon teyidi**: `close` = çöküş mumunun kapanışında hemen al (önceki davranış); `volume` = çöküşten sonraki `FUTURES_CONFIRM_BARS` (12 = 1 saat) mum içinde hacmi önceki 20 mumun 3 katı olan mumda; `green` = ilk yeşil mumda; `either` = hangisi önce gelirse |
+
+**Izgara testi:** `python main.py --backtest --strateji futures --izgara` (Telegram: 🧪 Backtest → Tür: Vadeli ızgara
+testi). 1) 96 giriş kuralı: düşüş süreleri [1, 2, 4, 8 saat] × oranları [%5, 8, 10, 15] × teyit [sadece kapanış, hacim
+zirvesi, ilk yeşil mum] + mikro/standart/makro × 4 teyit + oynaklık eşiği [1, 2, 4, 8 saat] × [2.5, 3, 4σ] × 3 teyit +
+ana kurala eklenen pencereler; 2) en iyi giriş kurallarıyla 48 çıkış (TP / SL / başabaş / zaman stopu); 3) adaylar
+1 dk mumlarla ve 3 kat kaymayla doğrulanır, en iyi 2 yapılandırma ayar satırlarıyla raporlanır (10-30 dk). Veri:
+2020-01 → 2026-11, liste ∪ köklü 20, 2x, 30 USDT; seçim dönemi 2020-01 → 2023-10, doğrulama 2023-11 → 2026-11.
+
+Bulgular (önce 5 dk mumlarla, sonra 1 dk ile doğrulandı):
+- **"İlk yeşil mum" teyidi her pencerede kârı düşürdü** (ör. 4 sa %10: işlem başı +%0.46 → +%0.05; düşüş durup ilk
+  yeşil mum geldiğinde dönüşün çoğu kaçmış oluyor). **Hacim zirvesi** işlem başı sonucu artırdı ama işlemi %60-90
+  azalttı (4 sa %10: 189 → 73/yıl): hedefin tersi.
+- **Oynaklık (σ) eşiği** aynı işlem sayısında sabit yüzdeden kötü (1 sa 4σ: 316/yıl, işlem başı +%0.12; 1 sa %5:
+  365/yıl, +%0.19). Likidasyon şelaleleri kaldıraç seviyelerine bağlı sabit yüzdelerde tetikleniyor, σ'da değil.
+- Tek pencerede eşiği düşürmek işlemi çok artırıyor ama işlem başı sonucu sıfıra indiriyor (4 sa %5: 1.104/yıl,
+  −%0.04; 8 sa %8: 649/yıl, +%0.04). Mikro/standart/makro VEYA mevcut çıkışlarla yılda 479 işlem ama kazanma %65.
+- **Asıl kazanç çıkışlarda:** ek 1 saatlik pencerenin sinyalleri, başabaşın +1 → +0.3'e, SL'nin 5'e, TP'nin 8'e ve
+  zaman stopunun 45-60 dk'ya çekilmesiyle kârlı hâle geliyor. Başabaş tabanı +0.2 daha da iyi görünüyor ama maliyete
+  (komisyon + kayma ≈ %0.14) çok yakın: kayma 3-5 katına çıkınca bu küçük kazançlar zarara dönüyor (kazanma %85 → %20).
+
+| 1 dk çıkışlarla | İşlem/yıl (seçim / doğr.) | Kazanma | Toplam (sabit poz.) | Yıllık getiri seçim / doğr. | Maks. düşüş seçim / doğr. | Kârlı yıl | Kayma ×3: yıllık |
+|---|---|---|---|---|---|---|---|
+| Mevcut (4 sa %10, TP 6 / SL 4 / BE 1.5 → 0.3 / 30 dk) | 195 (241 / 137) | %70.0 | +%526 | +%385 / +%99 | %57 / %30 | 7/7 | +%216 / +%73 |
+| **🏆 #1: + 1 sa %6 + 12 sa %15**, TP 8 / SL 5 / BE 1 → 0.3 / 45 dk | **410 (489 / 308)** | %79.7 | +%726 | +%721 / +%146 | %66 / %54 | 5/7 | +%220 / +%62 |
+| **🥈 #2: + 1 sa %6**, TP 8 / SL 5 / BE 1 → 0.3 / 45 dk | **343 (411 / 257)** | %81.2 | +%719 | +%587 / +%213 | %52 / %39 | 7/7 | +%236 / +%100 |
+| En çok işlem (kırılgan): + 1 sa %5 + 12 sa %15, TP 8 / SL 5 / BE 0.7 → 0.2 / 45 dk | 608 (721 / 464) | %83.8 | +%603 | +%394 / +%108 | %76 / %63 | 6/7 | +%94 / +%2 |
+
+Yıl yıl (her yıl 30 USDT ile, tek hesap): mevcut 2020 +%190, 2021 +%4.157, 2022 +%114, 2023 +%117, 2024 +%229, 2025
++%46, 2026 +%13; **#1** +%2.789, +%7.285, **−%1, −%11**, +%444, +%511, +%73; **#2** +%840, +%7.290, +%44, +%9, +%545,
++%642, +%66. #1 yılda 400 işlem hedefini tutturuyor ama durgun 2022-2023'te kazanamadı; **#2 her yıl kârlı ve maliyet
+artışına daha dayanıklı** (önerilen). Kazanma oranının yükselmesi büyük ölçüde başabaş stopuyla küçük kârla kapanan
+işlemlerden (çıkışların ~%60'ı): işlem başı net sonuç #2'de +%0.31 (mevcut +%0.39), ama işlem sayısı arttığı için toplam
+kâr daha yüksek. Kâr korunarak ulaşılabilen en yüksek işlem sayısı sağlam ayarlarda 1.8-2.1 kat (yılda 343-410); 3-4
+kat yalnızca maliyet varsayımına çok duyarlı ayarlarla mümkün oldu. `--izgara` komutu bu iki yapılandırmayı kendiliğinden
+bulur (aynı veriyle aynı sonuç).
+
+Uygulamak için: Telegram → 🧭 Giriş sinyali → **🏆 Izgara #1** ya da **🥈 Izgara #2** (onay ister; testteki evren ve
+bekleme ayarlarını da yazar) ya da `.env`'de `FUTURES_CRASH_EXTRA=1:6` + `TAKE_PROFIT_PCT=8 STOP_LOSS_PCT=5
+BREAKEVEN_TRIGGER_PCT=1 BREAKEVEN_FLOOR_PCT=0.3 MAX_HOLD_MINUTES=45` (#2; #1 için `FUTURES_CRASH_EXTRA=1:6,12:15`).
+Önce test modunda (paper) izleyin.
 
 ### 🏆 Strateji turnuvası (`--turnuva`)
 Hangi strateji türünün sizin dönemde işe yaradığını **tek komutla** görmek için:
