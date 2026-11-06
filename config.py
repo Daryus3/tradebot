@@ -87,6 +87,14 @@ FUTURES_TACTICS = ("crash", "liq4")
 # green = aynı süre içinde ilk yeşil (kapanışı açılışından yüksek) mumda | either = ikisinden hangisi önce gelirse
 FUTURES_CONFIRMS = ("close", "volume", "green", "either")
 FUTURES_MAX_CRASH_EXTRA = 6             # FUTURES_CRASH_EXTRA: en fazla 6 ek pencere
+# Çöküş taktiğine VEYA ile eklenen giriş modülleri (Faz 3; hepsi varsayılan kapalı):
+#   pump     = pompa dönüşü SHORT: son H saatte en az %X YÜKSELEN coinde 5 dk mum kapanışında short (FUTURES_PUMP_RULES)
+#   bb       = Bollinger (20, FUTURES_BB_STD) + RSI(14): kapanış alt bandın altında ve RSI < FUTURES_BB_RSI_LOW → long,
+#              üst bandın üstünde ve RSI > FUTURES_BB_RSI_HIGH → short (FUTURES_BB: off | both | long | short)
+#   breakout = hacimli kırılım LONG: hacim önceki 20 mumun FUTURES_BREAKOUT_VOLUME_RATIO katından fazla ve kapanış son
+#              FUTURES_BREAKOUT_HOURS saatin en yükseğinin üstünde
+# Aynı anda birden çok sinyal varsa öncelik: çöküş > pompa > kırılım > Bollinger (tek pozisyon).
+FUTURES_BB_MODES = ("off", "both", "long", "short")
 FUTURES_SIDES = ("both", "long", "short")
 FUTURES_LIQ_SOURCES = ("proxy", "feed", "both")
 FUTURES_TP_ORDERS = ("limit", "market")
@@ -357,6 +365,33 @@ def futures_crash_rules(cfg) -> Tuple[Tuple[int, float], ...]:
     return tuple(sorted(rules.items()))
 
 
+def futures_pump_rules(cfg) -> Tuple[Tuple[int, float], ...]:
+    """Pompa (short) kuralları (saat, %): FUTURES_PUMP_RULES, saat sırasıyla; boş = modül kapalı. Aynı saat iki kez
+    yazıldıysa küçük eşik geçerli (VEYA). Hatalı yazım boş sayılır (ayar doğrulaması uyarır)."""
+    try:
+        parsed = parse_crash_rules(getattr(cfg, "futures_pump_rules", ""))
+    except ValueError:
+        return ()
+    rules: dict = {}
+    for hours, pct in parsed:
+        rules[hours] = min(pct, rules.get(hours, pct))
+    return tuple(sorted(rules.items()))
+
+
+def futures_modules(cfg) -> Tuple[str, ...]:
+    """Çöküş taktiğinde açık olan ek giriş modülleri (öncelik sırasıyla): pump, breakout, bb."""
+    if getattr(cfg, "futures_tactic", "crash") != "crash":
+        return ()
+    out = []
+    if futures_pump_rules(cfg):
+        out.append("pump")
+    if getattr(cfg, "futures_breakout", False):
+        out.append("breakout")
+    if getattr(cfg, "futures_bb", "off") != "off":
+        out.append("bb")
+    return tuple(out)
+
+
 def futures_liq_distance_pct(leverage: float, mmr_pct: float) -> float:
     """Yalıtılmış (isolated) teminatta likidasyona kalan yaklaşık FİYAT hareketi (%): 100/kaldıraç - bakım oranı.
     10x → ~%9.5, 20x → ~%4.5."""
@@ -595,6 +630,15 @@ class Config:
     futures_confirm: str = "close"
     futures_confirm_bars: int = 12
     futures_confirm_volume_ratio: float = 3.0
+    # Ek giriş modülleri (Faz 3, bkz. FUTURES_BB_MODES üstündeki açıklama; hepsi varsayılan kapalı)
+    futures_pump_rules: str = ""           # Pompa dönüşü SHORT, "saat:%" yükseliş (ör. 1:6,4:10,12:15); boş = kapalı
+    futures_bb: str = "off"                # Bollinger + RSI: off | both | long | short
+    futures_bb_std: float = 2.0            # Bant genişliği (standart sapma; 20 mumluk ortalama)
+    futures_bb_rsi_low: float = 25.0       # Long: RSI(14) bunun altında
+    futures_bb_rsi_high: float = 75.0      # Short: RSI(14) bunun üstünde
+    futures_breakout: bool = False         # Hacimli kırılım LONG
+    futures_breakout_volume_ratio: float = 3.0
+    futures_breakout_hours: int = 4
     futures_leverage: int = 2              # Kaldıraç 1-20; her girişten hemen önce Binance'te ayarlanır
     futures_margin_usage_pct: float = 95.0  # Serbest bakiyenin teminata giden yüzdesi (bileşik; kalan pay komisyon için)
     futures_volume_ratio: float = 2.5      # Hacim onayı: sinyal mumu hacmi önceki 20 mumun ortalamasının en az bu katı
@@ -895,6 +939,17 @@ class Config:
             errors.append("FUTURES_CRASH_Z 0 (kapalı) ya da 1-10 standart sapma olmalı")
         if not 0.5 <= self.futures_crash_z_min_pct <= 50:
             errors.append("FUTURES_CRASH_Z_MIN_PCT 0.5-50 arasında olmalı (%)")
+        try:
+            parse_crash_rules(self.futures_pump_rules)
+        except ValueError as exc:
+            errors.append(f"FUTURES_PUMP_RULES hatalı: {exc}")
+        if self.futures_bb not in FUTURES_BB_MODES:
+            errors.append("FUTURES_BB şunlardan biri olmalı: " + ", ".join(FUTURES_BB_MODES))
+        if not 1 <= self.futures_bb_std <= 4 or not 5 <= self.futures_bb_rsi_low <= 50 \
+                or not 50 <= self.futures_bb_rsi_high <= 95:
+            errors.append("FUTURES_BB_STD 1-4, FUTURES_BB_RSI_LOW 5-50, FUTURES_BB_RSI_HIGH 50-95 arasında olmalı")
+        if not 1 <= self.futures_breakout_volume_ratio <= 20 or not 1 <= self.futures_breakout_hours <= 24:
+            errors.append("FUTURES_BREAKOUT_VOLUME_RATIO 1-20 kat, FUTURES_BREAKOUT_HOURS 1-24 saat olmalı")
         if self.futures_confirm not in FUTURES_CONFIRMS:
             errors.append("FUTURES_CONFIRM şunlardan biri olmalı: " + ", ".join(FUTURES_CONFIRMS))
         if not 1 <= self.futures_confirm_bars <= 24 or not 1 <= self.futures_confirm_volume_ratio <= 20:
@@ -1140,6 +1195,14 @@ def load_config(env_file: Optional[str] = None, mode_override: Optional[str] = N
         futures_confirm=_env_str("FUTURES_CONFIRM", "close").lower(),
         futures_confirm_bars=_env_int("FUTURES_CONFIRM_BARS", 12),
         futures_confirm_volume_ratio=_env_float("FUTURES_CONFIRM_VOLUME_RATIO", 3.0),
+        futures_pump_rules=canonical_crash_extra(_env_str("FUTURES_PUMP_RULES", "")),
+        futures_bb=_env_str("FUTURES_BB", "off").lower(),
+        futures_bb_std=_env_float("FUTURES_BB_STD", 2.0),
+        futures_bb_rsi_low=_env_float("FUTURES_BB_RSI_LOW", 25.0),
+        futures_bb_rsi_high=_env_float("FUTURES_BB_RSI_HIGH", 75.0),
+        futures_breakout=_env_bool("FUTURES_BREAKOUT", False),
+        futures_breakout_volume_ratio=_env_float("FUTURES_BREAKOUT_VOLUME_RATIO", 3.0),
+        futures_breakout_hours=_env_int("FUTURES_BREAKOUT_HOURS", 4),
         futures_leverage=_env_int("FUTURES_LEVERAGE", 2),
         futures_margin_usage_pct=_env_float("FUTURES_MARGIN_USAGE_PCT", 95.0),
         futures_volume_ratio=_env_float("FUTURES_VOLUME_RATIO", 2.5),
@@ -1328,7 +1391,8 @@ def _setting_notes(cfg: Config) -> List[str]:
                          f"%60-90'a çıktı. Önerilen kaldıraç 2x (en fazla 3x).")
         if cfg.futures_universe > 20:
             notes.append(f"FUTURES_UNIVERSE={cfg.futures_universe}: 2023-2026 testinde 20'den fazla köklü coin sonucu "
-                         f"zayıflattı (40: ~%0-35/yıl, 60-80: zarar); 10-20 coin kârlıydı. Önce 🧪 Backtest.")
+                         f"zayıflattı (40: ~%0-35/yıl, 60-80: zarar; Faz 3: 120-150 coinde yılda 1.000+ işlem ama işlem "
+                         f"başı ~%0, hesap eridi); 10-20 coin kârlıydı. Önce 🧪 Backtest.")
         if cfg.futures_universe > 0 and cfg.futures_universe_min_age_days < 730:
             notes.append(f"FUTURES_UNIVERSE_MIN_AGE_DAYS={cfg.futures_universe_min_age_days}: yaş filtresi kısa; testte "
                          f"yeni / hype coinler (TRUMP, FARTCOIN, WIF...) çöküşten toparlanmadı, hesap eridi. Önerilen ≥ 1095.")
@@ -1348,6 +1412,12 @@ def _setting_notes(cfg: Config) -> List[str]:
                              "kârlı oldu; şimdiki çıkışlarla (başabaş +%g, %d dk) kâr düşebilir. Telegram → 🧭 Giriş "
                              "sinyali → 🏆 / 🥈 Izgara setleri çıkışları da yazar." % (cfg.breakeven_trigger_pct,
                                                                                     cfg.max_hold_minutes))
+            mods = futures_modules(cfg)
+            if mods:
+                names = {"pump": "pompa short", "bb": "Bollinger + RSI", "breakout": "hacimli kırılım"}
+                notes.append("Ek giriş modülleri açık (" + ", ".join(names[m] for m in mods) + "): Faz 3 testinde "
+                             "(2020-2026) üçü de tek başına ve çöküşle birlikte zarar etti; işlem sayısı artar ama "
+                             "işlem başı sonuç maliyetin altında kalır (README). Yalnızca test modunda deneyin.")
             if cfg.breakeven_enabled and cfg.breakeven_floor_pct < 0.3:
                 notes.append(f"BREAKEVEN_FLOOR_PCT={cfg.breakeven_floor_pct:g}: başabaş stopu maliyetlere (komisyon + "
                              f"kayma ≈ %0.14) çok yakın; testte kayma biraz artınca bu küçük kazançlar zarara döndü. "

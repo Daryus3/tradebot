@@ -13,6 +13,8 @@ likidasyonlar piyasa emriyle kapatıldığı için zorla satış dalgaları bura
 from __future__ import annotations
 
 import io
+import os
+import threading
 import time
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
@@ -155,7 +157,7 @@ class FuturesArchive:
     @staticmethod
     def _save(path: Path, arrs: Dict[str, np.ndarray]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(path.name + ".tmp.npz")
+        tmp = path.with_name(f"{path.name}.{os.getpid()}-{threading.get_ident()}.tmp.npz")   # Eşzamanlı yazımlar
         np.savez_compressed(tmp, **arrs)
         tmp.replace(path)
 
@@ -218,7 +220,7 @@ class FuturesArchive:
                         r = np.array([float(ln.split(",")[-1]) for ln in lines], dtype=np.float64)
                 if content is not None or self.now_fn() - nxt.timestamp() > MISSING_GRACE_DAYS * 86400:
                     path.parent.mkdir(parents=True, exist_ok=True)
-                    tmp = path.with_name(path.name + ".tmp.npz")
+                    tmp = path.with_name(f"{path.name}.{os.getpid()}-{threading.get_ident()}.tmp.npz")
                     np.savez_compressed(tmp, t=t, r=r)
                     tmp.replace(path)
             times.append(t)

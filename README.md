@@ -433,6 +433,50 @@ bekleme ayarlarını da yazar) ya da `.env`'de `FUTURES_CRASH_EXTRA=1:6` + `TAKE
 BREAKEVEN_TRIGGER_PCT=1 BREAKEVEN_FLOOR_PCT=0.3 MAX_HOLD_MINUTES=45` (#2; #1 için `FUTURES_CRASH_EXTRA=1:6,12:15`).
 Önce test modunda (paper) izleyin.
 
+#### Faz 3: ek giriş modülleri ve geniş evren (`--modul-izgara`, Kasım 2026)
+Çöküş kuralına **VEYA** ile eklenebilen üç modül; hepsi varsayılan kapalı (Telegram: 🧭 Giriş sinyali → 🧩 Ek
+modüller). Tek pozisyon kuralı aynen geçerli; aynı anda birden çok sinyal varsa öncelik çöküş > pompa > kırılım >
+Bollinger. Canlı bot ve backtest aynı fonksiyonları kullanır; Bollinger / kırılım açıkken her coinin mumları her 5
+dakikada (çok coinde paralel) istenir, pompa açıkken 24 saatlik dibinin yeterince üstündeki coinler de taranır.
+
+| Ayar | Ne yapar |
+|---|---|
+| `FUTURES_PUMP_RULES` | **Pompa dönüşü SHORT:** son H saatte en az %X YÜKSELEN coinde 5 dk mum kapanışında short, ör. `1:6,4:10,12:15` |
+| `FUTURES_BB` (+ `_STD`, `_RSI_LOW`, `_RSI_HIGH`) | **Bollinger (20, 2) + RSI(14):** kapanış alt bandın altında ve RSI < 25 → long; üst bandın üstünde ve RSI > 75 → short (`off` / `both` / `long` / `short`) |
+| `FUTURES_BREAKOUT` (+ `_VOLUME_RATIO`, `_HOURS`) | **Hacimli kırılım LONG:** hacim önceki 20 mumun 3 katından fazla ve kapanış son 4 saatin zirvesinin üstünde |
+| `FUTURES_UNIVERSE` | Telegram'da artık 120 / 150 seçenekleri de var (en fazla 150) |
+
+**Test:** `python main.py --backtest --strateji futures --modul-izgara` (Telegram: 🧪 Backtest → Tür: Vadeli modül
+ızgarası). Çıkışlar sabit: TP 8 / SL 5 / başabaş +1 → +0.3 / 45 dk (🥈 #2), 2x, 30 USDT; 2020-01 → 2026-11; önce 5 dk
+mumlarla tarama, sonra 1 dk ile doğrulama ve 3 kat kayma. Not: 3 yıllık yaş kuralıyla 2020-2022'de yalnızca ~11 köklü
+coin vardı; 120-150 coinlik evren ancak 2024'ten itibaren oluşuyor.
+
+| Liste ∪ köklü 20 coin | İşlem/yıl | Kazanma | İşlem başı | Yıllık getiri seçim / doğr. | Maks. düşüş | Kayma ×3 |
+|---|---|---|---|---|---|---|
+| Çöküş #2 (mevcut en iyi, 1 dk) | 343 | %81.2 | +%0.31 | +%587 / +%213 | %52 / %39 | +%236 / +%100 |
+| Çöküş + pompa short (1 dk) | **1.008** | %74.1 | +%0.03 | −%32 / −%23 | %96 / %90 | eridi |
+| Yalnız pompa short (1 dk) | 739 | %71.4 | −%0.11 | eridi | %98 / %95 | eridi |
+| Yalnız Bollinger + RSI, long + short (5 dk) | 3.844 | %51.5 | −%0.13 | eridi | %92 / %91 | eridi |
+| Yalnız hacimli kırılım (5 dk) | 3.477 | %41.0 | −%0.12 | eridi | %92 / %95 | eridi |
+| HEPSİ: çöküş + pompa + Bollinger + kırılım (5 dk) | 5.520 | %47.6 | −%0.09 | eridi | %95 / %92 | eridi |
+
+| Çöküş #2, evren genişliği | İşlem/yıl (2024-26) | İşlem başı (2024-26) | Doğrulama yıllık | Kayma ×3 doğr. |
+|---|---|---|---|---|
+| 20 köklü + liste (1 dk) | 343 (257) | +%0.29 | +%213 | +%100 |
+| 30 (1 dk) | 397 (368) | +%0.12 | +%64 | −%4 |
+| 40 (5 dk) | 438 (494) | +%0.15 | +%133 | −%2 |
+| 60 (5 dk) | 590 (812) | +%0.03 | −%28 | eridi |
+| 120 (5 dk) | 973 (1.682) | −%0.02 | eridi | eridi |
+| 150 (5 dk) | 1.063 (1.888) | +%0.003 | eridi | eridi |
+
+Sonuç: **yılda 1.000+ işleme kârla ve kayma stresini geçerek ulaşan birleşim yok.** İşlem sayısı kolayca artıyor
+(pompa ekleyince 1.008, 150 coinde 1.063, hepsi birlikte 5.000-8.000/yıl) ama işlem başı net sonuç maliyetin
+(komisyon + kayma ≈ %0.14) altına iniyor. Modüller kendi tipik çıkışlarıyla da (TP 0.6-3, SL 0.6-2, 30-240 dk; 7 çıkış
+× 4 modül) denendi: 28 birleşimin 28'i zararda. Pompa short'ta kazanma oranı %70-79 olsa da sürmekte olan pompalar
+zarar kes'e gidiyor; Bollinger ve kırılımın 5 dk hareketi maliyeti karşılamıyor (önceki araştırmadaki 37 sinyal
+ailesiyle aynı sonuç). Çöküş long'unun avantajı likidasyon zincirinin zorla satışından geliyor; bunun simetriği
+pompalarda yok, geniş evrende de küçük / yeni coinlerin çöküşleri toparlanmıyor. Öneri: 🥈 #2 (liste ∪ köklü 20).
+
 ### 🏆 Strateji turnuvası (`--turnuva`)
 Hangi strateji türünün sizin dönemde işe yaradığını **tek komutla** görmek için:
 ```bash

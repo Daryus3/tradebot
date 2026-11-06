@@ -20,12 +20,13 @@ Yüzdeler (Kâr Al, Zarar Kes, başabaş) FİYAT hareketidir; 10x'te fiyat +%1.2
 """
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 import requests
 
-from config import futures_coin_list, futures_crash_rules, futures_liq_distance_pct
+from config import futures_coin_list, futures_crash_rules, futures_liq_distance_pct, futures_modules, futures_pump_rules
 from futures_exchange import FuturesError, MinNotionalError, describe_error
 from logger import get_logger
 from risk import ExitReason, Position, cooldown_minutes, kill_switch_hit
@@ -44,6 +45,8 @@ BE_RETRY_SEC = 30             # Başabaş stopu taşınamadıysa bu kadar sonra 
 TRAIL_MOVE_SEC = 10           # İzleyen stop: Binance'teki stop emri en sık bu aralıkla taşınır (bot arada kendisi izler)
 TRAIL_MIN_STEP_PCT = 0.1      # ...ve yeni seviye eskisinden en az bu kadar (fiyat %) iyiyse
 PREFILTER_SLACK_PCT = 1.0     # En hacimli N + çöküş: 24 saatlik tepeye göre ön elemede pay (fiyat puanı)
+KLINE_PARALLEL_MIN = 16       # Bundan çok coinin mumları paralel istenir (120-150 coinlik evrende tarama gecikmesin)
+KLINE_WORKERS = 6
 UNIVERSE_REFRESH_SEC = 24 * 3600   # En hacimli N köklü coin sıralaması günde bir yenilenir (parite başına 1 istek)
 
 
@@ -235,12 +238,22 @@ class FuturesBot(TradingBot):
         klines, errors = {}, []
         symbols, skipped = self._scan_symbols()
         limit = futures_kline_limit(self.cfg)       # En uzun pencere + izleme süresi + oynaklık geçmişi
-        for symbol in symbols:
-            if not ex.has_market(symbol) or symbol in self._scan_excluded():
-                continue
+        excluded = self._scan_excluded()
+        targets = [s for s in symbols if ex.has_market(s) and s not in excluded]
+
+        def fetch(symbol: str):
             try:
-                k = ex.klines(symbol, "5m", limit)
+                return symbol, ex.klines(symbol, "5m", limit), None
             except FuturesError as exc:
+                return symbol, None, exc
+
+        if len(targets) > KLINE_PARALLEL_MIN:        # Ağ hatası (ConnectionError) sıralı sürümdeki gibi yükselir
+            with ThreadPoolExecutor(max_workers=KLINE_WORKERS) as pool:
+                results = list(pool.map(fetch, targets))
+        else:
+            results = [fetch(s) for s in targets]
+        for symbol, k, exc in results:
+            if exc is not None:
                 errors.append(f"{symbol}: {exc}")
                 continue
             if len(k["t"]) and int(k["t"][-1]) + FUT_BAR_MS == closed_ms:   # Yalnızca az önce kapanan mum
@@ -251,7 +264,8 @@ class FuturesBot(TradingBot):
             log.warning("Vadeli tarama: %d coinin mumları alınamadı (%s)", len(errors), "; ".join(errors[:3]))
             rejects["veri alınamadı"] += len(errors)
         if skipped:
-            rejects["çöküş yok (24 saatlik tepeye yakın)"] += skipped
+            rejects["çöküş / pompa yok (24 saatlik aralık dar)" if futures_pump_rules(self.cfg)
+                    else "çöküş yok (24 saatlik tepeye yakın)"] += skipped
         result = ScanResult(signals=list(signals), candidates=len(symbols) + skipped, analyzed=len(klines),
                             rejects=rejects)
         self._record_scan(result, now)
@@ -305,7 +319,9 @@ class FuturesBot(TradingBot):
         Çöküş taktiğinde, fiyatı 24 saatlik tepesinin (en küçük eşik - pay) kadar altında olmayan coinlerin mumları
         hiç istenmez: son H (≤ 24) saatte %X düşen coin, 24 saatlik tepesinin de en az %X altındadır. Teyit beklenirken
         (izleme modu) fiyat çöküşten sonra toparlanmış olabilir: o zaman 24 saatlik DİP tepenin %X altında mı diye
-        bakılır (pencere + izleme süresi 24 saati aşarsa ön eleme yapılmaz)."""
+        bakılır (pencere + izleme süresi 24 saati aşarsa ön eleme yapılmaz). Pompa modülü açıksa fiyatı 24 saatlik
+        dibinin en az %Y üstünde olanlar da taranır; Bollinger / kırılım modülleri her coinde sinyal verebileceği için
+        onlar açıkken ön eleme yapılmaz."""
         cfg = self.cfg
         if cfg.futures_universe <= 0:
             return [c + "USDT" for c in futures_coin_list(cfg)], 0
@@ -313,24 +329,31 @@ class FuturesBot(TradingBot):
         symbols = self._universe_symbols()
         if cfg.futures_tactic != "crash" or not symbols:
             return symbols, 0
+        mods = futures_modules(cfg)
+        if "bb" in mods or "breakout" in mods:
+            return symbols, 0
         rules = futures_crash_rules(cfg)
         watch = cfg.futures_confirm != "close"
         reach_h = max(h for h, _p in rules) + (cfg.futures_confirm_bars / 12 if watch else 0)
         if reach_h > 24:
             return symbols, 0
         least = cfg.futures_crash_z_min_pct if cfg.futures_crash_z > 0 else min(p for _h, p in rules)
+        pump = futures_pump_rules(cfg)
         try:
             tickers = self.exchange.tickers_24h()
         except (FuturesError, requests.ConnectionError) as exc:
             log.warning("24 saatlik özetler alınamadı (ön eleme yapılmadı): %s", exc)
             return symbols, 0
         need = max(0.0, least - PREFILTER_SLACK_PCT) / 100
+        need_up = max(0.0, min(p for _h, p in pump) - PREFILTER_SLACK_PCT) / 100 if pump else None
         keep = []
         for symbol in symbols:
             t = tickers.get(symbol)
             price = t.get("low", 0.0) if t is not None and watch else (t or {}).get("last", 0.0)
             if t is None or t["high"] <= 0 or price <= 0 or price <= t["high"] * (1 - need):
                 keep.append(symbol)                  # Özet yoksa temkinli: mumlara bakılır
+            elif need_up is not None and 0 < t.get("low", 0.0) and t["last"] >= t["low"] * (1 + need_up):
+                keep.append(symbol)                  # Pompa adayı: 24 saatlik dibinin yeterince üstünde
         return keep, len(symbols) - len(keep)
 
     def open_futures(self, sig: FuturesSignal, now: float) -> Optional[Position]:

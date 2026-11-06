@@ -31,10 +31,10 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from config import DATA_DIR, futures_coin_list, futures_crash_rules, futures_liq_distance_pct
+from config import DATA_DIR, futures_coin_list, futures_crash_rules, futures_liq_distance_pct, futures_modules
 from futures_data import FuturesArchive, concat, resample, slice_range
-from strategy import (FUT_BAR_MS, FUT_HOUR_MS, btc_trend_1h, crash_scores, crash_state, futures_candidates,
-                      futures_features, futures_signal_at, trend_at)
+from strategy import (FUT_BAR_MS, FUT_HOUR_MS, btc_trend_1h, crash_state, futures_candidates, futures_entries,
+                      futures_features, pick_signal, trend_at)
 
 DAY_MS = 86_400_000
 MIN_MS = 60_000
@@ -212,6 +212,12 @@ class FutSignal:
     score: float
     entry_open: float       # Bir sonraki mumun açılışı (kaymasız giriş fiyatı)
     metrics: Dict[str, float] = field(default_factory=dict)
+    priority: int = 0       # Aynı mumda önce bu (strategy.FUT_PRIORITY), sonra puan: canlıdaki sıralama
+
+
+def signal_order(s: "FutSignal"):
+    """Sinyallerin işlenme sırası: zaman, sonra öncelik ve puanı yüksek olan (canlıdaki seçimle aynı)."""
+    return s.close_ms, -s.priority, -s.score
 
 
 @dataclass
@@ -273,19 +279,15 @@ def find_signals(cfg, data: FutData) -> Tuple[List[FutSignal], Funnel]:
             funnel.liq_vol += int(((f["liq_long"] | f["liq_short"]) & f["vol_ok"] & active).sum())
             funnel.liq_vol_trend += int(both.sum())
         for i in np.flatnonzero(both):
-            found = None
-            for side, ok in (("long", long_ok), ("short", short_ok)):   # Canlıdaki sıra: önce long
-                if ok[i]:
-                    found = futures_signal_at(f, i, side, cfg)
-                    if found is not None:
-                        break
+            found = pick_signal(f, i, cfg, long_ok, short_ok)          # Canlıdaki seçim (öncelik, puan, long)
             if found is None:
                 continue
             found["btc_trend"] = (1.0 if up is not None and up[i] else -1.0 if down is not None and down[i] else 0.0)
             signals.append(FutSignal(int(close[i]), symbol, found["side"], found["score"], float(k["o"][i + 1]),
-                                     {key: v for key, v in found.items() if key not in ("side", "price")}))
+                                     {key: v for key, v in found.items() if key not in ("side", "price", "priority")},
+                                     int(found.get("priority", 0))))
     funnel.signals = len(signals)
-    signals.sort(key=lambda s: (s.close_ms, -s.score))
+    signals.sort(key=signal_order)
     return signals, funnel
 
 
@@ -438,6 +440,7 @@ class FutTrade:
     liquidated: bool
     bar_ms: int
     score: float = 0.0
+    kind: float = 0.0       # Giriş modülü (metrics["tactic"]: 1 çöküş, 2 pompa, 3 Bollinger, 4 kırılım; 0 = liq4)
 
 
 @dataclass
@@ -578,7 +581,7 @@ def run_trade(p: SimParams, s: FutSignal, window: tuple, margin: float, notional
         fees = fee_in + fee_out
     return FutTrade(s.symbol, s.side, s.close_ms, exit_ms, entry, float(exit_price), reason, p.leverage, margin,
                     notional, fees, funding, pnl, pnl / margin * 100 if margin else 0.0, 0.0, worst,
-                    max(window_mae, worst), gap, liquidated, bar_ms, s.score)
+                    max(window_mae, worst), gap, liquidated, bar_ms, s.score, float(s.metrics.get("tactic", 0.0)))
 
 
 def simulate(p: SimParams, data: FutData, signals: Sequence[FutSignal], windows: Dict[Tuple[str, int], tuple],
@@ -996,6 +999,9 @@ class GridPart:
     cagr: float
     max_dd: float
     ruined: bool
+    liquidations: int = 0           # Sabit pozisyonda likidasyonla kapanan işlem
+    gaps: int = 0                   # Stopun / likidasyonun ötesinde açılan mumla kapanan işlem
+    worst_move: float = 0.0         # En kötü işlemin net sonucu (kaldıraçsız fiyat %)
 
     @property
     def per_year(self) -> float:
@@ -1029,7 +1035,9 @@ def _grid_part(name: str, trades: Sequence[FutTrade], chained: FutResult) -> Gri
     years = (chained.end_ms - chained.start_ms) / DAY_MS / 365.25
     return GridPart(name, years, len(trades), sum(m > 0 for m in moves) / len(moves) * 100 if moves else 0.0,
                     float(np.mean(moves)) if moves else 0.0, float(np.sum(moves)) if moves else 0.0,
-                    _cagr(chained), max_drawdown(chained.curve)[0], chained.ruined_ms is not None)
+                    _cagr(chained), max_drawdown(chained.curve)[0], chained.ruined_ms is not None,
+                    sum(tr.liquidated for tr in trades), sum(tr.gap for tr in trades),
+                    float(min(moves)) if moves else 0.0)
 
 
 def grid_row(variant: GridVariant, p: SimParams, data: FutData, signals: Sequence[FutSignal], windows,
@@ -1039,6 +1047,7 @@ def grid_row(variant: GridVariant, p: SimParams, data: FutData, signals: Sequenc
     fixed = simulate(p, data, signals, windows, fixed_notional=size)
     whole = _grid_part("Tümü", fixed.trades, simulate(p, data, signals, windows))
     parts = []
+    split_ms = min(max(split_ms, data.start_ms), data.end_ms)        # Kısa testte dönem verinin içine kırpılır
     for name, a, b in (("Seçim", data.start_ms, split_ms), ("Doğrulama", split_ms, data.end_ms)):
         if a < b:
             chained = simulate(p, data, signals, windows, start_ms=a, end_ms=b)
@@ -1076,18 +1085,19 @@ def grid_search(cfg, data: FutData, variants: Optional[Sequence[GridVariant]] = 
         active &= nxt_ok
         used = np.zeros(len(t), dtype=bool)
         for vi, c2 in enumerate(cfgs):
-            idx = np.flatnonzero(futures_candidates(f, c2)[0] & active)
+            idx, side, prio, score = futures_entries(f, c2, active)
             if len(idx):
                 used[idx] = True
-                store[vi].append((close[idx], symbol, crash_scores(f, c2, idx), k["o"][idx + 1]))
+                store[vi].append((close[idx], symbol, side, prio, score, k["o"][idx + 1]))
         windows.add(symbol, k, np.flatnonzero(used))
         if n % 10 == 0:
             say(f"   {n}/{coins} coin tarandı")
     rows = []
     for vi, (variant, c2) in enumerate(zip(variants, cfgs)):
-        signals = [FutSignal(int(ms), sym, "long", float(sc), float(eo))
-                   for closes, sym, scores, opens in store[vi] for ms, sc, eo in zip(closes, scores, opens)]
-        signals.sort(key=lambda x: (x.close_ms, -x.score))
+        signals = [FutSignal(int(ms), sym, "long" if sd > 0 else "short", float(sc), float(eo), priority=int(pr))
+                   for closes, sym, sides, prios, scores, opens in store[vi]
+                   for ms, sd, pr, sc, eo in zip(closes, sides, prios, scores, opens)]
+        signals.sort(key=signal_order)
         for name, over in exits:
             row = grid_row(variant, params_from_cfg(c2, **over), data, signals, windows, split_ms)
             row.exit_label, row.exit_over = name, tuple(over.items())
@@ -1178,6 +1188,23 @@ def grid_stage2(rows: Sequence[GridRow], base: GridRow, n: int = 4) -> List[Grid
     return out
 
 
+def _py(x: Optional[GridPart]) -> str:
+    """Dönemin işlem/yıl değeri (dönem yoksa —)."""
+    return "—" if x is None else f"{x.per_year:.0f}"
+
+
+def _pc(x: Optional[GridPart]) -> str:
+    return "—" if x is None else ("eridi" if x.ruined else _pct(x.cagr))
+
+
+def _pd(x: Optional[GridPart]) -> str:
+    return "—" if x is None else f"%{x.max_dd:.0f}"
+
+
+def _all_cagr_positive(row: GridRow) -> bool:
+    return all(x.cagr > 0 for x in row.parts) if row.parts else row.whole.cagr > 0
+
+
 def _part_text(x: Optional[GridPart]) -> str:
     if x is None:
         return "—"
@@ -1227,9 +1254,9 @@ def format_grid_report(cfg, data: FutData, rows: Sequence[GridRow], base: GridRo
         name = r.variant.label + (f" | {r.exit_label}" if with_exit and r.exit_label else "")
         years = (f"kârlı yıl (her yıl baştan) {years_b[id(r)]}/{r.n_years}" if id(r) in years_b
                  else f"kârlı yıl {r.profitable_years}/{r.n_years}")
-        return (f"{mark} {name}\n     {r.whole.per_year:4.0f}/yıl (seçim {s.per_year:.0f} / doğr. {o.per_year:.0f}) | "
+        return (f"{mark} {name}\n     {r.whole.per_year:4.0f}/yıl (seçim {_py(s)} / doğr. {_py(o)}) | "
                 f"kazanma %{r.whole.win_rate:.1f} | işlem başı {r.whole.avg_move:+.3f}% | toplam {r.whole.sum_move:+.0f}% | "
-                f"yıllık {_pct(s.cagr)} / {_pct(o.cagr)} | düşüş %{s.max_dd:.0f} / %{o.max_dd:.0f} | {years}")
+                f"yıllık {_pc(s)} / {_pc(o)} | düşüş {_pd(s)} / {_pd(o)} | {years}")
 
     L.append(f"📋 1) GİRİŞ KURALLARI ({len(rows)} kural, ayarlarınızdaki çıkışlarla; işlem sayısına göre, ilk {limit})")
     L.append("   işlem/yıl | kazanma | işlem başı net | toplam (sabit pozisyon, fiyat %) | yıllık getiri seçim / "
@@ -1265,8 +1292,7 @@ def format_grid_report(cfg, data: FutData, rows: Sequence[GridRow], base: GridRo
             return None
         s, o = x.part("Seçim"), x.part("Doğrulama")
         return (f"     kayma ×{GRID_STRESS_SLIP:g} (%{p.slippage_pct * GRID_STRESS_SLIP:g}): kazanma %{x.whole.win_rate:.1f} | "
-                f"işlem başı {x.whole.avg_move:+.3f}% | toplam {x.whole.sum_move:+.0f}% | yıllık {_pct(s.cagr)} / "
-                f"{_pct(o.cagr)}")
+                f"işlem başı {x.whole.avg_move:+.3f}% | toplam {x.whole.sum_move:+.0f}% | yıllık {_pc(s)} / {_pc(o)}")
     if verified:
         L.append("")
         L.append(f"✔️ 3) 1 DK MUMLARLA DOĞRULAMA (adaylar; seçim buna ve kayma ×{GRID_STRESS_SLIP:g} stresine göre)")
@@ -1377,6 +1403,139 @@ def run_grid_cli(cfg, days: Optional[int], end_ms: Optional[int], out_dir: Path,
     return report, list(rows) + exit_rows, path
 
 
+# ===================================================================== modül ızgarası (--modul-izgara, Faz 3)
+MODULE_UNIVERSES = (20, 120, 150)               # Denenen evrenler: en hacimli N köklü coin + listeniz
+MODULE_TARGET = 1000                            # Hedef: yılda 1000+ işlem (günde ~3)
+MODULE_PUMP = "1:6,4:10,12:15"                  # Pompa kuralı (ayarlarınızda yoksa)
+MODULE_OFF = (("futures_pump_rules", ""), ("futures_bb", "off"), ("futures_breakout", False))
+CRASH_OFF = (("futures_crash_hours", 1), ("futures_crash_drop_pct", 50.0), ("futures_crash_extra", ""),
+             ("futures_crash_z", 0.0), ("futures_confirm", "close"))     # Çöküş fiilen kapalı (1 saatte %50)
+
+
+def module_variants(cfg) -> List[GridVariant]:
+    """Faz 3: çöküş (ayarlarınız) + pompa short / Bollinger + RSI / hacimli kırılım tek tek ve VEYA ile birlikte."""
+    pump = cfg.futures_pump_rules or MODULE_PUMP
+    bb = cfg.futures_bb if cfg.futures_bb != "off" else "both"
+
+    def v(label, *parts):
+        over = dict(MODULE_OFF)
+        for part in parts:
+            over.update(dict(part))
+        return GridVariant(label, tuple(over.items()))
+    P, B, K = (("futures_pump_rules", pump),), (("futures_bb", bb),), (("futures_breakout", True),)
+    S = (("futures_sides", "short"),)
+    return [v("Çöküş (ayarlarınız): " + rule_label(cfg)),
+            v(f"Yalnız pompa short ({pump})", P, S),
+            v(f"Yalnız Bollinger + RSI ({bb})", CRASH_OFF, B),
+            v("Yalnız Bollinger long", CRASH_OFF, (("futures_bb", "long"),)),
+            v("Yalnız Bollinger short", CRASH_OFF, (("futures_bb", "short"),)),
+            v("Yalnız hacimli kırılım", CRASH_OFF, K),
+            v("Çöküş + pompa", P), v("Çöküş + Bollinger", B), v("Çöküş + kırılım", K),
+            v("Çöküş + pompa + kırılım", P, K),
+            v("HEPSİ: çöküş + pompa + Bollinger + kırılım", P, B, K)]
+
+
+@dataclass
+class ModuleUniverse:
+    n: int
+    note: str
+    rows: List[Tuple[GridRow, GridRow]]          # (normal, kayma stresi) her kural için
+    verified: List[Tuple[GridRow, Evaluation]] = field(default_factory=list)
+
+
+def module_universe(cfg, n: int, start: int, end: int, segments, verify: bool,
+                    progress: Callable[[str], None]) -> ModuleUniverse:
+    c_u = replace(cfg, futures_tactic="crash", futures_universe=n,
+                  futures_universe_with_list=True if n > 0 else cfg.futures_universe_with_list)
+    data = prepare(c_u, start, end, segments, exit_interval="1m", progress=progress)
+    variants = module_variants(c_u)
+    p = params_from_cfg(c_u)
+    stress = f"kayma ×{GRID_STRESS_SLIP:g}"
+    progress(f"🧩 Evren {n or 'liste'}: {len(variants)} kural × (normal, {stress}) (5 dk mumlarla)...")
+    rows = grid_search(c_u, data, variants, progress=progress,
+                       exits=[("", {}), (stress, {"slippage_pct": p.slippage_pct * GRID_STRESS_SLIP})])
+    pairs = [(rows[i], rows[i + 1]) for i in range(0, len(rows), 2)]
+    out = ModuleUniverse(n, data.universe_note or "liste", pairs)
+    if verify:                                   # 1 dk doğrulama: çöküş ve en çok işlem yapan kârlı birleşim
+        base = pairs[0][0]
+        best = max((r for r, _x in pairs[1:] if r.whole.sum_move > 0), key=lambda r: r.whole.per_year,
+                   default=None)
+        windows = None
+        for r in [base] + ([best] if best is not None else []):
+            c2 = r.variant.cfg(c_u)
+            progress(f"✔️ 1 dk doğrulama ({n or 'liste'}): {r.variant.label}")
+            sigs, _f = find_signals(c2, data)
+            windows = load_windows(data, sigs, max(MAX_WINDOW_MIN, c2.max_hold_minutes + 10), cache=windows)
+            r1 = grid_row(r.variant, params_from_cfg(c2), data, sigs, windows, _ms(GRID_SPLIT))
+            out.verified.append((r1, evaluate(params_from_cfg(c2), data, sigs, windows)))
+    return out
+
+
+def module_hit(row: GridRow, stressed: GridRow) -> bool:
+    """Hedef: yılda ≥ MODULE_TARGET işlem, kârlı ve kayma stresinde de her dönemde yıllık getiri pozitif."""
+    return (row.whole.per_year >= MODULE_TARGET and row.whole.sum_move > 0 and _all_cagr_positive(row)
+            and _all_cagr_positive(stressed))
+
+
+def format_module_report(cfg, start_ms: int, end_ms: int, unis: Sequence[ModuleUniverse]) -> str:
+    p = params_from_cfg(cfg)
+    days = (end_ms - start_ms) / DAY_MS
+    split = _date(_ms(GRID_SPLIT))
+    L = [f"🧩 MODÜL IZGARASI (Faz 3) — {_date(start_ms)} → {_date(end_ms)} ({days:.0f} gün)", "━" * 30,
+         f"Çıkışlar sabit (ayarlarınız): {exit_label(p)} | {p.leverage}x, teminat %{p.margin_usage_pct:g}, "
+         f"{p.start_capital:g} USDT; tek pozisyon, aynı anda sinyallerde öncelik çöküş > pompa > kırılım > Bollinger.",
+         f"Seçim dönemi → {split}, doğrulama {split} →. Tarama 5 dk mumlarla (başabaşta iyimser), seçilenler 1 dk ile "
+         f"doğrulandı. Hedef: yılda ≥{MODULE_TARGET} işlem, kâr ve kayma ×{GRID_STRESS_SLIP:g} stresinde de kâr.", ""]
+    for u in unis:
+        base, base_x = u.rows[0]
+        L.append(f"🪙 Evren: {u.note}")
+        L.append("   işlem/yıl | kazanma | işlem başı | toplam (sabit poz.) | yıllık seçim / doğr. | maks. düşüş | "
+                 f"kayma ×{GRID_STRESS_SLIP:g}: işlem başı, yıllık")
+        for r, x in u.rows:
+            s, o = r.part("Seçim"), r.part("Doğrulama")
+            xs, xo = x.part("Seçim"), x.part("Doğrulama")
+            ok = module_hit(r, x)
+            mark = "✅" if ok else "❌" if r.whole.avg_move <= 0 else "🟡"
+            L.append(f"{mark} {r.variant.label}\n     {r.whole.per_year:5.0f} | %{r.whole.win_rate:4.1f} | "
+                     f"{r.whole.avg_move:+.3f}% | {r.whole.sum_move:+6.0f}% | {_pc(s)} / {_pc(o)} | "
+                     f"{_pd(s)} / {_pd(o)} | {x.whole.avg_move:+.3f}%, {_pc(xs)} / {_pc(xo)}")
+        for r1, ev in u.verified:
+            ch = ev.chained
+            L.append(f"   ✔️ 1 dk: {r1.variant.label}: {r1.whole.per_year:.0f} işlem/yıl, kazanma %{r1.whole.win_rate:.1f}, "
+                     f"işlem başı {r1.whole.avg_move:+.3f}%, yıllık {_pc(r1.part('Seçim'))} / "
+                     f"{_pc(r1.part('Doğrulama'))}, maks. düşüş %{max_drawdown(ch.curve)[0]:.0f}, kârlı yıl "
+                     f"{ev.profitable_years}/{len(ev.years)}")
+            L.append("      yıl: " + " | ".join(f"{y} {stats_of(res).net_pct:+.0f}%" for y, res in ev.years))
+        L.append("")
+    hits = [(u, r) for u in unis for r, x in u.rows if module_hit(r, x)]
+    if hits:
+        L.append(f"🏁 Yılda {MODULE_TARGET}+ işlemle kârlı ve stresi geçen: "
+                 + "; ".join(f"{r.variant.label} ({u.n or 'liste'})" for u, r in hits))
+    else:
+        L.append(f"🏁 Yılda {MODULE_TARGET}+ işleme ulaşıp kâr eden ve kayma ×{GRID_STRESS_SLIP:g} stresini geçen "
+                 f"birleşim YOK. Ek modüller işlem sayısını artırıyor ama işlem başı sonuç maliyetin altında kalıyor.")
+    L.append("ℹ️ Geçmiş sonuç gelecek garantisi değildir; yeni modülü önce test modunda (paper) izleyin.")
+    return "\n".join(L)
+
+
+def run_module_grid_cli(cfg, days: Optional[int], end_ms: Optional[int], out_dir: Path, full_history: bool = True,
+                        universes: Sequence[int] = MODULE_UNIVERSES, verify: bool = True,
+                        progress: Callable[[str], None] = print) -> Tuple[str, List[ModuleUniverse], Optional[Path]]:
+    """--modul-izgara: her evrende (en hacimli N köklü coin + liste) çöküş ve ek modüller, sabit çıkışlarla."""
+    start, end, segments = period(cfg, days, end_ms, full_history)
+    unis = [module_universe(cfg, n, start, end, segments, verify, progress) for n in universes]
+    report = format_module_report(cfg, start, end, unis)
+    path: Optional[Path] = out_dir / f"vadeli_modul_izgara_{datetime.now():%Y%m%d-%H%M}.txt"
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        path.write_text(report, encoding="utf-8")
+        report += f"\n📄 Rapor dosyası: {path}"
+    except OSError as exc:
+        report += f"\n⚠️ Rapor dosyası yazılamadı: {exc}"
+        path = None
+    return report, unis, path
+
+
 # ===================================================================== rapor
 def _pct(v: Optional[float], sign: bool = True) -> str:
     if v is None or (isinstance(v, float) and math.isnan(v)):
@@ -1431,10 +1590,16 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
              f"puan önce çalışır")
     crash = cfg.futures_tactic == "crash"
     if crash:
-        L.append(f"Taktik: ÇÖKÜŞ DÖNÜŞÜ — son {cfg.futures_crash_hours} saatte en az %{cfg.futures_crash_drop_pct:g} düşen "
-                 f"coinde long" + (" (+ likidasyon dalgası şartı)" if cfg.futures_crash_liq else "")
+        L.append(f"Taktik: ÇÖKÜŞ DÖNÜŞÜ — {rule_label(cfg)}, long" + (" (+ likidasyon dalgası şartı)"
+                                                                     if cfg.futures_crash_liq else "")
                  + f"; aynı coine işlemden sonra {p.symbol_cooldown_min} dk, zarardan sonra "
                  f"{max(p.symbol_cooldown_min, p.loss_cooldown_min)} dk girilmez")
+        mods = futures_modules(cfg)
+        if mods:
+            parts = {"pump": f"pompa short ({cfg.futures_pump_rules})", "breakout": "hacimli kırılım long",
+                     "bb": f"Bollinger + RSI ({cfg.futures_bb})"}
+            L.append("Ek modüller (VEYA): " + ", ".join(parts[m] for m in mods)
+                     + "; öncelik çöküş > pompa > kırılım > Bollinger")
     else:
         L.append("Taktik: 4'lü onay (likidasyon + hacim + RSI uyumsuzluğu + BTC 1 saatlik trendi)")
     L.append("")
@@ -1505,6 +1670,14 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
                 w = sum(tr.pnl > 0 for tr in group)
                 L.append(f"  {name:5s}: {len(group)} işlem, kazanma %{w / len(group) * 100:.1f}, işlem başı "
                          f"{np.mean([net_move_pct(tr) for tr in group]):+.3f}%")
+        if len({tr.kind for tr in fixed}) > 1:                 # Ek modüller açıksa modül modül
+            for code, name in ((1.0, "Çöküş"), (2.0, "Pompa short"), (3.0, "Bollinger"), (4.0, "Kırılım")):
+                group = [tr for tr in fixed if tr.kind == code]
+                if group:
+                    w = sum(tr.pnl > 0 for tr in group)
+                    L.append(f"  {name:11s}: {len(group)} işlem, kazanma %{w / len(group) * 100:.1f}, işlem başı "
+                             f"{np.mean([net_move_pct(tr) for tr in group]):+.3f}%, likidasyon "
+                             f"{sum(tr.liquidated for tr in group)}")
         L.append("")
         L.append("⚠️ MARJİN ÇAĞRISI / LİKİDASYON RİSKİ (C'deki tüm işlemler)")
         L.append(f"  Likidasyon: {sum(tr.liquidated for tr in fixed)} | stopun ötesinde açılan mumla kapanan: "

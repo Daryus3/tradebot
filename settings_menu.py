@@ -21,10 +21,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Tuple
 
-from config import (DEFAULT_FUTURES_COINS, FUTURES_CONFIRMS, FUTURES_GRID_PRESETS, FUTURES_LIQ_SOURCES,
-                    FUTURES_RECOMMENDED, FUTURES_SIDES, FUTURES_TACTIC_EXITS, FUTURES_TACTICS, FUTURES_TP_ORDERS,
-                    futures_coin_list, futures_crash_rules, futures_liq_distance_pct, is_futures, is_rotation,
-                    parse_crash_rules)
+from config import (DEFAULT_FUTURES_COINS, FUTURES_BB_MODES, FUTURES_CONFIRMS, FUTURES_GRID_PRESETS,
+                    FUTURES_LIQ_SOURCES, FUTURES_RECOMMENDED, FUTURES_SIDES, FUTURES_TACTIC_EXITS, FUTURES_TACTICS,
+                    FUTURES_TP_ORDERS, futures_coin_list, futures_crash_rules, futures_liq_distance_pct,
+                    futures_modules, futures_pump_rules, is_futures, is_rotation, parse_crash_rules)
 from runtime_settings import EDITABLE, format_value
 from telegram_bot import LINE, esc, fmt_duration, fmt_signed, fmt_usdt
 
@@ -46,10 +46,14 @@ CONFIRM_TEXT = {"close": "yok — çöküş mumunun kapanışında hemen alını
                 "volume": "hacim zirvesi (kapitülasyon: mum hacmi önceki 20 mumun {ratio:g} katı)",
                 "green": "ilk yeşil mum (kapanış > açılış)",
                 "either": "hacim zirvesi ({ratio:g}x) ya da ilk yeşil mum, hangisi önce gelirse"}
+# Ek giriş modülleri (Faz 3)
+PUMP_CHOICES = ("", "1:6,4:10,12:15", "1:10,4:15,12:25")
+BB_LABELS = {"off": "〰️ Bant kapalı", "both": "〰️ Long + short", "long": "〰️ Yalnız long", "short": "〰️ Yalnız short"}
+MODULE_LABELS = {"pump": "pompa short", "bb": "Bollinger", "breakout": "kırılım"}
 # Ek çöküş pencereleri (ana kurala VEYA ile): boş, ızgara testinin öne çıkanları, mikro + makro
 CRASH_EXTRA_CHOICES = ("", "1:7", "1:6", "1:6,12:15", "1:7,12:15", "1:5,12:15")
 LEVERAGE_CHOICES = (1, 2, 3, 5, 10, 15, 20)
-UNIVERSE_CHOICES = (0, 10, 20, 40, 60, 80, 100)     # 0 = FUTURES_COINS listesi
+UNIVERSE_CHOICES = (0, 10, 20, 40, 60, 80, 100, 120, 150)     # 0 = FUTURES_COINS listesi
 # En hacimli N evreninin backtest özeti (Kasım 2026 araştırması; ayrıntı README)
 UNIVERSE_HINT = ("En iyi sonuç: 📋 liste + en hacimli 20 köklü coin (beklemesiz): doğrulamada yılda 137 işlem, +%99/yıl "
                  "(yalnızca liste: 53 işlem, +%62). Test (doğrulama 2023-11 → 2026-10, 2x, en az 3 yıllık coinler, 6 ay "
@@ -59,6 +63,9 @@ UNIVERSE_HINT = ("En iyi sonuç: 📋 liste + en hacimli 20 köklü coin (beklem
 TRAIL_HINT = ("Test (2023-11 → 2026-10): izleyen stop bu stratejide sonucu iyileştirmedi (sabit listede çoğu ayarda "
               "+%62 → +%27-48/yıl); başabaş +1.5 → +0.3 en düşük düşüşü verdi, +4 / +5 tetik getiri kazandırmadan "
               "düşüşü %25'ten %39'a çıkardı.")
+MODULES_HINT = ("Faz 3 testi (2020-2026, TP 8 / SL 5 / başabaş +1 → +0.3 / 45 dk): üç modül de zarar etti. Pompa "
+                "short yılda ~700 işlem, kazanma %71 ama işlem başı -%0.04; Bollinger ve kırılım binlerce işlem, işlem "
+                "başı -%0.1 civarı; hepsi birlikte hesap eridi (ayrıntı README). Önce 🧪 Backtest / test modu.")
 # Coin sayfasındaki seçenekler: varsayılan 10 coin (backtestte kullanılanlar) + vadelisi eski ve hacimli büyük coinler
 FUTURES_COIN_CHOICES = tuple(DEFAULT_FUTURES_COINS.split(",")) + ("AVAX", "LTC", "BCH", "XLM", "NEAR", "ATOM")
 
@@ -170,6 +177,14 @@ def _extra_label(v: str) -> str:
     return f"+ {_rules_label(rules)}" if rules else "Ek pencere yok"
 
 
+def _pump_label(v: str) -> str:
+    try:
+        rules = parse_crash_rules(v)
+    except ValueError:
+        return v
+    return "📈 " + " · ".join(f"{h} sa +%{p:g}" for h, p in rules) if rules else "📈 Pompa short kapalı"
+
+
 def _watching(cfg) -> bool:
     return _crash(cfg) and cfg.futures_confirm != "close"
 
@@ -227,6 +242,7 @@ PAGES: Dict[str, Page] = {
         Row("FUTURES_CONFIRM_VOLUME_RATIO", icon="📊", values=(2, 3, 4, 5), fmt=_x,
             show=lambda cfg: _watching(cfg) and cfg.futures_confirm in ("volume", "either")),
         Row("FUTURES_CRASH_LIQ", name="💥 Likidasyon dalgası şartı", show=_crash),
+        Link(lambda m: m.modules_label(), "pg:fm", show=lambda m: _crash(m.cfg)),
         Link(lambda m: m.grid_label(1), "fgp:1", show=lambda m: _crash(m.cfg) and len(FUTURES_GRID_PRESETS) >= 1),
         Link(lambda m: m.grid_label(2), "fgp:2", show=lambda m: _crash(m.cfg) and len(FUTURES_GRID_PRESETS) >= 2),
         Row("FUTURES_SIDES", values=FUTURES_SIDES, fmt=SIDE_LABELS.get, show=_liq4, per_row=3),
@@ -237,6 +253,21 @@ PAGES: Dict[str, Page] = {
             fmt=lambda v: f"{v / 1000:g}K", show=lambda cfg: _liq4(cfg) and cfg.futures_liq_source != "proxy"),
         Row("FUTURES_BTC_TREND", name="₿ BTC 1 saatlik trend filtresi", show=_liq4),
     ), back=(("⬅️ Vadeli ayarlar", "cfg"), ("🏠 Menü", "menu")), futures=True),
+    "fm": Page("🧩 Ek Giriş Modülleri", rows=(
+        Row("FUTURES_PUMP_RULES", values=PUMP_CHOICES, fmt=_pump_label, show=_crash, per_row=1),
+        Row("FUTURES_BB", values=FUTURES_BB_MODES, fmt=BB_LABELS.get, show=_crash, per_row=2),
+        Row("FUTURES_BB_RSI_LOW", icon="🔻", values=(20, 25, 30), fmt=lambda v: f"RSI < {v:g}",
+            show=lambda cfg: _crash(cfg) and cfg.futures_bb in ("both", "long"), per_row=3),
+        Row("FUTURES_BB_RSI_HIGH", icon="🔺", values=(70, 75, 80), fmt=lambda v: f"RSI > {v:g}",
+            show=lambda cfg: _crash(cfg) and cfg.futures_bb in ("both", "short"), per_row=3),
+        Row("FUTURES_BB_STD", icon="↔️", values=(2, 2.5, 3), fmt=lambda v: f"{v:g}σ bant",
+            show=lambda cfg: _crash(cfg) and cfg.futures_bb != "off", per_row=3),
+        Row("FUTURES_BREAKOUT", name="🚀 Hacimli kırılım (long)", show=_crash),
+        Row("FUTURES_BREAKOUT_VOLUME_RATIO", icon="📊", values=(3, 4, 5), fmt=_x,
+            show=lambda cfg: _crash(cfg) and cfg.futures_breakout, per_row=3),
+        Row("FUTURES_BREAKOUT_HOURS", icon="🕓", values=(4, 12, 24), fmt=lambda v: f"{v} sa zirve",
+            show=lambda cfg: _crash(cfg) and cfg.futures_breakout, per_row=3),
+    ), back=(("🧭 Giriş sinyali", "pg:fe"), ("⬅️ Vadeli ayarlar", "cfg"), ("🏠 Menü", "menu")), futures=True),
     "fx": Page("🎯 Vadeli Çıkışlar ve Emirler", rows=(
         Row("TAKE_PROFIT_PCT", icon="🎯", values=_by_tactic((3, 4, 6, 8), (1.0, 1.2, 1.5, 2.0)), fmt=_pct),
         Row("STOP_LOSS_PCT", icon="🛑", values=_by_tactic((3, 4, 5), (0.8, 0.9, 1.0)), fmt=_pct),
@@ -487,6 +518,10 @@ class SettingsMenu:
         self.panel.request_change(values, self._view("fe"), mid, origin="fe", ask=detail,
                                   question="Vadeli taktik değiştirilsin mi?")
 
+    def modules_label(self) -> str:
+        mods = futures_modules(self.cfg)
+        return "🧩 Ek modüller: " + (", ".join(MODULE_LABELS[m] for m in mods) if mods else "kapalı")
+
     def grid_label(self, n: int) -> str:
         preset = FUTURES_GRID_PRESETS[n - 1]
         on = all(format_value(getattr(self.cfg, EDITABLE[k].attr)) == format_value(v)
@@ -644,6 +679,32 @@ class SettingsMenu:
             hint = ("Taktik değişince o taktiğin çıkış ayarları da yüklenir (onay ister). Canlı likidasyon akışı "
                     "backtest edilemez.")
         return f"🧭 <b>Vadeli Giriş Sinyali</b>\n{LINE}\n{body}\n{LINE}\n<i>{hint}</i>"
+
+    def _text_fm(self) -> str:
+        cfg = self.cfg
+        if not _crash(cfg):
+            return (f"🧩 <b>Ek Giriş Modülleri</b>\n{LINE}\nModüller yalnızca 💥 Çöküş dönüşü taktiğinde çalışır "
+                    f"(🧭 Giriş sinyali → taktik).")
+        pump = futures_pump_rules(cfg)
+        bb = cfg.futures_bb
+        lines = ["🧩 <b>Ek Giriş Modülleri</b> (çöküş kuralına VEYA ile eklenir)", LINE,
+                 "📈 Pompa dönüşü (SHORT): " + (" veya ".join(f"son {h} saatte +%{p:g}" for h, p in pump)
+                                              + " yükselen coinde 5 dk kapanışında short" if pump else "kapalı"),
+                 "〰️ Bollinger + RSI: " + ("kapalı" if bb == "off" else esc(
+                     f"{BB_LABELS[bb].split(' ', 1)[1].lower()} — kapanış 20 mumluk {cfg.futures_bb_std:g}σ bandın "
+                     f"dışında ve RSI(14) < {cfg.futures_bb_rsi_low:g} (long) / > {cfg.futures_bb_rsi_high:g} "
+                     f"(short)")),
+                 "🚀 Hacimli kırılım (LONG): " + (f"hacim önceki 20 mumun {cfg.futures_breakout_volume_ratio:g} "
+                                                f"katından fazla ve kapanış son {cfg.futures_breakout_hours} saatin "
+                                                f"zirvesinin üstünde" if cfg.futures_breakout else "kapalı"),
+                 "Aynı anda birden çok sinyal: önce çöküş, sonra pompa, kırılım, Bollinger (tek pozisyon); çıkışlar "
+                 "🎯 Çıkışlar sayfasındaki ayarlar. Bollinger / kırılım açıkken her coinin mumları her 5 dakikada "
+                 "istenir.", LINE, f"<i>{MODULES_HINT}</i>"]
+        if cfg.futures_sides != "both":
+            lines.insert(-2, f"⚠️ FUTURES_SIDES={cfg.futures_sides}: "
+                             + ("short modüller (pompa, Bollinger short) çalışmaz." if cfg.futures_sides == "long"
+                                else "long modüller (çöküş, kırılım, Bollinger long) çalışmaz."))
+        return "\n".join(lines)
 
     def _text_fx(self) -> str:
         cfg = self.cfg

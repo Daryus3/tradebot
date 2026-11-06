@@ -17,9 +17,9 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Dict, Optional, Sequence, Tuple
 
-from config import (ACTION_MODES, FUTURES_CONFIRMS, FUTURES_LIQ_SOURCES, FUTURES_SIDES, FUTURES_TACTICS,
-                    FUTURES_TP_ORDERS, NOTIFY_MODES, SIGNAL_APPROVAL_MODES, Config, ConfigError, _setting_notes,
-                    format_crash_rules, parse_crash_rules)
+from config import (ACTION_MODES, FUTURES_BB_MODES, FUTURES_CONFIRMS, FUTURES_LIQ_SOURCES, FUTURES_SIDES,
+                    FUTURES_TACTICS, FUTURES_TP_ORDERS, NOTIFY_MODES, SIGNAL_APPROVAL_MODES, Config, ConfigError,
+                    _setting_notes, format_crash_rules, parse_crash_rules)
 
 
 @dataclass(frozen=True)
@@ -138,6 +138,17 @@ EDITABLE: Dict[str, Setting] = {
     "FUTURES_CONFIRM_BARS": Setting("futures_confirm_bars", "int", "Teyit için izleme süresi (5 dk mum)"),
     "FUTURES_CONFIRM_VOLUME_RATIO": Setting("futures_confirm_volume_ratio", "float",
                                             "Hacim zirvesi teyidi (önceki 20 mum ortalamasının katı)"),
+    "FUTURES_PUMP_RULES": Setting("futures_pump_rules", "rules",
+                                  "Pompa dönüşü SHORT (saat:% yükseliş, ör. 1:6,4:10,12:15; kapalı = yok)"),
+    "FUTURES_BB": Setting("futures_bb", "choice", "Bollinger + RSI modülü (off / both / long / short)",
+                          FUTURES_BB_MODES),
+    "FUTURES_BB_STD": Setting("futures_bb_std", "float", "Bollinger bant genişliği (standart sapma)"),
+    "FUTURES_BB_RSI_LOW": Setting("futures_bb_rsi_low", "float", "Bollinger long: RSI(14) bunun altında"),
+    "FUTURES_BB_RSI_HIGH": Setting("futures_bb_rsi_high", "float", "Bollinger short: RSI(14) bunun üstünde"),
+    "FUTURES_BREAKOUT": Setting("futures_breakout", "bool", "Hacimli kırılım LONG modülü"),
+    "FUTURES_BREAKOUT_VOLUME_RATIO": Setting("futures_breakout_volume_ratio", "float",
+                                             "Kırılım: hacim önceki 20 mumun en az katı"),
+    "FUTURES_BREAKOUT_HOURS": Setting("futures_breakout_hours", "int", "Kırılım: aşılacak zirvenin süresi (saat)"),
     "FUTURES_LEVERAGE": Setting("futures_leverage", "int", "Vadeli kaldıraç (1-20x; sonraki işlemde uygulanır)"),
     "FUTURES_COINS": Setting("futures_coins", "str", "Vadeli coinler (virgülle, ör. BTC,ETH,SOL)"),
     "FUTURES_SIDES": Setting("futures_sides", "choice", "Vadeli yön (both / long / short)", FUTURES_SIDES),
@@ -245,7 +256,7 @@ OVERRIDE_BLOCKED = frozenset({
 OVERRIDE_CHOICES = {"dca_mode": ACTION_MODES, "pyramid_mode": ACTION_MODES, "time_exit_mode": ACTION_MODES,
                     "escape_mode": ACTION_MODES, "signal_approval": SIGNAL_APPROVAL_MODES, "notify_mode": NOTIFY_MODES,
                     "futures_sides": FUTURES_SIDES, "futures_liq_source": FUTURES_LIQ_SOURCES,
-                    "futures_tactic": FUTURES_TACTICS, "futures_confirm": FUTURES_CONFIRMS,
+                    "futures_tactic": FUTURES_TACTICS, "futures_confirm": FUTURES_CONFIRMS, "futures_bb": FUTURES_BB_MODES,
                     "futures_tp_order": FUTURES_TP_ORDERS}
 # Serbest metin olarak değiştirilebilenler (doğrulamayı Config yapar)
 OVERRIDE_TEXT = frozenset({"rotation_coins", "intraday_coins", "intraday_tactic", "futures_coins",
@@ -262,7 +273,7 @@ def override_spec(key: str) -> Optional[Tuple[str, str, Tuple[str, ...]]]:
         return attr, f.type, ()
     if f.type == "str" and attr in OVERRIDE_CHOICES:
         return attr, "choice", OVERRIDE_CHOICES[attr]
-    if attr == "futures_crash_extra":
+    if attr in ("futures_crash_extra", "futures_pump_rules"):
         return attr, "rules", ()
     if f.type == "str" and attr in OVERRIDE_TEXT:
         return attr, "str", ()
