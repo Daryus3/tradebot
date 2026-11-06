@@ -546,13 +546,15 @@ zaman sürüyor (kazanma %56); çöküş + düzeltme yıl yıl 2020 +%131, 2021 
 | Günlük 30, ≥3 yıl, çöküş #2 (1 dk) | 731 | %77.7 | +%0.05 | +%405 / eridi | %69 / %95 | 4/7 |
 | Günlük 30, ≥3 yıl, çöküş + fonlama (1 dk) | 780 | %77.3 | +%0.07 | +%459 / eridi | %69 / %94 | 3/7 |
 | Günlük 30, ≥3 yıl, çöküş + düzeltme (1 dk) | 1.787 | %59.9 | −%0.05 | +%5 / eridi | %99 / %92 | 1/7 |
-| Günlük 30, ≥30 gün, çöküş #2 (5 dk tarama) | **3.534** | %77.6 | +%0.13 | +%2.721 / eridi | %68 / %94 | 6/7 |
-| Günlük 30, ≥30 gün, çöküş + düzeltme (5 dk) | 4.766 | %70.5 | +%0.05 | +%2.133 / eridi | %69 / %93 | 4/7 |
-| Günlük 30, ≥30 gün, yalnız fonlama −%0.05 (5 dk) | 1.311 | %77.5 | +%0.13 | +%366 / eridi | %88 / %93 | 5/7 |
+| Günlük 30, ≥30 gün, çöküş #2 (1 dk) | **3.699** | %77.8 | −%0.03 | +%1.620 / eridi | %77 / %92 | 2/7 |
+| Günlük 30, ≥30 gün, çöküş #2, limit giriş (1 dk) | 3.379 | %75.9 | −%0.10 | +%60 / eridi | %100 / %94 | 2/7 |
+| Günlük 30, ≥30 gün, çöküş + düzeltme (1 dk) | **4.937** | %70.9 | −%0.06 | eridi / eridi | %100 / %92 | 2/7 |
+| Günlük 30, ≥30 gün, yalnız fonlama −%0.05 (1 dk) | 1.364 | %77.6 | −%0.04 | −%4 / eridi | %92 / %92 | 2/7 |
 | Günlük 30, ≥30 gün, yalnız düzeltme RSI < 20 (1 dk) | 908 | %64.7 | +%0.02 | +%211 / eridi | %92 / %93 | 2/7 |
 
 Günlük 30 coin, ≥3 yıllık olanlarla bile yıl yıl: 2020 +%135, 2021 +%15.549, 2022 +%5, 2023 +%10, **2024 −%88, 2025
-−%66, 2026 −%91**. Yaş filtresi olmadan 7 yılda **627 farklı coin** günün ilk 30'una giriyor (FARTCOIN, PNUT, AIXBT,
+−%66, 2026 −%91**. Yaş filtresi olmadan çöküş #2 yılda 3.699 işlem yapıyor: 2021 boğasında hype coinlerle tek yılda
++%460.000 (!), sonra 2022 −%92, 2023 −%67, 2024 −%91, 2025 −%91, 2026 −%92. Yaş filtresi olmadan 7 yılda **627 farklı coin** günün ilk 30'una giriyor (FARTCOIN, PNUT, AIXBT,
 USUAL, PUMP...): dünün hacim patlaması çoğu zaman bir hype / yeni listeleme dalgası; bu coinlerin çöküşleri
 toparlanmıyor. "Hacim varsa kalite vardır" varsayımı tutmadı: 6 aylık ortalama hacim + 3 yıl yaş (şimdiki ayar)
 hype'ı eliyor, günlük hacim eleyemiyor.
