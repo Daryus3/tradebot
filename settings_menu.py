@@ -63,9 +63,10 @@ UNIVERSE_HINT = ("En iyi sonuç: 📋 liste + en hacimli 20 köklü coin (beklem
 TRAIL_HINT = ("Test (2023-11 → 2026-10): izleyen stop bu stratejide sonucu iyileştirmedi (sabit listede çoğu ayarda "
               "+%62 → +%27-48/yıl); başabaş +1.5 → +0.3 en düşük düşüşü verdi, +4 / +5 tetik getiri kazandırmadan "
               "düşüşü %25'ten %39'a çıkardı.")
-MODULES_HINT = ("Faz 3 testi (2020-2026, TP 8 / SL 5 / başabaş +1 → +0.3 / 45 dk): üç modül de zarar etti. Pompa "
-                "short yılda ~700 işlem, kazanma %71 ama işlem başı -%0.04; Bollinger ve kırılım binlerce işlem, işlem "
-                "başı -%0.1 civarı; hepsi birlikte hesap eridi (ayrıntı README). Önce 🧪 Backtest / test modu.")
+MODULES_HINT = ("Faz 3 testi (2020-2026, TP 8 / SL 5 / başabaş +1 → +0.3 / 45 dk, 1 dk doğrulama): üç modül de zarar "
+                "etti. Pompa short yılda ~740 işlem, kazanma %71 ama işlem başı -%0.11; çöküşle birlikte yılda ~1.000 "
+                "işlem ama hesap eridi. Bollinger ve kırılım binlerce işlem, işlem başı -%0.1 civarı; hepsi birlikte "
+                "yılda 5.000+ işlem, 2025'te -%91 (ayrıntı README). Yalnızca test modunda deneyin.")
 # Coin sayfasındaki seçenekler: varsayılan 10 coin (backtestte kullanılanlar) + vadelisi eski ve hacimli büyük coinler
 FUTURES_COIN_CHOICES = tuple(DEFAULT_FUTURES_COINS.split(",")) + ("AVAX", "LTC", "BCH", "XLM", "NEAR", "ATOM")
 

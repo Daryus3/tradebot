@@ -459,18 +459,23 @@ coin vardı; 120-150 coinlik evren ancak 2024'ten itibaren oluşuyor.
 | Yalnız Bollinger + RSI, long + short (5 dk) | 3.844 | %51.5 | −%0.13 | eridi | %92 / %91 | eridi |
 | Yalnız hacimli kırılım (5 dk) | 3.477 | %41.0 | −%0.12 | eridi | %92 / %95 | eridi |
 | HEPSİ: çöküş + pompa + Bollinger + kırılım (5 dk) | 5.520 | %47.6 | −%0.09 | eridi | %95 / %92 | eridi |
+| HEPSİ, 1 dk ile yalnızca 2025 | 5.395 | %42.9 | −%0.13 | 2025'te tek hesap −%91 | %91 | −%91 |
+
+Yıl yıl (her yıl 30 USDT ile, 1 dk): çöküş #2 2020 +%840, 2021 +%7.290, 2022 +%44, 2023 +%9, 2024 +%545, 2025 +%642,
+2026 +%66 (7/7); **çöküş + pompa** +%89, +%40, −%66, −%61, −%26, +%148, −%67 (3/7, tek hesap 30 → 3 USDT); yalnız
+pompa short 7 yılın 6'sında zararda (2021 −%92, 2023 −%85, 2024 −%85).
 
 | Çöküş #2, evren genişliği | İşlem/yıl (2024-26) | İşlem başı (2024-26) | Doğrulama yıllık | Kayma ×3 doğr. |
 |---|---|---|---|---|
 | 20 köklü + liste (1 dk) | 343 (257) | +%0.29 | +%213 | +%100 |
 | 30 (1 dk) | 397 (368) | +%0.12 | +%64 | −%4 |
-| 40 (5 dk) | 438 (494) | +%0.15 | +%133 | −%2 |
+| 40 (1 dk) | 458 (506) | +%0.03 | −%19 (2024 −%52) | eridi |
 | 60 (5 dk) | 590 (812) | +%0.03 | −%28 | eridi |
 | 120 (5 dk) | 973 (1.682) | −%0.02 | eridi | eridi |
-| 150 (5 dk) | 1.063 (1.888) | +%0.003 | eridi | eridi |
+| 150 (1 dk) | 1.118 (1.974) | −%0.07 | eridi (2024 −%92, 2025 −%92, 2026 −%91) | eridi |
 
 Sonuç: **yılda 1.000+ işleme kârla ve kayma stresini geçerek ulaşan birleşim yok.** İşlem sayısı kolayca artıyor
-(pompa ekleyince 1.008, 150 coinde 1.063, hepsi birlikte 5.000-8.000/yıl) ama işlem başı net sonuç maliyetin
+(pompa ekleyince 1.008, 150 coinde 1.118, hepsi birlikte 5.000-8.000/yıl) ama işlem başı net sonuç maliyetin
 (komisyon + kayma ≈ %0.14) altına iniyor. Modüller kendi tipik çıkışlarıyla da (TP 0.6-3, SL 0.6-2, 30-240 dk; 7 çıkış
 × 4 modül) denendi: 28 birleşimin 28'i zararda. Pompa short'ta kazanma oranı %70-79 olsa da sürmekte olan pompalar
 zarar kes'e gidiyor; Bollinger ve kırılımın 5 dk hareketi maliyeti karşılamıyor (önceki araştırmadaki 37 sinyal
