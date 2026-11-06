@@ -21,10 +21,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Tuple
 
-from config import (DEFAULT_FUTURES_COINS, FUTURES_BB_MODES, FUTURES_CONFIRMS, FUTURES_GRID_PRESETS,
-                    FUTURES_LIQ_SOURCES, FUTURES_RECOMMENDED, FUTURES_SIDES, FUTURES_TACTIC_EXITS, FUTURES_TACTICS,
-                    FUTURES_TP_ORDERS, futures_coin_list, futures_crash_rules, futures_liq_distance_pct,
-                    futures_modules, futures_pump_rules, is_futures, is_rotation, parse_crash_rules)
+from config import (DEFAULT_FUTURES_COINS, FUTURES_BB_MODES, FUTURES_CONFIRMS, FUTURES_ENTRY_ORDERS,
+                    FUTURES_GRID_PRESETS, FUTURES_LIQ_SOURCES, FUTURES_RECOMMENDED, FUTURES_SIDES, FUTURES_TACTIC_EXITS,
+                    FUTURES_TACTICS, FUTURES_TP_ORDERS, FUTURES_UNIVERSE_MODES, futures_coin_list, futures_crash_rules,
+                    futures_funding_rules, futures_liq_distance_pct, futures_modules, futures_pump_rules, is_futures,
+                    is_rotation, parse_crash_rules)
 from runtime_settings import EDITABLE, format_value
 from telegram_bot import LINE, esc, fmt_duration, fmt_signed, fmt_usdt
 
@@ -49,11 +50,16 @@ CONFIRM_TEXT = {"close": "yok — çöküş mumunun kapanışında hemen alını
 # Ek giriş modülleri (Faz 3)
 PUMP_CHOICES = ("", "1:6,4:10,12:15", "1:10,4:15,12:25")
 BB_LABELS = {"off": "〰️ Bant kapalı", "both": "〰️ Long + short", "long": "〰️ Yalnız long", "short": "〰️ Yalnız short"}
-MODULE_LABELS = {"pump": "pompa short", "bb": "Bollinger", "breakout": "kırılım"}
+MODULE_LABELS = {"pump": "pompa short", "bb": "Bollinger", "breakout": "kırılım", "funding": "fonlama",
+                 "pullback": "düzeltme"}
+# Faz 4: fonlama sıkışması, trend içi düzeltme, limit (maker) giriş, günlük hacim sıralaması
+FUNDING_RULE_CHOICES = ("1:5", "1:3", "1:6")
+ENTRY_ORDER_LABELS = {"market": "⚡ Giriş: piyasa emri", "limit": "📌 Giriş: limit (maker)"}
+UNIVERSE_MODE_LABELS = {"avg": "📊 Ortalama hacim", "daily": "📅 Dünün hacmi (her gün)"}
 # Ek çöküş pencereleri (ana kurala VEYA ile): boş, ızgara testinin öne çıkanları, mikro + makro
 CRASH_EXTRA_CHOICES = ("", "1:7", "1:6", "1:6,12:15", "1:7,12:15", "1:5,12:15")
 LEVERAGE_CHOICES = (1, 2, 3, 5, 10, 15, 20)
-UNIVERSE_CHOICES = (0, 10, 20, 40, 60, 80, 100, 120, 150)     # 0 = FUTURES_COINS listesi
+UNIVERSE_CHOICES = (0, 10, 20, 30, 40, 60, 80, 100, 120, 150)     # 0 = FUTURES_COINS listesi
 # En hacimli N evreninin backtest özeti (Kasım 2026 araştırması; ayrıntı README)
 UNIVERSE_HINT = ("En iyi sonuç: 📋 liste + en hacimli 20 köklü coin (beklemesiz): doğrulamada yılda 137 işlem, +%99/yıl "
                  "(yalnızca liste: 53 işlem, +%62). Test (doğrulama 2023-11 → 2026-10, 2x, en az 3 yıllık coinler, 6 ay "
@@ -66,7 +72,9 @@ TRAIL_HINT = ("Test (2023-11 → 2026-10): izleyen stop bu stratejide sonucu iyi
 MODULES_HINT = ("Faz 3 testi (2020-2026, TP 8 / SL 5 / başabaş +1 → +0.3 / 45 dk, 1 dk doğrulama): üç modül de zarar "
                 "etti. Pompa short yılda ~740 işlem, kazanma %71 ama işlem başı -%0.11; çöküşle birlikte yılda ~1.000 "
                 "işlem ama hesap eridi. Bollinger ve kırılım binlerce işlem, işlem başı -%0.1 civarı; hepsi birlikte "
-                "yılda 5.000+ işlem, 2025'te -%91 (ayrıntı README). Yalnızca test modunda deneyin.")
+                "yılda 5.000+ işlem, 2025'te -%91. Faz 4: fonlama sıkışması çöküşe yılda yalnızca ~4 işlem ekledi "
+                "(sonuç aynı); trend içi düzeltme çöküşle yılda ~1.240 işlem ama işlem başı -%0.01, 2022-2026 her yıl "
+                "zarar (ayrıntı README). Yalnızca test modunda deneyin.")
 # Coin sayfasındaki seçenekler: varsayılan 10 coin (backtestte kullanılanlar) + vadelisi eski ve hacimli büyük coinler
 FUTURES_COIN_CHOICES = tuple(DEFAULT_FUTURES_COINS.split(",")) + ("AVAX", "LTC", "BCH", "XLM", "NEAR", "ATOM")
 
@@ -186,6 +194,18 @@ def _pump_label(v: str) -> str:
     return "📈 " + " · ".join(f"{h} sa +%{p:g}" for h, p in rules) if rules else "📈 Pompa short kapalı"
 
 
+def _funding_rule_label(v: str) -> str:
+    try:
+        rules = parse_crash_rules(v)
+    except ValueError:
+        return v
+    return "💸 " + " · ".join(f"{h} sa -%{p:g}" for h, p in rules) if rules else "💸 Çöküş şartı yok"
+
+
+def _age_label(v) -> str:
+    return f"≥{int(v)} gün" if int(v) < 365 else f"≥{int(v) // 365} yıl"
+
+
 def _watching(cfg) -> bool:
     return _crash(cfg) and cfg.futures_confirm != "close"
 
@@ -268,6 +288,16 @@ PAGES: Dict[str, Page] = {
             show=lambda cfg: _crash(cfg) and cfg.futures_breakout, per_row=3),
         Row("FUTURES_BREAKOUT_HOURS", icon="🕓", values=(4, 12, 24), fmt=lambda v: f"{v} sa zirve",
             show=lambda cfg: _crash(cfg) and cfg.futures_breakout, per_row=3),
+        Row("FUTURES_FUNDING", name="💸 Fonlama sıkışması (long)", show=_crash),
+        Row("FUTURES_FUNDING_RATE_PCT", icon="💸", values=(-0.05, -0.10, -0.20), fmt=lambda v: f"fonlama ≤ %{v:g}",
+            show=lambda cfg: _crash(cfg) and cfg.futures_funding, per_row=3),
+        Row("FUTURES_FUNDING_RULES", values=FUNDING_RULE_CHOICES, fmt=_funding_rule_label,
+            show=lambda cfg: _crash(cfg) and cfg.futures_funding, per_row=3),
+        Row("FUTURES_PULLBACK", name="📐 Trend içi düzeltme (long)", show=_crash),
+        Row("FUTURES_PULLBACK_RSI", icon="🔻", values=(15, 20, 25, 30), fmt=lambda v: f"RSI < {v:g}",
+            show=lambda cfg: _crash(cfg) and cfg.futures_pullback, per_row=4),
+        Row("FUTURES_PULLBACK_EMA", icon="📈", values=(100, 200), fmt=lambda v: f"1 sa EMA{v}",
+            show=lambda cfg: _crash(cfg) and cfg.futures_pullback, per_row=2),
     ), back=(("🧭 Giriş sinyali", "pg:fe"), ("⬅️ Vadeli ayarlar", "cfg"), ("🏠 Menü", "menu")), futures=True),
     "fx": Page("🎯 Vadeli Çıkışlar ve Emirler", rows=(
         Row("TAKE_PROFIT_PCT", icon="🎯", values=_by_tactic((3, 4, 6, 8), (1.0, 1.2, 1.5, 2.0)), fmt=_pct),
@@ -278,6 +308,11 @@ PAGES: Dict[str, Page] = {
         Link(lambda m: m.protect_label(), "pg:fb"),
         Row("FUTURES_EXCHANGE_STOP", name="🛡️ Stop güvencesi (stop konamazsa pozisyonu kapat)"),
         Row("FUTURES_TP_ORDER", values=FUTURES_TP_ORDERS, fmt=TP_ORDER_LABELS.get, per_row=2),
+        Row("FUTURES_ENTRY_ORDER", values=FUTURES_ENTRY_ORDERS, fmt=ENTRY_ORDER_LABELS.get, per_row=2),
+        Row("FUTURES_LIMIT_OFFSET_PCT", icon="📌", values=(0, 0.02, 0.05, 0.1), fmt=lambda v: f"bid -%{v:g}",
+            show=lambda cfg: cfg.futures_entry_order == "limit", per_row=4),
+        Row("FUTURES_LIMIT_TTL_MIN", icon="⏳", values=(1, 3, 5), fmt=lambda v: f"{v} dk bekle",
+            show=lambda cfg: cfg.futures_entry_order == "limit", per_row=3),
     ), back=(("⬅️ Vadeli ayarlar", "cfg"), ("🏠 Menü", "menu")), futures=True),
     "fb": Page("🔒 Başabaş ve İzleyen Stop", rows=(
         Row("BREAKEVEN_ENABLED", name="🔒 Başabaş kalkanı"),
@@ -297,8 +332,10 @@ PAGES: Dict[str, Page] = {
     ), back=(("🎯 Çıkışlar", "pg:fx"), ("⬅️ Vadeli ayarlar", "cfg"), ("🏠 Menü", "menu")), futures=True),
     "fc": Page("🪙 Vadeli Coinler", rows=(
         Row("FUTURES_UNIVERSE", values=UNIVERSE_CHOICES, fmt=lambda v: f"🔝 {v}" if v else "📋 Liste", per_row=4),
-        Row("FUTURES_UNIVERSE_MIN_AGE_DAYS", icon="🎂", values=(365, 730, 1095, 1460),
-            fmt=lambda v: f"≥{int(v) // 365} yıl", show=lambda cfg: cfg.futures_universe > 0),
+        Row("FUTURES_UNIVERSE_MODE", values=FUTURES_UNIVERSE_MODES, fmt=UNIVERSE_MODE_LABELS.get,
+            show=lambda cfg: cfg.futures_universe > 0, per_row=2),
+        Row("FUTURES_UNIVERSE_MIN_AGE_DAYS", icon="🎂", values=(30, 365, 730, 1095, 1460),
+            fmt=_age_label, show=lambda cfg: cfg.futures_universe > 0),
         Row("FUTURES_UNIVERSE_WITH_LIST", name="📋 Listemi de tara (aşağıdaki coinler)",
             show=lambda cfg: cfg.futures_universe > 0),
     ), back=(("⬅️ Vadeli ayarlar", "cfg"), ("🏠 Menü", "menu")), futures=True),
@@ -698,13 +735,21 @@ class SettingsMenu:
                  "🚀 Hacimli kırılım (LONG): " + (f"hacim önceki 20 mumun {cfg.futures_breakout_volume_ratio:g} "
                                                 f"katından fazla ve kapanış son {cfg.futures_breakout_hours} saatin "
                                                 f"zirvesinin üstünde" if cfg.futures_breakout else "kapalı"),
-                 "Aynı anda birden çok sinyal: önce çöküş, sonra pompa, kırılım, Bollinger (tek pozisyon); çıkışlar "
-                 "🎯 Çıkışlar sayfasındaki ayarlar. Bollinger / kırılım açıkken her coinin mumları her 5 dakikada "
-                 "istenir.", LINE, f"<i>{MODULES_HINT}</i>"]
+                 "💸 Fonlama sıkışması (LONG): " + (esc(
+                     f"son ödenen fonlama (8 saatlik) ≤ %{cfg.futures_funding_rate_pct:g} ve "
+                     + " veya ".join(f"son {h} saatte -%{p:g}" for h, p in futures_funding_rules(cfg)))
+                     if cfg.futures_funding else "kapalı"),
+                 "📐 Trend içi düzeltme (LONG): " + (esc(
+                     f"son 1 saatlik kapanış EMA{cfg.futures_pullback_ema} üstünde ve 5 dk RSI(14) < "
+                     f"{cfg.futures_pullback_rsi:g}") if cfg.futures_pullback else "kapalı"),
+                 "Aynı anda birden çok sinyal: önce çöküş, sonra fonlama, pompa, düzeltme, kırılım, Bollinger (tek "
+                 "pozisyon); çıkışlar 🎯 Çıkışlar sayfasındaki ayarlar. Bollinger / kırılım / düzeltme açıkken her "
+                 "coinin mumları her 5 dakikada istenir.", LINE, f"<i>{MODULES_HINT}</i>"]
         if cfg.futures_sides != "both":
             lines.insert(-2, f"⚠️ FUTURES_SIDES={cfg.futures_sides}: "
                              + ("short modüller (pompa, Bollinger short) çalışmaz." if cfg.futures_sides == "long"
-                                else "long modüller (çöküş, kırılım, Bollinger long) çalışmaz."))
+                                else "long modüller (çöküş, fonlama, düzeltme, kırılım, Bollinger long) "
+                                     "çalışmaz."))
         return "\n".join(lines)
 
     def _text_fx(self) -> str:
@@ -719,6 +764,9 @@ class SettingsMenu:
                     else "piyasa emri (hedefte bot kapatır, taker komisyon)")
         stop = ("pozisyon hemen kapatılır (güvenli)" if cfg.futures_exchange_stop
                 else "⚠️ pozisyon açık kalır, bot izler (bot kapanırsa korumasız)")
+        entry = ("piyasa emri (taker; kayma girişte de ödenir)" if cfg.futures_entry_order == "market" else
+                 f"limit (maker): bid'in %{cfg.futures_limit_offset_pct:g} altına post-only emir, "
+                 f"{cfg.futures_limit_ttl_min} dk dolmazsa iptal (fırsat kaçar)")
         return (f"🎯 <b>Vadeli Çıkışlar ve Emirler</b>\n{LINE}\n"
                 f"🎯 Kâr Al: fiyat +%{cfg.take_profit_pct:g} → ROE ~+%{cfg.take_profit_pct * lev:.0f}\n"
                 f"🛑 Zarar Kes: fiyat -%{cfg.stop_loss_pct:g} → ROE ~-%{cfg.stop_loss_pct * lev:.0f} | likidasyon "
@@ -726,6 +774,7 @@ class SettingsMenu:
                 f"🔒 Başabaş: {be}\n"
                 f"⏱️ Zaman stopu: {cfg.max_hold_minutes} dk (dolunca piyasa emriyle kapanır)\n"
                 f"📌 Kâr Al emri: {tp_order}\n"
+                f"🚪 Giriş emri: {entry}\n"
                 f"🛡️ Zarar kes emri Binance'e konamazsa: {stop}\n{LINE}\n"
                 "<i>Kâr Al / Zarar Kes değişikliği SONRAKİ işlemde geçerli (açık pozisyonun Binance emirleri "
                 "değişmez); zaman stopu ve başabaş açık pozisyona da uygulanır. Testte seçilen (çöküş dönüşü): Kâr Al "
@@ -757,11 +806,14 @@ class SettingsMenu:
         if cfg.futures_universe > 0:
             now = getattr(self.bot, "universe", []) or []
             shown = ", ".join(s[:-4] for s in now[:20]) + (" ..." if len(now) > 20 else "")
+            volume = ("bir önceki UTC gününün USDT hacmine göre ilk {n} (her gün 00:00 UTC'de yenilenir"
+                      if cfg.futures_universe_mode == "daily" else
+                      f"son {cfg.futures_universe_avg_days} günün ortalama USDT hacmine göre ilk {{n}} (günde bir "
+                      f"yenilenir").format(n=cfg.futures_universe)
             return (f"🪙 <b>Vadeli Coinler</b>: en hacimli <b>{cfg.futures_universe}</b> köklü coin\n{LINE}\n"
-                    f"En az {cfg.futures_universe_min_age_days} gündür ({cfg.futures_universe_min_age_days / 365:.0f} "
-                    f"yıl) Binance USDⓈ-M'de olan kripto paritelerden, son {cfg.futures_universe_avg_days} günün "
-                    f"ortalama USDT hacmine göre ilk {cfg.futures_universe} (günde bir yenilenir; stabil coin, endeks, "
-                    f"hisse / emtia vadelileri ve kaldırılması planlanan pariteler hariç)."
+                    f"En az {cfg.futures_universe_min_age_days} gündür ({_age_label(cfg.futures_universe_min_age_days)}"
+                    f") Binance USDⓈ-M'de olan kripto paritelerden, {volume}; stabil coin, endeks, hisse / emtia "
+                    f"vadelileri ve kaldırılması planlanan pariteler hariç)."
                     + (f"\nŞu an: {esc(shown)}" if now else "\nListe ilk taramada oluşur.")
                     + (f"\n📋 + listeniz: {esc(', '.join(futures_coin_list(cfg)))}" if cfg.futures_universe_with_list
                        else "")

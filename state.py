@@ -65,6 +65,8 @@ class BotState:
     # Telegram'dan strateji değiştirilirken eski grubun çıkış ayarları (geri dönünce aynen yüklenir)
     family_settings: Dict[str, Dict[str, str]] = field(default_factory=dict)
     backtest_draft: Dict[str, object] = field(default_factory=dict)   # Telegram /backtest menüsünde seçilenler
+    # Vadeli limit (maker) giriş emri dolmayı bekliyor (FUTURES_ENTRY_ORDER=limit): parite, emir kimliği, fiyat, süre...
+    pending_entry: Dict[str, object] = field(default_factory=dict)
 
     @property
     def capital(self) -> float:

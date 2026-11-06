@@ -234,3 +234,63 @@ def universe_months(cfg, start_ms: int, end_ms: int, archive,
         if a < b:
             out.append((a, b, tuple(rank_month(k, cfg.futures_universe, age, avg, available, vols))))
     return out
+
+
+def daily_volumes(archive, start_ms: int, end_ms: int, available: Dict[str, List[str]], workers: int = 16):
+    """Tüm paritelerin günlük USDT hacimleri [start_ms - 1 gün, end_ms): (gün başı ms dizisi, pariteler, hacim matrisi
+    gün × parite, paritenin arşivdeki ilk işlem günü ms; arşivin ilk ayında görünenler 0). Kaynak: günlük mumların
+    aylık dosyaları (önbellekte)."""
+    import numpy as np
+    first_day = start_ms // DAY_MS * DAY_MS - DAY_MS
+    days = np.arange(first_day, end_ms, DAY_MS, dtype=np.int64)
+    keys = set(months_between(first_day, end_ms))
+    symbols = sorted(available)
+    qv = np.zeros((len(days), len(symbols)), dtype=np.float64)
+    born = np.full(len(symbols), np.iinfo(np.int64).max, dtype=np.int64)
+
+    def load(j: int):
+        symbol = symbols[j]
+        months = available[symbol]
+        arrs = [archive.month(symbol, "1d", int(m[:4]), int(m[5:])) for m in months if m in keys]
+        if months[0] == ARCHIVE_FIRST_MONTH:            # Arşivin ilk ayında görünenler daha eskidir
+            return j, arrs, 0
+        first = archive.month(symbol, "1d", int(months[0][:4]), int(months[0][5:]))
+        return j, arrs, int(first["t"][0]) if len(first["t"]) else None
+
+    with ThreadPoolExecutor(workers) as pool:
+        for j, arrs, start in pool.map(load, range(len(symbols))):
+            if start is not None:
+                born[j] = start
+            for a in arrs:
+                if not len(a["t"]):
+                    continue
+                idx = (a["t"] - first_day) // DAY_MS
+                ok = (idx >= 0) & (idx < len(days))
+                qv[idx[ok], j] = a["qv"][ok]
+    return days, symbols, qv, born
+
+
+def universe_days(cfg, start_ms: int, end_ms: int, archive,
+                  progress: Optional[Callable[[str], None]] = None) -> List[Tuple[int, int, Tuple[str, ...]]]:
+    """FUTURES_UNIVERSE_MODE=daily backtest evreni: her UTC günü için bir önceki günün USDT hacmine göre ilk N parite
+    (canlı: her gün 00:00 UTC'de, kapanmış günlük mumlardan). En az FUTURES_UNIVERSE_MIN_AGE_DAYS gündür işlem gören
+    pariteler (arşivin ilk ayında, 2020-01'de görünenler eski sayılır); stabil coin / endeks / hisse pariteleri hariç."""
+    import numpy as np
+    say = progress or (lambda _m: None)
+    hist = VolumeHistory(archive, progress=progress)
+    available = hist.symbols()
+    say(f"📥 Günlük hacimler: {len(available)} parite (önbellekten)")
+    days, symbols, qv, born = daily_volumes(archive, start_ms, end_ms, available)
+    n, age_ms = int(cfg.futures_universe), int(cfg.futures_universe_min_age_days) * DAY_MS
+    bases = [base_of(s) for s in symbols]
+    out = []
+    for i in range(1, len(days)):
+        a, b = max(start_ms, int(days[i])), min(end_ms, int(days[i]) + DAY_MS)
+        if a >= b:
+            continue
+        prev = qv[i - 1]
+        ok = (prev > 0) & (born <= int(days[i]) - age_ms)
+        cand = np.flatnonzero(ok)
+        top = cand[np.argsort(-prev[cand], kind="stable")[:n]]
+        out.append((a, b, tuple(bases[j] for j in top)))
+    return out

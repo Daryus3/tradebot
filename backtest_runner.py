@@ -62,6 +62,8 @@ KINDS: Dict[str, Tuple[str, Tuple[str, ...], str]] = {
                "vadeli çöküş kuralları: süre × oran × teyit + mikro/makro + σ, en iyi 2 ayar (10-30 dk)"),
     "modul": ("Vadeli modül ızgarası", ("--modul-izgara",),
               "çöküş + pompa short / Bollinger / kırılım × en hacimli 20 / 120 / 150 coin (30-90 dk)"),
+    "faz4": ("Vadeli Faz 4 ızgarası", ("--faz4-izgara",),
+             "limit (maker) giriş, fonlama sıkışması, trend içi düzeltme, günlük en hacimli 30 (30-120 dk)"),
 }
 DAY_CHOICES = (7, 14, 30, 45, 60, 90, 120, 180, 270, 365, 540, 730, 1095)
 FULL_HISTORY_DAYS = 9999      # Vadeli: "tüm dönem" (Ocak 2020 → bugün, dönem başı ilk 10 coin) → --tum-donem

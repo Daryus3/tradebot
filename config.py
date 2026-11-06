@@ -93,8 +93,19 @@ FUTURES_MAX_CRASH_EXTRA = 6             # FUTURES_CRASH_EXTRA: en fazla 6 ek pen
 #              üst bandın üstünde ve RSI > FUTURES_BB_RSI_HIGH → short (FUTURES_BB: off | both | long | short)
 #   breakout = hacimli kırılım LONG: hacim önceki 20 mumun FUTURES_BREAKOUT_VOLUME_RATIO katından fazla ve kapanış son
 #              FUTURES_BREAKOUT_HOURS saatin en yükseğinin üstünde
-# Aynı anda birden çok sinyal varsa öncelik: çöküş > pompa > kırılım > Bollinger (tek pozisyon).
+# Faz 4 (Kasım 2026; hepsi varsayılan kapalı, yalnızca LONG):
+#   funding  = fonlama sıkışması: son ödenen fonlama oranı (8 saate oranlanmış) FUTURES_FUNDING_RATE_PCT veya altında
+#              (ör. -0.10 = short'lar long'lara 8 saatte %0.10 ödüyor) VE FUTURES_FUNDING_RULES çöküşü (ör. 1:5)
+#   pullback = trend içi düzeltme: son tamamlanan 1 saatlik kapanış 1 saatlik EMA(FUTURES_PULLBACK_EMA) üstünde ve
+#              5 dk RSI(14) < FUTURES_PULLBACK_RSI
+# Aynı anda birden çok sinyal varsa öncelik: çöküş > fonlama > pompa > düzeltme > kırılım > Bollinger (tek pozisyon).
 FUTURES_BB_MODES = ("off", "both", "long", "short")
+# Giriş emri: market = piyasa emri (taker) | limit = alışta en iyi alış (bid) fiyatının FUTURES_LIMIT_OFFSET_PCT
+# altına post-only limit emir (maker); FUTURES_LIMIT_TTL_MIN dakikada dolmazsa iptal (fırsat kaçar)
+FUTURES_ENTRY_ORDERS = ("market", "limit")
+# Evren sıralaması: avg = son FUTURES_UNIVERSE_AVG_DAYS günün ortalama hacmi | daily = bir önceki UTC gününün USDT
+# hacmi (her gün 00:00 UTC'de yenilenir: "son 24 saatte en çok hacim yapan N coin")
+FUTURES_UNIVERSE_MODES = ("avg", "daily")
 FUTURES_SIDES = ("both", "long", "short")
 FUTURES_LIQ_SOURCES = ("proxy", "feed", "both")
 FUTURES_TP_ORDERS = ("limit", "market")
@@ -378,13 +389,29 @@ def futures_pump_rules(cfg) -> Tuple[Tuple[int, float], ...]:
     return tuple(sorted(rules.items()))
 
 
+def futures_funding_rules(cfg) -> Tuple[Tuple[int, float], ...]:
+    """Fonlama modülünün çöküş kuralları (saat, %): FUTURES_FUNDING_RULES (VEYA; aynı saatte küçük eşik)."""
+    try:
+        parsed = parse_crash_rules(getattr(cfg, "futures_funding_rules", ""))
+    except ValueError:
+        return ()
+    rules: dict = {}
+    for hours, pct in parsed:
+        rules[hours] = min(pct, rules.get(hours, pct))
+    return tuple(sorted(rules.items()))
+
+
 def futures_modules(cfg) -> Tuple[str, ...]:
-    """Çöküş taktiğinde açık olan ek giriş modülleri (öncelik sırasıyla): pump, breakout, bb."""
+    """Çöküş taktiğinde açık olan ek giriş modülleri (öncelik sırasıyla): funding, pump, pullback, breakout, bb."""
     if getattr(cfg, "futures_tactic", "crash") != "crash":
         return ()
     out = []
+    if getattr(cfg, "futures_funding", False) and futures_funding_rules(cfg):
+        out.append("funding")
     if futures_pump_rules(cfg):
         out.append("pump")
+    if getattr(cfg, "futures_pullback", False):
+        out.append("pullback")
     if getattr(cfg, "futures_breakout", False):
         out.append("breakout")
     if getattr(cfg, "futures_bb", "off") != "off":
@@ -639,7 +666,17 @@ class Config:
     futures_breakout: bool = False         # Hacimli kırılım LONG
     futures_breakout_volume_ratio: float = 3.0
     futures_breakout_hours: int = 4
-    futures_leverage: int = 2              # Kaldıraç 1-20; her girişten hemen önce Binance'te ayarlanır
+    # Faz 4 (bkz. FUTURES_ENTRY_ORDERS üstündeki açıklama; hepsi varsayılan kapalı)
+    futures_funding: bool = False          # Fonlama sıkışması LONG
+    futures_funding_rate_pct: float = -0.10   # Son ödenen fonlama (8 saate oranlanmış, %) bu değer veya altında
+    futures_funding_rules: str = "1:5"     # ...ve bu çöküşlerden biri ("saat:%"; 1:5 = son 1 saatte %5)
+    futures_pullback: bool = False         # Trend içi düzeltme LONG
+    futures_pullback_rsi: float = 25.0     # 5 dk RSI(14) bunun altında
+    futures_pullback_ema: int = 200        # ...ve son 1 saatlik kapanış 1 saatlik EMA(bu)'nun üstünde
+    futures_entry_order: str = "market"    # market | limit (maker; bkz. FUTURES_ENTRY_ORDERS)
+    futures_limit_offset_pct: float = 0.05   # limit: alışta bid'in, satışta ask'ın bu kadar (%) gerisine
+    futures_limit_ttl_min: int = 3         # limit: bu kadar dakikada dolmazsa iptal
+    futures_leverage: int = 2             # Kaldıraç 1-20; her girişten hemen önce Binance'te ayarlanır
     futures_margin_usage_pct: float = 95.0  # Serbest bakiyenin teminata giden yüzdesi (bileşik; kalan pay komisyon için)
     futures_volume_ratio: float = 2.5      # Hacim onayı: sinyal mumu hacmi önceki 20 mumun ortalamasının en az bu katı
     futures_liq_source: str = "proxy"      # proxy (mumlardan, backtest ile aynı) | feed (canlı akış) | both (ikisi)
@@ -663,6 +700,7 @@ class Config:
     futures_universe_with_list: bool = True     # En hacimli N'e FUTURES_COINS listesi de eklenir (liste ∪ köklü N)
     futures_universe_min_age_days: int = 1095
     futures_universe_avg_days: int = 180
+    futures_universe_mode: str = "avg"     # avg | daily (bir önceki UTC gününün hacmi, her gün yenilenir)
     # İzleyen stop: fiyat girişten +FUTURES_TRAILING_ACT_PCT gidince zarar kes, görülen en iyi fiyatın
     # FUTURES_TRAILING_GAP_PCT gerisine taşınır (yalnızca lehte yönde; Binance'teki stop emri de taşınır)
     futures_trailing: bool = False
@@ -950,6 +988,21 @@ class Config:
             errors.append("FUTURES_BB_STD 1-4, FUTURES_BB_RSI_LOW 5-50, FUTURES_BB_RSI_HIGH 50-95 arasında olmalı")
         if not 1 <= self.futures_breakout_volume_ratio <= 20 or not 1 <= self.futures_breakout_hours <= 24:
             errors.append("FUTURES_BREAKOUT_VOLUME_RATIO 1-20 kat, FUTURES_BREAKOUT_HOURS 1-24 saat olmalı")
+        try:
+            if not parse_crash_rules(self.futures_funding_rules) and self.futures_funding:
+                errors.append("FUTURES_FUNDING_RULES boş olamaz (ör. 1:5 = son 1 saatte %5 çöküş)")
+        except ValueError as exc:
+            errors.append(f"FUTURES_FUNDING_RULES hatalı: {exc}")
+        if not -2 <= self.futures_funding_rate_pct <= 0:
+            errors.append("FUTURES_FUNDING_RATE_PCT -2 ile 0 arasında olmalı (%, 8 saatlik; ör. -0.10)")
+        if not 5 <= self.futures_pullback_rsi <= 50 or not 20 <= self.futures_pullback_ema <= 500:
+            errors.append("FUTURES_PULLBACK_RSI 5-50, FUTURES_PULLBACK_EMA 20-500 arasında olmalı")
+        if self.futures_entry_order not in FUTURES_ENTRY_ORDERS:
+            errors.append("FUTURES_ENTRY_ORDER şunlardan biri olmalı: " + ", ".join(FUTURES_ENTRY_ORDERS))
+        if not 0 <= self.futures_limit_offset_pct <= 1 or not 1 <= self.futures_limit_ttl_min <= 15:
+            errors.append("FUTURES_LIMIT_OFFSET_PCT 0-1 (%), FUTURES_LIMIT_TTL_MIN 1-15 dakika olmalı")
+        if self.futures_universe_mode not in FUTURES_UNIVERSE_MODES:
+            errors.append("FUTURES_UNIVERSE_MODE şunlardan biri olmalı: " + ", ".join(FUTURES_UNIVERSE_MODES))
         if self.futures_confirm not in FUTURES_CONFIRMS:
             errors.append("FUTURES_CONFIRM şunlardan biri olmalı: " + ", ".join(FUTURES_CONFIRMS))
         if not 1 <= self.futures_confirm_bars <= 24 or not 1 <= self.futures_confirm_volume_ratio <= 20:
@@ -1203,6 +1256,15 @@ def load_config(env_file: Optional[str] = None, mode_override: Optional[str] = N
         futures_breakout=_env_bool("FUTURES_BREAKOUT", False),
         futures_breakout_volume_ratio=_env_float("FUTURES_BREAKOUT_VOLUME_RATIO", 3.0),
         futures_breakout_hours=_env_int("FUTURES_BREAKOUT_HOURS", 4),
+        futures_funding=_env_bool("FUTURES_FUNDING", False),
+        futures_funding_rate_pct=_env_float("FUTURES_FUNDING_RATE_PCT", -0.10),
+        futures_funding_rules=canonical_crash_extra(_env_str("FUTURES_FUNDING_RULES", "1:5")),
+        futures_pullback=_env_bool("FUTURES_PULLBACK", False),
+        futures_pullback_rsi=_env_float("FUTURES_PULLBACK_RSI", 25.0),
+        futures_pullback_ema=_env_int("FUTURES_PULLBACK_EMA", 200),
+        futures_entry_order=_env_str("FUTURES_ENTRY_ORDER", "market").lower(),
+        futures_limit_offset_pct=_env_float("FUTURES_LIMIT_OFFSET_PCT", 0.05),
+        futures_limit_ttl_min=_env_int("FUTURES_LIMIT_TTL_MIN", 3),
         futures_leverage=_env_int("FUTURES_LEVERAGE", 2),
         futures_margin_usage_pct=_env_float("FUTURES_MARGIN_USAGE_PCT", 95.0),
         futures_volume_ratio=_env_float("FUTURES_VOLUME_RATIO", 2.5),
@@ -1223,6 +1285,7 @@ def load_config(env_file: Optional[str] = None, mode_override: Optional[str] = N
         futures_universe_with_list=_env_bool("FUTURES_UNIVERSE_WITH_LIST", True),
         futures_universe_min_age_days=_env_int("FUTURES_UNIVERSE_MIN_AGE_DAYS", 1095),
         futures_universe_avg_days=_env_int("FUTURES_UNIVERSE_AVG_DAYS", 180),
+        futures_universe_mode=_env_str("FUTURES_UNIVERSE_MODE", "avg").lower(),
         futures_trailing=_env_bool("FUTURES_TRAILING", False),
         futures_trailing_act_pct=_env_float("FUTURES_TRAILING_ACT_PCT", 3.0),
         futures_trailing_gap_pct=_env_float("FUTURES_TRAILING_GAP_PCT", 1.5),
@@ -1413,11 +1476,29 @@ def _setting_notes(cfg: Config) -> List[str]:
                              "sinyali → 🏆 / 🥈 Izgara setleri çıkışları da yazar." % (cfg.breakeven_trigger_pct,
                                                                                     cfg.max_hold_minutes))
             mods = futures_modules(cfg)
-            if mods:
-                names = {"pump": "pompa short", "bb": "Bollinger + RSI", "breakout": "hacimli kırılım"}
-                notes.append("Ek giriş modülleri açık (" + ", ".join(names[m] for m in mods) + "): Faz 3 testinde "
+            names = {"pump": "pompa short", "bb": "Bollinger + RSI", "breakout": "hacimli kırılım"}
+            phase3 = [m for m in mods if m in names]
+            if phase3:
+                notes.append("Ek giriş modülleri açık (" + ", ".join(names[m] for m in phase3) + "): Faz 3 testinde "
                              "(2020-2026) üçü de tek başına ve çöküşle birlikte zarar etti; işlem sayısı artar ama "
                              "işlem başı sonuç maliyetin altında kalır (README). Yalnızca test modunda deneyin.")
+            if "pullback" in mods:
+                notes.append("FUTURES_PULLBACK=true (trend içi düzeltme): Faz 4 testinde (2020-2026, 1 dk) çöküşle "
+                             "birlikte yılda ~1.240 işlem ama işlem başı -%0.01, kazanma %56; 2022-2026 her yıl zarar, "
+                             "hesap 30 USDT'den 3 USDT'ye indi. Yalnızca test modunda deneyin.")
+            if "funding" in mods:
+                notes.append("FUTURES_FUNDING=true (fonlama sıkışması): Faz 4 testinde çöküş kuralına yılda yalnızca "
+                             "~4 işlem ekledi (fonlama sıkışmalarının çoğu zaten çöküş kuralına giriyor); sonuç "
+                             "neredeyse aynı kaldı. Tek başına yılda ~45 işlem, işlem başı +%0.16 (kayma ×3: +%0.02).")
+        if cfg.futures_entry_order == "limit":
+            notes.append("FUTURES_ENTRY_ORDER=limit: Faz 4 testinde (2020-2026, 1 dk) limit giriş maliyeti düşürdü "
+                         "(komisyon + kayma işlem başı ~%0.05 az) ama emirlerin ~%11'i dolmadı ve kaçanlar en hızlı "
+                         "toparlanan işlemlerdi (ortalama +%1.06, %93'ü kârlı): işlem başı +%0.31 → +%0.23, yıllık "
+                         "getiri +%587 / +%213 → +%234 / +%105. Kayma 3 katına çıksa da piyasa emri önde.")
+        if cfg.futures_universe > 0 and cfg.futures_universe_mode == "daily":
+            notes.append("FUTURES_UNIVERSE_MODE=daily (dünün en hacimli coinleri): Faz 4 testinde günlük en hacimli 30 "
+                         "coin, en az 3 yıllık olanlarla bile 2024-2026'da her yıl -%66 ile -%91 arası zarar etti; "
+                         "dünün hacim patlaması yapan coinleri çöküşten toparlanmıyor. Önerilen: avg (6 ay ortalama).")
             if cfg.breakeven_enabled and cfg.breakeven_floor_pct < 0.3:
                 notes.append(f"BREAKEVEN_FLOOR_PCT={cfg.breakeven_floor_pct:g}: başabaş stopu maliyetlere (komisyon + "
                              f"kayma ≈ %0.14) çok yakın; testte kayma biraz artınca bu küçük kazançlar zarara döndü. "

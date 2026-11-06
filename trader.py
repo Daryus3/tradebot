@@ -190,6 +190,10 @@ class TradingBot:
         except KeyboardInterrupt:
             log.info("Ctrl+C alındı, bot durduruluyor...")
         finally:
+            try:
+                self._on_shutdown()
+            except Exception as exc:  # noqa: BLE001 - kapanış her durumda tamamlansın
+                log.warning("Kapanış işlemi tamamlanamadı: %s", exc)
             self.state.last_alive = self.time_fn()
             self.store.save(self.state)
             if self.command_listener is not None:
@@ -272,6 +276,10 @@ class TradingBot:
     def stop(self, exit_code: int = 0) -> None:
         self.exit_code = exit_code
         self.running = False
+
+    def _on_shutdown(self) -> None:
+        """Bot dururken (Ctrl+C, systemctl stop, /kapat, kill-switch) son iş; vadeli bot bekleyen limit giriş emrini
+        iptal eder."""
 
     def set_paused(self, paused: bool) -> None:
         self.state.paused = paused

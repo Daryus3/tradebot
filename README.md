@@ -81,6 +81,8 @@ Normal durdurma, Telegram `/kapat`, ayar hatası ve kill-switch'te bot yeniden *
 | `python main.py --backtest --strateji rsi_divergence` | Pozitif RSI uyumsuzluğu + dönüş teyidiyle alım stratejisini dener (1 saatlik mumlar, 365 gün) |
 | `python main.py --backtest --deney --gun 540 --coin-sayisi 100` | **Zarar azaltma deneyi:** mevcut ayarlar, önerilen ayar listesi ve takılan işlem / zarardan sonra bekleme / önceki trend birleşimlerini **kill-switch açıkken** (canlıdaki gibi) aynı veriyle dener; en iyisi için `/ayar` satırlarını verir |
 | `python main.py --backtest --strateji futures --izgara` | **Vadeli ızgara testi:** çöküş süresi × oranı × teyit + mikro/makro + σ eşiği (96 kural), en iyilerle çıkış denemeleri, 1 dk ve 3 kat kaymayla doğrulama; en iyi 2 yapılandırmanın ayarlarını verir (Ocak 2020'den bugüne, 10-30 dk) |
+| `python main.py --backtest --strateji futures --modul-izgara` | **Vadeli modül ızgarası (Faz 3):** çöküş + pompa short / Bollinger + RSI / hacimli kırılım × en hacimli 20 / 120 / 150 coin, sabit çıkışlar, kayma ×3 ve 1 dk doğrulama (30-90 dk) |
+| `python main.py --backtest --strateji futures --faz4-izgara` | **Vadeli Faz 4 ızgarası:** yalnızca long; çöküş + fonlama sıkışması / trend içi düzeltme × piyasa ve limit (maker) giriş × kayma ×1 / ×3, ayarlarınızdaki evren ve günlük en hacimli 30 (≥30 gün / ≥3 yıl); 1 dk doğrulama (30-120 dk) |
 | `python main.py --backtest --gun 90 --strateji-karsilastir` | rebound / trend / breakout stratejilerini karşılaştırır |
 | `python main.py --backtest --gun 90 --bitis 2026-07-01` | O tarihte biten (daha eski) bir dönemi dener: bulunan ayarı bağımsız dönemde doğrulamak için |
 | `python main.py --telegram-chat-id` | Telegram chat ID'nizi bulur |
@@ -193,7 +195,7 @@ Sunucuya bağlanmadan, düğmelerle:
 
 | Düğme | Seçenekler |
 |---|---|
-| 📋 Tür | Normal backtest, çıkış taraması (`--tara`), giriş taraması, filtre gevşetme, A/B filtre testi, strateji karşılaştırma, strateji turnuvası, zarar azaltma deneyi, tüm taramalar birden, vadeli ızgara testi (`--izgara`) |
+| 📋 Tür | Normal backtest, çıkış taraması (`--tara`), giriş taraması, filtre gevşetme, A/B filtre testi, strateji karşılaştırma, strateji turnuvası, zarar azaltma deneyi, tüm taramalar birden, vadeli ızgara testi (`--izgara`), vadeli modül ızgarası (`--modul-izgara`), vadeli Faz 4 ızgarası (`--faz4-izgara`) |
 | 🧭 Strateji | Botun stratejisi veya herhangi bir strateji (yalnızca bu test için) |
 | 🗓️ Süre · 📅 Bitiş | 7 günden 3 yıla; bitiş bugün, N gün önce, **önceki dönem** ya da **iki dönem önce** (bulunan ayarları başka dönemlerde doğrulamak için; 3 yılda iki dönem önce = 2017-2020, 2018 düşüşü dahil) |
 | 💼 Sermaye · 🪙 Coin | Ayardaki / botun güncel sermayesi veya 11-1000 USDT; en hacimli 10-100 coin |
@@ -481,6 +483,84 @@ Sonuç: **yılda 1.000+ işleme kârla ve kayma stresini geçerek ulaşan birle�
 zarar kes'e gidiyor; Bollinger ve kırılımın 5 dk hareketi maliyeti karşılamıyor (önceki araştırmadaki 37 sinyal
 ailesiyle aynı sonuç). Çöküş long'unun avantajı likidasyon zincirinin zorla satışından geliyor; bunun simetriği
 pompalarda yok, geniş evrende de küçük / yeni coinlerin çöküşleri toparlanmıyor. Öneri: 🥈 #2 (liste ∪ köklü 20).
+
+#### Faz 4: limit (maker) giriş, fonlama sıkışması, trend içi düzeltme, günlük hacim evreni (`--faz4-izgara`)
+Dört yeni yapı; hepsi varsayılan kapalı, mevcut ayarlar değişmedi. Canlı bot ve backtest aynı fonksiyonları kullanır.
+
+| Ayar | Ne yapar |
+|---|---|
+| `FUTURES_ENTRY_ORDER=limit` (+ `FUTURES_LIMIT_OFFSET_PCT`, `FUTURES_LIMIT_TTL_MIN`) | **Limit (maker) giriş:** sinyalde piyasa emri yerine en iyi alış (bid) fiyatının %0.05 altına **post-only** (GTX) limit emir; 3 dk içinde dolmazsa iptal (fırsat kaçar). Kısmen dolarsa dolan kadarı pozisyon olur; bot kapanırken (Ctrl+C / `systemctl stop`) bekleyen emir iptal edilir. Telegram: 🎯 Çıkışlar ve Emirler |
+| `FUTURES_FUNDING=true` (+ `_RATE_PCT`, `_RULES`) | **Fonlama sıkışması LONG:** son ödenen fonlama oranı (8 saate oranlanmış; 4 / 1 saatte bir ödenen coinlerde ×2 / ×8) −%0.10 veya altında VE son 1 saatte %5 çöküş. Canlıda oranlar yalnızca çöküş şartını sağlayan coinler için istenir. Telegram: 🧩 Ek modüller |
+| `FUTURES_PULLBACK=true` (+ `_RSI`, `_EMA`) | **Trend içi düzeltme LONG:** son tamamlanan 1 saatlik kapanış 1 saatlik EMA(200) üstünde VE 5 dk RSI(14) < 25. Canlıda 1 saatlik mumlar coin başına saatte bir istenir. Telegram: 🧩 Ek modüller |
+| `FUTURES_UNIVERSE_MODE=daily` | **Günlük hacim havuzu:** her gün 00:00 UTC'de bir önceki günün USDT hacmine göre en hacimli N coin (`FUTURES_UNIVERSE=30`, yaş için `FUTURES_UNIVERSE_MIN_AGE_DAYS`; Telegram'da ≥30 gün seçeneği). Telegram: 🪙 Coinler |
+
+Öncelik (aynı anda birden çok sinyal): çöküş > fonlama > pompa > düzeltme > kırılım > Bollinger.
+
+**Test:** `python main.py --backtest --strateji futures --faz4-izgara` (Telegram: 🧪 Backtest → Tür: Vadeli Faz 4
+ızgarası). Yalnızca long; çıkışlar sabit: TP 8 / SL 5 / başabaş +1 → +0.3 / 45 dk (🥈 #2), 2x, 30 USDT; 2020-01 →
+2026-11; 5 dk mumlarla tarama, öne çıkanlar 1 dk mumlarla doğrulandı; kayma ×1 ve ×3. Komisyon Binance VIP0: piyasa
+(taker) %0.05, limit (maker) %0.02 (normal hesapta maker iadesi / sıfır komisyon yok). Limit emir modeli: referans
+sinyal anındaki fiyat, 3 dk içinde fiyat limitin %0.02 ötesine geçerse limit fiyattan dolar (yalnızca dokunması yetmez:
+kuyrukta önümüzdeki emirler önce dolar), geçmezse işlem yok.
+
+**1) Limit (maker) giriş, çöküş #2, liste ∪ köklü 20 (1 dk):**
+
+| Giriş | İşlem/yıl | Kazanma | İşlem başı | Yıllık seçim / doğr. | Maks. düşüş | Kayma ×3: işlem başı, yıllık |
+|---|---|---|---|---|---|---|
+| Piyasa emri (şimdiki) | 343 | %81.2 | **+%0.31** | +%587 / +%213 | %52 / %39 | +%0.22, +%236 / +%100 |
+| Limit bid −%0.02 | 315 | %78.6 | +%0.21 | +%149 / +%111 | %80 / %43 | +%0.18, +%98 / +%77 |
+| Limit bid −%0.05 (önerilen deneme) | 307 | %78.6 | +%0.23 | +%234 / +%105 | %82 / %44 | +%0.20, +%158 / +%73 |
+| Limit bid −%0.10 | 298 | %78.6 | +%0.22 | +%201 / +%73 | %69 / %47 | +%0.18, +%131 / +%47 |
+| Limit −%0.05, dolmazsa piyasa emri | 322 | %77.8 | +%0.21 | +%190 / +%86 | %82 / %58 | +%0.16, +%105 / +%47 |
+| Limit −%0.05, maker komisyonu %0 olsaydı | 307 | %78.6 | +%0.26 | +%286 / +%124 | %80 / %43 | +%0.22, +%195 / +%89 |
+
+Limit emir maliyeti gerçekten düşürüyor: işlem başı komisyon %0.099 → %0.069 ve girişte kayma yok; kayma 3 katına
+çıkınca piyasa emrinde işlem başı −%0.09 kaybedilirken limitte yalnızca −%0.04 (yalnızca çıkış kayıyor). Ama emirlerin
+%11'i (−%0.10'da %16) dolmuyor ve **dolmayanlar en iyi işlemler:** aynı sinyaller piyasa emriyle ortalama **+%1.06**
+kazanıyordu (%93'ü kârlı; çöküşten anında sıçrayanlar), dolanlar ise +%0.22 (düşüşü sürenler). Bu "ters seçim"
+tasarruftan büyük: işlem başı +%0.31 → +%0.23, yıllık getiri yaklaşık yarıya iniyor; kayma 3 katına çıksa bile piyasa
+emri önde. Dolmayınca piyasa emriyle girmek (yedek) de kötü: sıçramayı geç ve pahalı yakalıyor.
+
+**2) Fonlama sıkışması ve trend içi düzeltme, liste ∪ köklü 20 (1 dk):**
+
+| Kural | İşlem/yıl | Kazanma | İşlem başı | Yıllık seçim / doğr. | Maks. düşüş | Kayma ×3 | Kârlı yıl |
+|---|---|---|---|---|---|---|---|
+| Çöküş #2 (şimdiki) | 343 | %81.2 | +%0.31 | +%587 / +%213 | %52 / %39 | +%0.22 | 7/7 |
+| Çöküş + fonlama (−%0.10, 1 sa %5) | 347 | %81.2 | +%0.30 | +%555 / +%232 | %55 / %46 | +%0.21 | 6/7 |
+| Yalnız fonlama (−%0.05, 1 sa %5) | 44 | %82.9 | +%0.16 | +%9 / +%7 | %47 / %43 | +%0.02 | 4/7 |
+| Çöküş + düzeltme (EMA200, RSI < 25) | **1.242** | %56.3 | −%0.01 | +%40 / eridi | %99 / %91 | −%0.09 | 2/7 |
+| Yalnız düzeltme (RSI < 20) | 384 | %51.6 | −%0.01 | +%22 / −%49 | %89 / %92 | −%0.09 | 4/7 |
+
+Fonlama: büyük coinlerde 8 saatlik fonlama nadiren −%0.10'un altına iner (ETH 2023-2024'te en düşük −%0.02); iner ve
+aynı anda 1 saatte %5 çöküş olursa da bu genellikle zaten çöküş kuralına (1 saatte %6 / 4 saatte %10) giriyor: modül
+yılda yalnızca ~4 işlem ekledi, sonuç neredeyse aynı (2023 +%9 → −%8). Tek başına seyrek (yılda ~45) ve 3 kat kaymada
+başabaş. Düzeltme: işlem sayısını 343'ten **1.242'ye** çıkarıyor ama 5 dk RSI < 25 dipleri yükseliş trendinde de çoğu
+zaman sürüyor (kazanma %56); çöküş + düzeltme yıl yıl 2020 +%131, 2021 +%6.969, 2022 −%92, 2023 −%81, 2024 −%58,
+2025 −%66, 2026 −%91 (tek hesap 30 → 3 USDT).
+
+**3) Günlük "en hacimli 30" havuzu (yaş filtresi olmadan ve ≥3 yıl):**
+
+| Evren, kural | İşlem/yıl | Kazanma | İşlem başı | Yıllık seçim / doğr. | Maks. düşüş | Kârlı yıl |
+|---|---|---|---|---|---|---|
+| Liste ∪ köklü 20 (aylık, 6 ay ort. hacim), çöküş #2 (1 dk) | 343 | %81.2 | +%0.31 | +%587 / +%213 | %52 / %39 | 7/7 |
+| Günlük 30, ≥3 yıl, çöküş #2 (1 dk) | 731 | %77.7 | +%0.05 | +%405 / eridi | %69 / %95 | 4/7 |
+| Günlük 30, ≥3 yıl, çöküş + fonlama (1 dk) | 780 | %77.3 | +%0.07 | +%459 / eridi | %69 / %94 | 3/7 |
+| Günlük 30, ≥3 yıl, çöküş + düzeltme (1 dk) | 1.787 | %59.9 | −%0.05 | +%5 / eridi | %99 / %92 | 1/7 |
+| Günlük 30, ≥30 gün, çöküş #2 (5 dk tarama) | **3.534** | %77.6 | +%0.13 | +%2.721 / eridi | %68 / %94 | 6/7 |
+| Günlük 30, ≥30 gün, çöküş + düzeltme (5 dk) | 4.766 | %70.5 | +%0.05 | +%2.133 / eridi | %69 / %93 | 4/7 |
+| Günlük 30, ≥30 gün, yalnız fonlama −%0.05 (5 dk) | 1.311 | %77.5 | +%0.13 | +%366 / eridi | %88 / %93 | 5/7 |
+| Günlük 30, ≥30 gün, yalnız düzeltme RSI < 20 (1 dk) | 908 | %64.7 | +%0.02 | +%211 / eridi | %92 / %93 | 2/7 |
+
+Günlük 30 coin, ≥3 yıllık olanlarla bile yıl yıl: 2020 +%135, 2021 +%15.549, 2022 +%5, 2023 +%10, **2024 −%88, 2025
+−%66, 2026 −%91**. Yaş filtresi olmadan 7 yılda **627 farklı coin** günün ilk 30'una giriyor (FARTCOIN, PNUT, AIXBT,
+USUAL, PUMP...): dünün hacim patlaması çoğu zaman bir hype / yeni listeleme dalgası; bu coinlerin çöküşleri
+toparlanmıyor. "Hacim varsa kalite vardır" varsayımı tutmadı: 6 aylık ortalama hacim + 3 yıl yaş (şimdiki ayar)
+hype'ı eliyor, günlük hacim eleyemiyor.
+
+Sonuç: **dört yapıdan hiçbiri #2'yi geçemedi.** Limit emir maliyeti %0.05 düşürse de en iyi sıçramaları kaçırıyor;
+fonlama sinyali çöküşle örtüşüyor; düzeltme ve günlük havuz işlem sayısını 1.000-6.000'e çıkarıyor ama işlem başı
+sonuç maliyetin altına iniyor. Öneri: 🥈 #2 (liste ∪ köklü 20, piyasa emri), yeni modüller kapalı; denemek isterseniz
+yalnızca test modunda (paper).
 
 ### 🏆 Strateji turnuvası (`--turnuva`)
 Hangi strateji türünün sizin dönemde işe yaradığını **tek komutla** görmek için:

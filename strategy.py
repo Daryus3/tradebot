@@ -77,8 +77,8 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from binance_client import BinanceClient, RateLimitError
-from config import (STRATEGY_NAMES, fee_from_coin, futures_crash_rules, futures_modules, futures_pump_rules,
-                    intraday_coin_list, intraday_tactic_list, rotation_coin_list, rotation_hold_count)
+from config import (STRATEGY_NAMES, fee_from_coin, futures_crash_rules, futures_funding_rules, futures_modules,
+                    futures_pump_rules, intraday_coin_list, intraday_tactic_list, rotation_coin_list, rotation_hold_count)
 from rotation import RotationPlan, btc_trend, momentum_pct, plan_rotation
 from exchange import SymbolRules
 from entry_filters import candle_reject, prior_trend_reject
@@ -1669,11 +1669,15 @@ FUT_CONFIRM_AVG_BARS = FUT_AVG_BARS   # Hacim zirvesi teyidi: önceki 20 mumun o
 FUT_KLINE_MAX = 1500         # Binance tek istekte en fazla 1500 mum verir
 FUT_BB_BARS = 20             # Bollinger modülü: 20 mumluk kapanış ortalaması
 FUT_BB_RSI_PERIOD = 14       # Bollinger modülü: RSI(14)
-# Aynı mumda birden çok sinyal: önce öncelik (çöküş > pompa > kırılım > Bollinger), sonra modülün kendi puanı
-FUT_PRIORITY = {"crash": 0, "pump": -1, "breakout": -2, "bb": -3}
-FUT_TACTIC_CODE = {"crash": 1.0, "pump": 2.0, "bb": 3.0, "breakout": 4.0}   # metrics["tactic"]
+# Aynı mumda birden çok sinyal: önce öncelik (çöküş > fonlama > pompa > düzeltme > kırılım > Bollinger), sonra
+# modülün kendi puanı
+FUT_PRIORITY = {"crash": 0, "funding": -1, "pump": -2, "pullback": -3, "breakout": -4, "bb": -5}
+FUT_TACTIC_CODE = {"crash": 1.0, "pump": 2.0, "bb": 3.0, "breakout": 4.0, "funding": 5.0,   # metrics["tactic"]
+                   "pullback": 6.0}
 FUT_MODULE_NAMES = {"crash": "çöküş dönüşü", "pump": "pompa dönüşü", "bb": "Bollinger + RSI",
-                    "breakout": "hacimli kırılım"}
+                    "breakout": "hacimli kırılım", "funding": "fonlama sıkışması", "pullback": "trend içi düzeltme"}
+FUT_FUNDING_HOURS = 8        # Fonlama oranları 8 saate oranlanır (4 / 1 saatte bir ödenen coinlerde oran büyür)
+FUT_H1_LIMIT = 1000          # Canlı: düzeltme modülü için istenen 1 saatlik mum (EMA200'ün oturması için)
 
 
 def _need_numpy() -> None:
@@ -1768,7 +1772,9 @@ def futures_features(k: Dict[str, "np.ndarray"], cfg) -> Dict[str, "np.ndarray"]
     crash = np.full(len(c), np.nan)
     if len(c) > bars:
         crash[bars:] = (c[bars:] / c[:-bars] - 1) * 100
-    return {"o": o, "h": h, "l": l, "c": c, "v": v, "crash": crash,
+    # Faz 4: mum zamanları, mum başına son ödenen fonlama (k["fr"] → f["funding"]) ve 1 saatlik mumlar
+    extra = {name: k[key] for key, name in (("t", "t"), ("fr", "funding"), ("h1", "h1")) if key in k}
+    return {**extra, "o": o, "h": h, "l": l, "c": c, "v": v, "crash": crash,
             "vol_ratio": vol_ratio, "sell_ratio": sell_ratio, "buy_ratio": buy_ratio,
             "atr": atr_prev, "low_prev": low_prev, "high_prev": high_prev, "rsi": np_rsi(c, cfg.rsi_period),
             "piv_low": piv_low, "piv_high": piv_high,
@@ -2011,6 +2017,95 @@ def breakout_state(f: Dict[str, "np.ndarray"], cfg):
     return out
 
 
+def funding_per_bar(close_ms, funding_ms, rates):
+    """5 dk mumların kapanışında bilinen son fonlama oranı, 8 saate oranlanmış (%): oran × 8 / ödeme aralığı (o ödemeyle
+    bir öncekinin arası, 1-8 saat; ilk kayıtta 8). Mumun kapanışıyla aynı dakikadaki ödeme o mumda henüz sayılmaz
+    (canlıda kaydın gelmesi birkaç saniye sürebilir; backtest de aynı kuralı uygular). Ödeme yoksa NaN."""
+    close_ms = np.asarray(close_ms, dtype=np.int64)
+    ft = np.asarray(funding_ms, dtype=np.int64) // 60_000 * 60_000
+    fr = np.asarray(rates, dtype=np.float64)
+    out = np.full(len(close_ms), np.nan)
+    if not len(ft):
+        return out
+    gap = np.full(len(ft), float(FUT_FUNDING_HOURS))
+    if len(ft) > 1:
+        gap[1:] = np.clip(np.round(np.diff(ft) / FUT_HOUR_MS), 1, FUT_FUNDING_HOURS)
+    rate8 = fr * 100.0 * FUT_FUNDING_HOURS / gap
+    idx = np.searchsorted(ft, close_ms, "left") - 1
+    ok = idx >= 0
+    out[ok] = rate8[idx[ok]]
+    return out
+
+
+def funding_state(f: Dict[str, "np.ndarray"], cfg):
+    """Fonlama sıkışması (long): (tetik, 8 saatlik fonlama %, düşüş %, saat, eşik %). Tetik: son ödenen fonlama
+    FUTURES_FUNDING_RATE_PCT veya altında VE FUTURES_FUNDING_RULES çöküşlerinden biri (VEYA). Fonlama verisi yoksa
+    (f["funding"] yok) modül sinyal vermez."""
+    rules = futures_funding_rules(cfg)
+    key = (rules, float(cfg.futures_funding_rate_pct))
+    hit = f.get("_funding_state")
+    if hit is not None and hit[0] == key:
+        return hit[1]
+    n = len(f["c"])
+    fund = f.get("funding")
+    fund = np.full(n, np.nan) if fund is None else np.asarray(fund, dtype=np.float64)
+    trig = np.zeros(n, dtype=bool)
+    sev, drop_b, hours_b, thr_b = np.zeros(n), np.zeros(n), np.zeros(n), np.zeros(n)
+    for hours, pct in rules:
+        drop = crash_drop_pct(f, hours)
+        with np.errstate(invalid="ignore"):
+            ok = drop >= pct
+            sv = np.where(np.isfinite(drop), drop / pct, 0.0)
+        trig |= ok
+        better = sv > sev
+        sev = np.where(better, sv, sev)
+        drop_b = np.where(better, drop, drop_b)
+        hours_b = np.where(better, float(hours), hours_b)
+        thr_b = np.where(better, float(pct), thr_b)
+    with np.errstate(invalid="ignore"):
+        trig &= fund <= cfg.futures_funding_rate_pct           # NaN (veri yok) → False
+    out = (trig, fund, drop_b, hours_b, thr_b)
+    f["_funding_state"] = (key, out)
+    return out
+
+
+def h1_trend(f: Dict[str, "np.ndarray"], period: int):
+    """Düzeltme modülünün 1 saatlik trendi, 5 dk mumların kapanışına hizalı: (son TAMAMLANAN 1 saatlik kapanış, o saatteki
+    EMA(period)). 1 saatlik mum [t, t + 1 saat) t + 1 saatte biter; T'de kapanan 5 dk mum için bitişi ≤ T olanların
+    sonuncusu kullanılır (canlıda o anda süren saatin mumu da gelir, kullanılmaz). Veri yoksa NaN."""
+    def calc():
+        n = len(f["c"])
+        h1 = f.get("h1")
+        if h1 is None or "t" not in f or not len(h1["t"]):
+            return np.full(n, np.nan), np.full(n, np.nan)
+        t1 = np.asarray(h1["t"], dtype=np.int64)
+        c1 = np.asarray(h1["c"], dtype=np.float64)
+        ema = np_ema(c1, period)
+        idx = np.searchsorted(t1 + FUT_HOUR_MS, np.asarray(f["t"], dtype=np.int64) + FUT_BAR_MS, "right") - 1
+        ok = idx >= 0
+        close_at, ema_at = np.full(n, np.nan), np.full(n, np.nan)
+        close_at[ok], ema_at[ok] = c1[idx[ok]], ema[idx[ok]]
+        return close_at, ema_at
+    return _memo(f, ("h1trend", int(period)), calc)
+
+
+def pullback_state(f: Dict[str, "np.ndarray"], cfg):
+    """Trend içi düzeltme (long): (tetik, 1 saatlik kapanışın EMA'ya uzaklığı %). Tetik: son tamamlanan 1 saatlik kapanış
+    EMA(FUTURES_PULLBACK_EMA) üstünde VE 5 dk RSI(14) < FUTURES_PULLBACK_RSI."""
+    key = (int(cfg.futures_pullback_ema), float(cfg.futures_pullback_rsi))
+    hit = f.get("_pullback_state")
+    if hit is not None and hit[0] == key:
+        return hit[1]
+    close_at, ema_at = h1_trend(f, int(cfg.futures_pullback_ema))
+    r = rsi_14(f, cfg)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        trig = (close_at > ema_at) & (r < cfg.futures_pullback_rsi)
+        dist = np.where(ema_at > 0, (close_at / ema_at - 1) * 100, 0.0)
+    out = (trig, dist)
+    f["_pullback_state"] = (key, out)
+    return out
+
+
 def _entry_key(cfg, liq_long) -> tuple:
     return (futures_crash_rules(cfg), float(getattr(cfg, "futures_crash_z", 0.0) or 0.0),
             float(getattr(cfg, "futures_crash_z_min_pct", 3.0)), getattr(cfg, "futures_confirm", "close"),
@@ -2020,6 +2115,8 @@ def _entry_key(cfg, liq_long) -> tuple:
             float(getattr(cfg, "futures_bb_rsi_low", 25.0)), float(getattr(cfg, "futures_bb_rsi_high", 75.0)),
             bool(getattr(cfg, "futures_breakout", False)), float(getattr(cfg, "futures_breakout_volume_ratio", 3.0)),
             int(getattr(cfg, "futures_breakout_hours", 4)), cfg.futures_sides, int(getattr(cfg, "rsi_period", 14)),
+            futures_funding_rules(cfg), float(getattr(cfg, "futures_funding_rate_pct", -0.10)),
+            float(getattr(cfg, "futures_pullback_rsi", 25.0)), int(getattr(cfg, "futures_pullback_ema", 200)),
             None if liq_long is None else id(liq_long))
 
 
@@ -2035,8 +2132,12 @@ def entry_masks(f: Dict[str, "np.ndarray"], cfg, liq_long=None) -> Dict[str, lis
         crash = crash & (f["liq_long"] if liq_long is None else liq_long)
     longs, shorts = [("crash", crash)], []
     mods = futures_modules(cfg)
+    if "funding" in mods:
+        longs.append(("funding", funding_state(f, cfg)[0]))
     if "pump" in mods:
         shorts.append(("pump", pump_state(f, cfg)[0]))
+    if "pullback" in mods:
+        longs.append(("pullback", pullback_state(f, cfg)[0]))
     if "breakout" in mods:
         longs.append(("breakout", breakout_state(f, cfg)[0]))
     if "bb" in mods:
@@ -2061,8 +2162,8 @@ def _any(masks, n: int):
 
 def entry_scores(f: Dict[str, "np.ndarray"], cfg, idx, side: str, liq_long=None):
     """Giriş mumları `idx` (bu yönde en az bir modül sinyal veriyor) için (modül adları, öncelik, puan): modül =
-    öncelik sırasında ilk sinyal veren. Puan: çöküşte crash_scores, pompada şiddet × 10, kırılımda hacim katı,
-    Bollinger'da RSI'ın eşiği aşma miktarı."""
+    öncelik sırasında ilk sinyal veren. Puan: çöküşte crash_scores, fonlamada oranın baz puanı (-%0.25 → 25),
+    pompada şiddet × 10, kırılımda hacim katı, düzeltme ve Bollinger'da RSI'ın eşiği aşma miktarı."""
     idx = np.atleast_1d(np.asarray(idx, dtype=np.int64))
     masks = entry_masks(f, cfg, liq_long)[side]
     names = np.full(len(idx), "", dtype=object)
@@ -2078,6 +2179,10 @@ def entry_scores(f: Dict[str, "np.ndarray"], cfg, idx, side: str, liq_long=None)
             sc = crash_scores(f, cfg, sub)
         elif name == "pump":
             sc = pump_state(f, cfg)[1][sub] * 10.0
+        elif name == "funding":
+            sc = -funding_state(f, cfg)[1][sub] * 100.0
+        elif name == "pullback":
+            sc = cfg.futures_pullback_rsi - rsi_14(f, cfg)[sub]
         elif name == "breakout":
             sc = f["vol_ratio"][sub]
         else:
@@ -2118,6 +2223,8 @@ def futures_entries(f: Dict[str, "np.ndarray"], cfg, active=None):
 def futures_kline_limit(cfg) -> int:
     """Canlı: coin başına istenecek 5 dk mum sayısı (en uzun pencere + izleme süresi + oynaklık geçmişi)."""
     hours = [h for h, _p in futures_crash_rules(cfg)] + [h for h, _p in futures_pump_rules(cfg)]
+    if "funding" in futures_modules(cfg):
+        hours += [h for h, _p in futures_funding_rules(cfg)]
     if getattr(cfg, "futures_breakout", False):
         hours.append(int(cfg.futures_breakout_hours))
     need = max(hours) * 12 + FUT_AVG_BARS + 20
@@ -2197,7 +2304,7 @@ def futures_candidates(f: Dict[str, "np.ndarray"], cfg, up=None, down=None,
 
 
 def _module_signal(f, i: int, side: str, cfg, module: str, priority: int, score: float) -> dict:
-    """Ek modül sinyalinin ölçüleri (tactic: 2 pompa, 3 Bollinger, 4 kırılım)."""
+    """Ek modül sinyalinin ölçüleri (tactic: 2 pompa, 3 Bollinger, 4 kırılım, 5 fonlama, 6 düzeltme)."""
     c = float(f["c"][i])
     out = {"side": side, "price": c, "score": score, "priority": priority, "tactic": FUT_TACTIC_CODE[module],
            "vol_ratio": float(f["vol_ratio"][i])}
@@ -2205,6 +2312,13 @@ def _module_signal(f, i: int, side: str, cfg, module: str, priority: int, score:
         _trig, _sev, rise, hours, thr = pump_state(f, cfg)
         out.update(rise_pct=float(rise[i]), hours=float(hours[i]), thr_pct=float(thr[i]),
                    liq_ratio=float(f["buy_ratio"][i]))
+    elif module == "funding":
+        _trig, fund, drop, hours, thr = funding_state(f, cfg)
+        out.update(funding_pct=float(fund[i]), drop_pct=float(drop[i]), hours=float(hours[i]), thr_pct=float(thr[i]),
+                   liq_ratio=float(f["sell_ratio"][i]))
+    elif module == "pullback":
+        out.update(rsi=float(rsi_14(f, cfg)[i]), ema_pct=float(pullback_state(f, cfg)[1][i]),
+                   ema=float(cfg.futures_pullback_ema))
     elif module == "bb":
         _l, _s, lower, upper = bb_state(f, cfg)
         band = float(lower[i] if side == "long" else upper[i])
@@ -2274,7 +2388,7 @@ class FuturesSignal:
     candle_ms: int       # Sinyal mumunun açılış zamanı
     score: float
     metrics: Dict[str, float] = field(default_factory=dict)
-    priority: int = 0    # Aynı anda sinyallerde önce bu (FUT_PRIORITY: çöküş 0 > pompa > kırılım > Bollinger)
+    priority: int = 0    # Aynı anda sinyallerde önce bu (FUT_PRIORITY: çöküş 0 > fonlama > pompa > düzeltme > ...)
 
     def note(self) -> str:
         m = self.metrics
@@ -2289,6 +2403,13 @@ class FuturesSignal:
         if m.get("tactic") == 4.0:
             return (f"Hacimli kırılım (long): son {m.get('hours', 4):g} saatin zirvesi %{m.get('break_pct', 0):.2f} "
                     f"aşıldı | Hacim x{m.get('vol_ratio', 0):.1f}")
+        if m.get("tactic") == 5.0:
+            return (f"Fonlama sıkışması (long): fonlama %{m.get('funding_pct', 0):.3f} (8 saatlik) | son "
+                    f"{m.get('hours', 1):g} saatte -%{m.get('drop_pct', 0):.1f} | Satış hacmi x{m.get('liq_ratio', 0):.1f}"
+                    f" | Hacim x{m.get('vol_ratio', 0):.1f}")
+        if m.get("tactic") == 6.0:
+            return (f"Trend içi düzeltme (long): 1 saatlik kapanış EMA{m.get('ema', 200):g}'nin "
+                    f"%{m.get('ema_pct', 0):.1f} üstünde, 5 dk RSI {m.get('rsi', 0):.0f} | Hacim x{m.get('vol_ratio', 0):.1f}")
         if m.get("tactic") == 1.0:
             text = f"Çöküş dönüşü: son {m.get('hours', 4):g} saatte -%{m.get('drop_pct', 0):.1f}"
             if m.get("z"):
@@ -2405,7 +2526,7 @@ class FuturesScalpStrategy(ReboundStrategy):
             mode = getattr(cfg, "futures_confirm", "close")
             w = 0 if mode == "close" else int(cfg.futures_confirm_bars)
             if not trig[max(0, i - w):i + 1].any():
-                return "sinyal yok (çöküş / pompa / bant / kırılım)" if futures_modules(cfg) else "çöküş yok"
+                return "sinyal yok (çöküş / ek modüller)" if futures_modules(cfg) else "çöküş yok"
             if cfg.futures_sides == "short":
                 return "yön kapalı"
             if not crash_entries(f, cfg, trig)[i]:

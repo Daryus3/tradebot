@@ -26,11 +26,13 @@ from typing import Dict, List, Optional, Tuple
 
 import requests
 
-from config import futures_coin_list, futures_crash_rules, futures_liq_distance_pct, futures_modules, futures_pump_rules
-from futures_exchange import FuturesError, MinNotionalError, describe_error
+from config import (futures_coin_list, futures_crash_rules, futures_funding_rules, futures_liq_distance_pct,
+                    futures_modules, futures_pump_rules)
+from futures_exchange import FFill, FuturesError, MinNotionalError, describe_error
 from logger import get_logger
 from risk import ExitReason, Position, cooldown_minutes, kill_switch_hit
-from strategy import FUT_BAR_MS, FUT_BTC_1H_LIMIT, FuturesSignal, ScanResult, futures_kline_limit
+from strategy import (FUT_BAR_MS, FUT_BTC_1H_LIMIT, FUT_H1_LIMIT, FUT_HOUR_MS, FuturesSignal, ScanResult,
+                      funding_per_bar, futures_kline_limit)
 from telegram_bot import CRITICAL_EXITS, Messages, esc, fmt_duration, fmt_price, fmt_signed, fmt_usdt, futures_tag
 from trader import ALIVE_SAVE_SEC, POSITION_LOG_SEC, RULES_REFRESH_SEC, Mark, TradingBot
 
@@ -48,6 +50,10 @@ PREFILTER_SLACK_PCT = 1.0     # En hacimli N + çöküş: 24 saatlik tepeye gör
 KLINE_PARALLEL_MIN = 16       # Bundan çok coinin mumları paralel istenir (120-150 coinlik evrende tarama gecikmesin)
 KLINE_WORKERS = 6
 UNIVERSE_REFRESH_SEC = 24 * 3600   # En hacimli N köklü coin sıralaması günde bir yenilenir (parite başına 1 istek)
+PAPER_LIMIT_THROUGH_PCT = 0.02     # Test modu: limit emir fiyat limitin bu kadar (%) ötesine geçince dolar (backtestle aynı)
+LIMIT_REQUOTE_MAX = 2              # Post-only emir anında eşleşeceği için reddedilirse (-5022) yeni fiyatla yeniden dizilir
+LIMIT_CANCEL_GRACE_SEC = 5         # Süre dolunca iptal; test modunda son 1 dk mumun kapanması da beklenir
+FUNDING_LIMIT = 5                  # Fonlama modülü: coin başına istenen son ödenmiş fonlama sayısı
 
 
 @dataclass
@@ -89,6 +95,7 @@ class FuturesBot(TradingBot):
         self._ranking: List[str] = []          # Tüm köklü pariteler, ortalama hacme göre
         self._ranking_at = 0.0
         self._ranking_key: tuple = ()
+        self._h1_cache: Dict[str, Tuple[int, dict]] = {}   # Düzeltme modülü: parite → (saat, 1 saatlik mumlar)
 
     # ================================================================ kapasite
     def slots(self) -> int:
@@ -98,7 +105,7 @@ class FuturesBot(TradingBot):
         return 1
 
     def free_slots(self) -> int:
-        return 0 if self.state.positions else 1
+        return 0 if self.state.positions or self.state.pending_entry else 1
 
     @staticmethod
     def _next_close(now: float) -> float:
@@ -136,6 +143,9 @@ class FuturesBot(TradingBot):
             self._announced = True
         log.info("Vadeli bot başladı: %s | %d coin | %s", "test" if ex.is_paper else "CANLI", len(coins), mode_note)
         self._reconcile_positions_on_startup()
+        if self.state.pending_entry:
+            log.info("Bekleyen limit giriş emri: %s", self.state.pending_entry.get("symbol"))
+            self._check_pending_entry(now)
         self._init_report_markers(now)
         self.state.last_alive = now
         self.store.save(self.state)
@@ -186,6 +196,8 @@ class FuturesBot(TradingBot):
         self.process_commands()
         if not self.running:
             return
+        if self.state.pending_entry:
+            self._check_pending_entry(now)                   # Limit giriş emri: doldu mu / süresi doldu mu
         if self.state.positions:
             self.manage_positions(now)
         elif self.state.killed or kill_switch_hit(self.state.realized_pnl, 0.0, self.loss_limit):
@@ -194,8 +206,8 @@ class FuturesBot(TradingBot):
             return
         if now >= self.next_scan_at:
             self.next_scan_at = self._next_close(now) + SCAN_DELAY_SEC
-            if (not self.state.positions and not self.state.paused and not self.state.killed
-                    and not self.entries_frozen(now)):
+            if (not self.state.positions and not self.state.pending_entry and not self.state.paused
+                    and not self.state.killed and not self.entries_frozen(now)):
                 self.scan_and_enter(now)
         self._periodic(now)
 
@@ -219,7 +231,7 @@ class FuturesBot(TradingBot):
             self.store.save(self.state)
 
     def _next_sleep(self) -> float:
-        if self.state.positions:
+        if self.state.positions or self.state.pending_entry:
             return POSITION_POLL_SEC
         return max(1.0, min(self.next_scan_at - self.time_fn(), 30.0))
 
@@ -258,6 +270,7 @@ class FuturesBot(TradingBot):
                 continue
             if len(k["t"]) and int(k["t"][-1]) + FUT_BAR_MS == closed_ms:   # Yalnızca az önce kapanan mum
                 klines[symbol] = k
+        self._attach_extras(klines, closed_ms)       # Faz 4: fonlama oranları, 1 saatlik mumlar (modül açıksa)
         btc_1h = ex.klines("BTCUSDT", "1h", FUT_BTC_1H_LIMIT) if self.strategy.needs_btc_trend else None
         signals, rejects = self.strategy.evaluate(klines, btc_1h, now_ms, feed=self.smart.liq_feed)
         if errors:
@@ -288,8 +301,11 @@ class FuturesBot(TradingBot):
     def _refresh_universe(self, now: float, force: bool = False) -> None:
         """En hacimli N köklü parite listesini (gerekirse) yeniler: günde bir ya da ayar değişince."""
         cfg = self.cfg
-        key = (cfg.futures_universe_min_age_days, cfg.futures_universe_avg_days)
-        if not force and self._ranking and key == self._ranking_key and now - self._ranking_at < UNIVERSE_REFRESH_SEC:
+        daily = getattr(cfg, "futures_universe_mode", "avg") == "daily"
+        key = (cfg.futures_universe_min_age_days, 1 if daily else cfg.futures_universe_avg_days)
+        fresh = (now - self._ranking_at < UNIVERSE_REFRESH_SEC if not daily
+                 else int(now // 86400) == int(self._ranking_at // 86400))     # daily: her UTC gününde yeniden
+        if not force and self._ranking and key == self._ranking_key and fresh:
             self.universe = self._ranking[:cfg.futures_universe]
             return
         log.info("En hacimli köklü pariteler sıralanıyor (en az %d günlük, son %d gün ortalaması)...", *key)
@@ -330,14 +346,16 @@ class FuturesBot(TradingBot):
         if cfg.futures_tactic != "crash" or not symbols:
             return symbols, 0
         mods = futures_modules(cfg)
-        if "bb" in mods or "breakout" in mods:
+        if "bb" in mods or "breakout" in mods or "pullback" in mods:
             return symbols, 0
-        rules = futures_crash_rules(cfg)
+        rules = futures_crash_rules(cfg) + (futures_funding_rules(cfg) if "funding" in mods else ())
         watch = cfg.futures_confirm != "close"
         reach_h = max(h for h, _p in rules) + (cfg.futures_confirm_bars / 12 if watch else 0)
         if reach_h > 24:
             return symbols, 0
-        least = cfg.futures_crash_z_min_pct if cfg.futures_crash_z > 0 else min(p for _h, p in rules)
+        least = min(p for _h, p in rules)
+        if cfg.futures_crash_z > 0:
+            least = min([cfg.futures_crash_z_min_pct] + [p for _h, p in futures_funding_rules(cfg) if "funding" in mods])
         pump = futures_pump_rules(cfg)
         try:
             tickers = self.exchange.tickers_24h()
@@ -368,6 +386,9 @@ class FuturesBot(TradingBot):
         # 2) Büyüklük: serbest bakiyenin FUTURES_MARGIN_USAGE_PCT'si teminat × kaldıraç (bileşik)
         free = ex.free_balance()
         bid, ask = ex.bid_ask(symbol)
+        if cfg.futures_entry_order == "limit":
+            self._place_limit_entry(sig, now, lev, free, bid, ask)
+            return None
         price = ask if side == "long" else bid
         margin = free * cfg.futures_margin_usage_pct / 100
         qty = ex.amount_to_precision(symbol, margin * lev / price)
@@ -381,13 +402,21 @@ class FuturesBot(TradingBot):
             qty = ex.amount_to_precision(symbol, qty * MARGIN_RETRY_FACTOR)   # Komisyon payı yetmedi: biraz küçült
             ex.check_order_size(symbol, qty, price)
             fill = ex.market_order(symbol, order_side, qty)
+        return self._open_from_fill(sig, fill, lev, now)
+
+    def _open_from_fill(self, sig: FuturesSignal, fill: FFill, lev: int, now: float,
+                        opened_at: Optional[float] = None) -> Optional[Position]:
+        """Giriş emri doldu (piyasa ya da limit): pozisyon kaydı, Binance'te zarar kes + Kâr Al, bildirim."""
+        cfg, ex = self.cfg, self.exchange
+        symbol, side = sig.symbol, sig.side
         entry, qty = fill.price, fill.qty
         sign = 1 if side == "long" else -1
         tp = ex.price_to_precision(symbol, entry * (1 + sign * cfg.take_profit_pct / 100))
         sl = ex.price_to_precision(symbol, entry * (1 - sign * cfg.stop_loss_pct / 100))
         margin_used = qty * entry / lev
         pos = Position(symbol=symbol, base_asset=symbol[:-4], qty=qty, entry_price=entry,
-                       cost_usdt=margin_used + fill.fee, opened_at=now, buy_fee_usdt=fill.fee,
+                       cost_usdt=margin_used + fill.fee, opened_at=now if opened_at is None else opened_at,
+                       buy_fee_usdt=fill.fee,
                        signal_note=sig.note(), score=sig.score, metrics=dict(sig.metrics), futures=True, side=side,
                        leverage=lev, margin_usdt=margin_used,
                        liq_price=entry * (1 - sign * (1 / lev - cfg.futures_mmr_pct / 100)), sl_price=sl, tp_price=tp,
@@ -418,6 +447,195 @@ class FuturesBot(TradingBot):
                  symbol, side, lev, entry, qty, margin_used, tp, sl)
         self.notifier.notify(Messages.futures_open(pos, pos.signal_note, cfg, qty * entry), "open")
         return pos
+
+    # ================================================================ limit (maker) giriş
+    def _place_limit_entry(self, sig: FuturesSignal, now: float, lev: int, free: float, bid: float,
+                           ask: float) -> None:
+        """FUTURES_ENTRY_ORDER=limit: alışta bid'in FUTURES_LIMIT_OFFSET_PCT altına (satışta ask'ın üstüne) post-only
+        limit emir; FUTURES_LIMIT_TTL_MIN dakika dolmayı bekler (state.pending_entry, bot yeniden başlasa da sürer).
+        Post-only emir anında eşleşeceği için reddedilirse (fiyat limiti geçti) güncel fiyatla yeniden dizilir."""
+        cfg, ex = self.cfg, self.exchange
+        symbol, side = sig.symbol, sig.side
+        sign = 1 if side == "long" else -1
+        order_side = "buy" if side == "long" else "sell"
+        margin = free * cfg.futures_margin_usage_pct / 100
+        oid, price, qty = "", 0.0, 0.0
+        for attempt in range(LIMIT_REQUOTE_MAX + 1):
+            ref = bid if side == "long" else ask
+            price = ex.price_to_precision(symbol, ref * (1 - sign * cfg.futures_limit_offset_pct / 100))
+            qty = ex.amount_to_precision(symbol, margin * lev / price)
+            ex.check_order_size(symbol, qty, price)              # MinNotionalError → işlem pas geçilir
+            try:
+                oid = ex.limit_order(symbol, order_side, qty, price, post_only=True)
+                break
+            except FuturesError as exc:
+                if exc.code == "-2019":                          # Komisyon payı yetmedi: biraz küçült
+                    margin *= MARGIN_RETRY_FACTOR
+                elif exc.code != "-5022" or attempt == LIMIT_REQUOTE_MAX:
+                    raise
+                bid, ask = ex.bid_ask(symbol)                    # -5022: fiyat limiti geçti, güncel fiyatla dene
+        if not oid:
+            raise FuturesError(f"{symbol} limit giriş emri dizilemedi")
+        signal_ms = (int(now * 1000) // FUT_BAR_MS) * FUT_BAR_MS
+        self.state.pending_entry = {
+            "symbol": symbol, "side": side, "order_id": oid, "price": price, "qty": qty, "lev": lev,
+            "placed_at": now, "expires_at": signal_ms / 1000 + cfg.futures_limit_ttl_min * 60,
+            "signal_ms": signal_ms, "candle_ms": sig.candle_ms, "signal_price": sig.price, "score": sig.score,
+            "metrics": dict(sig.metrics), "priority": sig.priority}
+        self.store.save(self.state)
+        log.info("Limit giriş emri: %s %s %g @ %.8g (bid %.8g / ask %.8g, %d dk)", symbol, side, qty, price, bid, ask,
+                 cfg.futures_limit_ttl_min)
+
+    def _on_shutdown(self) -> None:
+        """Bot dururken bekleyen limit giriş emri iptal edilir (bot yokken dolup korumasız pozisyon açmasın); kısmen
+        dolduysa dolan kadarı zarar kes + Kâr Al ile pozisyon olur. Test modunda kayıt kalır (açılışta bakılır)."""
+        pe, ex = self.state.pending_entry, self.exchange
+        if not pe or ex.is_paper:
+            return
+        log.info("Bot duruyor: bekleyen limit giriş emri iptal ediliyor (%s)", pe["symbol"])
+        try:
+            ex.cancel(pe["symbol"], str(pe["order_id"]))
+            _status, filled, avg, fee = ex.order_state(pe["symbol"], str(pe["order_id"]))
+        except (FuturesError, requests.ConnectionError) as exc:
+            log.warning("%s limit emir iptal edilemedi (açılışta yeniden bakılacak): %s", pe["symbol"], exc)
+            return
+        if filled > 0:
+            self._finish_pending(pe, FFill(avg or float(pe["price"]), filled, fee, str(pe["order_id"])), self.time_fn())
+        else:
+            self._drop_pending(pe, "bot kapanırken iptal edildi")
+
+    def _pending_signal(self, pe: dict) -> FuturesSignal:
+        return FuturesSignal(pe["symbol"], pe["side"], float(pe.get("signal_price", pe["price"])),
+                             int(pe.get("candle_ms", 0)), float(pe.get("score", 0.0)), dict(pe.get("metrics") or {}),
+                             int(pe.get("priority", 0)))
+
+    def _check_pending_entry(self, now: float) -> None:
+        """Bekleyen limit giriş emri: dolduysa pozisyon açılır (zarar kes + Kâr Al konur); süresi dolduysa iptal edilir
+        (kısmen dolduysa dolan kadarı pozisyon olur). Test modunda dolumu fiyat belirler (backtestle aynı kural)."""
+        pe, ex = self.state.pending_entry, self.exchange
+        if not pe:
+            return
+        symbol = pe["symbol"]
+        if ex.is_paper:
+            fill_ms = self._paper_limit_hit(pe, now)
+            if fill_ms is not None:
+                fill = ex.paper_limit_fill(symbol, float(pe["qty"]), float(pe["price"]), str(pe["order_id"]))
+                self._finish_pending(pe, fill, now, fill_ms / 1000)
+            elif now >= float(pe["expires_at"]) + 60 + LIMIT_CANCEL_GRACE_SEC:    # Son 1 dk mum da kapandı
+                self._drop_pending(pe, "dolmadı")
+            return
+        try:
+            status, filled, avg, fee = ex.order_state(symbol, str(pe["order_id"]))
+        except FuturesError as exc:
+            log.warning("%s limit emir durumu okunamadı: %s", symbol, exc)
+            return
+        if status == "closed" and filled > 0:
+            self._finish_pending(pe, FFill(avg or float(pe["price"]), filled, fee, str(pe["order_id"])), now)
+            return
+        if status == "open" and now < float(pe["expires_at"]) + LIMIT_CANCEL_GRACE_SEC:
+            return
+        if status == "open":
+            try:
+                ex.cancel(symbol, str(pe["order_id"]))
+                status, filled, avg, fee = ex.order_state(symbol, str(pe["order_id"]))
+            except FuturesError as exc:
+                log.warning("%s limit emir iptal edilemedi: %s", symbol, exc)
+                return
+        if filled > 0:                                   # Kısmen doldu: dolan kadarı pozisyon (korumasıyla)
+            self._finish_pending(pe, FFill(avg or float(pe["price"]), filled, fee, str(pe["order_id"])), now)
+        else:
+            self._drop_pending(pe, "dolmadı" if status in ("open", "canceled", "expired", "") else status)
+
+    def _paper_limit_hit(self, pe: dict, now: float) -> Optional[int]:
+        """Test modu: limitin dolduğu an (ms) ya da None. Fiyat limiti PAPER_LIMIT_THROUGH_PCT geçmeli: süre içindeki
+        kapanmış 1 dk mumların ucu ya da şu anki fiyat (backtest: futures_backtest.limit_fill)."""
+        ex = self.exchange
+        sign = 1 if pe["side"] == "long" else -1
+        need = float(pe["price"]) * (1 - sign * PAPER_LIMIT_THROUGH_PCT / 100)
+        start_ms = int(pe["signal_ms"])
+        end_ms = start_ms + int(self.cfg.futures_limit_ttl_min) * 60_000
+        now_ms = int(now * 1000)
+        try:
+            if now_ms < end_ms:
+                last = ex.last_price(pe["symbol"])
+                if last > 0 and (last < need if sign > 0 else last > need):
+                    return now_ms
+            minute = now_ms // 60_000                     # Kapanmış 1 dk mumlara dakikada bir bakılır
+            if pe.get("k_minute") == minute:
+                return None
+            pe["k_minute"] = minute
+            k = ex.klines(pe["symbol"], "1m", int(self.cfg.futures_limit_ttl_min) + 3)
+        except FuturesError as exc:
+            log.warning("%s test modu limit kontrolü: %s", pe["symbol"], exc)
+            return None
+        for t, lo, hi in zip(k["t"], k["l"], k["h"]):
+            if start_ms <= int(t) < end_ms and (lo < need if sign > 0 else hi > need):
+                return int(t)
+        return None
+
+    def _finish_pending(self, pe: dict, fill: FFill, now: float, opened_at: Optional[float] = None) -> None:
+        self.state.pending_entry = {}
+        self.store.save(self.state)
+        log.info("Limit giriş emri doldu: %s %g @ %.8g", pe["symbol"], fill.qty, fill.price)
+        try:
+            self._open_from_fill(self._pending_signal(pe), fill, int(pe.get("lev", self.cfg.futures_leverage)), now,
+                                 opened_at)
+        except FuturesError as exc:
+            self.notifier.send(Messages.error(f"{pe['symbol']} limit girişi sonrası pozisyon kurulamadı: "
+                                              f"{describe_error(exc)}"), critical=True)
+
+    def _drop_pending(self, pe: dict, why: str) -> None:
+        self.state.pending_entry = {}
+        self.store.save(self.state)
+        log.info("Limit giriş emri %s: %s (%d dk)", why, pe["symbol"], self.cfg.futures_limit_ttl_min)
+        self.notifier.notify(f"⏳ {esc(pe['symbol'])} {str(pe['side']).upper()} limit giriş emri "
+                             f"{self.cfg.futures_limit_ttl_min} dk içinde {esc(why)}; iptal edildi (fırsat kaçtı).",
+                             "open")
+
+    # ================================================================ Faz 4 ek verileri
+    def _attach_extras(self, klines: Dict[str, dict], closed_ms: int) -> None:
+        """Fonlama modülü açıksa çöküş şartını sağlayan coinlere son ödenmiş fonlama oranları (k["fr"]), düzeltme
+        modülü açıksa 1 saatlik mumlar (k["h1"], saat başına bir kez istenir) eklenir. Hata: o coinde modül sinyal
+        vermez (log)."""
+        mods = futures_modules(self.cfg)
+        ex = self.exchange
+        if "funding" in mods:
+            rules = futures_funding_rules(self.cfg)
+            for symbol, k in klines.items():
+                c = k["c"]
+                hit = any(len(c) > h * 12 and c[-1 - h * 12] > 0 and (1 - c[-1] / c[-1 - h * 12]) * 100 >= pct
+                          for h, pct in rules)
+                if not hit:
+                    continue
+                try:
+                    ft, fr = ex.funding_history(symbol, FUNDING_LIMIT)
+                except (FuturesError, requests.ConnectionError) as exc:
+                    log.warning("%s fonlama oranları alınamadı: %s", symbol, exc)
+                    continue
+                k["fr"] = funding_per_bar(k["t"] + FUT_BAR_MS, ft, fr)
+        if "pullback" in mods:
+            hour = closed_ms // FUT_HOUR_MS
+            todo = [s for s in klines if self._h1_cache.get(s, (None,))[0] != hour]
+
+            def fetch(symbol: str):
+                try:
+                    return symbol, ex.klines(symbol, "1h", FUT_H1_LIMIT), None
+                except FuturesError as exc:
+                    return symbol, None, exc
+            if len(todo) > KLINE_PARALLEL_MIN:
+                with ThreadPoolExecutor(max_workers=KLINE_WORKERS) as pool:
+                    results = list(pool.map(fetch, todo))
+            else:
+                results = [fetch(s) for s in todo]
+            for symbol, k1, exc in results:
+                if exc is not None:
+                    log.warning("%s 1 saatlik mumlar alınamadı: %s", symbol, exc)
+                    continue
+                self._h1_cache[symbol] = (hour, k1)
+            for symbol, k in klines.items():
+                hit = self._h1_cache.get(symbol)
+                if hit is not None:
+                    k["h1"] = hit[1]
 
     # ================================================================ değerleme
     def mark_position(self, pos: Position, now: float, price: Optional[float] = None) -> Mark:
@@ -723,7 +941,8 @@ class FuturesBot(TradingBot):
                                f"(giriş {fmt_price(pos.entry_price)}, stop {fmt_price(pos.sl_price)}).")
         if not ex.is_paper:
             try:
-                others = [p for p in ex.all_positions() if p.symbol not in self.state.positions]
+                pending = (self.state.pending_entry or {}).get("symbol")
+                others = [p for p in ex.all_positions() if p.symbol not in self.state.positions and p.symbol != pending]
             except FuturesError as exc:
                 log.warning("Vadeli pozisyonlar okunamadı: %s", exc)
                 others = []
@@ -752,6 +971,11 @@ class FuturesBot(TradingBot):
                  f"Coin: {r.candidates} | Analiz: {r.analyzed} | Sinyal: {len(r.signals)}"]
         if self.state.positions:
             lines.append("📦 Açık pozisyon var: yeni tarama pozisyon kapanınca yapılır.")
+        pe = self.state.pending_entry
+        if pe:
+            left = max(0.0, float(pe.get("expires_at", 0.0)) - self.time_fn())
+            lines.append(f"⏳ Limit giriş emri bekliyor: {esc(str(pe.get('symbol')))} {str(pe.get('side')).upper()} @ "
+                         f"{fmt_price(float(pe.get('price', 0.0)))} (en fazla {left:.0f} sn daha)")
         if self.state.paused:
             lines.append("⏸️ Yeni işlemler durdurulmuş (/devam).")
         for s in self.last_signals[:3]:

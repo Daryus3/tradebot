@@ -31,10 +31,11 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from config import DATA_DIR, futures_coin_list, futures_crash_rules, futures_liq_distance_pct, futures_modules
+from config import (DATA_DIR, futures_coin_list, futures_crash_rules, futures_funding_rules,
+                    futures_liq_distance_pct, futures_modules)
 from futures_data import FuturesArchive, concat, resample, slice_range
-from strategy import (FUT_BAR_MS, FUT_HOUR_MS, btc_trend_1h, crash_state, futures_candidates, futures_entries,
-                      futures_features, pick_signal, trend_at)
+from strategy import (FUT_BAR_MS, FUT_HOUR_MS, btc_trend_1h, crash_state, funding_per_bar, futures_candidates,
+                      futures_entries, futures_features, pick_signal, trend_at)
 
 DAY_MS = 86_400_000
 MIN_MS = 60_000
@@ -122,9 +123,11 @@ def history_segments(end_ms: int, start_ms: Optional[int] = None) -> List[Segmen
 def universe_segments(cfg, start_ms: int, end_ms: int, archive: FuturesArchive,
                       progress: Optional[Callable[[str], None]] = None) -> List[Segment]:
     """FUTURES_UNIVERSE: her takvim ayı için o ayın "en hacimli N köklü coin" listesi (canlıyla aynı kural, geçmiş
-    aylık hacimlerle; sonradan kaldırılan pariteler dahil)."""
-    from futures_universe import universe_months
-    return [Segment(a, b, coins) for a, b, coins in universe_months(cfg, start_ms, end_ms, archive, progress)]
+    aylık hacimlerle; sonradan kaldırılan pariteler dahil). FUTURES_UNIVERSE_MODE=daily: her UTC günü için bir önceki
+    günün hacmine göre ilk N."""
+    from futures_universe import universe_days, universe_months
+    build = universe_days if getattr(cfg, "futures_universe_mode", "avg") == "daily" else universe_months
+    return [Segment(a, b, coins) for a, b, coins in build(cfg, start_ms, end_ms, archive, progress)]
 
 
 def with_list(segments: List[Segment], lists: List[Segment]) -> List[Segment]:
@@ -157,9 +160,13 @@ def prepare_universe(cfg, start_ms: int, end_ms: int, segments: List[Segment], a
     btc = archive.klines("BTCUSDT", start_ms - WARMUP_MS, end_ms, "5m")
     inside = slice_range(btc, start_ms, end_ms)
     age, avg = cfg.futures_universe_min_age_days, cfg.futures_universe_avg_days
-    note = (f"her ay en hacimli {cfg.futures_universe} köklü coin"
-            + (" + liste" if getattr(cfg, "futures_universe_with_list", False) else "")
-            + f" (en az {age} gün listelenmiş, son {avg} gün ortalama hacim; toplam {len(months)} farklı coin)")
+    plus = " + liste" if getattr(cfg, "futures_universe_with_list", False) else ""
+    if getattr(cfg, "futures_universe_mode", "avg") == "daily":
+        note = (f"her gün bir önceki günün en hacimli {cfg.futures_universe} coini{plus} (en az {age} gün listelenmiş; "
+                f"toplam {len(months)} farklı coin)")
+    else:
+        note = (f"her ay en hacimli {cfg.futures_universe} köklü coin{plus}"
+                f" (en az {age} gün listelenmiş, son {avg} gün ortalama hacim; toplam {len(months)} farklı coin)")
     return FutData(start_ms, end_ms, segments, {}, btc_trend_1h(resample(btc, FUT_HOUR_MS)), (inside["t"], inside["c"]),
                    {}, archive, exit_interval, ["Evren modunda fonlama için ortalama oran (8 saatte %0.01) kullanıldı."],
                    loader=loader, lean_symbols=sorted(months), universe_note=note)
@@ -231,11 +238,61 @@ class Funnel:
 
 
 def _active_mask(t_close: np.ndarray, coin: str, segments: List[Segment]) -> np.ndarray:
+    """Coinin evrende olduğu dönemlerdeki mumlar (start < kapanış ≤ end). t_close artan sırada."""
     mask = np.zeros(len(t_close), dtype=bool)
     for s in segments:
         if coin in s.coins:
-            mask |= (t_close > s.start_ms) & (t_close <= s.end_ms)
+            i, j = np.searchsorted(t_close, s.start_ms, "right"), np.searchsorted(t_close, s.end_ms, "right")
+            mask[i:j] = True
     return mask
+
+
+def load_funding(archive: FuturesArchive, symbol: str, t: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Mumların bulunduğu aylar (+ her birinin bir önceki ayı: ay başında bilinen son oran için) için fonlama oranları;
+    evren modunda coin yalnızca bazı aylarda evrendeyse aradaki aylar indirilmez."""
+    if not len(t):
+        return np.zeros(0, dtype=np.int64), np.zeros(0)
+    months = np.unique(np.asarray(t, dtype=np.int64).astype("datetime64[ms]").astype("datetime64[M]"))
+    keys = set()
+    for key in months.astype(str):
+        y, m = int(key[:4]), int(key[5:7])
+        keys.add((y, m))
+        keys.add((y - (m == 1), 12 if m == 1 else m - 1))
+    parts_t, parts_r = [], []
+    for y, m in sorted(keys):
+        a = int(datetime(y, m, 1, tzinfo=timezone.utc).timestamp() * 1000)
+        b = int(datetime(y + (m == 12), m % 12 + 1, 1, tzinfo=timezone.utc).timestamp() * 1000)
+        ft, fr = archive.funding(symbol, a, b)
+        parts_t.append(ft)
+        parts_r.append(fr)
+    ft, fr = np.concatenate(parts_t), np.concatenate(parts_r)
+    order = np.argsort(ft, kind="stable")
+    ft, fr = ft[order], fr[order]
+    keep = np.r_[True, ft[1:] != ft[:-1]] if len(ft) else np.zeros(0, dtype=bool)
+    return ft[keep], fr[keep]
+
+
+def with_extras(k: Dict[str, np.ndarray], symbol: str, data: FutData, cfgs) -> Dict[str, np.ndarray]:
+    """Faz 4 modüllerinin ek verisi mum sözlüğüne eklenir (canlıda FuturesBot ekler): fonlama modülü açıksa k["fr"]
+    (mumun kapanışında bilinen son fonlama, 8 saatlik %), düzeltme modülü açıksa k["h1"] (5 dk mumlardan 1 saatlik
+    mumlar). İndirilen fonlama oranları data.funding'e de yazılır: işlemlerin fonlama maliyeti gerçek oranlarla."""
+    mods = set()
+    for c in cfgs:
+        mods.update(futures_modules(c))
+    if not ({"funding", "pullback"} & mods) or not len(k["t"]):
+        return k
+    k = dict(k)
+    if "funding" in mods:
+        if symbol not in data.funding:
+            data.funding[symbol] = load_funding(data.archive, symbol, k["t"])
+            note = "Fonlama modülü açık: fonlama maliyeti gerçek oranlarla hesaplandı."
+            if note not in data.notes:
+                data.notes[:] = [n for n in data.notes if "ortalama oran" not in n] + [note]
+        ft, fr = data.funding[symbol]
+        k["fr"] = funding_per_bar(k["t"] + FUT_BAR_MS, ft, fr)
+    if "pullback" in mods:
+        k["h1"] = resample(k, FUT_HOUR_MS)
+    return k
 
 
 def _series(data: FutData):
@@ -255,6 +312,7 @@ def find_signals(cfg, data: FutData) -> Tuple[List[FutSignal], Funnel]:
     funnel = Funnel()
     for symbol, k in _series(data):
         coin = symbol[:-4]
+        k = with_extras(k, symbol, data, [cfg])
         t = k["t"]
         close = t + FUT_BAR_MS
         f = futures_features(k, cfg)
@@ -398,6 +456,15 @@ class SimParams:
     trail_enabled: bool = False
     trail_act_pct: float = 3.0
     trail_gap_pct: float = 1.5
+    # Limit (maker) giriş (FUTURES_ENTRY_ORDER=limit): sinyal anındaki fiyatın limit_offset_pct gerisine emir; süre
+    # (limit_ttl_min) içinde bir mumun ucu limitin limit_through_pct ötesine geçerse limit fiyattan dolar (maker
+    # komisyon, kayma yok), geçmezse işlem yok (canlı: emir iptal)
+    entry_limit: bool = False
+    limit_offset_pct: float = 0.05
+    limit_ttl_min: int = 3
+    limit_through_pct: float = 0.02
+    limit_strict: bool = False          # Stres: limitin dolduğu mumda lehte hareket (başabaş / hedef) sayılmaz
+    limit_fallback: bool = False        # Süre dolunca dolmayan emir yerine piyasa emri (taker) ile girilir
 
 
 def params_from_cfg(cfg, **over) -> SimParams:
@@ -413,7 +480,10 @@ def params_from_cfg(cfg, **over) -> SimParams:
                   loss_streak_limit=cfg.loss_streak_limit, loss_streak_pause_h=cfg.loss_streak_pause_hours,
                   daily_loss_pct=cfg.daily_loss_limit_pct, daily_profit_pct=cfg.daily_profit_target_pct,
                   trail_enabled=cfg.futures_trailing, trail_act_pct=cfg.futures_trailing_act_pct,
-                  trail_gap_pct=cfg.futures_trailing_gap_pct)
+                  trail_gap_pct=cfg.futures_trailing_gap_pct,
+                  entry_limit=getattr(cfg, "futures_entry_order", "market") == "limit",
+                  limit_offset_pct=float(getattr(cfg, "futures_limit_offset_pct", 0.05)),
+                  limit_ttl_min=int(getattr(cfg, "futures_limit_ttl_min", 3)))
     return replace(p, **over) if over else p
 
 
@@ -481,13 +551,48 @@ def _funding_count(a_ms: int, b_ms: int) -> int:
     return max(0, b_ms // step - a_ms // step)
 
 
+def limit_fill(p: SimParams, s: FutSignal, window: tuple) -> Optional[Tuple[int, float]]:
+    """Limit (maker) giriş: (dolduğu mumun penceredeki indeksi, limit fiyatı) ya da None (süre içinde dolmadı).
+
+    Referans fiyat sinyal mumunun kapanışındaki fiyattır (bir sonraki mumun açılışı; canlıda bid / ask). Limit = referans
+    × (1 - offset) long'da (short'ta +). Dolum için süre (FUTURES_LIMIT_TTL_MIN) içindeki bir mumun dibi limitin
+    limit_through_pct altına inmeli: yalnızca dokunması yetmez (sıradaki emirler önce dolar; temkinli varsayım).
+    5 dk pencerede (1 dk veri yoksa) yalnızca ilk mum bakılır (3 dk yerine 5 dk: biraz iyimser)."""
+    _bar, t, _o, h, l, _c = window
+    side = 1 if s.side == "long" else -1
+    limit = s.entry_open * (1 - side * p.limit_offset_pct / 100)
+    need = limit * (1 - side * p.limit_through_pct / 100)
+    end = s.close_ms + p.limit_ttl_min * MIN_MS
+    for j in range(len(t)):
+        if int(t[j]) >= end:
+            break
+        if (l[j] < need) if side > 0 else (h[j] > need):
+            return j, float(limit)
+    return None
+
+
 def run_trade(p: SimParams, s: FutSignal, window: tuple, margin: float, notional: float,
-              data: Optional[FutData] = None) -> FutTrade:
-    """Tek işlem: giriş, başabaş, izleyen stop, Kâr Al / Zarar Kes / zaman stopu, likidasyon (yalıtılmış teminat)."""
+              data: Optional[FutData] = None) -> Optional[FutTrade]:
+    """Tek işlem: giriş, başabaş, izleyen stop, Kâr Al / Zarar Kes / zaman stopu, likidasyon (yalıtılmış teminat).
+    Limit girişte emir süresinde dolmazsa None (işlem yok)."""
     bar_ms, t, o, h, l, c = window
     side = 1 if s.side == "long" else -1
     slip = p.slippage_pct / 100
-    entry = s.entry_open * (1 + side * slip)
+    start, entry_ms, maker = 0, s.close_ms, False
+    if p.entry_limit:
+        got = limit_fill(p, s, window)
+        if got is not None:
+            (start, entry), maker = got, True
+        elif p.limit_fallback:                          # Süre doldu: kalan fırsat piyasa emriyle (taker)
+            start = int(np.searchsorted(t, s.close_ms + p.limit_ttl_min * MIN_MS))
+            if start >= len(t):
+                return None
+            entry = o[start] * (1 + side * slip)
+        else:
+            return None
+        entry_ms = int(t[start])
+    else:
+        entry = s.entry_open * (1 + side * slip)
     tp = entry * (1 + side * p.tp_pct / 100)
     sl = entry * (1 - side * p.sl_pct / 100)
     be_trig = entry * (1 + side * p.be_trigger_pct / 100)
@@ -495,7 +600,7 @@ def run_trade(p: SimParams, s: FutSignal, window: tuple, margin: float, notional
     trail_trig = entry * (1 + side * p.trail_act_pct / 100)
     trail_gap = p.trail_gap_pct / 100
     liq = entry * (1 - side * (1 / p.leverage - p.mmr_pct / 100))
-    deadline = s.close_ms + p.hold_min * MIN_MS
+    deadline = entry_ms + p.hold_min * MIN_MS
     stop, kind = sl, "SL"                                   # Geçerli stop ve türü (SL → BE → TRAIL)
     be_on = trail_on = False
     peak = entry
@@ -527,8 +632,31 @@ def run_trade(p: SimParams, s: FutSignal, window: tuple, margin: float, notional
     adverse = l if side > 0 else h
     best = h if side > 0 else l
     n = len(t)
-    for j in range(n):
+    for j in range(start, n):
         tj = int(t[j])
+        if maker and j == start:
+            # Limitin dolduğu mum: fiyat limiti geçerken dolduk, ters uç (dip) dolumdan sonra görüldü → önce zarar kes.
+            # Mum içi sıra standart varsayımla: yükselen mumda dip tepeden önce gelir (dolum → dip → tepe → kapanış);
+            # düşen mumda tepe dolumdan önceydi, dolumdan sonra yalnızca kapanış görülür. limit_strict: o mumda lehte
+            # hareket hiç sayılmaz (stres).
+            worst = max(worst, side * (entry - adverse[j]) / entry * 100)
+            if worse(adverse[j], stop):
+                exit_price, reason, exit_ms = stop * (1 - side * slip), kind, tj
+                break
+            if p.limit_strict:
+                continue
+            cj = c[j]
+            adverse_first = cj >= o[j] if side > 0 else cj <= o[j]
+            fj = best[j] if adverse_first else cj
+            if reached(fj, tp):
+                exit_price = tp if p.tp_limit else tp * (1 - side * slip)
+                reason, exit_ms = "TP", tj
+                break
+            favorable(fj)
+            if worse(cj, stop):
+                exit_price, reason, exit_ms = stop * (1 - side * slip), kind, tj
+                break
+            continue
         if tj >= deadline:
             exit_price, reason, exit_ms = o[j] * (1 - side * slip), "TIME", tj
             break
@@ -567,11 +695,11 @@ def run_trade(p: SimParams, s: FutSignal, window: tuple, margin: float, notional
         exit_ms = int(t[last]) + bar_ms if n else s.close_ms
         reason = "END" if not n or int(t[last]) + bar_ms < deadline else "TIME"
     upto = np.searchsorted(t, deadline, "left")
-    window_mae = (float(np.max(side * (entry - adverse[:upto]) / entry * 100)) if upto else 0.0)
+    window_mae = (float(np.max(side * (entry - adverse[start:upto]) / entry * 100)) if upto > start else 0.0)
     qty = notional / entry
-    fee_in = notional * p.taker_fee
+    fee_in = notional * (p.maker_fee if maker else p.taker_fee)
     fee_out = qty * exit_price * (p.maker_fee if reason == "TP" and p.tp_limit else p.taker_fee)
-    funding = _funding_cost(data, s.symbol, side, notional, s.close_ms, exit_ms) if data is not None else 0.0
+    funding = _funding_cost(data, s.symbol, side, notional, entry_ms, exit_ms) if data is not None else 0.0
     if liquidated:
         pnl = -margin - fee_in
         fees = fee_in
@@ -579,7 +707,7 @@ def run_trade(p: SimParams, s: FutSignal, window: tuple, margin: float, notional
     else:
         pnl = side * qty * (exit_price - entry) - fee_in - fee_out - funding
         fees = fee_in + fee_out
-    return FutTrade(s.symbol, s.side, s.close_ms, exit_ms, entry, float(exit_price), reason, p.leverage, margin,
+    return FutTrade(s.symbol, s.side, entry_ms, exit_ms, entry, float(exit_price), reason, p.leverage, margin,
                     notional, fees, funding, pnl, pnl / margin * 100 if margin else 0.0, 0.0, worst,
                     max(window_mae, worst), gap, liquidated, bar_ms, s.score, float(s.metrics.get("tactic", 0.0)))
 
@@ -637,6 +765,11 @@ def simulate(p: SimParams, data: FutData, signals: Sequence[FutSignal], windows:
             skipped["çıkış verisi yok"] += 1
             continue
         tr = run_trade(p, s, window, margin, notional, data)
+        if tr is None:                                  # Limit emir süresinde dolmadı: iptal, işlem yok
+            skipped[f"limit emir {p.limit_ttl_min} dk içinde dolmadı"] += 1
+            busy_until = s.close_ms + p.limit_ttl_min * MIN_MS
+            last_entry = s.close_ms
+            continue
         equity = equity + tr.pnl if fixed_notional else max(0.0, equity + tr.pnl)
         tr.equity_after = equity
         trades.append(tr)
@@ -1076,6 +1209,7 @@ def grid_search(cfg, data: FutData, variants: Optional[Sequence[GridVariant]] = 
     store: List[List[tuple]] = [[] for _ in variants]
     coins = len(data.lean_symbols) if data.loader is not None else len(data.k5)
     for n, (symbol, k) in enumerate(_series(data), 1):
+        k = with_extras(k, symbol, data, cfgs)
         t = k["t"]
         close = t + FUT_BAR_MS
         f = futures_features(k, cfg)
@@ -1526,6 +1660,138 @@ def run_module_grid_cli(cfg, days: Optional[int], end_ms: Optional[int], out_dir
     unis = [module_universe(cfg, n, start, end, segments, verify, progress) for n in universes]
     report = format_module_report(cfg, start, end, unis)
     path: Optional[Path] = out_dir / f"vadeli_modul_izgara_{datetime.now():%Y%m%d-%H%M}.txt"
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        path.write_text(report, encoding="utf-8")
+        report += f"\n📄 Rapor dosyası: {path}"
+    except OSError as exc:
+        report += f"\n⚠️ Rapor dosyası yazılamadı: {exc}"
+        path = None
+    return report, unis, path
+
+
+# ===================================================================== Faz 4 ızgarası
+# Faz 4 (--faz4-izgara): limit (maker) giriş, fonlama sıkışması, trend içi düzeltme ve günlük "en hacimli 30" evreni;
+# yalnızca LONG, çıkışlar sabit (ayarlarınız), piyasa / limit giriş × kayma ×1 / ×3.
+PHASE4_UNIVERSES = (
+    ("ayarlarınız", {}),
+    ("günlük en hacimli 30 (≥30 gün)", (("futures_universe", 30), ("futures_universe_mode", "daily"),
+                                        ("futures_universe_min_age_days", 30), ("futures_universe_with_list", False))),
+    ("günlük en hacimli 30 (≥3 yıl)", (("futures_universe", 30), ("futures_universe_mode", "daily"),
+                                       ("futures_universe_min_age_days", 1095), ("futures_universe_with_list", False))),
+)
+PHASE4_OFF = MODULE_OFF + (("futures_funding", False), ("futures_pullback", False), ("futures_sides", "long"))
+PHASE4_OFFSET = 0.05            # Limit giriş denemesi: ayarlarınızda limit yoksa bid'in %0.05 altı
+
+
+def phase4_variants(cfg) -> List[GridVariant]:
+    """Faz 4: çöküş (ayarlarınız) + fonlama / düzeltme tek tek ve birlikte; hepsi yalnızca long."""
+    def v(label, *parts):
+        over = dict(PHASE4_OFF)
+        for part in parts:
+            over.update(dict(part))
+        return GridVariant(label, tuple(over.items()))
+    F, P = (("futures_funding", True),), (("futures_pullback", True),)
+    fund = (f"fonlama ≤ %{cfg.futures_funding_rate_pct:g} + "
+            + ",".join(f"{h}s %{p:g}" for h, p in (futures_funding_rules(cfg) or ((1, 5.0),))))
+    pull = f"1s EMA{cfg.futures_pullback_ema} üstü + RSI < {cfg.futures_pullback_rsi:g}"
+    return [v("Çöküş (ayarlarınız): " + rule_label(cfg)), v(f"Çöküş + fonlama ({fund})", F),
+            v(f"Çöküş + düzeltme ({pull})", P), v("Çöküş + fonlama + düzeltme", F, P),
+            v(f"Yalnız fonlama ({fund})", CRASH_OFF, F), v(f"Yalnız düzeltme ({pull})", CRASH_OFF, P)]
+
+
+def phase4_entries(cfg) -> List[Tuple[str, Dict[str, object]]]:
+    """Giriş emri × kayma: piyasa, piyasa ×3, limit (maker), limit ×3."""
+    p = params_from_cfg(cfg)
+    offset = cfg.futures_limit_offset_pct if cfg.futures_entry_order == "limit" else PHASE4_OFFSET
+    lim = {"entry_limit": True, "limit_offset_pct": offset, "limit_ttl_min": cfg.futures_limit_ttl_min}
+    x3 = {"slippage_pct": p.slippage_pct * GRID_STRESS_SLIP}
+    return [("piyasa", {"entry_limit": False}), (f"piyasa ×{GRID_STRESS_SLIP:g}", {"entry_limit": False, **x3}),
+            (f"limit %{offset:g}", lim), (f"limit ×{GRID_STRESS_SLIP:g}", {**lim, **x3})]
+
+
+@dataclass
+class Phase4Universe:
+    label: str
+    note: str
+    rows: List[List[GridRow]]                      # kural başına [piyasa, piyasa ×3, limit, limit ×3]
+    verified: List[Tuple[str, GridRow, GridRow, Evaluation]] = field(default_factory=list)
+
+
+def phase4_universe(cfg, label: str, over, start: int, end: int, segments, verify: bool,
+                    progress: Callable[[str], None]) -> Phase4Universe:
+    c_u = replace(cfg, futures_tactic="crash", **dict(over))
+    data = prepare(c_u, start, end, segments, exit_interval="1m", progress=progress)
+    variants = phase4_variants(c_u)
+    entries = phase4_entries(c_u)
+    progress(f"⚡ Evren {label}: {len(variants)} kural × {len(entries)} giriş / kayma (5 dk mumlarla)...")
+    rows = grid_search(c_u, data, variants, progress=progress, exits=entries)
+    groups = [rows[i:i + len(entries)] for i in range(0, len(rows), len(entries))]
+    out = Phase4Universe(label, data.universe_note or "liste", groups)
+    if verify:                      # 1 dk doğrulama: çöküş (piyasa / limit) ve çöküş + düzeltme (piyasa)
+        windows = None
+        for vi, ei in ((0, 0), (0, 2), (2, 0)):
+            r = groups[vi][ei]
+            name, ov = entries[ei]
+            c2 = r.variant.cfg(c_u)
+            progress(f"✔️ 1 dk doğrulama ({label}): {r.variant.label} / {name}")
+            sigs, _f = find_signals(c2, data)
+            windows = load_windows(data, sigs, max(MAX_WINDOW_MIN, c2.max_hold_minutes + 10), cache=windows)
+            p = params_from_cfg(c2, **ov)
+            r1 = grid_row(r.variant, p, data, sigs, windows, _ms(GRID_SPLIT))
+            r3 = grid_row(r.variant, replace(p, slippage_pct=p.slippage_pct * GRID_STRESS_SLIP), data, sigs, windows,
+                          _ms(GRID_SPLIT))
+            out.verified.append((name, r1, r3, evaluate(p, data, sigs, windows)))
+    return out
+
+
+def format_phase4_report(cfg, start_ms: int, end_ms: int, unis: Sequence[Phase4Universe]) -> str:
+    p = params_from_cfg(cfg)
+    days = (end_ms - start_ms) / DAY_MS
+    split = _date(_ms(GRID_SPLIT))
+    L = [f"⚡ FAZ 4 IZGARASI — {_date(start_ms)} → {_date(end_ms)} ({days:.0f} gün, yalnızca LONG)", "━" * 30,
+         f"Çıkışlar sabit (ayarlarınız): {exit_label(p)} | {p.leverage}x, teminat %{p.margin_usage_pct:g}, "
+         f"{p.start_capital:g} USDT; tek pozisyon, öncelik çöküş > fonlama > düzeltme.",
+         f"Komisyon: piyasa (taker) %{p.taker_fee * 100:g}, limit (maker) %{p.maker_fee * 100:g}; kayma piyasa "
+         f"emirlerinde %{p.slippage_pct:g} (stres ×{GRID_STRESS_SLIP:g}). Limit emir: sinyal anındaki fiyatın "
+         f"altına, {cfg.futures_limit_ttl_min} dk içinde fiyat limitin %{SimParams.limit_through_pct:g} ötesine "
+         f"geçerse dolar, geçmezse işlem yok.",
+         f"Seçim dönemi → {split}, doğrulama {split} →. Tarama 5 dk mumlarla (başabaşta ve limit dolumunda iyimser), "
+         f"öne çıkanlar 1 dk ile doğrulandı.", ""]
+    for u in unis:
+        L.append(f"🪙 Evren: {u.label} — {u.note}")
+        L.append("   işlem/yıl | kazanma | işlem başı | yıllık seçim / doğr. | maks. düşüş || aynısı kayma ×3 "
+                 "(işlem başı, yıllık)")
+        for group in u.rows:
+            L.append(f"• {group[0].variant.label}")
+            for r, x in ((group[0], group[1]), (group[2], group[3])):
+                s, o = r.part("Seçim"), r.part("Doğrulama")
+                xs, xo = x.part("Seçim"), x.part("Doğrulama")
+                mark = "✅" if r.whole.avg_move > 0 and _all_cagr_positive(r) and _all_cagr_positive(x) else (
+                    "❌" if r.whole.avg_move <= 0 else "🟡")
+                L.append(f"   {mark} {r.exit_label:10s} {r.whole.per_year:5.0f} | %{r.whole.win_rate:4.1f} | "
+                         f"{r.whole.avg_move:+.3f}% | {_pc(s)} / {_pc(o)} | {_pd(s)} / {_pd(o)} || "
+                         f"{x.whole.avg_move:+.3f}%, {_pc(xs)} / {_pc(xo)}")
+        for name, r1, r3, ev in u.verified:
+            ch = ev.chained
+            L.append(f"   ✔️ 1 dk: {r1.variant.label} / {name}: {r1.whole.per_year:.0f} işlem/yıl, kazanma "
+                     f"%{r1.whole.win_rate:.1f}, işlem başı {r1.whole.avg_move:+.3f}% (×{GRID_STRESS_SLIP:g} kayma: "
+                     f"{r3.whole.avg_move:+.3f}%), yıllık {_pc(r1.part('Seçim'))} / {_pc(r1.part('Doğrulama'))}, maks. "
+                     f"düşüş %{max_drawdown(ch.curve)[0]:.0f}, kârlı yıl {ev.profitable_years}/{len(ev.years)}")
+            L.append("      yıl: " + " | ".join(f"{y} {stats_of(res).net_pct:+.0f}%" for y, res in ev.years))
+        L.append("")
+    L.append("ℹ️ Geçmiş sonuç gelecek garantisi değildir; yeni ayarı önce test modunda (paper) izleyin.")
+    return "\n".join(L)
+
+
+def run_phase4_grid_cli(cfg, days: Optional[int], end_ms: Optional[int], out_dir: Path, full_history: bool = True,
+                        universes=PHASE4_UNIVERSES, verify: bool = True,
+                        progress: Callable[[str], None] = print) -> Tuple[str, List[Phase4Universe], Optional[Path]]:
+    """--faz4-izgara: evren × (çöküş, fonlama, düzeltme) × (piyasa / limit giriş) × kayma, yalnızca long."""
+    start, end, segments = period(cfg, days, end_ms, full_history)
+    unis = [phase4_universe(cfg, label, over, start, end, segments, verify, progress) for label, over in universes]
+    report = format_phase4_report(cfg, start, end, unis)
+    path: Optional[Path] = out_dir / f"vadeli_faz4_izgara_{datetime.now():%Y%m%d-%H%M}.txt"
     try:
         out_dir.mkdir(parents=True, exist_ok=True)
         path.write_text(report, encoding="utf-8")

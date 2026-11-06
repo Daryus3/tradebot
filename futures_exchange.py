@@ -96,7 +96,7 @@ def _is_network(exc: Exception) -> bool:
 def _code_of(exc: Exception) -> str:
     text = str(exc)
     for code in ("-4164", "-2019", "-4046", "-4047", "-4048", "-4059", "-2021", "-2022", "-4061", "-1111", "-4005",
-                 "-4003", "-2015", "-1021"):
+                 "-4003", "-2015", "-1021", "-5022"):          # -5022: post-only emir anında eşleşecekti (reddedildi)
         if code in text:
             return code
     return ""
@@ -259,6 +259,34 @@ class FuturesExchange:
         if not fee:
             fee = filled * price * self.cfg.futures_taker_fee
         return FFill(price, filled, fee, oid)
+
+    def limit_order(self, symbol: str, side: str, qty: float, price: float, post_only: bool = True) -> str:
+        """Giriş için limit emir (FUTURES_ENTRY_ORDER=limit). post_only: GTX (yalnızca maker; anında eşleşecekse Binance
+        emri reddeder, kod -5022). Emir kimliği döner."""
+        amount = self.amount_to_precision(symbol, qty)
+        if amount <= 0:
+            raise MinNotionalError(f"{symbol}: miktar en küçük adımın altında", "MIN_QTY")
+        px = self.price_to_precision(symbol, price)
+        order = self._call(f"{symbol} limit emir ({side})", self.ex.create_order, ccxt_symbol(symbol), "limit", side,
+                           amount, px, {"timeInForce": "GTX" if post_only else "GTC"})
+        return str(order.get("id") or "")
+
+    def order_state(self, symbol: str, order_id: str) -> Tuple[str, float, float, float]:
+        """Emrin durumu: (status: open | closed | canceled | expired | rejected, dolan miktar, ortalama fiyat,
+        komisyon USDT). Komisyon yanıtta yoksa maker oranıyla tahmin edilir."""
+        order = self._call(f"{symbol} emir durumu", self.ex.fetch_order, order_id, ccxt_symbol(symbol))
+        filled = float(order.get("filled") or 0.0)
+        price = float(order.get("average") or order.get("price") or 0.0)
+        fee = float((order.get("fee") or {}).get("cost") or 0.0) or filled * price * self.cfg.futures_maker_fee
+        return str(order.get("status") or ""), filled, price, fee
+
+    def funding_history(self, symbol: str, limit: int = 5) -> Tuple[List[int], List[float]]:
+        """Son `limit` ödenmiş fonlama oranı (zaman ms, oran; eskiden yeniye). Herkese açık uç; test modunda da çalışır."""
+        rows = self._call(f"{symbol} fonlama oranları alınamadı", self.ex.fapiPublicGetFundingRate,
+                          {"symbol": symbol, "limit": int(limit)})
+        out = sorted((int(r["fundingTime"]), float(r["fundingRate"])) for r in rows or []
+                     if r.get("fundingTime") is not None and r.get("fundingRate") not in (None, ""))
+        return [t for t, _r in out], [r for _t, r in out]
 
     def place_stop(self, symbol: str, position_side: str, stop_price: float) -> str:
         """Zarar kes / başabaş stopu: STOP_MARKET, closePosition (miktar gerekmez), son işlem fiyatıyla tetiklenir."""
@@ -502,6 +530,21 @@ class PaperFuturesExchange(FuturesExchange):
         fee = amount * price * self.cfg.futures_taker_fee
         self.balances[QUOTE] = round(self.balances.get(QUOTE, 0.0) - fee, 8)
         return FFill(price, amount, fee, self._id())
+
+    def limit_order(self, symbol: str, side: str, qty: float, price: float, post_only: bool = True) -> str:
+        """Test modu: limit emir yalnızca kaydedilir; dolup dolmadığına FuturesBot fiyatla karar verir."""
+        amount = self.amount_to_precision(symbol, qty)
+        if amount <= 0:
+            raise MinNotionalError(f"{symbol}: miktar en küçük adımın altında", "MIN_QTY")
+        self.check_order_size(symbol, amount, price)
+        return self._id()
+
+    def paper_limit_fill(self, symbol: str, qty: float, price: float, order_id: str) -> FFill:
+        """Test modu: limit emir doldu (maker komisyonu, kayma yok)."""
+        amount = self.amount_to_precision(symbol, qty)
+        fee = amount * price * self.cfg.futures_maker_fee
+        self.balances[QUOTE] = round(self.balances.get(QUOTE, 0.0) - fee, 8)
+        return FFill(price, amount, fee, order_id)
 
     def open_paper(self, symbol: str, side: str, qty: float, entry: float, margin: float, leverage: int) -> None:
         self.positions[symbol] = {"side": side, "qty": qty, "entry": entry, "margin": margin, "lev": leverage}

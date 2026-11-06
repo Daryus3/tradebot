@@ -17,9 +17,9 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Dict, Optional, Sequence, Tuple
 
-from config import (ACTION_MODES, FUTURES_BB_MODES, FUTURES_CONFIRMS, FUTURES_LIQ_SOURCES, FUTURES_SIDES,
-                    FUTURES_TACTICS, FUTURES_TP_ORDERS, NOTIFY_MODES, SIGNAL_APPROVAL_MODES, Config, ConfigError,
-                    _setting_notes, format_crash_rules, parse_crash_rules)
+from config import (ACTION_MODES, FUTURES_BB_MODES, FUTURES_CONFIRMS, FUTURES_ENTRY_ORDERS, FUTURES_LIQ_SOURCES,
+                    FUTURES_SIDES, FUTURES_TACTICS, FUTURES_TP_ORDERS, FUTURES_UNIVERSE_MODES, NOTIFY_MODES,
+                    SIGNAL_APPROVAL_MODES, Config, ConfigError, _setting_notes, format_crash_rules, parse_crash_rules)
 
 
 @dataclass(frozen=True)
@@ -149,6 +149,18 @@ EDITABLE: Dict[str, Setting] = {
     "FUTURES_BREAKOUT_VOLUME_RATIO": Setting("futures_breakout_volume_ratio", "float",
                                              "Kırılım: hacim önceki 20 mumun en az katı"),
     "FUTURES_BREAKOUT_HOURS": Setting("futures_breakout_hours", "int", "Kırılım: aşılacak zirvenin süresi (saat)"),
+    "FUTURES_FUNDING": Setting("futures_funding", "bool", "Fonlama sıkışması LONG modülü"),
+    "FUTURES_FUNDING_RATE_PCT": Setting("futures_funding_rate_pct", "float",
+                                        "Fonlama: son ödenen oran (8 saatlik %) bu değer veya altında (ör. -0.10)"),
+    "FUTURES_FUNDING_RULES": Setting("futures_funding_rules", "rules", "Fonlama: çöküş şartı (saat:%, ör. 1:5)"),
+    "FUTURES_PULLBACK": Setting("futures_pullback", "bool", "Trend içi düzeltme LONG modülü (1s EMA üstü + 5dk RSI)"),
+    "FUTURES_PULLBACK_RSI": Setting("futures_pullback_rsi", "float", "Düzeltme: 5 dk RSI(14) bunun altında"),
+    "FUTURES_PULLBACK_EMA": Setting("futures_pullback_ema", "int", "Düzeltme: 1 saatlik EMA periyodu"),
+    "FUTURES_ENTRY_ORDER": Setting("futures_entry_order", "choice", "Vadeli giriş emri (market / limit = maker)",
+                                   FUTURES_ENTRY_ORDERS),
+    "FUTURES_LIMIT_OFFSET_PCT": Setting("futures_limit_offset_pct", "float",
+                                        "Limit giriş: bid'in bu kadar altına (%; short'ta ask'ın üstüne)"),
+    "FUTURES_LIMIT_TTL_MIN": Setting("futures_limit_ttl_min", "int", "Limit giriş: dolmazsa iptal süresi (dk)"),
     "FUTURES_LEVERAGE": Setting("futures_leverage", "int", "Vadeli kaldıraç (1-20x; sonraki işlemde uygulanır)"),
     "FUTURES_COINS": Setting("futures_coins", "str", "Vadeli coinler (virgülle, ör. BTC,ETH,SOL)"),
     "FUTURES_SIDES": Setting("futures_sides", "choice", "Vadeli yön (both / long / short)", FUTURES_SIDES),
@@ -168,6 +180,9 @@ EDITABLE: Dict[str, Setting] = {
                                           "Vadeli: en hacimli N'e FUTURES_COINS listesini de ekle"),
     "FUTURES_UNIVERSE_MIN_AGE_DAYS": Setting("futures_universe_min_age_days", "int",
                                              "Vadeli: en hacimli N için en az listelenme süresi (gün)"),
+    "FUTURES_UNIVERSE_MODE": Setting("futures_universe_mode", "choice",
+                                     "Vadeli: hacim sıralaması (avg = ortalama / daily = dünün hacmi, her gün)",
+                                     FUTURES_UNIVERSE_MODES),
     "FUTURES_TRAILING": Setting("futures_trailing", "bool", "Vadeli: izleyen stop"),
     "FUTURES_TRAILING_ACT_PCT": Setting("futures_trailing_act_pct", "float", "Vadeli: izleyen stop başlangıcı (fiyat %)"),
     "FUTURES_TRAILING_GAP_PCT": Setting("futures_trailing_gap_pct", "float", "Vadeli: izleyen stop mesafesi (fiyat %)"),
@@ -257,7 +272,8 @@ OVERRIDE_CHOICES = {"dca_mode": ACTION_MODES, "pyramid_mode": ACTION_MODES, "tim
                     "escape_mode": ACTION_MODES, "signal_approval": SIGNAL_APPROVAL_MODES, "notify_mode": NOTIFY_MODES,
                     "futures_sides": FUTURES_SIDES, "futures_liq_source": FUTURES_LIQ_SOURCES,
                     "futures_tactic": FUTURES_TACTICS, "futures_confirm": FUTURES_CONFIRMS, "futures_bb": FUTURES_BB_MODES,
-                    "futures_tp_order": FUTURES_TP_ORDERS}
+                    "futures_tp_order": FUTURES_TP_ORDERS, "futures_entry_order": FUTURES_ENTRY_ORDERS,
+                    "futures_universe_mode": FUTURES_UNIVERSE_MODES}
 # Serbest metin olarak değiştirilebilenler (doğrulamayı Config yapar)
 OVERRIDE_TEXT = frozenset({"rotation_coins", "intraday_coins", "intraday_tactic", "futures_coins",
                            "futures_crash_extra"})
@@ -273,7 +289,7 @@ def override_spec(key: str) -> Optional[Tuple[str, str, Tuple[str, ...]]]:
         return attr, f.type, ()
     if f.type == "str" and attr in OVERRIDE_CHOICES:
         return attr, "choice", OVERRIDE_CHOICES[attr]
-    if attr in ("futures_crash_extra", "futures_pump_rules"):
+    if attr in ("futures_crash_extra", "futures_pump_rules", "futures_funding_rules"):
         return attr, "rules", ()
     if f.type == "str" and attr in OVERRIDE_TEXT:
         return attr, "str", ()

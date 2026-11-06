@@ -24,6 +24,7 @@ Kullanım:
     python main.py --backtest --strateji futures --tum-donem   # Vadeli scalping: Ocak 2020'den bugüne, yıllara göre
     python main.py --backtest --strateji futures --izgara      # Vadeli ızgara testi: çöküş kuralları × teyit × σ + çıkışlar
     python main.py --backtest --strateji futures --modul-izgara  # Faz 3: çöküş + pompa / Bollinger / kırılım × evren
+    python main.py --backtest --strateji futures --faz4-izgara   # Faz 4: limit (maker) giriş, fonlama, düzeltme, günlük 30
     python main.py --backtest --gun 90 --tara-ab    # Her giriş filtresini açıp / kapatıp kâra etkisini karşılaştırır
     python main.py --backtest --deney --gun 540     # Zarar azaltma deneyi: önerilen ayar birleşimleri, kill-switch açık
     python main.py --backtest --ayar TAKE_PROFIT_PCT=3 --ayar VWAP_FILTER=true  # Ayarı yalnızca bu test için değiştirir
@@ -113,6 +114,10 @@ def parse_args(argv=None) -> argparse.Namespace:
                         help="Vadeli modül ızgarası (Faz 3): çöküş + pompa short / Bollinger + RSI / hacimli kırılım "
                              "tek tek ve VEYA ile, en hacimli 20 / 120 / 150 köklü coinde, ayarlarınızdaki çıkışlarla; "
                              "kayma stresi ve 1 dk doğrulama. --gun verilmezse Ocak 2020'den bugüne (30-90 dk)")
+    parser.add_argument("--faz4-izgara", action="store_true",
+                        help="Vadeli Faz 4 ızgarası (yalnızca long): çöküş + fonlama sıkışması / trend içi düzeltme, "
+                             "piyasa ve limit (maker) girişle, kayma ×1 / ×3; ayarlarınızdaki evren ve günlük en "
+                             "hacimli 30 coin (≥30 gün / ≥3 yıl). --gun verilmezse Ocak 2020'den bugüne (30-120 dk)")
     parser.add_argument("--strateji-karsilastir", action="store_true",
                         help="Backtest: aynı mum aralığındaki stratejileri aynı veriyle karşılaştırır "
                              "(5 dk: rebound / trend / breakout, 1 saat: swing / swing_pullback, "
@@ -334,8 +339,8 @@ def run_backtest_cli(cfg, args) -> int:
         print("⚙️ Yalnızca bu test için değiştirilen ayarlar: " + " ".join(f"{k}={v}" for k, v in overrides.items()))
     if is_futures(cfg.strategy) and not args.turnuva:
         return run_futures_backtest_cli(cfg, args, out_dir)
-    if args.izgara or args.modul_izgara:
-        print("❌ --izgara / --modul-izgara yalnızca vadeli strateji içindir: --strateji futures ekleyin")
+    if args.izgara or args.modul_izgara or args.faz4_izgara:
+        print("❌ --izgara / --modul-izgara / --faz4-izgara yalnızca vadeli strateji içindir: --strateji futures ekleyin")
         return EXIT_CONFIG
     days = args.gun if args.gun is not None else (
         1095 if is_rotation(cfg.strategy) and not args.turnuva else
@@ -477,6 +482,8 @@ def run_futures_backtest_cli(cfg, args, out_dir) -> int:
         return run_futures_grid_cli(cfg, args, end_ms, out_dir)
     if args.modul_izgara:
         return run_futures_grid_cli(cfg, args, end_ms, out_dir, modules=True)
+    if args.faz4_izgara:
+        return run_futures_grid_cli(cfg, args, end_ms, out_dir, phase4=True)
     if cfg.futures_universe > 0:
         coins = (f"her ay en hacimli {cfg.futures_universe} köklü coin: en az {cfg.futures_universe_min_age_days} "
                  f"günlük, son {cfg.futures_universe_avg_days} gün ort. hacim")
@@ -512,20 +519,26 @@ def run_futures_backtest_cli(cfg, args, out_dir) -> int:
     return EXIT_OK
 
 
-def run_futures_grid_cli(cfg, args, end_ms, out_dir, modules: bool = False) -> int:
+def run_futures_grid_cli(cfg, args, end_ms, out_dir, modules: bool = False, phase4: bool = False) -> int:
     """--izgara: vadeli çöküş kurallarının ızgara testi (futures_backtest.run_grid_cli); --modul-izgara: çöküş + ek
-    modüller × evren (run_module_grid_cli). Rapor dosyası + Telegram."""
+    modüller × evren (run_module_grid_cli); --faz4-izgara: limit giriş, fonlama, düzeltme, günlük evren
+    (run_phase4_grid_cli). Rapor dosyası + Telegram."""
     import futures_backtest
     full = args.gun is None or args.tum_donem
     what = "Ocak 2020'den bugüne" if full else f"{'belirtilen tarihte biten' if end_ms else 'son'} {args.gun} gün"
-    if modules:
+    if phase4:
+        print(f"⏳ Vadeli Faz 4 ızgarası ({what}): {len(futures_backtest.phase4_variants(cfg))} kural × piyasa / limit "
+              f"giriş × kayma ×1 / ×3, {len(futures_backtest.PHASE4_UNIVERSES)} evren (yalnızca long); ilk seferde "
+              f"yüzlerce coinin mumları ve fonlama oranları indirilir (30-120 dk sürebilir)...")
+    elif modules:
         print(f"⏳ Vadeli modül ızgarası ({what}): {len(futures_backtest.module_variants(cfg))} kural × en hacimli "
               f"{' / '.join(map(str, futures_backtest.MODULE_UNIVERSES))} köklü coin, sabit çıkışlarla; ilk seferde "
               f"yüzlerce coinin mumları indirilir (30-90 dk sürebilir)...")
     else:
         print(f"⏳ Vadeli ızgara testi ({what}): {len(futures_backtest.grid_variants(cfg))} giriş kuralı, ardından en "
               f"iyilerle çıkış denemeleri ve 1 dk doğrulama. İlk seferde 1 dk mumlar indirilir (10-30 dk sürebilir)...")
-    run = futures_backtest.run_module_grid_cli if modules else futures_backtest.run_grid_cli
+    run = (futures_backtest.run_phase4_grid_cli if phase4 else
+           futures_backtest.run_module_grid_cli if modules else futures_backtest.run_grid_cli)
     try:
         report, _rows, path = run(cfg, None if full else args.gun, end_ms, out_dir, full_history=full, progress=print)
     except Exception as exc:  # noqa: BLE001
@@ -536,7 +549,8 @@ def run_futures_grid_cli(cfg, args, end_ms, out_dir, modules: bool = False) -> i
         from telegram_bot import TelegramNotifier
         notifier = TelegramNotifier(cfg.telegram_bot_token, cfg.telegram_chat_id, async_mode=False)
         try:
-            notifier.send_document(path, "🧩 Vadeli modül ızgarası raporu" if modules else "🧮 Vadeli ızgara testi raporu")
+            notifier.send_document(path, "⚡ Vadeli Faz 4 ızgarası raporu" if phase4 else
+                                   "🧩 Vadeli modül ızgarası raporu" if modules else "🧮 Vadeli ızgara testi raporu")
             print("📤 Rapor Telegram'a gönderildi.")
         except Exception as exc:  # noqa: BLE001
             print(f"⚠️ Telegram'a gönderilemedi: {exc}")
@@ -830,7 +844,20 @@ def _start_futures_bot(cfg, store, notifier, log, env_path=None) -> int:
         print(f"❌ {describe_error(exc)}")
         notifier.send(Messages.error(f"Vadeli bot başlatılamadı: {describe_error(exc)}", fatal=True), critical=True)
         return EXIT_CRASH if isinstance(exc, requests.RequestException) else EXIT_CONFIG
+    _graceful_sigterm()           # systemctl stop: bekleyen limit giriş emri iptal edilsin, durum kaydedilsin
     return bot.run(do_startup=False)
+
+
+def _graceful_sigterm() -> None:
+    """SIGTERM (systemctl stop) Ctrl+C gibi işlenir: bot döngüsü düzgün kapanır (TradingBot.run → _on_shutdown)."""
+    import signal
+
+    def _term(_signum, _frame):
+        raise KeyboardInterrupt
+    try:
+        signal.signal(signal.SIGTERM, _term)
+    except (ValueError, AttributeError):          # Ana iş parçacığı değil / platform desteklemiyor
+        pass
 
 
 def _entry() -> int:
