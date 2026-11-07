@@ -564,6 +564,48 @@ fonlama sinyali çöküşle örtüşüyor; düzeltme ve günlük havuz işlem sa
 sonuç maliyetin altına iniyor. Öneri: 🥈 #2 (liste ∪ köklü 20, piyasa emri), yeni modüller kapalı; denemek isterseniz
 yalnızca test modunda (paper).
 
+#### Faz 5: dalga modu — kârı azaltmadan daha çok işlem (Kasım 2026)
+**Bulgu:** tek pozisyon kuralı yüzünden #2 sinyallerin çoğunu atıyor. Her coini kendi başına sayınca yılda ~1.500
+işlem fırsatı var, #2 bunların ~%20'sini alabiliyor; atlananların %91'i "başka coinde açık pozisyon var" yüzünden ve
+alınanlar kadar kârlı (ortalama +%0.32, kazanma %80). Kâr piyasa geneli likidasyon dalgalarında toplanıyor:
+
+| Son 1 saatte %3+ düşen coin (genişlik) | Bağımsız işlem | Ortalama | Seçim dönemi | Doğrulama dönemi |
+|---|---|---|---|---|
+| 0-1 (yalnız çöküş) | 2.400 | −%0.08 | −%0.13 | −%0.02 |
+| 2-7 | 1.418 | +%0.25 | +%0.20 | +%0.41 |
+| 8+ (piyasa geneli dalga) | 6.559 | +%0.46 | +%0.45 | +%0.49 |
+
+Buna göre iki ayar eklendi (varsayılan kapalı; Telegram: 🧭 Giriş sinyali → 🌊 Dalga modu, ⭐ Faz 5 seti tek dokunuş):
+
+| Ayar | Ne yapar |
+|---|---|
+| `FUTURES_MAX_POSITIONS` (+ `FUTURES_EXTRA_BREADTH`) | Aynı anda en fazla N pozisyon (farklı coinler); her pozisyonun teminatı bakiyenin `FUTURES_MARGIN_USAGE_PCT / N`'i. İlk pozisyon her sinyalde, sonrakiler yalnızca genişlik ≥ `FUTURES_EXTRA_BREADTH` (8) iken açılır. Bot pozisyon açıkken de her 5 dk'da tarar. |
+| `FUTURES_ISOLATED_SIZE_PCT` (+ `FUTURES_ISOLATED_BREADTH`) | Genişlik `FUTURES_ISOLATED_BREADTH`'in (2) altındaysa (yalnız çöküş) pozisyon bu büyüklükte (%; 50 = yarım). |
+
+Genişlik canlı botta her taramada taranan tüm coinlerden (beklemedeki ve açık pozisyondaki coinler dahil), backtestte
+o tarihteki evrenin tüm coinlerinden aynı kuralla ölçülür. Rapor: genişliğe göre işlem başı döküm ve "🌊 Dalga modu" /
+"Tek pozisyon" karşılaştırma satırları (`python main.py --backtest --strateji futures --tum-donem`).
+
+Sonuç (liste ∪ köklü 20, 🥈 #2 girişi ve çıkışları, 30 USDT, 2020-2026, 1 dk):
+
+| Ayar | İşlem/yıl | Kazanma | İşlem başı | Yıllık seçim / doğr. | Maks. düşüş | Kayma ×3: yıllık | Kötümser stop: 30 USDT → |
+|---|---|---|---|---|---|---|---|
+| #2 (tek pozisyon, 2x) | 343 | %81.2 | +%0.31 | +%587 / +%212 | %52 / %39 | +%236 / +%100 | 374 USDT |
+| #2 + yalnız çöküş %50 | 343 | %81.2 | +%0.31 | +%571 / +%212 | **%46 / %34** | +%282 / +%127 | **699 USDT** |
+| **Faz 5 seti: 2 pozisyon, 3x, ek ≥8, yalnız çöküş %50** | **449** | **%81.7** | **+%0.34** | **+%690 / +%233** | %71 / %42 | **+%322 / +%134** | **Mayıs 2021'de eridi** |
+| Aynı set 2x | 449 | %81.7 | +%0.34 | +%350 / +%136 | %55 / %30 | +%194 / +%86 | 57 USDT |
+| Aynı set 4x | 449 | %81.7 | +%0.34 | +%1.122 / +%346 | %82 / %54 | — | — |
+
+Yıl yıl (her yıl 30 USDT ile): Faz 5 seti 2020 +%547, 2021 +%14.005, 2022 +%50, 2023 +%91, 2024 +%278, 2025 +%499,
+2026 +%106 (#2: +%840, +%7.290, +%44, +%9, +%545, +%642, +%66). İkinci pozisyonda açılan 1.059 işlem ortalama +%0.42.
+Bedeli: en büyük düşüş 12-13 Mart 2020'de %71 (iki pozisyon birlikte zarar kesti; #2'de %52) ve "kötümser stop
+dolumu" stresinde (zarar kes, stopun ötesindeki fitilin yarısından dolarsa) 19-20 Mayıs 2021'de hesap eridi; #2
+erimedi. "Yalnız çöküş %50" ise her senaryoda #2'ye eşit ya da daha iyi (daha az düşüş), ama işlem sayısını artırmaz.
+Denenen ve elenenler: sermayeyi N'e bölüp aynı kaldıraçla çok pozisyon (5 pozisyon: yılda 688 işlem ama yıllık getiri
++%90 / +%40), dalga şartı olmadan aynı büyüklükte 2-3 pozisyon (düşüş %84-93), zarardan sonra beklemeyi kaldırmak
+(yılda 444 işlem ama doğrulamada düşüş %67, 3 zararlı yıl), dalgada çöküş eşiğini düşürmek (işlem başı en iyi hâlde
+#2 düzeyinde, getiri artmıyor), ilk pozisyon kârdayken ikinciyi açmak (düşüş azalıyor ama ek işlemlerin çoğu kayboluyor).
+
 ### 🏆 Strateji turnuvası (`--turnuva`)
 Hangi strateji türünün sizin dönemde işe yaradığını **tek komutla** görmek için:
 ```bash

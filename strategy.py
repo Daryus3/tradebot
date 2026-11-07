@@ -1678,6 +1678,8 @@ FUT_MODULE_NAMES = {"crash": "çöküş dönüşü", "pump": "pompa dönüşü",
                     "breakout": "hacimli kırılım", "funding": "fonlama sıkışması", "pullback": "trend içi düzeltme"}
 FUT_FUNDING_HOURS = 8        # Fonlama oranları 8 saate oranlanır (4 / 1 saatte bir ödenen coinlerde oran büyür)
 FUT_H1_LIMIT = 1000          # Canlı: düzeltme modülü için istenen 1 saatlik mum (EMA200'ün oturması için)
+FUT_BREADTH_DROP_PCT = 3.0   # Dalga modu: "genişlik" = son FUT_BREADTH_HOURS saatte en az bu kadar (%) düşen coin sayısı
+FUT_BREADTH_HOURS = 1
 
 
 def _need_numpy() -> None:
@@ -1802,6 +1804,31 @@ def crash_drop_pct(f: Dict[str, "np.ndarray"], hours: int):
             out[bars:] = (1 - c[bars:] / c[:-bars]) * 100
         return out
     return _memo(f, ("drop", int(hours)), calc)
+
+
+def breadth_flags(f: Dict[str, "np.ndarray"]):
+    """Dalga modu: her mumda bu coin genişliğe sayılır mı (son 1 saatte kapanıştan kapanışa en az %3 düşüş)."""
+    with np.errstate(invalid="ignore"):
+        return crash_drop_pct(f, FUT_BREADTH_HOURS) >= FUT_BREADTH_DROP_PCT
+
+
+def market_breadth(klines: Dict[str, Dict[str, "np.ndarray"]]) -> int:
+    """Canlı: son kapanmış mumda son 1 saatte en az %3 düşen coin sayısı (taranan tüm coinler; backtest aynı ölçüyü
+    o tarihteki evrenin tüm coinleri için her mumda hesaplar)."""
+    _need_numpy()
+    count = 0
+    for k in klines.values():
+        c = np.asarray(k["c"], dtype=np.float64)
+        if len(c) and bool(breadth_flags({"c": c})[-1]):
+            count += 1
+    return count
+
+
+def isolated_factor(size_pct: float, isolated_breadth: int, breadth: int) -> float:
+    """Pozisyon büyüklüğü çarpanı: genişlik isolated_breadth'in altındaysa (yalnız çöküş) size_pct / 100, değilse 1."""
+    if size_pct >= 100 or breadth >= isolated_breadth:
+        return 1.0
+    return max(0.0, float(size_pct)) / 100
 
 
 def window_sigma(c, bars: int, lookback: int = FUT_Z_LOOKBACK_BARS):
@@ -2391,6 +2418,9 @@ class FuturesSignal:
     priority: int = 0    # Aynı anda sinyallerde önce bu (FUT_PRIORITY: çöküş 0 > fonlama > pompa > düzeltme > ...)
 
     def note(self) -> str:
+        return self._base_note() + self.cascade_note()
+
+    def _base_note(self) -> str:
         m = self.metrics
         if m.get("tactic") == 2.0:
             return (f"Pompa dönüşü (short): son {m.get('hours', 4):g} saatte +%{m.get('rise_pct', 0):.1f} | "
@@ -2425,6 +2455,20 @@ class FuturesSignal:
             if m.get("feed_usdt"):
                 text += f" | Likidasyon akışı {m['feed_usdt']:,.0f} USDT".replace(",", ".")
             return text
+        return self._legacy_note()
+
+    def cascade_note(self) -> str:
+        """Dalga modu bilgisi (genişlik, yarım büyüklük): not metnine eklenir."""
+        m = self.metrics
+        parts = []
+        if "breadth" in m:
+            parts.append(f"Dalga: {int(m['breadth'])} coin %3+ düştü (1 saat)")
+        if m.get("size_pct") and m["size_pct"] < 100:
+            parts.append(f"Pozisyon %{m['size_pct']:g} (yalnız çöküş)")
+        return (" | " + " | ".join(parts)) if parts else ""
+
+    def _legacy_note(self) -> str:
+        m = self.metrics
         liq = "zorla satış" if self.side == "long" else "zorla alış"
         div = "pozitif" if self.side == "long" else "negatif"
         trend = {1.0: "yükseliş", -1.0: "düşüş"}.get(m.get("btc_trend", 0.0), "kapalı")
@@ -2462,12 +2506,16 @@ class FuturesScalpStrategy(ReboundStrategy):
         return result
 
     def evaluate(self, klines: Dict[str, Dict[str, "np.ndarray"]], btc_1h: Optional[Dict[str, "np.ndarray"]],
-                 now_ms: int, feed=None) -> Tuple[List[FuturesSignal], Counter]:
+                 now_ms: int, feed=None, breadth: Optional[int] = None) -> Tuple[List[FuturesSignal], Counter]:
         """Her coinin son KAPANMIŞ 5 dk mumunu değerlendirir. `klines`: sembol → kapanmış mum dizileri (son satır
-        en yeni kapanmış mum). `feed`: liquidations.LiquidationFeed (FUTURES_LIQ_SOURCE=feed/both). (sinyaller
-        en güçlüden zayıfa, elenme nedenleri)."""
+        en yeni kapanmış mum). `feed`: liquidations.LiquidationFeed (FUTURES_LIQ_SOURCE=feed/both). `breadth`: dalga
+        modu genişliği (verilmezse `klines`'tan). (sinyaller en güçlüden zayıfa, elenme nedenleri)."""
         _need_numpy()
         cfg = self.cfg
+        cascade = (int(getattr(cfg, "futures_max_positions", 1)) > 1
+                   or float(getattr(cfg, "futures_isolated_size_pct", 100.0)) < 100)
+        if cascade and breadth is None:
+            breadth = market_breadth(klines)
         rejects: Counter = Counter()
         trend = btc_trend_1h(btc_1h) if self.needs_btc_trend and btc_1h is not None and len(btc_1h["t"]) else None
         signals: List[FuturesSignal] = []
@@ -2513,6 +2561,8 @@ class FuturesScalpStrategy(ReboundStrategy):
                 continue
             found["btc_trend"] = 1.0 if up is not None and up[i] else -1.0 if down is not None and down[i] else 0.0
             found["feed_usdt"] = feed_long if found["side"] == "long" else feed_short
+            if cascade:
+                found["breadth"] = float(breadth or 0)
             signals.append(FuturesSignal(symbol, found["side"], found["price"], int(k["t"][i]), found["score"],
                                          {k2: v for k2, v in found.items() if k2 not in ("side", "price", "priority")},
                                          int(found.get("priority", 0))))

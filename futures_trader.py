@@ -31,8 +31,8 @@ from config import (futures_coin_list, futures_crash_rules, futures_funding_rule
 from futures_exchange import FFill, FuturesError, MinNotionalError, describe_error
 from logger import get_logger
 from risk import ExitReason, Position, cooldown_minutes, kill_switch_hit
-from strategy import (FUT_BAR_MS, FUT_BTC_1H_LIMIT, FUT_H1_LIMIT, FUT_HOUR_MS, FuturesSignal, ScanResult,
-                      funding_per_bar, futures_kline_limit)
+from strategy import (FUT_BAR_MS, FUT_BREADTH_DROP_PCT, FUT_BTC_1H_LIMIT, FUT_H1_LIMIT, FUT_HOUR_MS, FuturesSignal,
+                      ScanResult, funding_per_bar, futures_kline_limit, isolated_factor, market_breadth)
 from telegram_bot import CRITICAL_EXITS, Messages, esc, fmt_duration, fmt_price, fmt_signed, fmt_usdt, futures_tag
 from trader import ALIVE_SAVE_SEC, POSITION_LOG_SEC, RULES_REFRESH_SEC, Mark, TradingBot
 
@@ -96,16 +96,23 @@ class FuturesBot(TradingBot):
         self._ranking_at = 0.0
         self._ranking_key: tuple = ()
         self._h1_cache: Dict[str, Tuple[int, dict]] = {}   # Düzeltme modülü: parite → (saat, 1 saatlik mumlar)
+        self.last_breadth: Optional[int] = None    # Dalga modu: son taramada son 1 saatte %3+ düşen coin sayısı
 
     # ================================================================ kapasite
     def slots(self) -> int:
-        return 1                  # Tüm serbest bakiye tek pozisyona (bileşik)
+        """Tek pozisyon (tüm bakiye, bileşik); dalga modunda FUTURES_MAX_POSITIONS (her biri bakiyenin 1/N'i)."""
+        return max(1, int(self.cfg.futures_max_positions))
 
     def target_slots(self) -> int:
-        return 1
+        return self.slots()
 
     def free_slots(self) -> int:
-        return 0 if self.state.positions or self.state.pending_entry else 1
+        return max(0, self.slots() - len(self.state.positions) - (1 if self.state.pending_entry else 0))
+
+    def _cascade_on(self) -> bool:
+        """Dalga modu ya da yalnız çöküş küçültme açık mı (genişlik gerekir)."""
+        cfg = self.cfg
+        return cfg.futures_max_positions > 1 or cfg.futures_isolated_size_pct < 100
 
     @staticmethod
     def _next_close(now: float) -> float:
@@ -206,7 +213,7 @@ class FuturesBot(TradingBot):
             return
         if now >= self.next_scan_at:
             self.next_scan_at = self._next_close(now) + SCAN_DELAY_SEC
-            if (not self.state.positions and not self.state.pending_entry and not self.state.paused
+            if (self.free_slots() > 0 and not self.state.pending_entry and not self.state.paused
                     and not self.state.killed and not self.entries_frozen(now)):
                 self.scan_and_enter(now)
         self._periodic(now)
@@ -251,7 +258,10 @@ class FuturesBot(TradingBot):
         symbols, skipped = self._scan_symbols()
         limit = futures_kline_limit(self.cfg)       # En uzun pencere + izleme süresi + oynaklık geçmişi
         excluded = self._scan_excluded()
-        targets = [s for s in symbols if ex.has_market(s) and s not in excluded]
+        cascade = self._cascade_on()
+        # Dalga modu: genişlik tüm taranan coinlerden ölçülür (backtestteki evrenle aynı); beklemedeki / açık
+        # pozisyondaki coinlerin mumları da istenir ama onlarda sinyal aranmaz
+        targets = [s for s in symbols if ex.has_market(s) and (cascade or s not in excluded)]
 
         def fetch(symbol: str):
             try:
@@ -270,9 +280,12 @@ class FuturesBot(TradingBot):
                 continue
             if len(k["t"]) and int(k["t"][-1]) + FUT_BAR_MS == closed_ms:   # Yalnızca az önce kapanan mum
                 klines[symbol] = k
+        breadth = market_breadth(klines) if cascade else None
+        self.last_breadth = breadth
+        klines = {s: k for s, k in klines.items() if s not in excluded}
         self._attach_extras(klines, closed_ms)       # Faz 4: fonlama oranları, 1 saatlik mumlar (modül açıksa)
         btc_1h = ex.klines("BTCUSDT", "1h", FUT_BTC_1H_LIMIT) if self.strategy.needs_btc_trend else None
-        signals, rejects = self.strategy.evaluate(klines, btc_1h, now_ms, feed=self.smart.liq_feed)
+        signals, rejects = self.strategy.evaluate(klines, btc_1h, now_ms, feed=self.smart.liq_feed, breadth=breadth)
         if errors:
             log.warning("Vadeli tarama: %d coinin mumları alınamadı (%s)", len(errors), "; ".join(errors[:3]))
             rejects["veri alınamadı"] += len(errors)
@@ -283,20 +296,28 @@ class FuturesBot(TradingBot):
                             rejects=rejects)
         self._record_scan(result, now)
         self.last_signals = list(signals)
-        if not signals:
-            return
-        sig = signals[0]
-        log.info("Vadeli sinyal: %s %s | %s", sig.symbol, sig.side, sig.note())
-        try:
-            self.open_futures(sig, now)
-        except MinNotionalError as exc:
-            log.warning("Minimum emir tutarı: %s", exc)
-            self.notifier.send(Messages.warning(f"{sig.symbol} {sig.side.upper()} sinyali pas geçildi: "
-                                                f"{describe_error(exc)}"))
-        except FuturesError as exc:
-            log.error("Vadeli pozisyon açılamadı: %s", exc)
-            self.notifier.send(Messages.error(f"{sig.symbol} {sig.side.upper()} pozisyonu açılamadı: "
-                                              f"{describe_error(exc)}"))
+        for sig in signals:              # En güçlüden: boş yer oldukça (dalga modunda ek pozisyon yalnızca dalgada)
+            if self.free_slots() <= 0 or self.state.pending_entry:
+                break
+            if sig.symbol in self.state.positions:
+                continue
+            if self.state.positions and (breadth or 0) < self.cfg.futures_extra_breadth:
+                log.info("Ek pozisyon açılmadı: dalga yok (%s coin düşüyor, gereken %d)", breadth,
+                         self.cfg.futures_extra_breadth)
+                break
+            log.info("Vadeli sinyal: %s %s | %s", sig.symbol, sig.side, sig.note())
+            try:
+                self.open_futures(sig, now)
+            except MinNotionalError as exc:
+                log.warning("Minimum emir tutarı: %s", exc)
+                self.notifier.send(Messages.warning(f"{sig.symbol} {sig.side.upper()} sinyali pas geçildi: "
+                                                    f"{describe_error(exc)}"))
+                continue                 # Sıradaki sinyal denenir (backtest de minimum emrin altındakini atlar)
+            except FuturesError as exc:
+                log.error("Vadeli pozisyon açılamadı: %s", exc)
+                self.notifier.send(Messages.error(f"{sig.symbol} {sig.side.upper()} pozisyonu açılamadı: "
+                                                  f"{describe_error(exc)}"))
+                break
 
     def _refresh_universe(self, now: float, force: bool = False) -> None:
         """En hacimli N köklü parite listesini (gerekirse) yeniler: günde bir ya da ayar değişince."""
@@ -362,6 +383,8 @@ class FuturesBot(TradingBot):
         except (FuturesError, requests.ConnectionError) as exc:
             log.warning("24 saatlik özetler alınamadı (ön eleme yapılmadı): %s", exc)
             return symbols, 0
+        if self._cascade_on():           # Genişlik: son 1 saatte %3+ düşen coin 24 saatlik tepesinin en az %3 altında
+            least = min(least, FUT_BREADTH_DROP_PCT)
         need = max(0.0, least - PREFILTER_SLACK_PCT) / 100
         need_up = max(0.0, min(p for _h, p in pump) - PREFILTER_SLACK_PCT) / 100 if pump else None
         keep = []
@@ -383,14 +406,15 @@ class FuturesBot(TradingBot):
             raise FuturesError(f"Zarar kes (%{cfg.stop_loss_pct:g}) {lev}x'te likidasyona (%{room:.1f}) çok yakın")
         # 1) İşleme girmeden HEMEN ÖNCE: yalıtılmış teminat + kaldıraç (her girişte, zorunlu)
         ex.prepare_symbol(symbol, lev)
-        # 2) Büyüklük: serbest bakiyenin FUTURES_MARGIN_USAGE_PCT'si teminat × kaldıraç (bileşik)
+        # 2) Büyüklük: serbest bakiyenin FUTURES_MARGIN_USAGE_PCT'si teminat × kaldıraç (bileşik); dalga modunda
+        #    bakiyenin (serbest + açık pozisyon teminatları) 1/N'i, yalnız çöküşte × FUTURES_ISOLATED_SIZE_PCT
         free = ex.free_balance()
+        margin = self._entry_margin(sig, free)
         bid, ask = ex.bid_ask(symbol)
         if cfg.futures_entry_order == "limit":
-            self._place_limit_entry(sig, now, lev, free, bid, ask)
+            self._place_limit_entry(sig, now, lev, margin, bid, ask)
             return None
         price = ask if side == "long" else bid
-        margin = free * cfg.futures_margin_usage_pct / 100
         qty = ex.amount_to_precision(symbol, margin * lev / price)
         ex.check_order_size(symbol, qty, price)                  # MinNotionalError → işlem pas geçilir
         order_side = "buy" if side == "long" else "sell"
@@ -449,7 +473,23 @@ class FuturesBot(TradingBot):
         return pos
 
     # ================================================================ limit (maker) giriş
-    def _place_limit_entry(self, sig: FuturesSignal, now: float, lev: int, free: float, bid: float,
+    def _entry_margin(self, sig: FuturesSignal, free: float) -> float:
+        """Girişin teminatı (USDT). Tek pozisyonda serbest bakiye × FUTURES_MARGIN_USAGE_PCT (eskisi gibi); dalga
+        modunda (serbest + açık pozisyon teminatları) × kullanım / FUTURES_MAX_POSITIONS, serbest bakiyeyi aşmadan.
+        Yalnız çöküşte (genişlik < FUTURES_ISOLATED_BREADTH) × FUTURES_ISOLATED_SIZE_PCT (backtest: simulate)."""
+        cfg = self.cfg
+        usage = cfg.futures_margin_usage_pct / 100
+        factor = isolated_factor(cfg.futures_isolated_size_pct, cfg.futures_isolated_breadth,
+                                 int(sig.metrics.get("breadth", cfg.futures_isolated_breadth)))
+        if factor < 1:
+            sig.metrics["size_pct"] = round(factor * 100, 1)
+        slots = self.slots()
+        if slots <= 1:
+            return free * usage * factor
+        used = sum(p.margin_usdt for p in self.state.positions.values() if p.futures)
+        return min((free + used) * usage / slots * factor, free * usage)
+
+    def _place_limit_entry(self, sig: FuturesSignal, now: float, lev: int, margin: float, bid: float,
                            ask: float) -> None:
         """FUTURES_ENTRY_ORDER=limit: alışta bid'in FUTURES_LIMIT_OFFSET_PCT altına (satışta ask'ın üstüne) post-only
         limit emir; FUTURES_LIMIT_TTL_MIN dakika dolmayı bekler (state.pending_entry, bot yeniden başlasa da sürer).
@@ -458,7 +498,6 @@ class FuturesBot(TradingBot):
         symbol, side = sig.symbol, sig.side
         sign = 1 if side == "long" else -1
         order_side = "buy" if side == "long" else "sell"
-        margin = free * cfg.futures_margin_usage_pct / 100
         oid, price, qty = "", 0.0, 0.0
         for attempt in range(LIMIT_REQUOTE_MAX + 1):
             ref = bid if side == "long" else ask
@@ -969,8 +1008,14 @@ class FuturesBot(TradingBot):
         age = self.time_fn() - self.last_scan_at
         lines = [f"🔍 <b>Son Vadeli Tarama</b> ({age:.0f} sn önce)",
                  f"Coin: {r.candidates} | Analiz: {r.analyzed} | Sinyal: {len(r.signals)}"]
-        if self.state.positions:
+        if self.state.positions and self.slots() > 1:
+            lines.append(f"📦 {len(self.state.positions)}/{self.slots()} pozisyon açık: ek pozisyon yalnızca son 1 saatte "
+                         f"≥{self.cfg.futures_extra_breadth} coin %3+ düşerken açılır.")
+        elif self.state.positions:
             lines.append("📦 Açık pozisyon var: yeni tarama pozisyon kapanınca yapılır.")
+        if self._cascade_on() and self.last_breadth is not None:
+            lines.append(f"🌊 Genişlik: {self.last_breadth} coin son 1 saatte %3+ düştü (dalga ≥"
+                         f"{self.cfg.futures_extra_breadth}, yalnız çöküş <{self.cfg.futures_isolated_breadth})")
         pe = self.state.pending_entry
         if pe:
             left = max(0.0, float(pe.get("expires_at", 0.0)) - self.time_fn())

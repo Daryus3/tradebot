@@ -22,6 +22,7 @@ TP / SL duyarlılığı. Grafik: sermaye eğrisi, düşüş, yıllık getiri ve 
 from __future__ import annotations
 
 import csv
+import heapq
 import math
 from collections import Counter
 from dataclasses import dataclass, field, replace
@@ -34,8 +35,8 @@ import numpy as np
 from config import (DATA_DIR, futures_coin_list, futures_crash_rules, futures_funding_rules,
                     futures_liq_distance_pct, futures_modules)
 from futures_data import FuturesArchive, concat, resample, slice_range
-from strategy import (FUT_BAR_MS, FUT_HOUR_MS, btc_trend_1h, crash_state, funding_per_bar, futures_candidates,
-                      futures_entries, futures_features, pick_signal, trend_at)
+from strategy import (FUT_BAR_MS, FUT_HOUR_MS, breadth_flags, btc_trend_1h, crash_state, funding_per_bar,
+                      futures_candidates, futures_entries, futures_features, isolated_factor, pick_signal, trend_at)
 
 DAY_MS = 86_400_000
 MIN_MS = 60_000
@@ -106,6 +107,8 @@ class FutData:
     loader: Optional[Callable[[str], Dict[str, np.ndarray]]] = None
     lean_symbols: List[str] = field(default_factory=list)
     universe_note: str = ""
+    # Dalga modu genişliği: (ilk mum kapanışı ms, mum başına son 1 saatte %3+ düşen evren coini sayısı)
+    breadth: Optional[Tuple[int, np.ndarray]] = None
 
 
 def history_segments(end_ms: int, start_ms: Optional[int] = None) -> List[Segment]:
@@ -220,6 +223,7 @@ class FutSignal:
     entry_open: float       # Bir sonraki mumun açılışı (kaymasız giriş fiyatı)
     metrics: Dict[str, float] = field(default_factory=dict)
     priority: int = 0       # Aynı mumda önce bu (strategy.FUT_PRIORITY), sonra puan: canlıdaki sıralama
+    breadth: int = 0        # Dalga modu: o mumda son 1 saatte %3+ düşen evren coini sayısı (strategy.market_breadth)
 
 
 def signal_order(s: "FutSignal"):
@@ -306,16 +310,50 @@ def _series(data: FutData):
             yield symbol, k
 
 
+class BreadthCounter:
+    """Dalga modu genişliği: sinyal taramasıyla aynı geçişte her coinin "son 1 saatte %3+ düştü" mumları sayılır (o tarihte
+    evrende olan coinler; canlıda taranan coinler)."""
+
+    def __init__(self, data: FutData):
+        self.data = data
+        self.t0 = data.start_ms // FUT_BAR_MS * FUT_BAR_MS
+        self.need = data.breadth is None
+        self.counts = np.zeros((data.end_ms - self.t0) // FUT_BAR_MS + 2, dtype=np.int32) if self.need else None
+
+    def add(self, f: Dict[str, np.ndarray], close: np.ndarray, coin: str) -> None:
+        if not self.need:
+            return
+        idx = (close - self.t0) // FUT_BAR_MS
+        ok = (idx >= 0) & (idx < len(self.counts)) & _active_mask(close, coin, self.data.segments) & breadth_flags(f)
+        np.add.at(self.counts, idx[ok], 1)
+
+    def finish(self, signals: Sequence[FutSignal]) -> None:
+        if self.need:
+            self.data.breadth = (self.t0, self.counts)
+        for s in signals:
+            s.breadth = breadth_at(self.data, s.close_ms)
+
+
+def breadth_at(data: FutData, close_ms: int) -> int:
+    if data.breadth is None:
+        return 0
+    t0, counts = data.breadth
+    i = (int(close_ms) - t0) // FUT_BAR_MS
+    return int(counts[i]) if 0 <= i < len(counts) else 0
+
+
 def find_signals(cfg, data: FutData) -> Tuple[List[FutSignal], Funnel]:
     """Canlı botun her 5 dk kapanışında yaptığı değerlendirmenin tüm geçmişe uygulanışı."""
     signals: List[FutSignal] = []
     funnel = Funnel()
+    breadth = BreadthCounter(data)
     for symbol, k in _series(data):
         coin = symbol[:-4]
         k = with_extras(k, symbol, data, [cfg])
         t = k["t"]
         close = t + FUT_BAR_MS
         f = futures_features(k, cfg)
+        breadth.add(f, close, coin)
         active = _active_mask(close, coin, data.segments)
         nxt_ok = np.zeros(len(t), dtype=bool)
         nxt_ok[:-1] = t[1:] == close[:-1]                 # Bir sonraki mum boşluksuz geliyor (giriş yapılabilir)
@@ -346,6 +384,7 @@ def find_signals(cfg, data: FutData) -> Tuple[List[FutSignal], Funnel]:
                                      int(found.get("priority", 0))))
     funnel.signals = len(signals)
     signals.sort(key=signal_order)
+    breadth.finish(signals)
     return signals, funnel
 
 
@@ -465,6 +504,13 @@ class SimParams:
     limit_through_pct: float = 0.02
     limit_strict: bool = False          # Stres: limitin dolduğu mumda lehte hareket (başabaş / hedef) sayılmaz
     limit_fallback: bool = False        # Süre dolunca dolmayan emir yerine piyasa emri (taker) ile girilir
+    # Dalga modu (FUTURES_MAX_POSITIONS ...): en fazla max_positions pozisyon, her biri bakiyenin usage / N'i teminat;
+    # açık pozisyon varken yenisi yalnızca genişlik ≥ extra_breadth ise; genişlik < isolated_breadth ise büyüklük
+    # isolated_size_pct (%)
+    max_positions: int = 1
+    extra_breadth: int = 8
+    isolated_size_pct: float = 100.0
+    isolated_breadth: int = 2
 
 
 def params_from_cfg(cfg, **over) -> SimParams:
@@ -483,7 +529,11 @@ def params_from_cfg(cfg, **over) -> SimParams:
                   trail_gap_pct=cfg.futures_trailing_gap_pct,
                   entry_limit=getattr(cfg, "futures_entry_order", "market") == "limit",
                   limit_offset_pct=float(getattr(cfg, "futures_limit_offset_pct", 0.05)),
-                  limit_ttl_min=int(getattr(cfg, "futures_limit_ttl_min", 3)))
+                  limit_ttl_min=int(getattr(cfg, "futures_limit_ttl_min", 3)),
+                  max_positions=int(getattr(cfg, "futures_max_positions", 1)),
+                  extra_breadth=int(getattr(cfg, "futures_extra_breadth", 8)),
+                  isolated_size_pct=float(getattr(cfg, "futures_isolated_size_pct", 100.0)),
+                  isolated_breadth=int(getattr(cfg, "futures_isolated_breadth", 2)))
     return replace(p, **over) if over else p
 
 
@@ -511,6 +561,8 @@ class FutTrade:
     bar_ms: int
     score: float = 0.0
     kind: float = 0.0       # Giriş modülü (metrics["tactic"]: 1 çöküş, 2 pompa, 3 Bollinger, 4 kırılım; 0 = liq4)
+    breadth: int = 0        # Girişte genişlik (son 1 saatte %3+ düşen coin sayısı)
+    slot: int = 1           # Açıldığında kaçıncı pozisyondu (dalga modu)
 
 
 @dataclass
@@ -709,7 +761,8 @@ def run_trade(p: SimParams, s: FutSignal, window: tuple, margin: float, notional
         fees = fee_in + fee_out
     return FutTrade(s.symbol, s.side, entry_ms, exit_ms, entry, float(exit_price), reason, p.leverage, margin,
                     notional, fees, funding, pnl, pnl / margin * 100 if margin else 0.0, 0.0, worst,
-                    max(window_mae, worst), gap, liquidated, bar_ms, s.score, float(s.metrics.get("tactic", 0.0)))
+                    max(window_mae, worst), gap, liquidated, bar_ms, s.score, float(s.metrics.get("tactic", 0.0)),
+                    int(getattr(s, "breadth", 0)))
 
 
 def simulate(p: SimParams, data: FutData, signals: Sequence[FutSignal], windows: Dict[Tuple[str, int], tuple],
@@ -717,9 +770,12 @@ def simulate(p: SimParams, data: FutData, signals: Sequence[FutSignal], windows:
              fixed_notional: Optional[float] = None) -> FutResult:
     """Sinyalleri zaman sırasıyla işler: aynı anda tek pozisyon, tüm bakiye (bileşik). start_ms / end_ms verilirse
     yalnızca o aralıktaki sinyaller (yıl yıl yeniden başlama için). fixed_notional verilirse her işlem bu tutarla
-    açılır (bakiye ne olursa olsun; erime / minimum emir yok): stratejinin işlem başı gücünü ölçmek için."""
+    açılır (bakiye ne olursa olsun; erime / minimum emir yok): stratejinin işlem başı gücünü ölçmek için.
+    Dalga modunda (p.max_positions > 1) simulate_slots."""
     start_ms = data.start_ms if start_ms is None else start_ms
     end_ms = data.end_ms if end_ms is None else end_ms
+    if p.max_positions > 1:
+        return simulate_slots(p, data, signals, windows, kill_switch, start_ms, end_ms, fixed_notional)
     signals = [s for s in signals if start_ms <= s.close_ms < end_ms]
     equity = p.start_capital
     curve: List[Tuple[int, float]] = [(start_ms, equity)]
@@ -747,11 +803,12 @@ def simulate(p: SimParams, data: FutData, signals: Sequence[FutSignal], windows:
         if s.close_ms < freeze_until:
             skipped["risk sigortası (zarar serisi / günlük limit)"] += 1
             continue
+        factor = isolated_factor(p.isolated_size_pct, p.isolated_breadth, s.breadth)   # Yalnız çöküş: küçük
         if fixed_notional:
-            notional = fixed_notional
+            notional = fixed_notional * factor
             margin = notional / p.leverage
         else:
-            margin = equity * usage
+            margin = equity * usage * factor
             notional = min(margin * p.leverage, p.max_notional)
             margin = notional / p.leverage
         if not fixed_notional and notional < min_notional(s.symbol):
@@ -805,6 +862,127 @@ def simulate(p: SimParams, data: FutData, signals: Sequence[FutSignal], windows:
         if equity * usage * p.leverage < DEFAULT_MIN_NOTIONAL:
             ruined = tr.exit_ms
             break
+    return FutResult(p, trades, curve, skipped, start_ms, end_ms, ruined, kill_ms)
+
+
+def simulate_slots(p: SimParams, data: FutData, signals: Sequence[FutSignal], windows, kill_switch: bool,
+                   start_ms: int, end_ms: int, fixed_notional: Optional[float] = None) -> FutResult:
+    """Dalga modu: aynı anda en fazla p.max_positions pozisyon (farklı coinler). Her pozisyonun teminatı gerçekleşmiş
+    bakiyenin usage / N'i (yalnız çöküşte × isolated_size_pct); açık pozisyon varken yenisi yalnızca genişlik ≥
+    p.extra_breadth ise açılır (canlı: FuturesBot.scan_and_enter). Kapanan pozisyonun kârı / zararı çıkış sırasıyla
+    bakiyeye yazılır; risk sigortaları (bekleme, günlük limit, zarar serisi, kill-switch) tek pozisyondaki gibi.
+    Limit girişte bir mumda tek emir denenir (canlıda aynı anda tek bekleyen giriş emri)."""
+    signals = [s for s in signals if start_ms <= s.close_ms < end_ms]
+    slots = max(1, int(p.max_positions))
+    equity = p.start_capital
+    curve: List[Tuple[int, float]] = [(start_ms, equity)]
+    trades: List[FutTrade] = []
+    skipped: Counter = Counter()
+    heap: List[tuple] = []                  # (boşalma ms, sıra, işlem, teminat)
+    open_syms: Dict[str, int] = {}
+    used = 0.0
+    seq = 0
+    limit_bar = -1
+    cooldown: Dict[str, int] = {}
+    freeze_until = -1
+    sl_streak = 0
+    day_key, day_pnl = -1, 0.0
+    ruined = kill_ms = None
+    stop = False
+    usage = p.margin_usage_pct / 100
+    kill_level = p.start_capital * (1 - p.kill_pct / 100) if p.kill_pct else -1.0
+
+    def realize(until: int) -> None:
+        nonlocal equity, used, freeze_until, sl_streak, day_key, day_pnl, kill_ms, ruined, stop
+        while heap and heap[0][0] <= until and not stop:
+            _free, _q, tr, margin = heapq.heappop(heap)
+            used -= margin
+            open_syms.pop(tr.symbol, None)
+            equity = equity + tr.pnl if fixed_notional else max(0.0, equity + tr.pnl)
+            tr.equity_after = equity
+            curve.append((tr.exit_ms, equity))
+            day = tr.exit_ms // DAY_MS
+            if day != day_key:
+                day_key, day_pnl = day, 0.0
+            day_pnl += tr.pnl
+            midnight = (day + 1) * DAY_MS
+            if p.daily_loss_pct > 0 and day_pnl <= -p.start_capital * p.daily_loss_pct / 100:
+                freeze_until = max(freeze_until, midnight)
+            if p.daily_profit_pct > 0 and day_pnl >= p.start_capital * p.daily_profit_pct / 100:
+                freeze_until = max(freeze_until, midnight)
+            sl_streak = sl_streak + 1 if tr.reason == "SL" else 0
+            if p.loss_streak_limit > 0 and sl_streak >= p.loss_streak_limit:
+                freeze_until = max(freeze_until, tr.exit_ms + int(p.loss_streak_pause_h * FUT_HOUR_MS))
+                sl_streak = 0
+            if fixed_notional:
+                continue
+            if kill_ms is None and equity <= kill_level:
+                kill_ms = tr.exit_ms
+                if kill_switch:
+                    stop = True
+            if not heap and equity * usage * p.leverage / slots < DEFAULT_MIN_NOTIONAL:
+                ruined, stop = tr.exit_ms, True
+
+    for s in signals:
+        realize(s.close_ms)
+        if stop:
+            break
+        if s.close_ms == limit_bar:
+            skipped["aynı mumda limit emir denendi"] += 1
+            continue
+        if len(heap) >= slots:
+            skipped["açık pozisyon vardı"] += 1
+            continue
+        if s.symbol in open_syms:
+            skipped["bu coinde açık pozisyon var"] += 1
+            continue
+        if heap and s.breadth < p.extra_breadth:
+            skipped[f"ek pozisyon: dalga yok (genişlik < {p.extra_breadth})"] += 1
+            continue
+        if s.close_ms < cooldown.get(s.symbol, -1):
+            skipped["coin beklemede (önceki işlemden sonra)"] += 1
+            continue
+        if s.close_ms < freeze_until:
+            skipped["risk sigortası (zarar serisi / günlük limit)"] += 1
+            continue
+        factor = isolated_factor(p.isolated_size_pct, p.isolated_breadth, s.breadth)
+        if fixed_notional:
+            notional = fixed_notional * factor
+            margin = notional / p.leverage
+        else:
+            margin = min(equity * usage / slots * factor, max(0.0, equity * usage - used))
+            notional = min(margin * p.leverage, p.max_notional)
+            margin = notional / p.leverage
+            if notional < min_notional(s.symbol):
+                skipped["minimum emir tutarının altında"] += 1
+                if not heap and equity * usage * p.leverage / slots < DEFAULT_MIN_NOTIONAL:
+                    ruined = s.close_ms
+                    break
+                continue
+        window = windows.get((s.symbol, s.close_ms))
+        if window is None or not len(window[1]):
+            skipped["çıkış verisi yok"] += 1
+            continue
+        tr = run_trade(p, s, window, margin, notional, data)
+        if p.entry_limit:
+            limit_bar = s.close_ms
+        if tr is None:
+            skipped[f"limit emir {p.limit_ttl_min} dk içinde dolmadı"] += 1
+            continue
+        tr.slot = len(heap) + 1
+        trades.append(tr)
+        free_at = tr.exit_ms if tr.reason == "TIME" else tr.exit_ms + tr.bar_ms
+        seq += 1
+        heapq.heappush(heap, (free_at, seq, tr, margin))
+        open_syms[s.symbol] = free_at
+        used += margin
+        wait = (max(p.symbol_cooldown_min, p.loss_cooldown_min) if tr.pnl < 0 and p.loss_cooldown_min > 0
+                else p.symbol_cooldown_min)
+        if wait > 0:
+            cooldown[s.symbol] = tr.exit_ms + tr.bar_ms + wait * MIN_MS
+    if not stop:
+        realize(2 ** 62)
+    curve.sort(key=lambda x: x[0])
     return FutResult(p, trades, curve, skipped, start_ms, end_ms, ruined, kill_ms)
 
 
@@ -930,7 +1108,7 @@ def evaluate(p: SimParams, data: FutData, signals: Sequence[FutSignal], windows)
     chained = simulate(p, data, signals, windows)
     years = [(y, simulate(p, data, signals, windows, start_ms=a, end_ms=b)) for y, a, b in year_ranges(data)]
     fixed = simulate(p, data, signals, windows,
-                     fixed_notional=p.start_capital * p.margin_usage_pct / 100 * p.leverage)
+                     fixed_notional=p.start_capital * p.margin_usage_pct / 100 * p.leverage / max(1, p.max_positions))
     return Evaluation(chained, years, fixed)
 
 
@@ -962,6 +1140,20 @@ def exit_grid(cfg, data: FutData, signals, windows) -> List[Tuple[float, float, 
             for tp in tps for sl in sls]
 
 
+def cascade_rows(cfg, ev) -> List[Tuple[str, "Evaluation"]]:
+    """Dalga modu karşılaştırması: kapalıysa önerilen set ve yalnız çöküş yarım; açıksa tek pozisyon (2x)."""
+    base = params_from_cfg(cfg)
+    rows = []
+    if base.max_positions == 1:
+        rows.append(("🌊 Dalga modu (2 pozisyon, 3x, ek ≥8 coin, yalnız çöküş %50)",
+                     ev(max_positions=2, leverage=3, extra_breadth=8, isolated_size_pct=50.0, isolated_breadth=2)))
+    else:
+        rows.append(("Tek pozisyon (dalga modu kapalı, 2x)", ev(max_positions=1, leverage=2, isolated_size_pct=100.0)))
+    if base.isolated_size_pct >= 100:
+        rows.append(("Yalnız çöküş yarım büyüklük (<2 coin)", ev(isolated_size_pct=50.0, isolated_breadth=2)))
+    return rows
+
+
 def variant_rows(cfg, data: FutData, signals, windows) -> List[Tuple[str, Evaluation]]:
     """Tek bir kuralı değiştirmenin etkisi (diğer her şey aynı)."""
     def ev(sigs=signals, **over):
@@ -989,7 +1181,7 @@ def variant_rows(cfg, data: FutData, signals, windows) -> List[Tuple[str, Evalua
                 (f"Çöküş eşiği %{cfg.futures_crash_drop_pct - 2:g}", other(futures_crash_drop_pct=cfg.futures_crash_drop_pct - 2)),
                 (f"Çöküş eşiği %{cfg.futures_crash_drop_pct + 2:g}", other(futures_crash_drop_pct=cfg.futures_crash_drop_pct + 2)),
                 ("+likidasyon dalgası şartı" if not cfg.futures_crash_liq else "Likidasyon şartı kapalı",
-                 other(futures_crash_liq=not cfg.futures_crash_liq))]
+                 other(futures_crash_liq=not cfg.futures_crash_liq))] + cascade_rows(cfg, ev)
     out = [("Başabaş kalkanı kapalı", ev(be_enabled=False)),
            ("Zaman stopu 30 dk", ev(hold_min=30)),
            ("Zaman stopu 120 dk", ev(hold_min=120)),
@@ -1208,11 +1400,13 @@ def grid_search(cfg, data: FutData, variants: Optional[Sequence[GridVariant]] = 
     windows = GridWindows(hold // 5 + 2)
     store: List[List[tuple]] = [[] for _ in variants]
     coins = len(data.lean_symbols) if data.loader is not None else len(data.k5)
+    breadth = BreadthCounter(data)
     for n, (symbol, k) in enumerate(_series(data), 1):
         k = with_extras(k, symbol, data, cfgs)
         t = k["t"]
         close = t + FUT_BAR_MS
         f = futures_features(k, cfg)
+        breadth.add(f, close, symbol[:-4])
         active = _active_mask(close, symbol[:-4], data.segments)
         nxt_ok = np.zeros(len(t), dtype=bool)
         nxt_ok[:-1] = t[1:] == close[:-1]
@@ -1226,9 +1420,11 @@ def grid_search(cfg, data: FutData, variants: Optional[Sequence[GridVariant]] = 
         windows.add(symbol, k, np.flatnonzero(used))
         if n % 10 == 0:
             say(f"   {n}/{coins} coin tarandı")
+    breadth.finish(())
     rows = []
     for vi, (variant, c2) in enumerate(zip(variants, cfgs)):
-        signals = [FutSignal(int(ms), sym, "long" if sd > 0 else "short", float(sc), float(eo), priority=int(pr))
+        signals = [FutSignal(int(ms), sym, "long" if sd > 0 else "short", float(sc), float(eo), priority=int(pr),
+                             breadth=breadth_at(data, int(ms)))
                    for closes, sym, sides, prios, scores, opens in store[vi]
                    for ms, sd, pr, sc, eo in zip(closes, sides, prios, scores, opens)]
         signals.sort(key=signal_order)
@@ -1826,6 +2022,35 @@ def _eval_line(ev: Evaluation) -> str:
             f"%{ev.win_rate:4.1f}, işlem başı {ev.avg_move:+.3f}%")
 
 
+def cascade_label(p: SimParams) -> str:
+    """Dalga modu / yalnız çöküş büyüklüğü özeti (rapor satırı)."""
+    parts = []
+    if p.max_positions > 1:
+        parts.append(f"🌊 Dalga modu: en fazla {p.max_positions} pozisyon (her biri bakiyenin "
+                     f"%{p.margin_usage_pct / p.max_positions:.1f}'i teminat × {p.leverage}x); ek pozisyon yalnızca son 1 "
+                     f"saatte ≥{p.extra_breadth} coin %3+ düşerken")
+    if p.isolated_size_pct < 100:
+        parts.append(f"yalnız çöküşte (≤{p.isolated_breadth - 1} coin düşüyor) pozisyon %{p.isolated_size_pct:g}")
+    return "; ".join(parts)
+
+
+def breadth_breakdown(trades: Sequence[FutTrade], p: SimParams) -> str:
+    """Girişteki genişliğe göre işlem başı sonuç (sabit tutar): yalnız çöküş / ara / piyasa geneli dalga."""
+    groups = (("yalnız çöküş (0-1 coin)", lambda b: b < 2), ("2-7 coin", lambda b: 2 <= b < 8),
+              ("dalga (8+ coin)", lambda b: b >= 8))
+    out = []
+    for name, ok in groups:
+        mv = [net_move_pct(t) for t in trades if ok(t.breadth)]
+        if mv:
+            out.append(f"{name}: {len(mv)} işlem, ort. {np.mean(mv):+.3f}%")
+    text = "Genişliğe göre (son 1 saatte %3+ düşen coin, sabit tutar): " + " | ".join(out)
+    if p.max_positions > 1:
+        extra = [t for t in trades if t.slot > 1]
+        if extra:
+            text += f" | ek pozisyonlar: {len(extra)} işlem, ort. {np.mean([net_move_pct(t) for t in extra]):+.3f}%"
+    return text
+
+
 def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None, grid=None, variants=None) -> str:
     res = ev.chained
     p = res.params
@@ -1835,15 +2060,17 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
     room = futures_liq_distance_pct(p.leverage, p.mmr_pct)
     days = (data.end_ms - data.start_ms) / DAY_MS
     fixed = ev.trades
-    size = p.start_capital * p.margin_usage_pct / 100 * p.leverage
+    size = p.start_capital * p.margin_usage_pct / 100 * p.leverage / max(1, p.max_positions)
     L = [f"📊 VADELİ SCALPING BACKTESTİ — {_date(data.start_ms)} → {_date(data.end_ms)} ({days:.0f} gün)", "━" * 30]
     if data.universe_note:
         last = data.segments[-1].coins if data.segments else ()
         L.append(f"Coinler: {data.universe_note}; son ay: {','.join(last[:20])}" + (" ..." if len(last) > 20 else ""))
     else:
         L.append("Coinler: " + "; ".join(f"{_date(s.start_ms)}'den: {','.join(s.coins)}" for s in data.segments))
-    L.append(f"Kaldıraç {p.leverage}x isolated | teminat: serbest bakiyenin %{p.margin_usage_pct:g}'i (bileşik) | "
-             f"başlangıç {p.start_capital:g} USDT")
+    margin_text = (f"serbest bakiyenin %{p.margin_usage_pct:g}'i (bileşik)" if p.max_positions <= 1 else
+                   f"pozisyon başına bakiyenin %{p.margin_usage_pct / p.max_positions:.1f}'i (en fazla "
+                   f"{p.max_positions} pozisyon, bileşik)")
+    L.append(f"Kaldıraç {p.leverage}x isolated | teminat: {margin_text} | başlangıç {p.start_capital:g} USDT")
     L.append(f"Kâr Al +%{p.tp_pct:g} ({'limit, maker' if p.tp_limit else 'piyasa'}) | Zarar Kes -%{p.sl_pct:g} | "
              + (f"başabaş +%{p.be_trigger_pct:g} → stop +%{p.be_floor_pct:g}" if p.be_enabled else "başabaş kapalı")
              + (f" | izleyen stop +%{p.trail_act_pct:g}'de, tepenin %{p.trail_gap_pct:g} gerisinden"
@@ -1863,9 +2090,12 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
         mods = futures_modules(cfg)
         if mods:
             parts = {"pump": f"pompa short ({cfg.futures_pump_rules})", "breakout": "hacimli kırılım long",
-                     "bb": f"Bollinger + RSI ({cfg.futures_bb})"}
+                     "bb": f"Bollinger + RSI ({cfg.futures_bb})", "funding": "fonlama sıkışması long",
+                     "pullback": "trend içi düzeltme long"}
             L.append("Ek modüller (VEYA): " + ", ".join(parts[m] for m in mods)
-                     + "; öncelik çöküş > pompa > kırılım > Bollinger")
+                     + "; öncelik çöküş > fonlama > pompa > düzeltme > kırılım > Bollinger")
+        if p.max_positions > 1 or p.isolated_size_pct < 100:
+            L.append(cascade_label(p))
     else:
         L.append("Taktik: 4'lü onay (likidasyon + hacim + RSI uyumsuzluğu + BTC 1 saatlik trendi)")
     L.append("")
@@ -1874,7 +2104,8 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
         L.append("🔎 Sinyal hunisi (aktif dönemdeki 5 dk mumlar):")
         L.append(f"  {_num(funnel.candles, 0)} mum → {cfg.futures_crash_hours} saatte ≥%{cfg.futures_crash_drop_pct:g} "
                  f"düşüş {_num(funnel.liq, 0)} (likidasyon dalgalı: {_num(funnel.liq_vol, 0)}) → {_num(funnel.signals, 0)} "
-                 f"sinyal mumu (tek pozisyon ve bekleme kurallarıyla işleme dönüşen {len(fixed)})")
+                 f"sinyal mumu ({'tek pozisyon' if p.max_positions <= 1 else 'pozisyon sınırı'} ve bekleme "
+                 f"kurallarıyla işleme dönüşen {len(fixed)})")
     else:
         L.append("🔎 4'lü onay hunisi (aktif dönemdeki 5 dk mumlar):")
         L.append(f"  {_num(funnel.candles, 0)} mum → likidasyon dalgası {_num(funnel.liq, 0)} → + hacim "
@@ -1891,6 +2122,8 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
     skipped = ", ".join(f"{k}: {v}" for k, v in res.skipped.most_common())
     if skipped:
         L.append(f"  Atlanan sinyal: {skipped}")
+    if crash and data.breadth is not None and fixed:
+        L.append("  " + breadth_breakdown(fixed, p))
     if res.kill_ms:
         L.append(f"  ⚠️ Kill-switch (-%{p.kill_pct:g}) canlıda {_date(res.kill_ms)} tarihinde botu durdururdu")
     if res.ruined_ms:
