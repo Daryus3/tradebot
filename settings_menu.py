@@ -14,6 +14,7 @@ aç / kapa düğmesini gösterir. Düğme verisi (Telegram sınırı 64 bayt):
   ftac:<taktik>                    vadeli taktik (onaydan sonra o taktiğin çıkış ayarları da yüklenir)
   fgp:<n>                          ızgara testinin n. en iyi giriş kuralı (onaydan sonra birlikte yazılır)
   fcm:on | fcm:off                 🌊 dalga modunun önerilen seti / kapatma (onaydan sonra birlikte yazılır)
+  fcm:p6 | fcm:p6s                 ⭐ Faz 6 seti / Faz 6 tek pozisyon (onaydan sonra birlikte yazılır)
 Değişiklik ControlPanel.request_change ile doğrulanır, hemen uygulanır ve .env'ye yazılır. Kill-switch'i gevşetmek
 ve Binance'teki zarar kes güvencesini kapatmak onay ister; şu anki zararın altında bir kill-switch seçilemez.
 """
@@ -23,11 +24,11 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Tuple
 
 from config import (DEFAULT_FUTURES_COINS, FUTURES_BB_MODES, FUTURES_CASCADE_PRESET, FUTURES_CONFIRMS,
-                    FUTURES_ENTRY_ORDERS,
+                    FUTURES_ENTRY_ORDERS, FUTURES_PHASE6_OFF, FUTURES_PHASE6_PRESET, FUTURES_PHASE6_SINGLE_PRESET,
                     FUTURES_GRID_PRESETS, FUTURES_LIQ_SOURCES, FUTURES_RECOMMENDED, FUTURES_SIDES, FUTURES_TACTIC_EXITS,
                     FUTURES_TACTICS, FUTURES_TP_ORDERS, FUTURES_UNIVERSE_MODES, futures_coin_list, futures_crash_rules,
-                    futures_funding_rules, futures_liq_distance_pct, futures_modules, futures_pump_rules, is_futures,
-                    is_rotation, parse_crash_rules)
+                    futures_funding_rules, futures_liq_distance_pct, futures_modules, futures_pump_rules,
+                    futures_slot_share, futures_wave_rules, is_futures, is_rotation, parse_crash_rules)
 from runtime_settings import EDITABLE, format_value
 from telegram_bot import LINE, esc, fmt_duration, fmt_signed, fmt_usdt
 
@@ -58,8 +59,19 @@ MODULE_LABELS = {"pump": "pompa short", "bb": "Bollinger", "breakout": "kırıl�
 FUNDING_RULE_CHOICES = ("1:5", "1:3", "1:6")
 ENTRY_ORDER_LABELS = {"market": "⚡ Giriş: piyasa emri", "limit": "📌 Giriş: limit (maker)"}
 UNIVERSE_MODE_LABELS = {"avg": "📊 Ortalama hacim", "daily": "📅 Dünün hacmi (her gün)"}
-# Dalga modu (Faz 5): kapatınca tek pozisyon, tam büyüklük ve 🥈 #2'nin kaldıracı
+# Dalga modu (Faz 5): kapatınca tek pozisyon, tam büyüklük ve 🥈 #2'nin kaldıracı (Faz 6 ekleri de kapanır)
 CASCADE_OFF = {"FUTURES_MAX_POSITIONS": 1, "FUTURES_ISOLATED_SIZE_PCT": 100, "FUTURES_LEVERAGE": 2}
+# Faz 6 setleri (Faz 5 seti bunlardan bağımsız; Faz 5 düğmesi Faz 6 eklerini kapatır, Faz 5 tam olarak Faz 5 kalır)
+PHASE6_PRESETS = {"p6": FUTURES_PHASE6_PRESET, "p6s": FUTURES_PHASE6_SINGLE_PRESET}
+WAVE_RULE_CHOICES = ("", "1:5,4:8")
+PHASE6_HINT = ("Faz 6 testi (2020-2026, 1 dk, liste + en hacimli 20 köklü coin, 🥈 #2 giriş / çıkışları, 30 USDT): "
+               "dalgada zarar kesen coin genelde düşmeye devam edip daha derinden dönüyor; zarar sonrası 240 dk "
+               "bekleme bu en kârlı ikinci girişi kaçırıyordu (12+ coin düşerken işlem başı +%1.10). Faz 6 seti (4 "
+               "pozisyon: ilk #2 boyunda + dalgada 3 küçük ek, 3x; dalgada yeniden giriş ≥3 coin; 12+ coin düşerken "
+               "1 saatte %5 / 4 saatte %8 de sinyal): yılda ~800 işlem (#2: 343), yıllık getiri iki dönemde de #2'den "
+               "yüksek, en büyük düşüş #2 kadar. Faz 6 tek pozisyon: yılda ~400 işlem, düşüş #2 kadar. Rakamlar README'de "
+               "(Faz 6). Kötümser stop dolumunda ve kaymada da #2'den iyi ama ikisi birlikte her ayar zarar eder. Önce "
+               "test modunda (paper) izleyin.")
 CASCADE_HINT = ("Faz 5 testi (2020-2026, 1 dk, liste + en hacimli 20 köklü coin, 🥈 #2 çıkışları): kâr piyasa geneli "
                 "dalgalardan geliyor (8+ coin düşerken işlem başı ~+%0.46, tek coin düşerken ~%0). Faz 5 seti (2 "
                 "pozisyon, 3x, ek pozisyon ≥8 coin, yalnız çöküş %50): yılda ~450 işlem (343 yerine), kazanma %81.7, "
@@ -198,6 +210,14 @@ def _extra_label(v: str) -> str:
     return f"+ {_rules_label(rules)}" if rules else "Ek pencere yok"
 
 
+def _wave_label(v: str) -> str:
+    try:
+        rules = parse_crash_rules(v)
+    except ValueError:
+        return v
+    return "Dalga eşikleri: " + " · ".join(f"{h} sa %{p:g}" for h, p in rules) if rules else "Dalga eşikleri: kapalı"
+
+
 def _pump_label(v: str) -> str:
     try:
         rules = parse_crash_rules(v)
@@ -314,18 +334,28 @@ PAGES: Dict[str, Page] = {
     ), back=(("🧭 Giriş sinyali", "pg:fe"), ("⬅️ Vadeli ayarlar", "cfg"), ("🏠 Menü", "menu")), futures=True),
     "fw": Page("🌊 Dalga Modu", rows=(
         Link(lambda m: m.cascade_preset_label(), "fcm:on", show=lambda m: _crash(m.cfg)),
-        Row("FUTURES_MAX_POSITIONS", values=(1, 2, 3), fmt=lambda v: "1 pozisyon (kapalı)" if int(v) == 1 else
-            f"en fazla {v} pozisyon", show=_crash, per_row=3),
+        Link(lambda m: m.phase6_preset_label("p6"), "fcm:p6", show=lambda m: _crash(m.cfg)),
+        Link(lambda m: m.phase6_preset_label("p6s"), "fcm:p6s", show=lambda m: _crash(m.cfg)),
+        Row("FUTURES_MAX_POSITIONS", values=(1, 2, 3, 4), fmt=lambda v: "1 pozisyon (kapalı)" if int(v) == 1 else
+            f"en fazla {v} pozisyon", show=_crash, per_row=4),
         Row("FUTURES_EXTRA_BREADTH", icon="🌊", values=(5, 8, 12), fmt=lambda v: f"ek: ≥{v} coin",
             show=lambda cfg: _crash(cfg) and cfg.futures_max_positions > 1, per_row=3),
         Row("FUTURES_LEVERAGE", icon="⚡", values=(2, 3, 4), fmt=lambda v: f"{v}x",
             show=lambda cfg: _crash(cfg) and cfg.futures_max_positions > 1, per_row=3),
+        Row("FUTURES_EXTRA_SIZE_PCT", icon="📏", values=(100, 50, 25, 16.7), fmt=lambda v: "ek: eşit" if float(v) >= 100
+            else f"ek: %{float(v):g}", show=lambda cfg: _crash(cfg) and cfg.futures_max_positions > 1, per_row=4),
         Row("FUTURES_ISOLATED_SIZE_PCT", values=(100, 50, 25), fmt=lambda v: "Yalnız çöküş: tam" if float(v) >= 100
             else f"Yalnız çöküş: %{float(v):g}", show=_crash, per_row=3),
         Row("FUTURES_ISOLATED_BREADTH", icon="🔎", values=(2, 3), fmt=lambda v: f"yalnız: <{v} coin",
             show=lambda cfg: _crash(cfg) and cfg.futures_isolated_size_pct < 100, per_row=2),
-        Link(lambda m: "⛔ Dalga modunu kapat (tek pozisyon, 2x)", "fcm:off",
-             show=lambda m: m.cfg.futures_max_positions > 1 or m.cfg.futures_isolated_size_pct < 100),
+        Row("FUTURES_REENTRY_BREADTH", icon="🔁", values=(0, 3, 8), fmt=lambda v: "yeniden giriş: kapalı" if int(v) == 0
+            else f"yeniden giriş: ≥{v} coin", show=_crash, per_row=3),
+        Row("FUTURES_WAVE_RULES", values=WAVE_RULE_CHOICES, fmt=lambda v: _wave_label(v), show=_crash, per_row=2),
+        Row("FUTURES_WAVE_BREADTH", icon="🌊", values=(8, 12, 15), fmt=lambda v: f"eşikler: ≥{v} coin",
+            show=lambda cfg: _crash(cfg) and bool(futures_wave_rules(cfg)), per_row=3),
+        Link(lambda m: "⛔ Dalga modunu kapat (tek pozisyon, 2x)" + (" ve Faz 6'yı" if m.phase6_on() else ""),
+             "fcm:off", show=lambda m: (m.cfg.futures_max_positions > 1 or m.cfg.futures_isolated_size_pct < 100
+                                        or m.phase6_on())),
     ), back=(("🧭 Giriş sinyali", "pg:fe"), ("⬅️ Vadeli ayarlar", "cfg"), ("🏠 Menü", "menu")), futures=True),
     "fx": Page("🎯 Vadeli Çıkışlar ve Emirler", rows=(
         Row("TAKE_PROFIT_PCT", icon="🎯", values=_by_tactic((3, 4, 6, 8), (1.0, 1.2, 1.5, 2.0)), fmt=_pct),
@@ -590,25 +620,46 @@ class SettingsMenu:
 
     def cascade_label(self) -> str:
         cfg = self.cfg
+        p6 = " + Faz 6" if self.phase6_on() else ""
         if cfg.futures_max_positions > 1:
             return (f"🌊 Dalga modu: {cfg.futures_max_positions} pozisyon, ek ≥{cfg.futures_extra_breadth} coin"
-                    + (f", yalnız çöküş %{cfg.futures_isolated_size_pct:g}" if cfg.futures_isolated_size_pct < 100 else ""))
+                    + (f", yalnız çöküş %{cfg.futures_isolated_size_pct:g}" if cfg.futures_isolated_size_pct < 100 else "")
+                    + p6)
         if cfg.futures_isolated_size_pct < 100:
-            return f"🌊 Dalga modu: kapalı (yalnız çöküş %{cfg.futures_isolated_size_pct:g})"
-        return "🌊 Dalga modu: kapalı"
+            return f"🌊 Dalga modu: kapalı (yalnız çöküş %{cfg.futures_isolated_size_pct:g}){p6}"
+        return "🌊 Dalga modu: kapalı" + p6
+
+    def _matches(self, values: Dict[str, object]) -> bool:
+        return all(format_value(getattr(self.cfg, EDITABLE[k].attr)) == format_value(v) for k, v in values.items())
+
+    def phase6_on(self) -> bool:
+        """Faz 6 eklerinden biri açık mı (dalgada yeniden giriş, dalga eşikleri, küçük ek pozisyonlar)."""
+        cfg = self.cfg
+        return (cfg.futures_reentry_breadth > 0 or bool(futures_wave_rules(cfg))
+                or (cfg.futures_max_positions > 1 and cfg.futures_extra_size_pct < 100))
 
     def cascade_preset_label(self) -> str:
-        on = all(format_value(getattr(self.cfg, EDITABLE[k].attr)) == format_value(v)
-                 for k, v in FUTURES_CASCADE_PRESET.items())
+        on = self._matches({**FUTURES_CASCADE_PRESET, **FUTURES_PHASE6_OFF})
         return f"{'✅ ' if on else ''}⭐ Faz 5 seti: 2 pozisyon, 3x, ek ≥8 coin, yalnız çöküş %50"
 
+    def phase6_preset_label(self, key: str) -> str:
+        on = self._matches(PHASE6_PRESETS[key])
+        name = ("Faz 6 seti: 4 pozisyon (ilk tam + 3 küçük), 3x, dalgada yeniden giriş, dalga eşikleri" if key == "p6"
+                else "Faz 6 tek pozisyon: dalgada yeniden giriş, dalga eşikleri, yalnız çöküş %50")
+        return f"{'✅ ' if on else ''}⭐ {name}"
+
     def ask_cascade(self, arg: str, mid: Optional[int]) -> None:
-        """fcm:on → dalga modunun önerilen seti; fcm:off → tek pozisyon, tam büyüklük, 2x (onaydan sonra yazılır)."""
-        if arg not in ("on", "off"):
+        """fcm:on → dalga modunun Faz 5 seti; fcm:p6 / fcm:p6s → Faz 6 seti / Faz 6 tek pozisyon; fcm:off → tek
+        pozisyon, tam büyüklük, 2x (Faz 6 ekleri de kapanır). Onaydan sonra birlikte yazılır."""
+        if arg not in ("on", "off", "p6", "p6s"):
             self._invalid()
             return
+        if arg in PHASE6_PRESETS:
+            self.ask_phase6(arg, mid)
+            return
         cfg = self.cfg
-        values = {k: format_value(v) for k, v in (FUTURES_CASCADE_PRESET if arg == "on" else CASCADE_OFF).items()}
+        preset = FUTURES_CASCADE_PRESET if arg == "on" else CASCADE_OFF
+        values = {k: format_value(v) for k, v in {**preset, **FUTURES_PHASE6_OFF}.items()}
         changed = [f"{k}={v}" for k, v in values.items() if v != format_value(getattr(cfg, EDITABLE[k].attr))]
         if not changed:
             self.show("fw", mid, "✅ Zaten bu ayarlar kullanılıyor.")
@@ -625,6 +676,36 @@ class SettingsMenu:
         else:
             detail = f"\n⚙️ Değişecekler: {esc(', '.join(changed))}"
             question = "Dalga modu kapatılsın mı (tek pozisyon, tam büyüklük, 2x)?"
+        if self.bot.state.positions:
+            detail += "\n📦 Açık pozisyonlar kendi emirleriyle devam eder."
+        self.panel.request_change(values, self._view("fw"), mid, origin="fw", ask=detail, question=question)
+
+    def ask_phase6(self, arg: str, mid: Optional[int]) -> None:
+        """fcm:p6 → Faz 6 seti (4 pozisyon); fcm:p6s → Faz 6 tek pozisyon. Faz 5 seti değişmez."""
+        cfg = self.cfg
+        values = {k: format_value(v) for k, v in PHASE6_PRESETS[arg].items()}
+        changed = [f"{k}={v}" for k, v in values.items() if v != format_value(getattr(cfg, EDITABLE[k].attr))]
+        if not changed:
+            self.show("fw", mid, "✅ Zaten bu ayarlar kullanılıyor.")
+            return
+        if arg == "p6":
+            detail = ("\n⭐ <b>Faz 6 seti</b>\nAynı anda en fazla 4 pozisyon: ilk pozisyon #2 ile aynı büyüklükte "
+                      "(bakiyenin %63.3'ü teminat × 3x = bakiyenin 1.9 katı); son 1 saatte 8+ coin %3+ düşerken açılan "
+                      "3 ek pozisyonun her biri bunun 1/6'sı (toplam en fazla bakiyenin 2.85 katı, Faz 5 kadar). Dalgada "
+                      "(3+ coin) zarar sonrası 240 dk bekleme atlanır; 12+ coin düşerken 1 saatte %5 / 4 saatte %8 düşüş "
+                      "de sinyal; yalnız çöküşte pozisyon yarım. Test (2020-2026, 1 dk, 30 USDT): yılda ~800 işlem "
+                      "(#2: 343), işlem başı +%0.35, yıllık getiri iki dönemde de #2'den yüksek, en büyük düşüş #2 "
+                      "kadar (%56 / %40; #2 %52 / %39).")
+            question = "Faz 6 seti açılsın mı?"
+        else:
+            detail = ("\n⭐ <b>Faz 6 tek pozisyon</b>\nEskisi gibi tek pozisyon (2x); dalgada (3+ coin) zarar sonrası "
+                      "240 dk bekleme atlanır, 12+ coin düşerken 1 saatte %5 / 4 saatte %8 düşüş de sinyal, yalnız "
+                      "çöküşte pozisyon yarım. Test: yılda ~400 işlem (#2: 343), yıllık getiri iki dönemde de #2'den "
+                      "yüksek, en büyük düşüş #2 kadar.")
+            question = "Faz 6 tek pozisyon açılsın mı?"
+        detail += ("\n🥈 #2'nin giriş / çıkış ayarlarıyla test edildi (onlar değişmez). ⚠️ Kötümser stop dolumu ve 3 kat "
+                   "kayma birlikte olursa her ayar zarar eder."
+                   f"\n⚙️ Değişecekler: {esc(', '.join(changed))}\n🧪 Önce test modunda (paper) izleyin.")
         if self.bot.state.positions:
             detail += "\n📦 Açık pozisyonlar kendi emirleriyle devam eder."
         self.panel.request_change(values, self._view("fw"), mid, origin="fw", ask=detail, question=question)
@@ -796,24 +877,40 @@ class SettingsMenu:
             return (f"🌊 <b>Dalga Modu</b>\n{LINE}\nYalnızca 💥 Çöküş dönüşü taktiğinde çalışır (🧭 Giriş sinyali → "
                     f"taktik).")
         k = cfg.futures_max_positions
-        if k > 1:
+        if k > 1 and cfg.futures_extra_size_pct >= 100:
             mode = (f"Açık: aynı anda en fazla <b>{k}</b> pozisyon; her biri bakiyenin "
                     f"%{cfg.futures_margin_usage_pct / k:.1f}'i teminat × {cfg.futures_leverage}x. İlk pozisyon her "
                     f"sinyalde, sonrakiler yalnızca son 1 saatte <b>≥{cfg.futures_extra_breadth}</b> coin %3+ düşerken "
                     f"(piyasa geneli likidasyon dalgası) açılır.")
+        elif k > 1:
+            first = cfg.futures_margin_usage_pct * futures_slot_share(cfg, 0)
+            each = cfg.futures_margin_usage_pct * futures_slot_share(cfg, 1)
+            mode = (f"Açık: aynı anda en fazla <b>{k}</b> pozisyon. İlk pozisyon her sinyalde, bakiyenin "
+                    f"%{first:.1f}'i teminat × {cfg.futures_leverage}x (bakiyenin {first * cfg.futures_leverage / 100:.2f}"
+                    f" katı); ek pozisyonlar yalnızca son 1 saatte <b>≥{cfg.futures_extra_breadth}</b> coin %3+ düşerken, "
+                    f"her biri %{each:.1f}'i (ilkinin %{cfg.futures_extra_size_pct:g}'i).")
         else:
             mode = "Kapalı: aynı anda tek pozisyon (tüm bakiye)."
         size = (f"Yalnız çöküş (son 1 saatte {cfg.futures_isolated_breadth}'den az coin %3+ düşüyor): pozisyon "
                 f"<b>%{cfg.futures_isolated_size_pct:g}</b> büyüklükte." if cfg.futures_isolated_size_pct < 100
                 else "Yalnız çöküşte pozisyon tam büyüklükte.")
         lines = ["🌊 <b>Dalga Modu</b>", LINE, mode, size]
+        if cfg.futures_reentry_breadth > 0:
+            lines.append(f"🔁 Dalgada yeniden giriş: son 1 saatte ≥{cfg.futures_reentry_breadth} coin %3+ düşerken zarar "
+                         f"sonrası bekleme ({cfg.loss_cooldown_minutes} dk) atlanır."
+                         + (" ⚠️ LOSS_COOLDOWN_MINUTES bekleme vermiyor, etkisiz." if
+                            cfg.loss_cooldown_minutes <= cfg.symbol_cooldown_minutes else ""))
+        wave = futures_wave_rules(cfg)
+        if wave:
+            lines.append(f"📉 Dalga eşikleri: son 1 saatte ≥{cfg.futures_wave_breadth} coin %3+ düşerken "
+                         + " veya ".join(f"{h} saatte %{p:g}" for h, p in wave) + " düşüş de sinyal.")
         breadth = getattr(bot, "last_breadth", None)
         if breadth is not None:
             lines.append(f"Son tarama: {breadth} coin son 1 saatte %3+ düştü.")
         if k > 1 and cfg.futures_universe <= 0:
             lines.append("⚠️ Yalnızca FUTURES_COINS listesi taranıyor: eşikler ~25 coinlik evren (liste + en hacimli 20) "
                          "için seçildi, ek pozisyon çok seyrek açılır.")
-        lines += [LINE, f"<i>{esc(CASCADE_HINT)}</i>"]
+        lines += [LINE, f"<i>{esc(CASCADE_HINT)}</i>", f"<i>{esc(PHASE6_HINT)}</i>"]
         return "\n".join(lines)
 
     def _text_fm(self) -> str:

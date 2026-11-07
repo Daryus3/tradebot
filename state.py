@@ -35,6 +35,9 @@ class BotState:
     positions: Dict[str, Position] = field(default_factory=dict)  # parite → açık pozisyon
     paper_balances: Dict[str, float] = field(default_factory=dict)
     cooldowns: Dict[str, float] = field(default_factory=dict)
+    # Faz 6 (vadeli, FUTURES_REENTRY_BREADTH): zararla kapanan coin → [dalgada yeniden girişe izin anı, o zarar sonrası
+    # beklemenin bitişi]. Bekleme sonradan uzatıldıysa (kara liste, onay bekleyen sinyal) bitiş tutmaz, atlanmaz.
+    wave_reentry: Dict[str, List[float]] = field(default_factory=dict)
     killed: bool = False
     kill_reason: str = ""
     killed_at: float = 0.0

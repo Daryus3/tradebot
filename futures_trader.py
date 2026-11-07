@@ -22,12 +22,13 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 import requests
 
-from config import (futures_coin_list, futures_crash_rules, futures_funding_rules, futures_liq_distance_pct,
-                    futures_modules, futures_pump_rules)
+from config import (futures_breadth_on, futures_coin_list, futures_crash_rules, futures_funding_rules,
+                    futures_liq_distance_pct, futures_modules, futures_pump_rules, futures_slot_share,
+                    futures_wave_rules)
 from futures_exchange import FFill, FuturesError, MinNotionalError, describe_error
 from logger import get_logger
 from risk import ExitReason, Position, cooldown_minutes, kill_switch_hit
@@ -110,9 +111,46 @@ class FuturesBot(TradingBot):
         return max(0, self.slots() - len(self.state.positions) - (1 if self.state.pending_entry else 0))
 
     def _cascade_on(self) -> bool:
-        """Dalga modu ya da yalnız çöküş küçültme açık mı (genişlik gerekir)."""
-        cfg = self.cfg
-        return cfg.futures_max_positions > 1 or cfg.futures_isolated_size_pct < 100
+        """Genişlik gerekiyor mu: dalga modu / yalnız çöküş küçültme (Faz 5) ya da dalgada yeniden giriş / dalga
+        eşikleri (Faz 6)."""
+        return futures_breadth_on(self.cfg)
+
+    def _reentry_bypass(self, breadth: Optional[int], now: float) -> Set[str]:
+        """Faz 6 (FUTURES_REENTRY_BREADTH): genişlik eşiği aşıldıysa zarar sonrası beklemesi atlanabilecek coinler.
+        Yalnızca o zararla başlayan bekleme sürüyorsa (kara liste / onay ertelemesiyle uzatılmadıysa), SYMBOL_COOLDOWN
+        bittiyse ve coinde açık pozisyon / bekleyen emir yoksa (backtest: futures_backtest.cooldown_block)."""
+        cfg, state = self.cfg, self.state
+        need = int(getattr(cfg, "futures_reentry_breadth", 0))
+        if need <= 0 or breadth is None or breadth < need or not state.wave_reentry:
+            return set()
+        busy = (set(state.positions) | {p["symbol"] for p in state.pending_orders.values()} | set(self.smart.entries)
+                | ({state.pending_entry.get("symbol")} if state.pending_entry else set()))
+        if self.fee_info is not None and self.fee_info.bnb_enabled:
+            busy.add(f"BNB{cfg.quote_asset}")
+        out = set()
+        for symbol, (after, until) in state.wave_reentry.items():
+            if symbol not in busy and now >= after and abs(state.cooldowns.get(symbol, -1.0) - until) < 1e-6:
+                out.add(symbol)
+        return out
+
+    def _mark_reentry(self, symbol: str, now: float, pnl: float, prev_until: float) -> None:
+        """Kapanışta (state.cooldowns yazıldıktan sonra; prev_until = kapanıştan önceki bekleme bitişi): zarar sonrası
+        bekleme dalgada atlanabilir mi (Faz 6). Dalgada yeniden girilen işlem kârla kapanırsa önceki zararın beklemesi
+        sonuna kadar sürer: o süre içinde coine yine yalnızca dalgada girilir (backtest: futures_backtest.set_cooldown)."""
+        cfg, state = self.cfg, self.state
+        loss_cd = int(getattr(cfg, "loss_cooldown_minutes", 0))
+        prev = state.wave_reentry.get(symbol)
+        after = now + cfg.symbol_cooldown_minutes * 60
+        if int(getattr(cfg, "futures_reentry_breadth", 0)) <= 0:
+            state.wave_reentry.pop(symbol, None)
+        elif pnl < 0 and loss_cd > cfg.symbol_cooldown_minutes:
+            state.wave_reentry[symbol] = [after, state.cooldowns[symbol]]
+        elif prev is not None and prev_until > now and abs(prev_until - prev[1]) < 1e-6:   # Önceki zarar sürüyor
+            until = max(prev[1], state.cooldowns[symbol])
+            state.cooldowns[symbol] = until
+            state.wave_reentry[symbol] = [max(prev[0], after), until]
+        else:
+            state.wave_reentry.pop(symbol, None)
 
     @staticmethod
     def _next_close(now: float) -> float:
@@ -254,6 +292,7 @@ class FuturesBot(TradingBot):
             return
         state = self.state
         state.cooldowns = {s: t for s, t in state.cooldowns.items() if t > now}   # Süresi dolan beklemeler
+        state.wave_reentry = {s: v for s, v in state.wave_reentry.items() if s in state.cooldowns}
         klines, errors = {}, []
         symbols, skipped = self._scan_symbols()
         limit = futures_kline_limit(self.cfg)       # En uzun pencere + izleme süresi + oynaklık geçmişi
@@ -282,10 +321,18 @@ class FuturesBot(TradingBot):
                 klines[symbol] = k
         breadth = market_breadth(klines) if cascade else None
         self.last_breadth = breadth
+        reentry = self._reentry_bypass(breadth, now)       # Faz 6: dalgada zarar sonrası bekleme atlanır
+        if reentry:
+            excluded = excluded - reentry
+            log.info("Dalgada yeniden giriş: %s coin düşüyor, zarar sonrası beklemesi atlanan: %s", breadth,
+                     ", ".join(sorted(reentry)))
         klines = {s: k for s, k in klines.items() if s not in excluded}
         self._attach_extras(klines, closed_ms)       # Faz 4: fonlama oranları, 1 saatlik mumlar (modül açıksa)
         btc_1h = ex.klines("BTCUSDT", "1h", FUT_BTC_1H_LIMIT) if self.strategy.needs_btc_trend else None
         signals, rejects = self.strategy.evaluate(klines, btc_1h, now_ms, feed=self.smart.liq_feed, breadth=breadth)
+        for sig in signals:
+            if sig.symbol in reentry:
+                sig.metrics["reentry"] = 1.0
         if errors:
             log.warning("Vadeli tarama: %d coinin mumları alınamadı (%s)", len(errors), "; ".join(errors[:3]))
             rejects["veri alınamadı"] += len(errors)
@@ -369,7 +416,8 @@ class FuturesBot(TradingBot):
         mods = futures_modules(cfg)
         if "bb" in mods or "breakout" in mods or "pullback" in mods:
             return symbols, 0
-        rules = futures_crash_rules(cfg) + (futures_funding_rules(cfg) if "funding" in mods else ())
+        rules = (futures_crash_rules(cfg) + futures_wave_rules(cfg)        # Faz 6 dalga eşikleri de (genişlik sonra)
+                 + (futures_funding_rules(cfg) if "funding" in mods else ()))
         watch = cfg.futures_confirm != "close"
         reach_h = max(h for h, _p in rules) + (cfg.futures_confirm_bars / 12 if watch else 0)
         if reach_h > 24:
@@ -486,8 +534,13 @@ class FuturesBot(TradingBot):
         slots = self.slots()
         if slots <= 1:
             return free * usage * factor
-        used = sum(p.margin_usdt for p in self.state.positions.values() if p.futures)
-        return min((free + used) * usage / slots * factor, free * usage)
+        opened = [p for p in self.state.positions.values() if p.futures]
+        used = sum(p.margin_usdt for p in opened)
+        share = futures_slot_share(cfg, len(opened))        # Faz 5: 1/N; Faz 6: ilk büyük, ekler küçük
+        if opened and cfg.futures_extra_size_pct < 100:
+            sig.metrics["size_pct"] = round(cfg.futures_extra_size_pct * factor, 1)
+            sig.metrics["size_kind"] = "ek pozisyon, ilkinin yüzdesi"
+        return min((free + used) * usage * share * factor, free * usage)
 
     def _place_limit_entry(self, sig: FuturesSignal, now: float, lev: int, margin: float, bid: float,
                            ask: float) -> None:
@@ -924,7 +977,9 @@ class FuturesBot(TradingBot):
             state.losses += 1
         state.total_fees += exit_fee
         state.positions.pop(pos.symbol, None)
+        prev_until = state.cooldowns.get(pos.symbol, 0.0)
         state.cooldowns[pos.symbol] = now + cooldown_minutes(self.cfg, pnl) * 60
+        self._mark_reentry(pos.symbol, now, pnl, prev_until)
         self.marks.pop(pos.symbol, None)
         self._be_retry_at.pop(pos.symbol, None)
         self._trail_at.pop(pos.symbol, None)
@@ -1014,8 +1069,14 @@ class FuturesBot(TradingBot):
         elif self.state.positions:
             lines.append("📦 Açık pozisyon var: yeni tarama pozisyon kapanınca yapılır.")
         if self._cascade_on() and self.last_breadth is not None:
+            cfg = self.cfg
+            extra = ""
+            if cfg.futures_reentry_breadth > 0:
+                extra += f", dalgada yeniden giriş ≥{cfg.futures_reentry_breadth}"
+            if futures_wave_rules(cfg):
+                extra += f", dalga eşikleri ≥{cfg.futures_wave_breadth}"
             lines.append(f"🌊 Genişlik: {self.last_breadth} coin son 1 saatte %3+ düştü (dalga ≥"
-                         f"{self.cfg.futures_extra_breadth}, yalnız çöküş <{self.cfg.futures_isolated_breadth})")
+                         f"{cfg.futures_extra_breadth}, yalnız çöküş <{cfg.futures_isolated_breadth}{extra})")
         pe = self.state.pending_entry
         if pe:
             left = max(0.0, float(pe.get("expires_at", 0.0)) - self.time_fn())

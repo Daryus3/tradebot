@@ -77,8 +77,9 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from binance_client import BinanceClient, RateLimitError
-from config import (STRATEGY_NAMES, fee_from_coin, futures_crash_rules, futures_funding_rules, futures_modules,
-                    futures_pump_rules, intraday_coin_list, intraday_tactic_list, rotation_coin_list, rotation_hold_count)
+from config import (STRATEGY_NAMES, fee_from_coin, futures_breadth_on, futures_crash_rules, futures_funding_rules,
+                    futures_modules, futures_pump_rules, futures_wave_cfg, futures_wave_rules, intraday_coin_list,
+                    intraday_tactic_list, rotation_coin_list, rotation_hold_count)
 from rotation import RotationPlan, btc_trend, momentum_pct, plan_rotation
 from exchange import SymbolRules
 from entry_filters import candle_reject, prior_trend_reject
@@ -2250,6 +2251,7 @@ def futures_entries(f: Dict[str, "np.ndarray"], cfg, active=None):
 def futures_kline_limit(cfg) -> int:
     """Canlı: coin başına istenecek 5 dk mum sayısı (en uzun pencere + izleme süresi + oynaklık geçmişi)."""
     hours = [h for h, _p in futures_crash_rules(cfg)] + [h for h, _p in futures_pump_rules(cfg)]
+    hours += [h for h, _p in futures_wave_rules(cfg)]          # Faz 6 dalga eşikleri
     if "funding" in futures_modules(cfg):
         hours += [h for h, _p in futures_funding_rules(cfg)]
     if getattr(cfg, "futures_breakout", False):
@@ -2463,8 +2465,12 @@ class FuturesSignal:
         parts = []
         if "breadth" in m:
             parts.append(f"Dalga: {int(m['breadth'])} coin %3+ düştü (1 saat)")
+        if m.get("wave_rule"):
+            parts.append("Dalga eşiği (Faz 6)")
+        if m.get("reentry"):
+            parts.append("Dalgada yeniden giriş (zarar sonrası bekleme atlandı)")
         if m.get("size_pct") and m["size_pct"] < 100:
-            parts.append(f"Pozisyon %{m['size_pct']:g} (yalnız çöküş)")
+            parts.append(f"Pozisyon %{m['size_pct']:g} ({m.get('size_kind', 'yalnız çöküş')})")
         return (" | " + " | ".join(parts)) if parts else ""
 
     def _legacy_note(self) -> str:
@@ -2512,10 +2518,14 @@ class FuturesScalpStrategy(ReboundStrategy):
         modu genişliği (verilmezse `klines`'tan). (sinyaller en güçlüden zayıfa, elenme nedenleri)."""
         _need_numpy()
         cfg = self.cfg
-        cascade = (int(getattr(cfg, "futures_max_positions", 1)) > 1
-                   or float(getattr(cfg, "futures_isolated_size_pct", 100.0)) < 100)
+        cascade = futures_breadth_on(cfg)         # Dalga modu / yalnız çöküş küçültme (Faz 5) ya da Faz 6 ekleri
         if cascade and breadth is None:
             breadth = market_breadth(klines)
+        # Faz 6 dalga eşikleri: genişlik FUTURES_WAVE_BREADTH veya üstündeyse ana kuralın sinyal vermediği coinlerde
+        # FUTURES_WAVE_RULES'un (daha düşük) eşikleri de denenir (backtest: find_signals)
+        wave_cfg = futures_wave_cfg(cfg)
+        if wave_cfg is None or breadth is None or breadth < int(getattr(cfg, "futures_wave_breadth", 12)):
+            wave_cfg = None
         rejects: Counter = Counter()
         trend = btc_trend_1h(btc_1h) if self.needs_btc_trend and btc_1h is not None and len(btc_1h["t"]) else None
         signals: List[FuturesSignal] = []
@@ -2556,6 +2566,11 @@ class FuturesScalpStrategy(ReboundStrategy):
                 liq_long, liq_short = fl, fs
             long_ok, short_ok = futures_candidates(f, cfg, up, down, liq_long, liq_short)
             found = pick_signal(f, i, cfg, long_ok, short_ok, liq_long)
+            if found is None and wave_cfg is not None:
+                lw, sw = futures_candidates(f, wave_cfg, up, down, liq_long, liq_short)
+                found = pick_signal(f, i, wave_cfg, lw, sw, liq_long)
+                if found is not None:
+                    found["wave_rule"] = 1.0
             if found is None:
                 rejects[self._reject_reason(f, i, up, down, liq_long, liq_short)] += 1
                 continue

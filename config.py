@@ -120,6 +120,29 @@ FUTURES_MAX_POSITIONS_LIMIT = 5
 # (kötümser stop dolumunda Mayıs 2021'de eridi); ayrıntı README.
 FUTURES_CASCADE_PRESET = {"FUTURES_MAX_POSITIONS": 2, "FUTURES_LEVERAGE": 3, "FUTURES_EXTRA_BREADTH": 8,
                           "FUTURES_ISOLATED_SIZE_PCT": 50, "FUTURES_ISOLATED_BREADTH": 2}
+# Faz 6 (Kasım 2026; hepsi varsayılan kapalı, Faz 5 ayarları ve seti değişmez):
+#   FUTURES_REENTRY_BREADTH = genişlik bu değer veya üstündeyken zarar sonrası bekleme (LOSS_COOLDOWN_MINUTES)
+#       uygulanmaz: dalgada zarar kesen coine yeniden girilebilir (SYMBOL_COOLDOWN_MINUTES yine geçerli). 0 = kapalı.
+#       Testte dalgada zarar sonrası yeniden girişler en kârlı işlemlerdi (12+ coin: işlem başı +%1.10, sıradan dalga
+#       işlemi +%0.69); yalnız çöküşte ~%0 (orada bekleme sürer).
+#   FUTURES_WAVE_RULES + FUTURES_WAVE_BREADTH = genişlik FUTURES_WAVE_BREADTH veya üstündeyken ek çöküş pencereleri
+#       ("saat:%", ör. 1:5,4:8 = son 1 saatte %5 VEYA 4 saatte %8 düşüş de sinyal); boş = kapalı.
+#   FUTURES_EXTRA_SIZE_PCT = dalga modunda ek pozisyonların (2., 3. ...) büyüklüğü, ilk pozisyonun yüzdesi olarak;
+#       100 = hepsi eşit (Faz 5, eskisi gibi). Teminat ağırlıkları 1, x, x, ... (x = %/100): ilk pozisyon kullanılabilir
+#       bakiyenin 1 / (1 + (N-1)·x)'i, her ek pozisyon x / (1 + (N-1)·x)'i. 3x ve (N-1)·x = 0.5 iken ilk pozisyon #2 ile
+#       aynı büyüklükte (bakiyenin 1.9 katı) ve hepsi açıkken toplam Faz 5 kadar (2.85 katı).
+# Telegram → 🌊 Dalga modu → ⭐ Faz 6 seti (2020-2026, 1 dk; #2'nin giriş / çıkışlarıyla): 4 pozisyon (ilk tam + 3 ek ×
+# 1/6), 3x, dalgada yeniden giriş, dalga eşikleri. ⭐ Faz 6 tek pozisyon: aynı ekler tek pozisyonla. Ayrıntı README.
+FUTURES_PHASE6_PRESET = {"FUTURES_MAX_POSITIONS": 4, "FUTURES_LEVERAGE": 3, "FUTURES_EXTRA_BREADTH": 8,
+                         "FUTURES_ISOLATED_SIZE_PCT": 50, "FUTURES_ISOLATED_BREADTH": 2, "FUTURES_EXTRA_SIZE_PCT": 16.7,
+                         "FUTURES_REENTRY_BREADTH": 3, "FUTURES_WAVE_RULES": "1:5,4:8", "FUTURES_WAVE_BREADTH": 12,
+                         "LOSS_COOLDOWN_MINUTES": 240}
+FUTURES_PHASE6_SINGLE_PRESET = {"FUTURES_MAX_POSITIONS": 1, "FUTURES_LEVERAGE": 2, "FUTURES_ISOLATED_SIZE_PCT": 50,
+                                "FUTURES_ISOLATED_BREADTH": 2, "FUTURES_EXTRA_SIZE_PCT": 100,
+                                "FUTURES_REENTRY_BREADTH": 3, "FUTURES_WAVE_RULES": "1:5,4:8",
+                                "FUTURES_WAVE_BREADTH": 12, "LOSS_COOLDOWN_MINUTES": 240}
+# Faz 6 eklerinin kapalı hâli (Faz 5 seti ve "dalga modunu kapat" bunları da yazar: Faz 5 tam olarak Faz 5 kalır)
+FUTURES_PHASE6_OFF = {"FUTURES_EXTRA_SIZE_PCT": 100, "FUTURES_REENTRY_BREADTH": 0, "FUTURES_WAVE_RULES": ""}
 FUTURES_SIDES = ("both", "long", "short")
 FUTURES_LIQ_SOURCES = ("proxy", "feed", "both")
 FUTURES_TP_ORDERS = ("limit", "market")
@@ -415,6 +438,59 @@ def futures_funding_rules(cfg) -> Tuple[Tuple[int, float], ...]:
     return tuple(sorted(rules.items()))
 
 
+def futures_wave_rules(cfg) -> Tuple[Tuple[int, float], ...]:
+    """Faz 6 dalga eşikleri (saat, %): FUTURES_WAVE_RULES, saat sırasıyla; boş / hatalı = kapalı. Yalnızca çöküş
+    taktiğinde ve sabit yüzdelerle (FUTURES_CRASH_Z açıkken eşikler oynaklıktan gelir, dalga eşikleri kullanılmaz)."""
+    if getattr(cfg, "futures_tactic", "crash") != "crash" or float(getattr(cfg, "futures_crash_z", 0.0) or 0.0) > 0:
+        return ()
+    try:
+        parsed = parse_crash_rules(getattr(cfg, "futures_wave_rules", ""))
+    except ValueError:
+        return ()
+    rules: dict = {}
+    for hours, pct in parsed:
+        rules[hours] = min(pct, rules.get(hours, pct))
+    return tuple(sorted(rules.items()))
+
+
+def futures_wave_cfg(cfg):
+    """Dalga anındaki çöküş ayarı: ana kural + FUTURES_CRASH_EXTRA + FUTURES_WAVE_RULES (aynı saatte küçük eşik).
+    Ana saatin eşiği de düşerse ana yüzde de düşer: sıralama puanı (şiddet × ana yüzde) düşüş derinliğini ölçmeye
+    devam eder. Dalga eşikleri kapalıysa None. Canlı bot (FuturesScalpStrategy.evaluate) ve backtest (find_signals)
+    aynı ayarı kullanır."""
+    rules = futures_wave_rules(cfg)
+    if not rules:
+        return None
+    try:
+        base_extra = parse_crash_rules(getattr(cfg, "futures_crash_extra", ""))
+    except ValueError:
+        base_extra = ()
+    main_h = int(cfg.futures_crash_hours)
+    main_pct = min([float(cfg.futures_crash_drop_pct)] + [p for h, p in rules if h == main_h])
+    return replace(cfg, futures_crash_drop_pct=main_pct,
+                   futures_crash_extra=format_crash_rules(tuple(base_extra) + tuple(rules)))
+
+
+def futures_breadth_on(cfg) -> bool:
+    """Genişlik (son 1 saatte %3+ düşen coin sayısı) gerekiyor mu: dalga modu, yalnız çöküş küçültme (Faz 5) ya da
+    dalgada yeniden giriş / dalga eşikleri (Faz 6)."""
+    return (int(getattr(cfg, "futures_max_positions", 1)) > 1
+            or float(getattr(cfg, "futures_isolated_size_pct", 100.0)) < 100
+            or int(getattr(cfg, "futures_reentry_breadth", 0)) > 0 or bool(futures_wave_rules(cfg)))
+
+
+def futures_slot_share(cfg, n_open: int) -> float:
+    """Yeni pozisyonun teminatı, kullanılabilir bakiyenin (bakiye × FUTURES_MARGIN_USAGE_PCT) kaçta kaçı: tek
+    pozisyonda 1; dalga modunda ağırlıklar 1 (ilk pozisyon, açık pozisyon yokken) ve x = FUTURES_EXTRA_SIZE_PCT / 100
+    (ek pozisyonlar), toplam 1 + (N - 1)·x'e bölünür. x = 1 (varsayılan) → her biri 1/N (Faz 5)."""
+    slots = max(1, int(getattr(cfg, "futures_max_positions", 1)))
+    if slots <= 1:
+        return 1.0
+    x = max(0.0, min(1.0, float(getattr(cfg, "futures_extra_size_pct", 100.0)) / 100))
+    total = 1 + (slots - 1) * x
+    return (1.0 if n_open <= 0 else x) / total
+
+
 def futures_modules(cfg) -> Tuple[str, ...]:
     """Çöküş taktiğinde açık olan ek giriş modülleri (öncelik sırasıyla): funding, pump, pullback, breakout, bb."""
     if getattr(cfg, "futures_tactic", "crash") != "crash":
@@ -695,6 +771,11 @@ class Config:
     futures_extra_breadth: int = 8         # 2. ve sonraki pozisyon: son 1 saatte %3+ düşen coin sayısı en az bu kadar
     futures_isolated_size_pct: float = 100.0   # Yalnız çöküşte (genişlik < FUTURES_ISOLATED_BREADTH) pozisyon büyüklüğü %
     futures_isolated_breadth: int = 2      # Bundan az coin düşüyorsa çöküş "yalnız" sayılır
+    # Faz 6 (bkz. FUTURES_PHASE6_PRESET üstündeki açıklama; varsayılanlar = kapalı, eskisi gibi)
+    futures_extra_size_pct: float = 100.0  # Ek pozisyonların büyüklüğü, ilk pozisyonun %'si (100 = eşit, Faz 5)
+    futures_reentry_breadth: int = 0       # Genişlik ≥ bu iken zarar sonrası bekleme atlanır (0 = kapalı)
+    futures_wave_rules: str = ""           # Genişlik ≥ FUTURES_WAVE_BREADTH iken ek çöküş pencereleri ("saat:%")
+    futures_wave_breadth: int = 12
     futures_leverage: int = 2             # Kaldıraç 1-20; her girişten hemen önce Binance'te ayarlanır
     futures_margin_usage_pct: float = 95.0  # Serbest bakiyenin teminata giden yüzdesi (bileşik; kalan pay komisyon için)
     futures_volume_ratio: float = 2.5      # Hacim onayı: sinyal mumu hacmi önceki 20 mumun ortalamasının en az bu katı
@@ -1026,6 +1107,14 @@ class Config:
             errors.append("FUTURES_EXTRA_BREADTH ve FUTURES_ISOLATED_BREADTH 1-100 coin olmalı")
         if not 10 <= self.futures_isolated_size_pct <= 100:
             errors.append("FUTURES_ISOLATED_SIZE_PCT 10-100 arasında olmalı (%; 100 = tam büyüklük)")
+        if not 5 <= self.futures_extra_size_pct <= 100:
+            errors.append("FUTURES_EXTRA_SIZE_PCT 5-100 arasında olmalı (%; ilk pozisyona göre, 100 = eşit)")
+        if not 0 <= self.futures_reentry_breadth <= 100 or not 1 <= self.futures_wave_breadth <= 100:
+            errors.append("FUTURES_REENTRY_BREADTH 0-100 (0 = kapalı), FUTURES_WAVE_BREADTH 1-100 coin olmalı")
+        try:
+            parse_crash_rules(self.futures_wave_rules)
+        except ValueError as exc:
+            errors.append(f"FUTURES_WAVE_RULES hatalı: {exc}")
         if self.futures_universe_mode not in FUTURES_UNIVERSE_MODES:
             errors.append("FUTURES_UNIVERSE_MODE şunlardan biri olmalı: " + ", ".join(FUTURES_UNIVERSE_MODES))
         if self.futures_confirm not in FUTURES_CONFIRMS:
@@ -1294,6 +1383,10 @@ def load_config(env_file: Optional[str] = None, mode_override: Optional[str] = N
         futures_extra_breadth=_env_int("FUTURES_EXTRA_BREADTH", 8),
         futures_isolated_size_pct=_env_float("FUTURES_ISOLATED_SIZE_PCT", 100.0),
         futures_isolated_breadth=_env_int("FUTURES_ISOLATED_BREADTH", 2),
+        futures_extra_size_pct=_env_float("FUTURES_EXTRA_SIZE_PCT", 100.0),
+        futures_reentry_breadth=_env_int("FUTURES_REENTRY_BREADTH", 0),
+        futures_wave_rules=canonical_crash_extra(_env_str("FUTURES_WAVE_RULES", "")),
+        futures_wave_breadth=_env_int("FUTURES_WAVE_BREADTH", 12),
         futures_leverage=_env_int("FUTURES_LEVERAGE", 2),
         futures_margin_usage_pct=_env_float("FUTURES_MARGIN_USAGE_PCT", 95.0),
         futures_volume_ratio=_env_float("FUTURES_VOLUME_RATIO", 2.5),
@@ -1525,16 +1618,38 @@ def _setting_notes(cfg: Config) -> List[str]:
                          "toparlanan işlemlerdi (ortalama +%1.06, %93'ü kârlı): işlem başı +%0.31 → +%0.23, yıllık "
                          "getiri +%587 / +%213 → +%234 / +%105. Kayma 3 katına çıksa da piyasa emri önde.")
         if cfg.futures_max_positions > 1:
-            per = cfg.futures_margin_usage_pct / cfg.futures_max_positions
-            notes.append(f"FUTURES_MAX_POSITIONS={cfg.futures_max_positions} (🌊 dalga modu): her pozisyon bakiyenin "
-                         f"%{per:.1f}'i teminat × {cfg.futures_leverage}x; 2. ve sonraki pozisyon yalnızca son 1 saatte "
-                         f"≥{cfg.futures_extra_breadth} coin %3+ düşerken. Faz 5 testinde (2 pozisyon, 3x, ≥8 coin) yılda "
-                         f"~450 işlem (+%31), işlem başı +%0.34, ama en büyük düşüş %71 (12-13 Mart 2020; tek "
-                         f"pozisyonda %52) ve zarar kes emirleri fitilin yarısından dolarsa (kötümser senaryo) 3x'te "
-                         f"Mayıs 2021'de hesap eridi (tek pozisyonda erimedi). Önce test modunda deneyin.")
-            if cfg.futures_max_positions > 2:
-                notes.append("FUTURES_MAX_POSITIONS 3 ve üstü: testte düşüşü %83-95'e çıkardı (aynı dalgadaki pozisyonlar "
-                             "birlikte zarar kesiyor). Önerilen 2.")
+            x = cfg.futures_extra_size_pct / 100
+            if x >= 1:                   # Eşit büyüklükler (Faz 5)
+                per = cfg.futures_margin_usage_pct / cfg.futures_max_positions
+                notes.append(f"FUTURES_MAX_POSITIONS={cfg.futures_max_positions} (🌊 dalga modu): her pozisyon bakiyenin "
+                             f"%{per:.1f}'i teminat × {cfg.futures_leverage}x; 2. ve sonraki pozisyon yalnızca son 1 "
+                             f"saatte ≥{cfg.futures_extra_breadth} coin %3+ düşerken. Faz 5 testinde (2 pozisyon, 3x, ≥8 "
+                             f"coin) yılda ~450 işlem (+%31), işlem başı +%0.34, ama en büyük düşüş %71 (12-13 Mart 2020; "
+                             f"tek pozisyonda %52) ve zarar kes emirleri fitilin yarısından dolarsa (kötümser senaryo) "
+                             f"3x'te Mayıs 2021'de hesap eridi (tek pozisyonda erimedi). Önce test modunda deneyin.")
+                if cfg.futures_max_positions > 2:
+                    notes.append("FUTURES_MAX_POSITIONS 3 ve üstü: testte düşüşü %83-95'e çıkardı (aynı dalgadaki "
+                                 "pozisyonlar birlikte zarar kesiyor). Önerilen 2.")
+            else:                        # Faz 6: ilk pozisyon büyük, ek pozisyonlar küçük
+                lev = cfg.futures_leverage
+                first = cfg.futures_margin_usage_pct * futures_slot_share(cfg, 0)
+                each = cfg.futures_margin_usage_pct * futures_slot_share(cfg, 1)
+                notes.append(f"FUTURES_MAX_POSITIONS={cfg.futures_max_positions}, FUTURES_EXTRA_SIZE_PCT="
+                             f"{cfg.futures_extra_size_pct:g} (🌊 dalga modu, Faz 6 büyüklükleri): ilk pozisyon "
+                             f"bakiyenin %{first:.1f}'i teminat × {lev}x (bakiyenin {first * lev / 100:.2f} katı; #2: 1.90), "
+                             f"son 1 saatte ≥{cfg.futures_extra_breadth} coin %3+ düşerken açılan her ek pozisyon "
+                             f"%{each:.1f}'i ({each * lev / 100:.2f} katı). Faz 6 setinde (4 pozisyon, 3x, ek %16.7, "
+                             f"dalgada yeniden giriş ve dalga eşikleriyle) yılda ~780 işlem, işlem başı +%0.36, yıllık "
+                             f"getiri +%1.001 / +%353, en büyük düşüş %53 / %38 (#2: 343 işlem, +%587 / +%212, %52 / "
+                             f"%39); kötümser stop dolumunda 30 USDT → 648 USDT (#2: 374). Önce test modunda deneyin.")
+                if first * lev / 100 < 1.8:
+                    notes.append(f"İlk pozisyon #2'den küçük (bakiyenin {first * lev / 100:.2f} katı, #2: 1.90): işlemlerin "
+                                 f"çoğu tek pozisyon olduğundan getiri düşer. Faz 6 seti 3x ve (pozisyon sayısı - 1) × "
+                                 f"ek büyüklük = %50 ile ilk pozisyonu #2 boyunda tutar.")
+                if (cfg.futures_max_positions - 1) * x > 0.75:
+                    notes.append("Ek pozisyonların toplamı ilk pozisyonun %75'inden büyük: Faz 6 testinde (ör. 5 pozisyon, "
+                                 "ekler ilkinin %25'i, 4x) en büyük düşüş %74'e çıktı, kötümser stopta 30 USDT 142 "
+                                 "USDT'ye indi. Önerilen: 4 pozisyon, ek %16.7.")
             if cfg.futures_universe <= 0:
                 notes.append("Dalga modu yalnızca FUTURES_COINS listesinde: genişlik eşikleri (≥8 coin) liste + en hacimli "
                              "20 köklü coin (~25 coin) için seçildi; 10 coinlik listede ek pozisyon çok seyrek açılır.")
@@ -1543,6 +1658,28 @@ def _setting_notes(cfg: Config) -> List[str]:
                          f"{cfg.futures_isolated_breadth}'den az coin %3+ düşerken açılan (yalnız çöküş) pozisyonlar "
                          f"%{cfg.futures_isolated_size_pct:g} büyüklükte. Faz 5 testinde yalnız çöküşler işlem başı ~%0 "
                          f"getirdi; yarım büyüklük işlem sayısını değiştirmeden düşüşü %52 / %39'dan %46 / %34'e indirdi.")
+        if cfg.futures_reentry_breadth > 0:
+            if cfg.loss_cooldown_minutes <= cfg.symbol_cooldown_minutes:
+                notes.append(f"FUTURES_REENTRY_BREADTH={cfg.futures_reentry_breadth}: LOSS_COOLDOWN_MINUTES="
+                             f"{cfg.loss_cooldown_minutes} olduğu için zarar sonrası ayrı bir bekleme yok, bu ayar etkisiz "
+                             f"(Faz 6 240 dk ile test edildi; ⭐ Faz 6 setleri 240 yazar).")
+            else:
+                notes.append(f"FUTURES_REENTRY_BREADTH={cfg.futures_reentry_breadth} (Faz 6, dalgada yeniden giriş): son 1 "
+                             f"saatte ≥{cfg.futures_reentry_breadth} coin %3+ düşerken zarar sonrası "
+                             f"{cfg.loss_cooldown_minutes} dk bekleme uygulanmaz (yalnız çöküşte sürer). Faz 6 testinde "
+                             f"dalgada zarar sonrası yeniden girişler işlem başı +%1.10 kazandırdı (12+ coin; sıradan "
+                             f"dalga işlemi +%0.69); #2 + yalnız çöküş %50'de yılda 343 → 370 işlem, yıllık getiri +%571 "
+                             f"/ +%212 → +%1.062 / +%302, kötümser stopta 699 → 3.400 USDT.")
+        wave = futures_wave_rules(cfg)
+        if wave:
+            desc = " veya ".join(f"{h} saatte %{p:g}" for h, p in wave)
+            notes.append(f"FUTURES_WAVE_RULES={format_crash_rules(wave)} (Faz 6, dalga eşikleri): son 1 saatte "
+                         f"≥{cfg.futures_wave_breadth} coin %3+ düşerken {desc} düşüş de sinyal. Faz 6 testinde (1:5,4:8, "
+                         f"≥12) dalgada yeniden girişle birlikte tek pozisyonda yılda 370 → 388 işlem, yıllık getiri "
+                         f"+%1.062 / +%302 → +%1.103 / +%356; Faz 6 setinde (4 pozisyon) 684 → 782 işlem.")
+        elif (cfg.futures_wave_rules or "").strip():
+            notes.append("FUTURES_WAVE_RULES yazılı ama kullanılmıyor: dalga eşikleri yalnızca çöküş taktiğinde ve sabit "
+                         "yüzdelerle (FUTURES_CRASH_Z=0) çalışır.")
         if cfg.futures_universe > 0 and cfg.futures_universe_mode == "daily":
             notes.append("FUTURES_UNIVERSE_MODE=daily (dünün en hacimli coinleri): Faz 4 testinde günlük en hacimli 30 "
                          "coin, en az 3 yıllık olanlarla bile 2024-2026'da her yıl -%66 ile -%91 arası zarar etti; "

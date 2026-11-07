@@ -169,6 +169,14 @@ EDITABLE: Dict[str, Setting] = {
                                          "Yalnız çöküşte pozisyon büyüklüğü (%; 100 = tam)"),
     "FUTURES_ISOLATED_BREADTH": Setting("futures_isolated_breadth", "int",
                                         "Bundan az coin düşüyorsa çöküş yalnız sayılır"),
+    "FUTURES_EXTRA_SIZE_PCT": Setting("futures_extra_size_pct", "float",
+                                      "Faz 6: ek pozisyonların büyüklüğü (ilk pozisyonun %'si; 100 = eşit)"),
+    "FUTURES_REENTRY_BREADTH": Setting("futures_reentry_breadth", "int",
+                                       "Faz 6: bu kadar coin düşerken zarar sonrası bekleme atlanır (0 = kapalı)"),
+    "FUTURES_WAVE_RULES": Setting("futures_wave_rules", "rules",
+                                  "Faz 6: dalgada ek çöküş pencereleri (saat:%, ör. 1:5,4:8; kapalı = yok)"),
+    "FUTURES_WAVE_BREADTH": Setting("futures_wave_breadth", "int",
+                                    "Faz 6: dalga eşikleri için son 1 saatte %3+ düşen en az coin sayısı"),
     "FUTURES_LEVERAGE": Setting("futures_leverage", "int", "Vadeli kaldıraç (1-20x; sonraki işlemde uygulanır)"),
     "FUTURES_COINS": Setting("futures_coins", "str", "Vadeli coinler (virgülle, ör. BTC,ETH,SOL)"),
     "FUTURES_SIDES": Setting("futures_sides", "choice", "Vadeli yön (both / long / short)", FUTURES_SIDES),
@@ -297,7 +305,7 @@ def override_spec(key: str) -> Optional[Tuple[str, str, Tuple[str, ...]]]:
         return attr, f.type, ()
     if f.type == "str" and attr in OVERRIDE_CHOICES:
         return attr, "choice", OVERRIDE_CHOICES[attr]
-    if attr in ("futures_crash_extra", "futures_pump_rules", "futures_funding_rules"):
+    if attr in ("futures_crash_extra", "futures_pump_rules", "futures_funding_rules", "futures_wave_rules"):
         return attr, "rules", ()
     if f.type == "str" and attr in OVERRIDE_TEXT:
         return attr, "str", ()

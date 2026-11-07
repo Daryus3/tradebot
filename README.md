@@ -606,6 +606,64 @@ Denenen ve elenenler: sermayeyi N'e bölüp aynı kaldıraçla çok pozisyon (5 
 (yılda 444 işlem ama doğrulamada düşüş %67, 3 zararlı yıl), dalgada çöküş eşiğini düşürmek (işlem başı en iyi hâlde
 #2 düzeyinde, getiri artmıyor), ilk pozisyon kârdayken ikinciyi açmak (düşüş azalıyor ama ek işlemlerin çoğu kayboluyor).
 
+#### Faz 6: dalgada yeniden giriş, dalga eşikleri, küçük ek pozisyonlar (Kasım 2026)
+Faz 5'in üzerine (Faz 5 ayarları ve ⭐ Faz 5 seti değişmedi) üç bulgu:
+
+1. **Dalgada zarar sonrası yeniden giriş en kârlı işlem.** Piyasa geneli çöküşte zarar kesen coin genelde düşmeye devam
+   edip daha derinden dönüyor; 240 dk zarar sonrası bekleme bu ikinci girişi kaçırıyordu. Beklemesiz koşuda (#2 + yalnız
+   çöküş %50, sabit tutar) zarardan sonraki 240 dk içinde açılan işlemler:
+
+   | Son 1 saatte %3+ düşen coin | Sıradan işlem | Zarar sonrası yeniden giriş |
+   |---|---|---|
+   | 0-1 (yalnız çöküş) | 613 işlem, +%0.04 | 632 işlem, +%0.02 |
+   | 2-7 | 490 işlem, +%0.23 | 231 işlem, +%0.17 |
+   | 8-11 | 259 işlem, +%0.23 | 96 işlem, +%0.61 |
+   | 12+ | 515 işlem, +%0.69 | 207 işlem, +%1.10 |
+
+   Bekleme yalnız çöküşte doğru, dalgada zarar ettiriyor. Kural: genişlik ≥ 3 iken bekleme atlanır (2-12 arası her eşik
+   iyileştirdi); bekleme süresi bitene kadar coine yalnızca dalgada girilir (araya kârlı bir yeniden giriş girse de).
+2. **Dalga eşikleri.** 12+ coin düşerken 1 saatte %5 veya 4 saatte %8 düşüş de sinyal. Faz 5'te tek başına getiriyi
+   artırmamıştı; yeniden girişle birlikte işlem sayısını da getiriyi de artırıyor (erken girip stop olan coine dipte
+   tekrar girilebiliyor).
+3. **Küçük ek pozisyonlar.** Faz 5'te iki pozisyon eşit: işlemlerin çoğu tek pozisyon olduğundan dalga dışında da ilk
+   pozisyon #2'nin %75'i kadardı. Faz 6'da ilk pozisyon #2 boyunda (3x, bakiyenin %63.3'ü teminat = bakiyenin 1.9 katı),
+   dalgada açılan 3 ek pozisyonun her biri bunun 1/6'sı; hepsi açıkken toplam bakiyenin 2.85 katı (Faz 5 kadar).
+
+| Ayar | Ne yapar |
+|---|---|
+| `FUTURES_REENTRY_BREADTH` | Genişlik bu değer veya üstündeyken zarar sonrası bekleme (`LOSS_COOLDOWN_MINUTES`) atlanır; `SYMBOL_COOLDOWN_MINUTES` ve kara liste (coin karnesi) yine geçerli. 0 = kapalı. |
+| `FUTURES_WAVE_RULES` + `FUTURES_WAVE_BREADTH` | Genişlik ≥ `FUTURES_WAVE_BREADTH` (12) iken ek çöküş pencereleri ("saat:%", `1:5,4:8`); ana kuralın sinyal vermediği coinlerde denenir, sıralamada derinliğe göre ana kural sinyallerinin arkasında kalır. Boş = kapalı. |
+| `FUTURES_EXTRA_SIZE_PCT` | Dalga modunda ek pozisyonların büyüklüğü, ilk pozisyonun yüzdesi (100 = eşit, Faz 5). Teminat ağırlıkları 1, x, x, ...: ilk pozisyon kullanılabilir bakiyenin 1 / (1 + (N-1)·x)'i. |
+
+Telegram: 🧭 Giriş sinyali → 🌊 Dalga modu → **⭐ Faz 6 seti** (4 pozisyon, 3x, ek %16.7, yeniden giriş ≥3, dalga
+eşikleri 1:5,4:8 ≥12, yalnız çöküş %50, zarar sonrası bekleme 240 dk) ya da **⭐ Faz 6 tek pozisyon** (aynı ekler tek
+pozisyonla, 2x). ⭐ Faz 5 seti Faz 6 eklerini kapatır (Faz 5 tam olarak Faz 5 kalır); "⛔ Dalga modunu kapat" hepsini
+kapatır. Backtest raporunda genişlik dökümüne "dalgada yeniden giriş" ve "dalga eşiği sinyali" satırları, karşılaştırmaya
+Faz 6 setleri ve eklerin tek tek kapatılması eklendi.
+
+Sonuç (liste ∪ köklü 20, 🥈 #2 girişi ve çıkışları, 30 USDT, 2020-2026, 1 dk; motorla doğrulandı):
+
+| Ayar | İşlem/yıl | Kazanma | İşlem başı | Yıllık seçim / doğr. | Maks. düşüş | Kayma ×3: yıllık | Kötümser stop: 30 USDT → |
+|---|---|---|---|---|---|---|---|
+| #2 (tek pozisyon, 2x) | 343 | %81.2 | +%0.31 | +%587 / +%212 | %52 / %39 | +%236 / +%100 | 374 USDT |
+| Faz 5 seti | 449 | %81.7 | +%0.34 | +%690 / +%233 | %71 / %42 | +%322 / +%134 | Mayıs 2021'de eridi |
+| **Faz 6 tek pozisyon** | **388** | %81.1 | **+%0.36** | **+%1.103 / +%356** | %50 / %45 | **+%517 / +%206** | **4.628 USDT** |
+| **Faz 6 seti** | **782** | %81.7 | **+%0.36** | **+%1.001 / +%353** | **%53 / %38** | **+%385 / +%224** | **647 USDT** |
+
+Yıl yıl (her yıl 30 USDT ile): Faz 6 seti 2020 +%1.673, 2021 +%10.495, 2022 +%157, 2023 +%84, 2024 +%588, 2025 +%642,
+2026 +%123 (#2: +%840, +%7.290, +%44, +%9, +%545, +%642, +%66): 7 yılın 7'sinde #2'den iyi ya da eşit. Faz 6 setinde ek
+pozisyonlar yılda ~477 işlem, işlem başı +%0.38 (seçim +%0.41, doğrulama +%0.32); dalgada yeniden giriş yılda ~200
+işlem, +%0.56; dalga eşiği sinyalleri yılda ~140 işlem, +%0.17. En kötü gün 12 Mart 2020: -%37 (#2: -%43). Komşu
+ayarlar da (ek pozisyon kapısı 5-12, yeniden giriş eşiği 2-8, dalga eşiği genişliği 10-15 ya da kapalı, ek boyu %12-20,
+3 ya da 5 pozisyon) iki dönemde de #2'den kârlı çıktı. Kötümser stop dolumu ve 3 kat kayma **birlikte** olursa her ayar
+para kaybediyor: 30 USDT ile Faz 6 seti 29 USDT'de bitiyor (#2 ve Faz 5 eriyor), 300 USDT ile #2 44, Faz 5 17, Faz 6
+seti 52 USDT. 40'tan fazla ayar denendi ve iki dönemin sonucuna da bakıldı; seçim yanlılığı olabilir, önce test modunda
+(paper) izleyin.
+Denenen ve elenenler: ek coinleri (köklü 40) yalnızca dalgada taramak (doğrulama getirisi +%212 → +%176..+%224, kötümser
+stop 699 → 219..407 USDT), piyasa geneli pompada short (işlem başı ~%0; 3 kat kaymada getiriyi düşürdü), beklemeyi
+yalnızca zarar kesten sonra uygulamak (işlem arttı ama kâr ve stres sonucu düştü), zarar kes %3 / %4 / %6, zaman stopu
+30 / 60 dk, kâr al %6 (kâr düştü), 4x kaldıraçla büyük ek pozisyonlar (daha kârlı ama kötümser stopta 485 / 142 USDT).
+
 ### 🏆 Strateji turnuvası (`--turnuva`)
 Hangi strateji türünün sizin dönemde işe yaradığını **tek komutla** görmek için:
 ```bash
