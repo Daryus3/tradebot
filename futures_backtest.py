@@ -2279,16 +2279,29 @@ def live_comparison(cfg, data: FutData, trades: Sequence[FutTrade], path: Option
                     limit: int = 15) -> List[str]:
     """Backtestin (tek hesap) işlemlerini canlı botun aynı mumdaki tarama kaydıyla karşılaştırır: canlı da açtı mı,
     açmadıysa neden (bot taramadı / coin evrende yoktu / sinyal çıkmadı / yer yoktu...). Kayıt yoksa boş."""
-    path = Path(path) if path is not None else scan_log_path(DATA_DIR, getattr(cfg, "trading_mode", "paper"))
-    journal = read_scan_log(path, data.start_ms, data.end_ms + FUT_BAR_MS)
-    if not journal:
-        return []
-    by_t = {int(r["t"]): r for r in journal}
-    first, last = min(by_t), max(by_t)
-    mode = "test modu" if getattr(cfg, "trading_mode", "paper") == "paper" else "canlı"
+    mode_key = getattr(cfg, "trading_mode", "paper")
+    path = Path(path) if path is not None else scan_log_path(DATA_DIR, mode_key)
+    mode = "test modu" if mode_key == "paper" else "canlı"
 
     def when(ms: int) -> str:
         return datetime.fromtimestamp(ms / 1000).strftime("%d.%m %H:%M")
+    journal = read_scan_log(path, data.start_ms, data.end_ms + FUT_BAR_MS)
+    if not journal:
+        head = f"🔍 CANLI BOT KARŞILAŞTIRMASI ({mode} bot kaydı)"
+        every = read_scan_log(path, 0, 2 ** 62)
+        if not every:
+            other = scan_log_path(path.parent, "live" if mode_key == "paper" else "paper")
+            note = (f"  Not: {other.name} dosyasında kayıt var; bot başka modda çalışıyor olabilir (TRADING_MODE)."
+                    if read_scan_log(other, 0, 2 ** 62) else "")
+            return [head, "  Canlı tarama kaydı henüz yok: bot güncellendikten sonra her 5 dk'da bir kayıt tutar."]\
+                + ([note] if note else [])
+        first = min(int(r["t"]) for r in every)
+        if first >= data.end_ms:
+            return [head, f"  Kayıt {when(first)}'de başladı ama backtest dönemi {when(data.end_ms)}'de bitiyor (arşivde "
+                          f"bitmiş günler var): karşılaştırma yarınki backtestte görünür."]
+        return [head, "  Bu backtest döneminde canlı tarama kaydı yok."]
+    by_t = {int(r["t"]): r for r in journal}
+    first, last = min(by_t), max(by_t)
     expected = (last - first) // FUT_BAR_MS + 1
     skips = Counter(str(r["skip"]).split(" (")[0] for r in journal if "skip" in r)
     scanned = sum(1 for r in journal if "skip" not in r)

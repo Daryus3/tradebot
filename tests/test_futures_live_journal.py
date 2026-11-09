@@ -160,7 +160,17 @@ def test_live_comparison_explains_each_backtest_trade(fcfg, tmp_path):
     assert "ZEC: coin canlı evrende yoktu (canlı 3 coin tarıyordu)" in text
     assert "ETH: kayıt yok" in text                                      # O mumda kayıt yok (bot kapalı)
     assert "Backtest işlemleri bu aralıkta: 7 | canlı da açtı: 1" in text   # Kayıt sonrası işlem sayılmaz
-    assert fb.live_comparison(fcfg, data, trades, path=tmp_path / "yok.jsonl") == []
+    empty = fb.live_comparison(fcfg, data, trades, path=tmp_path / "yok.jsonl")
+    assert "henüz yok" in empty[1]
+    later = tmp_path / "later" / "futures_scans_paper.jsonl"
+    later.parent.mkdir()
+    later.write_text(json.dumps({"t": t0 + 30 * FUT_BAR_MS, "a": []}) + "\n", encoding="utf-8")
+    assert "yarınki backtestte görünür" in fb.live_comparison(fcfg, data, trades, path=later)[1]
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "futures_scans_live.jsonl").write_text(json.dumps({"t": t0, "a": []}) + "\n", encoding="utf-8")
+    assert any("başka modda" in x for x in fb.live_comparison(fcfg, data, trades,
+                                                              path=other / "futures_scans_paper.jsonl"))
 
 
 def test_run_cli_report_includes_live_comparison(fcfg, tmp_path, monkeypatch):
