@@ -190,6 +190,14 @@ class FuturesBot(TradingBot):
                 [c for c in coins if c not in missing], self.loss_limit, self.loss_pct, mode_note, free))
             for note in cfg.notes:
                 self.notifier.send(Messages.warning(note))
+            if not ex.is_paper and not self.state.positions:
+                try:
+                    wallet = self._wallet_note(ex.total_balance())
+                except (FuturesError, requests.ConnectionError) as exc:
+                    log.warning("Vadeli cüzdan bakiyesi okunamadı: %s", exc)
+                    wallet = None
+                if wallet:
+                    self.notifier.send(Messages.warning(wallet))
             if missing:
                 self.notifier.send(Messages.warning("Binance vadeli işlemlerde bulunamayan (atlanan) coinler: "
                                                     + ", ".join(missing)))
@@ -636,7 +644,7 @@ class FuturesBot(TradingBot):
         ex.prepare_symbol(symbol, lev)
         # 2) Büyüklük: serbest bakiyenin FUTURES_MARGIN_USAGE_PCT'si teminat × kaldıraç (bileşik); dalga modunda
         #    bakiyenin (serbest + açık pozisyon teminatları) 1/N'i, yalnız çöküşte × FUTURES_ISOLATED_SIZE_PCT
-        free = ex.free_balance()
+        free = self._available_margin()
         margin = self._entry_margin(sig, free)
         bid, ask = ex.bid_ask(symbol)
         if cfg.futures_entry_order == "limit":
@@ -701,6 +709,30 @@ class FuturesBot(TradingBot):
         return pos
 
     # ================================================================ limit (maker) giriş
+    def _available_margin(self) -> float:
+        """Yeni pozisyon için kullanılabilir teminat (USDT): vadeli cüzdandaki serbest bakiye; canlı modda botun
+        sermayesiyle sınırlı (başlangıç + K/Z - açık pozisyonlara bağlı tutar). Bot yalnızca kendisine verilen sermayeyle
+        işlem yapar: cüzdana eklenen para /sermayeekle ile tanıtılınca kullanılır, kill-switch limiti de onunla büyür
+        (tanıtılmadan kullanılsaydı pozisyonlar büyür ama kill-switch eski küçük sermayeye göre kalırdı)."""
+        free = self.exchange.free_balance()
+        if self.exchange.is_paper:
+            return free
+        return max(0.0, min(free, self.state.capital - self.state.committed))
+
+    def _wallet_note(self, total: float) -> Optional[str]:
+        """Canlı modda vadeli cüzdan ile botun sermayesi belirgin farklıysa açılış uyarısı (yoksa None)."""
+        capital, q = self.state.capital, self.cfg.quote_asset
+        extra = total - capital
+        if extra > max(5.0, capital * 0.05):
+            return (f"Vadeli (USDⓈ-M) cüzdanda {fmt_usdt(total)} {q} var, bot {fmt_usdt(capital)} {q} sermayeyle "
+                    f"işlem yapıyor: bota ayrılmamış {fmt_usdt(extra)} {q} kullanılmaz. Bu parayla da işlem yapılsın "
+                    f"istiyorsanız Telegram'a /sermayeekle {extra:.2f} yazın (kill-switch limiti de sermayeyle büyür).")
+        if -extra > max(1.0, capital * 0.05):
+            return (f"Vadeli (USDⓈ-M) cüzdandaki bakiye ({fmt_usdt(total)} {q}) botun sermayesinden "
+                    f"({fmt_usdt(capital)} {q}) az: pozisyonlar cüzdandaki serbest bakiyeyle (daha küçük) açılır. "
+                    f"Para çektiyseniz ya da başka işlem açtıysanız normal; değilse Spot'tan vadeli cüzdana aktarın.")
+        return None
+
     def _entry_margin(self, sig: FuturesSignal, free: float) -> float:
         """Girişin teminatı (USDT). Tek pozisyonda serbest bakiye × FUTURES_MARGIN_USAGE_PCT (eskisi gibi); dalga
         modunda (serbest + açık pozisyon teminatları) × kullanım / FUTURES_MAX_POSITIONS, serbest bakiyeyi aşmadan.

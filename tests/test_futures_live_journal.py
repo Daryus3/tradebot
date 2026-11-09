@@ -3,11 +3,13 @@ uyarı) ve canlı tarama kaydının backtest raporundaki "canlı bot karşılaş
 import json
 from dataclasses import replace
 
+import pytest
 import requests
 
 import futures_backtest as fb
 from config import scan_log_path
 from futures_exchange import FuturesError
+from risk import ExitReason
 from strategy import FUT_BAR_MS
 from test_futures import BASE_MS, fcfg, make_fbot  # noqa: F401 - pytest fikstürü
 from test_futures_universe import META, TICKERS, UniCcxt, ucfg  # noqa: F401 - pytest fikstürü
@@ -202,3 +204,51 @@ def test_scan_error_is_journaled_and_reraised(ucfg, tmp_path):
     except requests.ConnectionError:
         raised = True                                                     # Ana döngü her zamanki gibi ele alır
     assert raised and journal(bot)[-1]["skip"].startswith("tarama hatası (ConnectionError: Binance'e ulaşılamadı")
+
+
+# ====================================================================== sermaye artışı (canlı vadeli)
+def test_live_futures_sizes_on_bot_capital_until_sermayeekle(fcfg, tmp_path):
+    """Cüzdana para eklenip bota tanıtılmazsa pozisyon eski sermayeyle açılır (kill-switch eski sermayeye göre kalır,
+    büyük pozisyon ilk dalgalanmada kill-switch'i tetiklerdi); /sermayeekle sonrası yeni sermayeyle."""
+    from commands import Command
+    from test_futures import FakeCcxt, signal
+    fake = FakeCcxt(free=1500.0)
+    bot, fake, notes, _clock = make_fbot(fcfg, tmp_path, live=True, fake=fake)
+    assert bot.state.capital == 30.0
+    assert any("bota ayrılmamış 1470.00" in m and "/sermayeekle 1470.00" in m for m in notes.messages)
+    fake.calls.clear()
+    bot.open_futures(signal(), bot.time_fn())
+    market = [c for c in fake.calls if c[0] == "create_order"][0]
+    assert market[4] == pytest.approx(int(30 * 0.95 * 2 / 100 * 1000) / 1000)    # 1.500 değil, 30 USDT ile
+    bot.close_position(bot.state.positions["BTCUSDT"], ExitReason.TAKE_PROFIT)
+    bot.commands.handle(Command("sermayeekle", ["1470"]))
+    assert any("sermaye eklensin mi" in m and "675.00 USDT" in m for m in notes.messages)
+    bot.commands.handle(Command("evet"))
+    assert bot.state.start_capital == pytest.approx(1500.0) and bot.loss_limit == pytest.approx(1500 * 0.45)
+    fake.calls.clear()
+    bot.open_futures(signal(), bot.time_fn())
+    market = [c for c in fake.calls if c[0] == "create_order"][0]
+    assert market[4] == pytest.approx(min(1500.0, bot.state.capital) * 0.95 * 2 / 100, rel=0.01)
+
+
+def test_wallet_note_less_than_capital_and_paper_unchanged(fcfg, tmp_path):
+    from test_futures import FakeCcxt
+    bot, fake, notes, _clock = make_fbot(fcfg, tmp_path, live=True, fake=FakeCcxt(free=10.0))
+    assert any("botun sermayesinden" in m and "az" in m for m in notes.messages)
+    assert bot._available_margin() == pytest.approx(10.0)                       # Cüzdandaki kadar
+    assert bot._wallet_note(30.5) is None                                         # Küçük fark: uyarı yok
+    (tmp_path / "p").mkdir()
+    paper, _f, paper_notes, _c = make_fbot(fcfg, tmp_path / "p", fake=FakeCcxt(free=1500.0))
+    assert paper._available_margin() == pytest.approx(30.0)                     # Test modu: sanal bakiye
+    assert not any("bota ayrılmamış" in m for m in paper_notes.messages)
+
+
+def test_sermayeekle_texts_name_futures_wallet(fcfg, tmp_path):
+    from commands import Command
+    from test_futures import FakeCcxt
+    bot, fake, notes, _clock = make_fbot(fcfg, tmp_path, live=True, fake=FakeCcxt(free=100.0))
+    bot.commands.handle(Command("sermayeekle", []))
+    assert any("vadeli (USDⓈ-M) cüzdanınıza" in m for m in notes.messages)
+    bot.commands.handle(Command("sermayeekle", ["500"]))                  # Cüzdanda yalnız 70 USDT ayrılmamış
+    assert any("Vadeli (USDⓈ-M) cüzdanda bota ayrılmamış" in m and "USDⓈ-M Vadeli cüzdanına aktarın" in m
+               for m in notes.messages)

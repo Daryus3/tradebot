@@ -617,7 +617,8 @@ class CommandProcessor:
 
     def cmd_sermayeekle(self, args) -> None:
         bot, q = self.bot, self.bot.cfg.quote_asset
-        usage = (f"Kullanım: /sermayeekle 10  → Binance Spot hesabınıza eklediğiniz {q} tutarını bota tanıtır.\n"
+        wallet = "vadeli (USDⓈ-M) cüzdanınıza" if getattr(bot, "is_futures", False) else "Spot hesabınıza"
+        usage = (f"Kullanım: /sermayeekle 10  → Binance {wallet} eklediğiniz {q} tutarını bota tanıtır.\n"
                  f"Bot normalde yalnızca kendisine verilen sermayeyle işlem yapar; para eklemek tek başına yetmez.")
         try:
             amount = float(args[0].replace(",", ".")) if args else 0.0
@@ -655,6 +656,10 @@ class CommandProcessor:
         except Exception as exc:  # noqa: BLE001
             return Messages.error(f"Binance bakiyesi okunamadı, sermaye eklenmedi: {exc}")
         if spare is not None and amount > spare + 0.01:
+            if getattr(bot, "is_futures", False):
+                return (f"⚠️ Vadeli (USDⓈ-M) cüzdanda bota ayrılmamış serbest bakiye yalnızca "
+                        f"<b>{fmt_usdt(max(0.0, spare))} {q}</b>.\nÖnce parayı Binance'te Cüzdan → Transfer ile "
+                        f"Spot'tan USDⓈ-M Vadeli cüzdanına aktarın, sonra tekrar deneyin.")
             return (f"⚠️ Spot cüzdanında bota ayrılmamış serbest bakiye yalnızca "
                     f"<b>{fmt_usdt(max(0.0, spare))} {q}</b>.\nÖnce parayı Binance'te Spot cüzdanına "
                     f"aktarın, sonra tekrar deneyin.")

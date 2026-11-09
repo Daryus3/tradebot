@@ -278,6 +278,14 @@ açık olsun (IP kısıtlaması: sunucunun IP'si). `.env`'de `STRATEGY=futures` 
 Önce test modunda (`TRADING_MODE=paper`) çalıştırın: piyasa verisi gerçek, emirler sanal. Kontrol:
 `.venv/bin/python main.py --selftest` (CCXT bağlantısı, pozisyon modu, vadeli bakiye).
 
+**Sermaye.** Bot yalnızca kendisine verilen sermayeyle işlem yapar: canlı modda pozisyonlar vadeli cüzdandaki serbest
+bakiyeyle açılır ama botun sermayesini (başlangıç `START_CAPITAL_USDT` + K/Z + `/sermayeekle`) aşmaz; kill-switch de
+bu sermayenin `MAX_TOTAL_LOSS_PCT`'si. Cüzdana para ekleyince Telegram'dan **`/sermayeekle <tutar>`** yazın (onay ister):
+sermaye ve kill-switch limiti birlikte büyür. Tanıtılmayan para kullanılmaz (tanıtılmadan kullanılsaydı pozisyonlar
+büyür ama kill-switch eski sermayeye göre kalır, bot ilk dalgalanmada kendini kilitlerdi). Açılışta cüzdan ile sermaye
+belirgin farklıysa bot uyarır. Canlıya **ilk kez** geçerken (`state_futures_live.json` yokken) sermaye
+`START_CAPITAL_USDT`'den alınır: önce bu değeri cüzdandaki tutara eşitleyin. Test modunda `/sermayeekle` sanal bakiyeye ekler.
+
 **Taktik (`FUTURES_TACTIC=crash`, varsayılan): çöküş dönüşü.** `FUTURES_COINS`'teki (varsayılan Kasım 2023'ün ilk 10'u)
 bir coin son `FUTURES_CRASH_HOURS` (4) saatte en az `FUTURES_CRASH_DROP_PCT` (%10) düştüyse (likidasyon şelalesi),
 5 dk mum kapanışında **long** açılır; aynı anda birden çok coin çökerse en derin düşen alınır. Çıkışlar (fiyat %):
