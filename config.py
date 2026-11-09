@@ -270,7 +270,9 @@ FUTURES_GRID_PRESETS = (
      "detail": "Çöküş: son 4 saatte %10 VEYA 1 saatte %6 VEYA 12 saatte %15. Çıkış: TP +8, SL -5, başabaş +1 → +0.3, "
                "45 dk. Test (2020-2026, 1 dk): yılda ~410 işlem (şimdiki ~195), kazanma %80 (şimdiki %70), toplam kâr "
                "+%38; yıllık getiri seçim döneminde +%721, doğrulamada +%146 (şimdiki +%385 / +%99); en büyük düşüş "
-               "%66 / %54 (şimdiki %57 / %30). Zayıf yanı: 2022 ve 2023 yaklaşık başabaş / hafif zarar (-%1, -%11).",
+               "%66 / %54 (şimdiki %57 / %30). Zayıf yanı: 2022 ve 2023 yaklaşık başabaş / hafif zarar (-%1, -%11). "
+               "Kasım 2026 testi: 12 saat penceresi doğrulamada kârı düşürdü (tek pozisyonda yıllık +%213 yerine "
+               "+%146, Faz 6 setinde 3x'te +%352 yerine +%209); 🥈 #2 girişi önerilir.",
      "values": {**FUTURES_RECOMMENDED, "FUTURES_CRASH_EXTRA": "1:6,12:15", "FUTURES_CRASH_Z": 0,
                 "FUTURES_CONFIRM": "close", "TAKE_PROFIT_PCT": 8, "STOP_LOSS_PCT": 5, "BREAKEVEN_ENABLED": True,
                 "BREAKEVEN_TRIGGER_PCT": 1, "BREAKEVEN_FLOOR_PCT": 0.3, "MAX_HOLD_MINUTES": 45}},
@@ -411,6 +413,20 @@ def futures_crash_rules(cfg) -> Tuple[Tuple[int, float], ...]:
     for hours, pct in extra:
         rules[hours] = min(pct, rules.get(hours, pct))
     return tuple(sorted(rules.items()))
+
+
+LONG_CRASH_WINDOW_H = 8                 # Bu saat ve üstü ek pencere "uzun" (ör. 12 saatte %15; rapor_13 testi)
+
+
+def futures_long_windows(cfg) -> Tuple[Tuple[int, float], ...]:
+    """FUTURES_CRASH_EXTRA'daki uzun ek pencereler (≥ LONG_CRASH_WINDOW_H saat), ör. ((12, 15.0),). Kasım 2026
+    testinde (rapor_13) yalnız bu pencerenin bulduğu işlemler işlem başı ~%0 getirdi ve tam boy ilk pozisyonu
+    kapattı; not ve backtest satırı bunları gösterir. Hatalı yazımda ()."""
+    try:
+        extra = parse_crash_rules(getattr(cfg, "futures_crash_extra", ""))
+    except ValueError:
+        return ()
+    return tuple(r for r in extra if r[0] >= LONG_CRASH_WINDOW_H)
 
 
 def futures_pump_rules(cfg) -> Tuple[Tuple[int, float], ...]:
@@ -1591,6 +1607,17 @@ def _setting_notes(cfg: Config) -> List[str]:
             if cfg.futures_crash_z > 0:
                 notes.append("FUTURES_CRASH_Z: ızgara testinde oynaklık (σ) eşiği aynı işlem sayısında sabit yüzde "
                              "eşiğinden kötü çıktı. Önce 🧪 Backtest.")
+            long_w = futures_long_windows(cfg)
+            if long_w and not cfg.futures_crash_z:
+                names = " + ".join(f"{h} saatte %{p:g}" for h, p in long_w)
+                notes.append(f"FUTURES_CRASH_EXTRA={cfg.futures_crash_extra}: uzun pencere ({names}) Kasım 2026 "
+                             f"testinde (2020-2026, 1 dk) kârı düşürdü: yalnız bu pencerenin bulduğu işlemler (yılda "
+                             f"~100) işlem başı ~%0 getirdi (diğerleri +%0.37) ve çoğu tam boy ilk pozisyonu kapattı. "
+                             f"Kapalıyken (yalnız 1 saatte %6) doğrulama dönemi yıllık getirisi Faz 6 setinde (3x) "
+                             f"+%209 → +%352 (en büyük düşüş %51 → %38, kötümser stopta 153 → 647 USDT), 5x'te +%378 → "
+                             f"+%795, Faz 6 tek pozisyonda +%279 → +%355, #2'de +%146 → +%212. 7 yılın 6'sında kapalı "
+                             f"olan önde (yalnız 2020'de açık). Telegram → 🧭 Giriş sinyali → ➕ uzun pencere olmadan "
+                             f"(ör. '+ 1 sa %6').")
             if (cfg.futures_crash_extra and cfg.breakeven_enabled
                     and (cfg.breakeven_trigger_pct > 1.2 or cfg.max_hold_minutes < 45)):
                 notes.append("FUTURES_CRASH_EXTRA: testte ek pencereler başabaş +1 → +0.3 ve 45-60 dk zaman stopuyla "

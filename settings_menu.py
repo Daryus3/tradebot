@@ -338,8 +338,8 @@ PAGES: Dict[str, Page] = {
         Link(lambda m: m.phase6_preset_label("p6s"), "fcm:p6s", show=lambda m: _crash(m.cfg)),
         Row("FUTURES_MAX_POSITIONS", values=(1, 2, 3, 4), fmt=lambda v: "1 pozisyon (kapalı)" if int(v) == 1 else
             f"en fazla {v} pozisyon", show=_crash, per_row=4),
-        Row("FUTURES_EXTRA_BREADTH", icon="🌊", values=(5, 8, 12), fmt=lambda v: f"ek: ≥{v} coin",
-            show=lambda cfg: _crash(cfg) and cfg.futures_max_positions > 1, per_row=3),
+        Row("FUTURES_EXTRA_BREADTH", icon="🌊", values=(5, 8, 10, 12), fmt=lambda v: f"ek: ≥{v} coin",
+            show=lambda cfg: _crash(cfg) and cfg.futures_max_positions > 1, per_row=4),
         Row("FUTURES_LEVERAGE", icon="⚡", values=(2, 3, 4), fmt=lambda v: f"{v}x",
             show=lambda cfg: _crash(cfg) and cfg.futures_max_positions > 1, per_row=3),
         Row("FUTURES_EXTRA_SIZE_PCT", icon="📏", values=(100, 50, 25, 16.7), fmt=lambda v: "ek: eşit" if float(v) >= 100

@@ -664,6 +664,42 @@ stop 699 → 219..407 USDT), piyasa geneli pompada short (işlem başı ~%0; 3 k
 yalnızca zarar kesten sonra uygulamak (işlem arttı ama kâr ve stres sonucu düştü), zarar kes %3 / %4 / %6, zaman stopu
 30 / 60 dk, kâr al %6 (kâr düştü), 4x kaldıraçla büyük ek pozisyonlar (daha kârlı ama kötümser stopta 485 / 142 USDT).
 
+#### Rapor 13 (Kasım 2026): 12 saat penceresi, kaldıraç, ek pozisyon kapısı
+Bir kullanıcı raporu (Faz 6 seti + 🏆 Izgara #1 girişi `1:6,12:15` + 5x, Kâr Al piyasa emri, BNB komisyon indirimi,
+33.3 USDT) motorla birebir yeniden üretildi (5.824 işlem, işlem başı +%0.320, tek hesap 8.756.340 USDT) ve ~200 ayar
+seçim (2023-11 öncesi) / doğrulama (sonrası) dönemi, 3 kat kayma ve kötümser stop dolumuyla denendi.
+
+1. **12 saat penceresi kârı düşürüyor.** Yalnız bu pencerenin bulduğu işlemler yılda ~100, kazanma %72, işlem başı
+   -%0.04 (diğerleri +%0.37); 691 işlemin 483'ü tam boy ilk pozisyon olarak açılıp daha iyi sinyallerin yerini aldı.
+   Kapalıyken 7 yılın 6'sında getiri daha yüksek (yalnız 2020'de açık olan önde). Aynı sonuç tek pozisyonda da var
+   (🥈 #2 doğrulamada +%213, 🏆 #1 +%146). Komşu kurallar da (4 saat %8 / %9 / %11 / %12, 1 saat %5 / %5.5 / %6.5 /
+   %7, ek pencereler 2:8, 8:12, 8:14, 12:12, 12:18, 24:20) `1:6` + 4 saat %10'dan kötü ya da aynı çıktı.
+2. **Kaldıraç kâr / risk ayarı.** 12 saat penceresi kapalı Faz 6 setinde doğrulama dönemi yıllık getirisi 2x +%199,
+   3x +%368, 4x +%593, 5x +%862, 6x +%1.153; en büyük düşüş (seçim / doğrulama) %37 / %27, %53 / %38, %66 / %48,
+   %80 / %57, %87 / %64; kötümser stopta 33 USDT → 633, 781, 543, 134 USDT, 6x'te Mayıs 2021'de eridi.
+3. **Ek pozisyon kapısı ≥10 coin** (`FUTURES_EXTRA_BREADTH=10`, 8 yerine): 3x / 4x / 5x'te iki dönemde de getiri biraz
+   daha yüksek, en büyük düşüş ~9 puan daha az, yılda ~%4 daha az işlem; kötümser stopta 4x-5x'te daha kötü. Ek
+   pozisyonları küçültmek (%7.5-12.5) doğrulamada getiriyi artırıp seçim döneminde düşürdü (ilk pozisyon büyüyor):
+   sağlam değil.
+4. **Kâr Al limit emir** (`FUTURES_TP_ORDER=limit`): işlem başı +%0.002, kötümser stopta biraz daha iyi.
+
+| Ayar (33.3 USDT, BNB indirimi) | İşlem/yıl | İşlem başı | Yıllık seçim / doğr. | Son 12 ay | Maks. düşüş | Kayma ×3: doğr. | Kötümser stop: 33 USDT → |
+|---|---|---|---|---|---|---|---|
+| Rapordaki (5x, 1:6 + 12:15, TP piyasa) | 850 | +%0.320 | +%1.947 / +%417 | +%268 | %77 / %72 | +%192 | 32 USDT |
+| 5x, 12 saat kapalı, TP limit | 781 | +%0.372 | +%1.925 / +%870 | +%376 | %80 / %57 | +%454 | 145 USDT |
+| **+ ek kapısı ≥10** | 752 | +%0.382 | **+%1.953 / +%884** | **+%378** | %70 / %54 | +%464 | 108 USDT |
+| 4x, 12 saat kapalı, TP limit | 781 | +%0.372 | +%1.672 / +%597 | +%272 | %66 / %48 | +%346 | 871 USDT |
+| **+ ek kapısı ≥10** | 752 | +%0.382 | +%1.722 / +%606 | +%274 | **%57 / %45** | +%352 | 467 USDT |
+| 3x (Faz 6 seti) + ek kapısı ≥10 | 752 | +%0.382 | +%1.169 / +%374 | +%182 | %44 / %36 | +%243 | 851 USDT |
+
+Elenenler (aynı sette): kâr al %6-15, zarar kes %4-7, başabaş +%0.5-3 (0.5 yılda ~1.000 işlem ama doğrulamada aynı
+getiri, kaymaya daha duyarlı), zaman stopu 30-180 dk (60 dk: işlem başı yüksek ama getiri düşük), izleyen stop, limit
+giriş (yılda ~500 işlem, getiri üçte birin altına iner), 2 / 3 / 5 / 6 / 8 pozisyon (3 pozisyon doğrulamada daha kârlı
+ama 4x-5x'te düşüş %80+), yalnız çöküş %10-100 ve eşik 1-4 coin, yeniden giriş eşiği 0 / 2 / 5 / 8, zarar sonrası bekleme 0-720 dk, coin
+beklemesi 30-60 dk (kâr yarıya ya da daha aşağı iner), teminat %90, dalga eşiklerinin komşuları (≥8-20 coin; 1:4,4:7 doğrulamada
+yüksek ama 5x kötümser stopta eridi). Yüzlerce ayar denendiği için seçim yanlılığı olabilir; önce test modunda izleyin.
+Backtest raporu uzun pencere varsa "12 sa %15 penceresi kapalı" satırını, ayar notu da bu uyarıyı gösterir.
+
 ### 🏆 Strateji turnuvası (`--turnuva`)
 Hangi strateji türünün sizin dönemde işe yaradığını **tek komutla** görmek için:
 ```bash

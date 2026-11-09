@@ -32,8 +32,9 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from config import (DATA_DIR, futures_coin_list, futures_crash_rules, futures_funding_rules,
-                    futures_liq_distance_pct, futures_modules, futures_wave_cfg, futures_wave_rules)
+from config import (DATA_DIR, format_crash_rules, futures_coin_list, futures_crash_rules, futures_funding_rules,
+                    futures_liq_distance_pct, futures_long_windows, futures_modules, futures_wave_cfg,
+                    futures_wave_rules, parse_crash_rules)
 from futures_data import FuturesArchive, concat, resample, slice_range
 from strategy import (FUT_BAR_MS, FUT_HOUR_MS, breadth_flags, btc_trend_1h, crash_state, funding_per_bar,
                       futures_candidates, futures_entries, futures_features, isolated_factor, pick_signal, trend_at)
@@ -1290,6 +1291,19 @@ def phase6_rows(cfg, ev, signals=None, phase6=None) -> List[Tuple[str, "Evaluati
     return rows
 
 
+def long_window_rows(cfg, other) -> List[Tuple[str, "Evaluation"]]:
+    """Uzun ek pencere (≥8 saat, ör. 12 sa %15) varsa onsuz satır: Kasım 2026 testinde (rapor_13) bu pencerenin tek
+    başına bulduğu işlemler işlem başı ~%0 getirip tam boy ilk pozisyonu kapattı. `other(**cfg değişikliği)` yeni
+    sinyallerle değerlendirir (variant_rows verir). Oynaklık (σ) kurallarında satır yok."""
+    long_w = futures_long_windows(cfg)
+    if not long_w or cfg.futures_crash_z:
+        return []
+    keep = tuple(r for r in parse_crash_rules(cfg.futures_crash_extra) if r not in long_w)
+    names = " + ".join(f"{h} sa %{p:g}" for h, p in long_w)
+    rest = (" (ek: " + " + ".join(f"{h} sa %{p:g}" for h, p in keep) + ")") if keep else " (ek pencere yok)"
+    return [(f"{names} penceresi kapalı{rest}", other(futures_crash_extra=format_crash_rules(keep)))]
+
+
 def variant_rows(cfg, data: FutData, signals, windows) -> List[Tuple[str, Evaluation]]:
     """Tek bir kuralı değiştirmenin etkisi (diğer her şey aynı)."""
     def ev(sigs=signals, **over):
@@ -1329,8 +1343,8 @@ def variant_rows(cfg, data: FutData, signals, windows) -> List[Tuple[str, Evalua
                 (f"Çöküş eşiği %{cfg.futures_crash_drop_pct - 2:g}", other(futures_crash_drop_pct=cfg.futures_crash_drop_pct - 2)),
                 (f"Çöküş eşiği %{cfg.futures_crash_drop_pct + 2:g}", other(futures_crash_drop_pct=cfg.futures_crash_drop_pct + 2)),
                 ("+likidasyon dalgası şartı" if not cfg.futures_crash_liq else "Likidasyon şartı kapalı",
-                 other(futures_crash_liq=not cfg.futures_crash_liq))] + cascade_rows(cfg, ev, signals)
-                + phase6_rows(cfg, ev, signals, phase6))
+                 other(futures_crash_liq=not cfg.futures_crash_liq))] + long_window_rows(cfg, other)
+                + cascade_rows(cfg, ev, signals) + phase6_rows(cfg, ev, signals, phase6))
     out = [("Başabaş kalkanı kapalı", ev(be_enabled=False)),
            ("Zaman stopu 30 dk", ev(hold_min=30)),
            ("Zaman stopu 120 dk", ev(hold_min=120)),
