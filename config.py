@@ -415,6 +415,11 @@ def futures_crash_rules(cfg) -> Tuple[Tuple[int, float], ...]:
     return tuple(sorted(rules.items()))
 
 
+def scan_log_path(folder, mode: str) -> Path:
+    """Vadeli canlı tarama kaydı (FuturesBot yazar, vadeli backtest raporu karşılaştırır): mod başına bir dosya."""
+    return Path(folder) / f"futures_scans_{mode}.jsonl"
+
+
 LONG_CRASH_WINDOW_H = 8                 # Bu saat ve üstü ek pencere "uzun" (ör. 12 saatte %15; rapor_13 testi)
 
 

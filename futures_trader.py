@@ -20,13 +20,14 @@ Yüzdeler (Kâr Al, Zarar Kes, başabaş) FİYAT hareketidir; 10x'te fiyat +%1.2
 """
 from __future__ import annotations
 
+import json
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Set, Tuple
 
 import requests
 
-from config import (futures_breadth_on, futures_coin_list, futures_crash_rules, futures_funding_rules,
+from config import (futures_breadth_on, futures_coin_list, scan_log_path, futures_crash_rules, futures_funding_rules,
                     futures_liq_distance_pct, futures_modules, futures_pump_rules, futures_slot_share,
                     futures_wave_rules)
 from futures_exchange import FFill, FuturesError, MinNotionalError, describe_error
@@ -51,6 +52,9 @@ PREFILTER_SLACK_PCT = 1.0     # En hacimli N + çöküş: 24 saatlik tepeye gör
 KLINE_PARALLEL_MIN = 16       # Bundan çok coinin mumları paralel istenir (120-150 coinlik evrende tarama gecikmesin)
 KLINE_WORKERS = 6
 UNIVERSE_REFRESH_SEC = 24 * 3600   # En hacimli N köklü coin sıralaması günde bir yenilenir (parite başına 1 istek)
+UNIVERSE_RETRY_SEC = 600           # Sıralama alınamazsa bu kadar sonra yeniden denenir
+SCAN_LOG_DAYS = 30                 # Canlı tarama kaydı (futures_scans_<mod>.jsonl) bu kadar gün tutulur
+UNIVERSE_WARN_SEC = 6 * 3600       # Sıralama alınamıyor uyarısı en sık bu aralıkla (Telegram)
 PAPER_LIMIT_THROUGH_PCT = 0.02     # Test modu: limit emir fiyat limitin bu kadar (%) ötesine geçince dolar (backtestle aynı)
 LIMIT_REQUOTE_MAX = 2              # Post-only emir anında eşleşeceği için reddedilirse (-5022) yeni fiyatla yeniden dizilir
 LIMIT_CANCEL_GRACE_SEC = 5         # Süre dolunca iptal; test modunda son 1 dk mumun kapanması da beklenir
@@ -96,6 +100,15 @@ class FuturesBot(TradingBot):
         self._ranking: List[str] = []          # Tüm köklü pariteler, ortalama hacme göre
         self._ranking_at = 0.0
         self._ranking_key: tuple = ()
+        self._ranking_source = ""              # "avg": ayardaki ortalama hacim | "24h": geçici (24 saatlik hacim)
+        self._ranking_error = ""               # Son sıralama denemesi başarısızsa nedeni (/tarama ve uyarı)
+        self._ranking_retry_at = 0.0           # Başarısız denemeden sonra bu ana kadar yeniden denenmez
+        self._universe_warned_at = 0.0
+        # Canlı tarama kaydı: her 5 dk mum için bir satır (taranan / analiz edilen coinler, sinyaller ve sonuçları ya da
+        # taramanın neden yapılmadığı). Vadeli backtest raporu bunu backtestin işlemleriyle karşılaştırır.
+        self.scan_log_path = scan_log_path(self.store.path.parent, self.cfg.trading_mode)
+        self._journal_universe: Optional[List[str]] = None
+        self._prune_scan_log()
         self._h1_cache: Dict[str, Tuple[int, dict]] = {}   # Düzeltme modülü: parite → (saat, 1 saatlik mumlar)
         self.last_breadth: Optional[int] = None    # Dalga modu: son taramada son 1 saatte %3+ düşen coin sayısı
 
@@ -251,10 +264,91 @@ class FuturesBot(TradingBot):
             return
         if now >= self.next_scan_at:
             self.next_scan_at = self._next_close(now) + SCAN_DELAY_SEC
-            if (self.free_slots() > 0 and not self.state.pending_entry and not self.state.paused
-                    and not self.state.killed and not self.entries_frozen(now)):
-                self.scan_and_enter(now)
+            blocked = self._scan_block_reason(now)
+            bar_ms = int(now * 1000) // FUT_BAR_MS * FUT_BAR_MS
+            if blocked is None:
+                try:
+                    self.scan_and_enter(now)
+                except Exception as exc:  # noqa: BLE001 - kayda yazılır, ana döngü her zamanki gibi ele alır
+                    self._journal({"t": bar_ms, "skip": f"tarama hatası ({type(exc).__name__}: {exc})"[:200]})
+                    raise
+            else:
+                self._journal({"t": bar_ms, "skip": blocked})
         self._periodic(now)
+
+    def _scan_block_reason(self, now: float) -> Optional[str]:
+        """Bu mum kapanışında neden taranmıyor (None = taranır)."""
+        state = self.state
+        if state.killed:
+            return "kill-switch"
+        if state.paused:
+            return "yeni işlemler durdurulmuş (/durdur)"
+        if self.entries_frozen(now):
+            return f"alımlar donduruldu ({state.freeze_reason})"
+        if state.pending_entry:
+            return "limit giriş emri bekliyor"
+        if self.free_slots() <= 0:
+            return f"boş yer yok ({len(state.positions)}/{self.slots()} pozisyon açık)"
+        return None
+
+    # ================================================================ canlı tarama kaydı
+    def _journal(self, entry: dict) -> None:
+        """Tarama kaydına bir satır (JSON). Yazılamazsa bot çalışmaya devam eder."""
+        if self.scan_log_path is None:
+            return
+        try:
+            with open(self.scan_log_path, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(entry, ensure_ascii=False, separators=(",", ":")) + "\n")
+        except OSError as exc:
+            log.debug("Tarama kaydı yazılamadı: %s", exc)
+
+    def _journal_scan(self, closed_ms: int, universe: List[str], analyzed: List[str], breadth: Optional[int],
+                      outcome: Dict[str, str], errors: int, excluded: List[str]) -> None:
+        """Yapılan taramanın kaydı: evren (yalnızca değişince), analiz edilen coinler, genişlik, sinyaller ve sonuçları,
+        beklemedeki / açık pozisyondaki coinler, mumu alınamayan coin sayısı."""
+        short = [s[:-4] for s in universe]
+        row: dict = {"t": closed_ms}
+        if short != self._journal_universe:
+            row["u"] = short
+            self._journal_universe = short
+        row["a"] = [s[:-4] for s in analyzed]
+        if breadth is not None:
+            row["b"] = breadth
+        if outcome:
+            row["s"] = {k[:-4]: v for k, v in outcome.items()}
+        if excluded:
+            row["x"] = [s[:-4] for s in excluded]
+        if errors:
+            row["e"] = errors
+        self._journal(row)
+
+    def _prune_scan_log(self) -> None:
+        """SCAN_LOG_DAYS günden eski satırları siler (açılışta)."""
+        path = self.scan_log_path
+        try:
+            if path is None or not path.exists():
+                return
+            cutoff = (self.time_fn() - SCAN_LOG_DAYS * 86400) * 1000
+            lines = path.read_text(encoding="utf-8").splitlines()
+            keep, universe, need_u = [], None, True
+            for line in lines:
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if "u" in row:
+                    universe = row["u"]
+                if row.get("t", 0) < cutoff:
+                    continue
+                if need_u and "skip" not in row:                    # Evren yalnızca değişince yazılır: kalan ilk
+                    if "u" not in row and universe is not None:     # tarama satırı silinenlerdeki evreni taşısın
+                        row["u"] = universe
+                    need_u = False
+                keep.append(json.dumps(row, ensure_ascii=False, separators=(",", ":")))
+            if len(keep) < len(lines):
+                path.write_text("".join(k + "\n" for k in keep), encoding="utf-8")
+        except OSError as exc:
+            log.debug("Tarama kaydı temizlenemedi: %s", exc)
 
     def _periodic(self, now: float) -> None:
         if now >= self.next_status_at:
@@ -289,6 +383,8 @@ class FuturesBot(TradingBot):
         now_ms = int(now * 1000)
         closed_ms = now_ms // FUT_BAR_MS * FUT_BAR_MS          # Az önce kapanan mumun kapanış zamanı
         if now_ms - closed_ms > MAX_SCAN_LAG_SEC * 1000:
+            lag = (now_ms - closed_ms) / 1000
+            self._journal({"t": closed_ms, "skip": f"gecikme (mum kapanışından {lag:.0f} sn sonra)"})
             return
         state = self.state
         state.cooldowns = {s: t for s, t in state.cooldowns.items() if t > now}   # Süresi dolan beklemeler
@@ -343,14 +439,19 @@ class FuturesBot(TradingBot):
                             rejects=rejects)
         self._record_scan(result, now)
         self.last_signals = list(signals)
+        outcome: Dict[str, str] = {}
+        stop = "boş yer yok"
         for sig in signals:              # En güçlüden: boş yer oldukça (dalga modunda ek pozisyon yalnızca dalgada)
             if self.free_slots() <= 0 or self.state.pending_entry:
+                stop = "boş yer yok" if self.free_slots() <= 0 else "limit giriş emri bekliyor"
                 break
             if sig.symbol in self.state.positions:
+                outcome[sig.symbol] = "bu coinde pozisyon zaten açık"
                 continue
             if self.state.positions and (breadth or 0) < self.cfg.futures_extra_breadth:
                 log.info("Ek pozisyon açılmadı: dalga yok (%s coin düşüyor, gereken %d)", breadth,
                          self.cfg.futures_extra_breadth)
+                stop = f"ek pozisyon için dalga yok ({breadth} coin düşüyor, gereken {self.cfg.futures_extra_breadth})"
                 break
             log.info("Vadeli sinyal: %s %s | %s", sig.symbol, sig.side, sig.note())
             try:
@@ -359,35 +460,114 @@ class FuturesBot(TradingBot):
                 log.warning("Minimum emir tutarı: %s", exc)
                 self.notifier.send(Messages.warning(f"{sig.symbol} {sig.side.upper()} sinyali pas geçildi: "
                                                     f"{describe_error(exc)}"))
+                outcome[sig.symbol] = "minimum emir tutarının altında"
                 continue                 # Sıradaki sinyal denenir (backtest de minimum emrin altındakini atlar)
             except FuturesError as exc:
                 log.error("Vadeli pozisyon açılamadı: %s", exc)
                 self.notifier.send(Messages.error(f"{sig.symbol} {sig.side.upper()} pozisyonu açılamadı: "
                                                   f"{describe_error(exc)}"))
+                outcome[sig.symbol] = f"açılamadı: {describe_error(exc)}"[:120]
+                stop = "önceki girişte hata"
                 break
+            outcome[sig.symbol] = ("açıldı" if sig.symbol in self.state.positions
+                                   else "limit emir kondu" if self.state.pending_entry else "açılmadı (koruma)")
+        for sig in signals:
+            outcome.setdefault(sig.symbol, stop)
+        full = (self._universe_symbols() if self.cfg.futures_universe > 0
+                else [c + "USDT" for c in futures_coin_list(self.cfg)])
+        self._journal_scan(closed_ms, full, sorted(klines), breadth, outcome, len(errors),
+                           sorted(s for s in excluded if s in set(full)))
 
     def _refresh_universe(self, now: float, force: bool = False) -> None:
-        """En hacimli N köklü parite listesini (gerekirse) yeniler: günde bir ya da ayar değişince."""
+        """En hacimli N köklü parite listesini (gerekirse) yeniler: günde bir ya da ayar değişince. Sıralama durumda
+        saklanır (yeniden başlatmada hemen hazır). Alınamazsa önceki sıralama, hiç yoksa geçici olarak 24 saatlik hacme
+        göre sıralama kullanılır ve 10 dk sonra yeniden denenir; evren yalnız listeye düşerse Telegram'dan uyarılır."""
         cfg = self.cfg
         daily = getattr(cfg, "futures_universe_mode", "avg") == "daily"
         key = (cfg.futures_universe_min_age_days, 1 if daily else cfg.futures_universe_avg_days)
-        fresh = (now - self._ranking_at < UNIVERSE_REFRESH_SEC if not daily
-                 else int(now // 86400) == int(self._ranking_at // 86400))     # daily: her UTC gününde yeniden
-        if not force and self._ranking and key == self._ranking_key and fresh:
+
+        def is_fresh(at: float) -> bool:
+            return (now - at < UNIVERSE_REFRESH_SEC if not daily
+                    else int(now // 86400) == int(at // 86400))                  # daily: her UTC gününde yeniden
+        fresh = bool(self._ranking) and key == self._ranking_key and is_fresh(self._ranking_at)
+        waiting = key == self._ranking_key and now < self._ranking_retry_at       # Son deneme başarısız: biraz bekle
+        if not force and (fresh or waiting):
             self.universe = self._ranking[:cfg.futures_universe]
             return
+        saved = self.state.futures_ranking or {}
+        if (not force and not self._ranking and saved.get("symbols") and list(saved.get("key") or ()) == list(key)
+                and is_fresh(float(saved.get("at") or 0.0))):
+            self._ranking, self._ranking_key = list(saved["symbols"]), key        # Yeniden başlatma: kayıtlı sıralama
+            self._ranking_at, self._ranking_source, self._ranking_error = float(saved["at"]), "avg", ""
+            self.universe = self._ranking[:cfg.futures_universe]
+            log.info("En hacimli %d köklü parite (kayıtlı sıralama): %s", len(self.universe),
+                     ", ".join(s[:-4] for s in self.universe))
+            return
         log.info("En hacimli köklü pariteler sıralanıyor (en az %d günlük, son %d gün ortalaması)...", *key)
+        error = ""
         try:
             ranking = [s for s, _qv in self.exchange.seasoned_ranking(*key)]
         except (FuturesError, requests.ConnectionError) as exc:
-            log.warning("Hacim sıralaması alınamadı (önceki liste kullanılıyor): %s", exc)
-            self._ranking_at = now - UNIVERSE_REFRESH_SEC + 600          # 10 dk sonra tekrar dene
-            self.universe = self._ranking[:cfg.futures_universe]
-            return
+            ranking, error = [], str(exc)
         if ranking:
+            recovered = bool(self._ranking_error)
             self._ranking, self._ranking_key, self._ranking_at = ranking, key, now
+            self._ranking_source, self._ranking_error, self._ranking_retry_at = "avg", "", 0.0
+            self.state.futures_ranking = {"key": list(key), "at": now, "symbols": ranking}
+            self.store.save(self.state)
+            self.universe = self._ranking[:cfg.futures_universe]
+            log.info("En hacimli %d köklü parite: %s", len(self.universe), ", ".join(s[:-4] for s in self.universe))
+            if recovered and self._universe_warned_at:
+                self._universe_warned_at = 0.0
+                self.notifier.send(f"✅ En hacimli coin sıralaması alındı: {len(self._universe_symbols())} coin "
+                                   f"taranıyor ({', '.join(s[:-4] for s in self.universe)}).")
+            return
+        error = error or "sıralama boş geldi (uygun parite ya da hacim bilgisi yok)"
+        self._ranking_error = error
+        self._ranking_retry_at = now + UNIVERSE_RETRY_SEC                         # 10 dk sonra tekrar dene
+        if not self._ranking or key != self._ranking_key:
+            fallback = self._ranking_by_24h(key[0])
+            if fallback:
+                self._ranking, self._ranking_source = fallback, "24h"
+            elif key != self._ranking_key:
+                self._ranking, self._ranking_source = [], ""
+        self._ranking_key = key
         self.universe = self._ranking[:cfg.futures_universe]
-        log.info("En hacimli %d köklü parite: %s", len(self.universe), ", ".join(s[:-4] for s in self.universe))
+        log.warning("Hacim sıralaması alınamadı (%s); %s", error, self.universe_label())
+        degraded = not self.universe or self._ranking_source == "24h"     # Önceki iyi sıralama varsa uyarı yok
+        if degraded and now - self._universe_warned_at >= UNIVERSE_WARN_SEC:
+            self._universe_warned_at = now
+            self.notifier.send(Messages.warning(
+                f"En hacimli {cfg.futures_universe} coin sıralaması alınamadı: {error}. Şimdilik "
+                f"{self.universe_label()}; 10 dk sonra yeniden denenecek. Backtest bu sıralamayla çalıştığı için "
+                f"liste dışındaki coinlerdeki işlemler kaçabilir."))
+
+    def _ranking_by_24h(self, min_age_days: float) -> List[str]:
+        """Geçici evren: köklü paritelerin son 24 saatlik USDT hacmine göre sıralaması (tek istek)."""
+        try:
+            eligible = set(self.exchange.eligible_symbols(min_age_days))
+            if not eligible:
+                return []
+            tickers = self.exchange.tickers_24h()
+        except Exception as exc:  # noqa: BLE001 - geçici evren en iyi çaba: bot hiçbir durumda durmasın
+            log.warning("24 saatlik hacimler de alınamadı: %s", exc)
+            return []
+        rows = sorted(((t.get("qv", 0.0), s) for s, t in tickers.items() if s in eligible and t.get("qv", 0.0) > 0),
+                      reverse=True)
+        return [s for _qv, s in rows]
+
+    def universe_label(self) -> str:
+        """Taranan evrenin kısa açıklaması (/tarama, uyarılar): kaç coin, nereden."""
+        cfg = self.cfg
+        n = len(self._universe_symbols())
+        if cfg.futures_universe <= 0:
+            return f"{n} coin (FUTURES_COINS listesi)"
+        listed = " + liste" if cfg.futures_universe_with_list else ""
+        if not self.universe:
+            return f"yalnız liste: {n} coin (en hacimli {cfg.futures_universe} sıralaması yok)"
+        if self._ranking_source == "24h":
+            return f"{n} coin (geçici: 24 saatlik hacme göre en hacimli {cfg.futures_universe}{listed})"
+        return f"{n} coin (en hacimli {cfg.futures_universe}{listed})"
 
     def _universe_symbols(self) -> List[str]:
         """En hacimli N köklü parite (+ FUTURES_UNIVERSE_WITH_LIST açıksa FUTURES_COINS listesindekiler)."""
@@ -1063,6 +1243,12 @@ class FuturesBot(TradingBot):
         age = self.time_fn() - self.last_scan_at
         lines = [f"🔍 <b>Son Vadeli Tarama</b> ({age:.0f} sn önce)",
                  f"Coin: {r.candidates} | Analiz: {r.analyzed} | Sinyal: {len(r.signals)}"]
+        names = [s[:-4] for s in (self._universe_symbols() if self.cfg.futures_universe > 0
+                                  else [c + "USDT" for c in futures_coin_list(self.cfg)])]
+        lines.append(f"🪙 Evren: {esc(self.universe_label())}: {esc(', '.join(names[:30]))}"
+                     + (" …" if len(names) > 30 else ""))
+        if self._ranking_error and (not self.universe or self._ranking_source == "24h"):
+            lines.append(f"⚠️ En hacimli coin sıralaması alınamadı: {esc(self._ranking_error[:150])}")
         if self.state.positions and self.slots() > 1:
             lines.append(f"📦 {len(self.state.positions)}/{self.slots()} pozisyon açık: ek pozisyon yalnızca son 1 saatte "
                          f"≥{self.cfg.futures_extra_breadth} coin %3+ düşerken açılır.")

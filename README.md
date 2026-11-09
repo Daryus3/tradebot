@@ -348,6 +348,17 @@ Ham hacim sıralaması 2024-2026'da yeni çıkan hype / meme coinleri (TRUMP, FA
 istekle 24 saatlik özet alınır, yalnızca tepesinden yeterince düşmüş coinlerin mumları istenir; kaldırılması planlanan
 ve 30 günden yeni pariteler alınmaz). Telegram: ⚙️ Ayarlar → 🪙 Coinler → 📋 Liste / 🔝 10 · 20 · 40 · 60 · 80 · 100,
 🎂 en az 1-4 yıl. Backtest aynı kuralı geçmişe uygular (ilk çalıştırmada ~22 bin küçük aylık hacim dosyası iner).
+Canlı sıralama durum dosyasında saklanır (yeniden başlatmada hemen hazır); birkaç paritenin hacmi alınamazsa onlar atlanır,
+sıralama hiç alınamazsa önceki sıralama, o da yoksa geçici olarak köklü paritelerin 24 saatlik hacmi kullanılır, 10 dk
+sonra yeniden denenir ve Telegram'dan uyarılır (yalnız listeye düşen bot, backtestin liste dışı coinlerde açtığı
+işlemleri kaçırır). `/tarama` taranan evreni ("🪙 Evren: 22 coin (en hacimli 20 + liste): BTC, ETH, ...") gösterir.
+
+**Canlı bot karşılaştırması.** Vadeli bot her 5 dk mum için `data/futures_scans_<mod>.jsonl` dosyasına bir satır yazar
+(taranan / analiz edilen coinler, genişlik, sinyaller ve sonuçları, beklemedeki coinler ya da taramanın neden yapılmadığı:
+durdurulmuş, kill-switch, dondurulmuş, boş yer yok, gecikme; 30 gün tutulur). Vadeli backtest raporu bu kayıtla örtüşen
+dönemde backtestin her işlemini canlı botun aynı mumdaki kaydıyla karşılaştırır ("🔍 CANLI BOT KARŞILAŞTIRMASI"): canlı da
+açtı mı, açmadıysa neden (kayıt yok = bot kapalıydı, taranmadı, coin canlı evrende yoktu, coin beklemedeydi, sinyal
+çıkmadı, sinyal vardı ama boş yer yoktu / minimum emir / hata). Telegram'dan 🧪 Backtest → 7 gün ile kontrol edilir.
 
 - **İzleyen stop** (`FUTURES_TRAILING`, varsayılan kapalı; fiyat +`FUTURES_TRAILING_ACT_PCT` gidince zarar kes en iyi
   fiyatın `FUTURES_TRAILING_GAP_PCT` gerisine çekilir, Binance'teki stop emri de taşınır): seçim döneminde çoğu ayarda
@@ -834,5 +845,6 @@ tradebot/
 | Coinler Binance'te "kilitli" görünüyor | Normal: yedek zarar-kes emri bekliyor |
 | Kill-switch kilidi | Servisi durdurun, `python main.py --mode paper --reset-state --yes`, servisi başlatın |
 | Bot hiç alım yapmıyor | Telegram'dan `/tarama` yazın; hangi filtrenin elediğini gösterir |
+| Backtest işlem gösteriyor, canlı bot açmadı (vadeli) | 🧪 Backtest → 7 gün: raporun başındaki 🔍 CANLI BOT KARŞILAŞTIRMASI her işlemin neden kaçtığını yazar; `/tarama`'da 🪙 Evren satırına bakın |
 
 **Geliştiriciler için testler:** `.venv/bin/pip install pytest && .venv/bin/python -m pytest`

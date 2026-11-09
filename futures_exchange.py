@@ -445,12 +445,17 @@ class FuturesExchange:
     def seasoned_ranking(self, min_age_days: float, avg_days: int) -> List[Tuple[str, float]]:
         """FUTURES_UNIVERSE sıralaması: en az min_age_days gündür listelenen kripto süresiz pariteler, son avg_days
         günün ortalama USDT hacmine göre (büyükten küçüğe). Parite başına bir istek: günde bir kez çağrılır."""
-        rows = []
-        for symbol in self.eligible_symbols(min_age_days):
+        rows, failed = [], 0
+        symbols = self.eligible_symbols(min_age_days)
+        for symbol in symbols:
             try:
                 rows.append((symbol, self.average_volume(symbol, avg_days)))
-            except FuturesError as exc:
+            except (FuturesError, requests.ConnectionError) as exc:
+                # Tek paritedeki geçici ağ / limit hatası tüm sıralamayı bozmasın; çoğu alınamıyorsa vazgeçilir
+                failed += 1
                 log.warning("%s hacim geçmişi alınamadı: %s", symbol, exc)
+                if failed > max(5, len(symbols) // 4):
+                    raise FuturesError(f"{failed} paritenin hacim geçmişi alınamadı (son hata: {exc})") from exc
         rows.sort(key=lambda r: -r[1])
         return [r for r in rows if r[1] > 0]
 

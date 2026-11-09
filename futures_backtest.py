@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import csv
 import heapq
+import json
 import math
 from collections import Counter
 from dataclasses import dataclass, field, replace
@@ -34,7 +35,7 @@ import numpy as np
 
 from config import (DATA_DIR, format_crash_rules, futures_coin_list, futures_crash_rules, futures_funding_rules,
                     futures_liq_distance_pct, futures_long_windows, futures_modules, futures_wave_cfg,
-                    futures_wave_rules, parse_crash_rules)
+                    futures_wave_rules, parse_crash_rules, scan_log_path)
 from futures_data import FuturesArchive, concat, resample, slice_range
 from strategy import (FUT_BAR_MS, FUT_HOUR_MS, breadth_flags, btc_trend_1h, crash_state, funding_per_bar,
                       futures_candidates, futures_entries, futures_features, isolated_factor, pick_signal, trend_at)
@@ -2225,7 +2226,105 @@ def breadth_breakdown(trades: Sequence[FutTrade], p: SimParams) -> str:
     return text
 
 
-def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None, grid=None, variants=None) -> str:
+# ===================================================================== canlı bot karşılaştırması
+def read_scan_log(path: Path, start_ms: int, end_ms: int) -> List[dict]:
+    """Canlı botun tarama kaydı (FuturesBot, futures_scans_<mod>.jsonl): [start, end) aralığındaki satırlar. Evren ('u')
+    yalnızca değişince yazıldığı için her tarama satırına o anki evren eklenir."""
+    rows: List[dict] = []
+    universe = None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(row, dict) or not isinstance(row.get("t"), (int, float)):
+                    continue
+                if "u" in row:
+                    universe = row["u"]
+                elif universe is not None and "skip" not in row:
+                    row["u"] = universe
+                if start_ms <= row["t"] < end_ms:
+                    rows.append(row)
+    except OSError:
+        return []
+    return rows
+
+
+def live_status(symbol: str, row: Optional[dict]) -> Tuple[str, str]:
+    """Backtestin işlem açtığı mumda canlı bot ne yaptı: (kısa neden, açıklama)."""
+    base = symbol[:-4] if symbol.endswith("USDT") else symbol
+    if row is None:
+        return "kayıt yok", "kayıt yok: canlı bot o anda çalışmıyordu ya da o mumu taramadı"
+    if "skip" in row:
+        reason = str(row["skip"])
+        return reason.split(" (")[0], f"taranmadı: {reason}"
+    outcome = (row.get("s") or {}).get(base)
+    if outcome is not None:
+        if outcome == "açıldı":
+            return "açtı", "✅ canlı da açtı"
+        return outcome.split(" (")[0].split(":")[0], f"sinyal vardı ama {outcome}"
+    if base in (row.get("x") or []):
+        return "coin beklemedeydi", "coin beklemedeydi (zarar sonrası bekleme ya da açık pozisyon)"
+    universe = row.get("u")
+    if universe is not None and base not in universe:
+        return "coin evrende yoktu", f"coin canlı evrende yoktu (canlı {len(universe)} coin tarıyordu)"
+    if base in (row.get("a") or []):
+        return "sinyal çıkmadı", "coin analiz edildi ama canlı mumlarda sinyal çıkmadı"
+    return "analiz edilmedi", "coin analiz edilmedi (24 saatlik ön eleme ya da mumu alınamadı)"
+
+
+def live_comparison(cfg, data: FutData, trades: Sequence[FutTrade], path: Optional[Path] = None,
+                    limit: int = 15) -> List[str]:
+    """Backtestin (tek hesap) işlemlerini canlı botun aynı mumdaki tarama kaydıyla karşılaştırır: canlı da açtı mı,
+    açmadıysa neden (bot taramadı / coin evrende yoktu / sinyal çıkmadı / yer yoktu...). Kayıt yoksa boş."""
+    path = Path(path) if path is not None else scan_log_path(DATA_DIR, getattr(cfg, "trading_mode", "paper"))
+    journal = read_scan_log(path, data.start_ms, data.end_ms + FUT_BAR_MS)
+    if not journal:
+        return []
+    by_t = {int(r["t"]): r for r in journal}
+    first, last = min(by_t), max(by_t)
+    mode = "test modu" if getattr(cfg, "trading_mode", "paper") == "paper" else "canlı"
+
+    def when(ms: int) -> str:
+        return datetime.fromtimestamp(ms / 1000).strftime("%d.%m %H:%M")
+    expected = (last - first) // FUT_BAR_MS + 1
+    skips = Counter(str(r["skip"]).split(" (")[0] for r in journal if "skip" in r)
+    scanned = sum(1 for r in journal if "skip" not in r)
+    L = [f"🔍 CANLI BOT KARŞILAŞTIRMASI ({mode} bot kaydı: {when(first)} → {when(last)})",
+         f"  Kayıtlı 5 dk mum: {len(by_t)} / {expected} (bot kapalıyken kayıt olmaz) | taranan {scanned}"
+         + (" | taranmayan: " + ", ".join(f"{k}: {v}" for k, v in skips.most_common(4)) if skips else "")]
+    last_u = next((r["u"] for r in reversed(journal) if r.get("u") is not None), None)
+    if last_u is not None:
+        bt = [c for c in (data.segments[-1].coins if data.segments else ())]
+        missing = [c for c in bt if c not in last_u]
+        L.append(f"  Canlı evren (son kayıt): {len(last_u)} coin | backtest evreni: {len(bt)} coin"
+                 + (f" | backtestte olup canlıda olmayan: {', '.join(missing[:12])}" + (" …" if len(missing) > 12 else "")
+                    if missing else ""))
+    inside = [tr for tr in trades if first <= tr.entry_ms <= last]
+    if not inside:
+        L.append("  Bu aralıkta backtestte işlem yok.")
+        return L
+    counts: Counter = Counter()
+    rows = []
+    for tr in inside:
+        # Sinyal mumunun kapanışı: piyasa girişinde giriş anının kendisi, limit girişte (dolum birkaç dk sonra) o mum
+        key, text = live_status(tr.symbol, by_t.get(int(tr.entry_ms) // FUT_BAR_MS * FUT_BAR_MS))
+        counts[key] += 1
+        rows.append(f"  {when(tr.entry_ms)} {tr.symbol[:-4]}: {text}")
+    L.append(f"  Backtest işlemleri bu aralıkta: {len(inside)} | canlı da açtı: {counts.get('açtı', 0)}")
+    L.extend(rows[:limit])
+    if len(rows) > limit:
+        L.append(f"  … {len(rows) - limit} işlem daha")
+    others = [(k, v) for k, v in counts.most_common() if k != "açtı"]
+    if others:
+        L.append("  Kaçanların nedeni: " + ", ".join(f"{k}: {v}" for k, v in others))
+    return L
+
+
+def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None, grid=None, variants=None,
+                  live: Optional[List[str]] = None) -> str:
     res = ev.chained
     p = res.params
     st = stats_of(res)
@@ -2294,6 +2393,9 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
                  f"{_num(funnel.liq_vol_trend, 0)} → + RSI uyumsuzluğu {_num(funnel.signals, 0)} sinyal "
                  f"(ayda ~{per_month:.0f}; tek pozisyon kuralıyla işleme dönüşen {len(fixed)})")
     L.append("")
+    if live:
+        L.extend(live)
+        L.append("")
     L.append(f"💰 A) {p.start_capital:g} USDT ile {_date(data.start_ms)}'de başlayıp para eklemeseydiniz (tek hesap)")
     L.append(f"  Son bakiye: {_num(res.final_equity)} USDT ({_pct(res.net_pct)}) | BTC al-tut {_pct(btc_hold_pct(data))}")
     L.append(f"  İşlem {st.trades} | kazanan {st.wins} | kazanma %{st.win_rate:.1f} | kâr faktörü {_pf(st.profit_factor)}"
@@ -2526,7 +2628,7 @@ def run_cli(cfg, days: Optional[int], end_ms: Optional[int], out_dir: Path, char
         levs = leverage_table(cfg, data, signals, windows)
         grid = exit_grid(cfg, data, signals, windows)
         variants = variant_rows(cfg, data, signals, windows)
-    report = format_report(cfg, data, ev, funnel, levs, grid, variants)
+    report = format_report(cfg, data, ev, funnel, levs, grid, variants, live=live_comparison(cfg, data, ev.chained.trades))
     stamp = datetime.now().strftime("%Y%m%d-%H%M")
     try:
         csv_path = save_trades_csv(ev.trades, out_dir / f"vadeli_islemler_{stamp}.csv")

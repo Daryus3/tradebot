@@ -70,6 +70,9 @@ class BotState:
     backtest_draft: Dict[str, object] = field(default_factory=dict)   # Telegram /backtest menüsünde seçilenler
     # Vadeli limit (maker) giriş emri dolmayı bekliyor (FUTURES_ENTRY_ORDER=limit): parite, emir kimliği, fiyat, süre...
     pending_entry: Dict[str, object] = field(default_factory=dict)
+    # Vadeli en hacimli N sıralaması (FUTURES_UNIVERSE): {"key": [yaş, gün], "at": zaman, "symbols": [...]}. Yeniden
+    # başlatmada sıralama hemen hazır olsun, Binance'e ulaşılamazsa son iyi sıralama kullanılsın diye saklanır.
+    futures_ranking: Dict[str, object] = field(default_factory=dict)
 
     @property
     def capital(self) -> float:
