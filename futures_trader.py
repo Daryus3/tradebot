@@ -192,6 +192,14 @@ class FuturesBot(TradingBot):
                 [c for c in coins if c not in missing], self.loss_limit, self.loss_pct, mode_note, free))
             for note in cfg.notes:
                 self.notifier.send(Messages.warning(note))
+            if not ex.is_paper:
+                try:
+                    asset_note = ex.check_single_asset()
+                except (FuturesError, requests.ConnectionError) as exc:
+                    log.warning("Varlık modu denetlenemedi: %s", exc)
+                    asset_note = str(exc) if getattr(exc, "code", "") == "MULTI_ASSETS" else None
+                if asset_note:
+                    self.notifier.send(Messages.warning(asset_note))
             if not ex.is_paper and not self.state.positions:
                 try:
                     wallet = self._wallet_note(ex.total_balance())

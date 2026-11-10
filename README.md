@@ -908,6 +908,7 @@ tradebot/
 | Coinler Binance'te "kilitli" görünüyor | Normal: yedek zarar-kes emri bekliyor |
 | Kill-switch kilidi | Servisi durdurun, `python main.py --mode paper --reset-state --yes`, servisi başlatın |
 | Bot hiç alım yapmıyor | Telegram'dan `/tarama` yazın; hangi filtrenin elediğini gösterir |
+| `Unable to adjust to isolated-margin mode under the Multi-Assets mode` (-4168) | Vadeli hesap Çoklu Varlık modunda; bu modda yalıtılmış teminat kullanılamaz. Bot açılışta ve ilk işlemde hesabı kendisi Tek Varlık moduna alır. Alamazsa: açık vadeli pozisyon ve emirleri kapatıp Binance → Vadeli → Ayarlar (Tercihler) → Varlık Modu → **Tek Varlık Modu** |
 | Backtest işlem gösteriyor, canlı bot açmadı (vadeli) | 🧪 Backtest → 7 gün: raporun başındaki 🔍 CANLI BOT KARŞILAŞTIRMASI her işlemin neden kaçtığını yazar; `/tarama`'da 🪙 Evren satırına bakın |
 
 **Geliştiriciler için testler:** `.venv/bin/pip install pytest && .venv/bin/python -m pytest`

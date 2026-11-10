@@ -96,7 +96,7 @@ def _is_network(exc: Exception) -> bool:
 def _code_of(exc: Exception) -> str:
     text = str(exc)
     for code in ("-4164", "-2019", "-4046", "-4047", "-4048", "-4059", "-2021", "-2022", "-4061", "-1111", "-4005",
-                 "-4003", "-2015", "-1021", "-5022"):          # -5022: post-only emir anında eşleşecekti (reddedildi)
+                 "-4003", "-2015", "-1021", "-5022", "-4168"):          # -5022: post-only emir anında eşleşecekti (reddedildi)
         if code in text:
             return code
     return ""
@@ -218,13 +218,39 @@ class FuturesExchange:
         bal = self._call("Vadeli bakiye okunamadı", self.ex.fetch_balance)
         return float((bal.get("total") or {}).get(asset) or 0.0)
 
+    def check_single_asset(self) -> Optional[str]:
+        """Hesap Çoklu Varlık (Multi-Assets) modundaysa Tek Varlık moduna alır: Çoklu Varlık modunda Binance yalıtılmış
+        (ISOLATED) teminata izin vermez (-4168) ve hiçbir pozisyon açılamaz. Değişiklik olduysa bilgi notu döner
+        (zaten Tek Varlık modundaysa None); geçilemezse FuturesError."""
+        info = self._call("Varlık modu okunamadı", self.ex.fapiPrivateGetMultiAssetsMargin)
+        if str((info or {}).get("multiAssetsMargin")).lower() != "true":
+            return None
+        try:
+            self._call("Tek Varlık moduna geçilemedi", self.ex.fapiPrivatePostMultiAssetsMargin,
+                       {"multiAssetsMargin": "false"})
+        except FuturesError as exc:
+            raise FuturesError(f"Binance vadeli hesabınız Çoklu Varlık (Multi-Assets) modunda ve Tek Varlık moduna "
+                               f"alınamadı: {exc}. Bu modda yalıtılmış teminat kullanılamadığı için bot işlem açamaz. "
+                               f"Açık vadeli pozisyon ve emirleri kapatıp Binance → Vadeli → Ayarlar (Tercihler) → "
+                               f"Varlık Modu'ndan 'Tek Varlık Modu'nu seçin.", "MULTI_ASSETS") from exc
+        return ("🔁 Hesap Çoklu Varlık (Multi-Assets) modundaydı; Tek Varlık moduna alındı (bu modda yalıtılmış "
+                "teminat kullanılamıyor, bot işlem açamıyordu)")
+
     def prepare_symbol(self, symbol: str, leverage: int) -> None:
         """İşleme girmeden HEMEN ÖNCE: yalıtılmış (ISOLATED) teminat ve kaldıraç."""
         sym = ccxt_symbol(symbol)
+        what = f"{symbol} teminat modu ISOLATED yapılamadı"
         try:
-            self._call(f"{symbol} teminat modu ISOLATED yapılamadı", self.ex.set_margin_mode, "isolated", sym)
+            self._call(what, self.ex.set_margin_mode, "isolated", sym)
         except FuturesError as exc:
-            if exc.code != "-4046" and "no need to change" not in str(exc).lower():
+            if exc.code == "-4168":                       # Çoklu Varlık modu: Tek Varlık moduna al, bir kez daha dene
+                self.check_single_asset()
+                try:
+                    self._call(what, self.ex.set_margin_mode, "isolated", sym)
+                except FuturesError as again:
+                    if again.code != "-4046" and "no need to change" not in str(again).lower():
+                        raise
+            elif exc.code != "-4046" and "no need to change" not in str(exc).lower():
                 raise                                     # -4046: zaten isolated
         self._call(f"{symbol} kaldıraç {leverage}x yapılamadı", self.ex.set_leverage, int(leverage), sym)
 

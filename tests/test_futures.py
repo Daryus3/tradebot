@@ -35,6 +35,8 @@ class FakeCcxt:
         self.positions = {}
         self.fail_stop = False
         self.margin_error = None
+        self.multi_assets = False
+        self.multi_switch_error = None
         self.min_cost = min_cost or {}
         self._id = 0
 
@@ -82,8 +84,20 @@ class FakeCcxt:
 
     def set_margin_mode(self, mode, sym):
         self.calls.append(("set_margin_mode", mode, sym))
+        if self.multi_assets:
+            raise Exception('binance {"code":-4168,"msg":"Unable to adjust to isolated-margin mode under the '
+                            'Multi-Assets mode."}')
         if self.margin_error:
             raise Exception(self.margin_error)
+
+    def fapiPrivateGetMultiAssetsMargin(self, params=None):
+        return {"multiAssetsMargin": "true" if self.multi_assets else "false"}
+
+    def fapiPrivatePostMultiAssetsMargin(self, params):
+        self.calls.append(("multi_assets", params["multiAssetsMargin"]))
+        if self.multi_switch_error:
+            raise Exception(self.multi_switch_error)
+        self.multi_assets = False
 
     def set_leverage(self, lev, sym):
         self.calls.append(("set_leverage", lev, sym))
@@ -337,6 +351,23 @@ def test_prepare_symbol_isolated_then_leverage(fcfg):
     fake.margin_error = 'binance {"code":-4046,"msg":"No need to change margin type."}'   # Zaten isolated
     ex.prepare_symbol("BTCUSDT", 5)
     assert fake.calls[-1] == ("set_leverage", 5, "BTC/USDT:USDT")
+
+
+def test_multi_assets_mode_is_switched_off(fcfg):
+    """-4168: Çoklu Varlık modunda ISOLATED yapılamaz → bot Tek Varlık moduna alıp yeniden dener."""
+    fake = FakeCcxt()
+    ex = FuturesExchange(fcfg, exchange=fake)
+    assert ex.check_single_asset() is None                       # Zaten Tek Varlık modu: dokunulmaz
+    fake.multi_assets = True
+    ex.prepare_symbol("BTCUSDT", 5)
+    assert ("multi_assets", "false") in fake.calls and fake.calls[-1] == ("set_leverage", 5, "BTC/USDT:USDT")
+    fake.multi_assets = True
+    assert "Tek Varlık" in ex.check_single_asset()
+    fake.multi_assets = True
+    fake.multi_switch_error = 'binance {"code":-4167,"msg":"Unable to adjust Multi-Assets Mode with open positions"}'
+    with pytest.raises(FuturesError) as err:
+        ex.prepare_symbol("BTCUSDT", 5)
+    assert err.value.code == "MULTI_ASSETS" and "Varlık Modu" in str(err.value)
 
 
 def test_min_notional_detection(fcfg):
