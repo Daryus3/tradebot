@@ -27,7 +27,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 import requests
 
-from config import (futures_breadth_on, futures_coin_list, scan_log_path, futures_crash_rules, futures_funding_rules,
+from config import (futures_be_trigger, futures_breadth_on, futures_coin_list, scan_log_path, futures_crash_rules, futures_funding_rules,
                     futures_liq_distance_pct, futures_modules, futures_pump_rules, futures_slot_share,
                     futures_wave_rules)
 from futures_exchange import FFill, FuturesError, MinNotionalError, describe_error
@@ -46,6 +46,7 @@ MAX_SCAN_LAG_SEC = 90         # Mum kapanışından bu kadar sonra (kesinti / ya
 MARGIN_RETRY_FACTOR = 0.9     # "Margin is insufficient" (-2019): miktar %10 küçültülüp bir kez daha denenir
 SOFT_STOP_GRACE_PCT = 0.15    # Fiyat stopu bu kadar (fiyat %) geçtiği hâlde Binance emri çalışmadıysa bot kapatır
 BE_RETRY_SEC = 30             # Başabaş stopu taşınamadıysa bu kadar sonra tekrar denenir
+STOP_WOULD_TRIGGER = "-2021"  # Binance: "Order would immediately trigger" (fiyat stop seviyesini çoktan geçmiş)
 TRAIL_MOVE_SEC = 10           # İzleyen stop: Binance'teki stop emri en sık bu aralıkla taşınır (bot arada kendisi izler)
 TRAIL_MIN_STEP_PCT = 0.1      # ...ve yeni seviye eskisinden en az bu kadar (fiyat %) iyiyse
 PREFILTER_SLACK_PCT = 1.0     # En hacimli N + çöküş: 24 saatlik tepeye göre ön elemede pay (fiyat puanı)
@@ -95,6 +96,7 @@ class FuturesBot(TradingBot):
         self.next_scan_at = self._next_close(self.time_fn()) + SCAN_DELAY_SEC
         self.last_signals: List[FuturesSignal] = []
         self._be_retry_at: Dict[str, float] = {}
+        self._stop_passed: Set[str] = set()    # Stop taşınırken "emir hemen tetiklenir" reddi alan pariteler
         self._trail_at: Dict[str, float] = {}
         self.universe: List[str] = []          # FUTURES_UNIVERSE: en hacimli N köklü parite (sıralamanın ilk N'i)
         self._ranking: List[str] = []          # Tüm köklü pariteler, ortalama hacme göre
@@ -674,6 +676,9 @@ class FuturesBot(TradingBot):
         tp = ex.price_to_precision(symbol, entry * (1 + sign * cfg.take_profit_pct / 100))
         sl = ex.price_to_precision(symbol, entry * (1 - sign * cfg.stop_loss_pct / 100))
         margin_used = qty * entry / lev
+        # Faz 8: başka pozisyon açıkken açılan (ek) pozisyon kendi başabaş tetiğiyle izlenir (backtest: simulate_slots)
+        n_open = sum(1 for p in self.state.positions.values() if p.futures and p.symbol != symbol)
+        be_trigger = futures_be_trigger(cfg, n_open)
         pos = Position(symbol=symbol, base_asset=symbol[:-4], qty=qty, entry_price=entry,
                        cost_usdt=margin_used + fill.fee, opened_at=now if opened_at is None else opened_at,
                        buy_fee_usdt=fill.fee,
@@ -681,6 +686,8 @@ class FuturesBot(TradingBot):
                        leverage=lev, margin_usdt=margin_used,
                        liq_price=entry * (1 - sign * (1 / lev - cfg.futures_mmr_pct / 100)), sl_price=sl, tp_price=tp,
                        regime=f"{side.upper()} {lev}X")      # İşlem kaydında (CSV) yön ve kaldıraç görünsün
+        if cfg.breakeven_enabled and be_trigger != cfg.breakeven_trigger_pct:
+            pos.metrics["be_trigger"] = be_trigger
         self.state.positions[symbol] = pos
         if ex.is_paper:
             ex.open_paper(symbol, side, qty, entry, margin_used, lev)
@@ -961,8 +968,17 @@ class FuturesBot(TradingBot):
     def levels(self, pos: Position) -> dict:
         if not pos.futures:
             return super().levels(pos)
-        trig = pos.entry_price * (1 + _sign(pos) * self.cfg.breakeven_trigger_pct / 100)
+        trig = pos.entry_price * (1 + _sign(pos) * self._be_trigger_pct(pos) / 100)
         return {"tp": pos.tp_price, "sl": pos.sl_price, "trail_on": trig, "liq": pos.liq_price}
+
+    def _be_trigger_pct(self, pos: Position) -> float:
+        """Pozisyonun başabaş tetiği (fiyat %): Faz 8'de ek pozisyon olarak açıldıysa girişte kaydedilen değer
+        (pos.metrics["be_trigger"]), yoksa güncel BREAKEVEN_TRIGGER_PCT."""
+        try:
+            own = float(pos.metrics.get("be_trigger", 0.0))
+        except (TypeError, ValueError):
+            own = 0.0
+        return own if own > 0 else self.cfg.breakeven_trigger_pct
 
     # ================================================================ pozisyon yönetimi
     def manage_positions(self, now: float) -> None:
@@ -1013,12 +1029,13 @@ class FuturesBot(TradingBot):
         return None
 
     def _check_breakeven(self, pos: Position, price: float, mark: Mark, now: float) -> None:
-        """Erken başabaş kalkanı: fiyat +BREAKEVEN_TRIGGER_PCT'ye gelince stop girişin +BREAKEVEN_FLOOR_PCT'sine."""
+        """Erken başabaş kalkanı: fiyat +BREAKEVEN_TRIGGER_PCT'ye (Faz 8: ek pozisyonda FUTURES_EXTRA_BE_TRIGGER_PCT'ye)
+        gelince stop girişin +BREAKEVEN_FLOOR_PCT'sine."""
         cfg, ex = self.cfg, self.exchange
         if not cfg.breakeven_enabled or pos.breakeven_active or now < self._be_retry_at.get(pos.symbol, 0.0):
             return
         sign = _sign(pos)
-        if not _reached(pos, price, pos.entry_price * (1 + sign * cfg.breakeven_trigger_pct / 100)):
+        if not _reached(pos, price, pos.entry_price * (1 + sign * self._be_trigger_pct(pos) / 100)):
             return
         new_stop = ex.price_to_precision(pos.symbol, pos.entry_price * (1 + sign * cfg.breakeven_floor_pct / 100))
         if _worse(pos, price, new_stop):
@@ -1029,6 +1046,13 @@ class FuturesBot(TradingBot):
             self.store.save(self.state)
             return
         if not self._move_stop(pos, new_stop, now, "başabaş"):
+            if pos.symbol in self._stop_passed:
+                # Stop konurken fiyat yeni stopun gerisine düşmüş (tetik ile taban arası dar olduğunda, ör. Faz 8'de
+                # %0.2): backtestteki gibi beklemeden çıkılır (eski zarar kes geri kondu, kapanış olmazsa o korur)
+                self._stop_passed.discard(pos.symbol)
+                if pos.symbol in self.state.positions:
+                    log.info("%s başabaş: fiyat yeni stopu geçmiş, piyasa emriyle kapatılıyor", pos.symbol)
+                    self.close_position(pos, ExitReason.BREAKEVEN)
             return
         pos.breakeven_active = True
         self.store.save(self.state)
@@ -1071,6 +1095,7 @@ class FuturesBot(TradingBot):
         False döner (bir süre sonra tekrar denenir); eski de konamazsa pozisyon güvenlik için kapatılır."""
         ex = self.exchange
         old_id, old_stop = pos.stop_order_id, pos.sl_price
+        self._stop_passed.discard(pos.symbol)
         try:
             if old_id:
                 ex.cancel(pos.symbol, old_id, conditional=True)
@@ -1086,10 +1111,13 @@ class FuturesBot(TradingBot):
                                                   f"güvenlik için kapatılıyor."), critical=True)
                 self.close_position(pos, ExitReason.SAFETY)
                 return False
+            self.store.save(self.state)
+            if exc.code == STOP_WOULD_TRIGGER:           # Fiyat yeni stopu çoktan geçmiş: çağıran karar verir
+                self._stop_passed.add(pos.symbol)
+                return False
             self.notifier.send_error(f"stop-{pos.symbol}", Messages.warning(
                 f"{pos.symbol} {what} Binance'e taşınamadı ({exc}); eski zarar kes duruyor, tekrar denenecek."),
                 cooldown_sec=300)
-            self.store.save(self.state)
             return False
         pos.sl_price = new_stop
         return True
@@ -1293,6 +1321,9 @@ class FuturesBot(TradingBot):
                 extra += f", dalgada yeniden giriş ≥{cfg.futures_reentry_breadth}"
             if futures_wave_rules(cfg):
                 extra += f", dalga eşikleri ≥{cfg.futures_wave_breadth}"
+            if (cfg.futures_max_positions > 1 and cfg.breakeven_enabled
+                    and futures_be_trigger(cfg, 1) != cfg.breakeven_trigger_pct):
+                extra += f", ek pozisyon başabaşı +%{cfg.futures_extra_be_trigger_pct:g}"
             lines.append(f"🌊 Genişlik: {self.last_breadth} coin son 1 saatte %3+ düştü (dalga ≥"
                          f"{cfg.futures_extra_breadth}, yalnız çöküş <{cfg.futures_isolated_breadth}{extra})")
         pe = self.state.pending_entry

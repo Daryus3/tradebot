@@ -177,6 +177,8 @@ EDITABLE: Dict[str, Setting] = {
                                   "Faz 6: dalgada ek çöküş pencereleri (saat:%, ör. 1:5,4:8; kapalı = yok)"),
     "FUTURES_WAVE_BREADTH": Setting("futures_wave_breadth", "int",
                                     "Faz 6: dalga eşikleri için son 1 saatte %3+ düşen en az coin sayısı"),
+    "FUTURES_EXTRA_BE_TRIGGER_PCT": Setting("futures_extra_be_trigger_pct", "float",
+                                            "Faz 8: ek pozisyonların başabaş tetiği (fiyat %; 0 = ana ayarla aynı)"),
     "FUTURES_LEVERAGE": Setting("futures_leverage", "int", "Vadeli kaldıraç (1-20x; sonraki işlemde uygulanır)"),
     "FUTURES_COINS": Setting("futures_coins", "str", "Vadeli coinler (virgülle, ör. BTC,ETH,SOL)"),
     "FUTURES_SIDES": Setting("futures_sides", "choice", "Vadeli yön (both / long / short)", FUTURES_SIDES),

@@ -537,6 +537,8 @@ class SimParams:
     # ≥ reentry_breadth iken zarar sonrası bekleme atlanır; 0 = kapalı)
     extra_size_pct: float = 100.0
     reentry_breadth: int = 0
+    # Faz 8: ek pozisyonların (başka pozisyon açıkken açılanlar) başabaş tetiği (fiyat %; 0 = be_trigger_pct ile aynı)
+    extra_be_trigger_pct: float = 0.0
 
 
 def params_from_cfg(cfg, **over) -> SimParams:
@@ -561,7 +563,8 @@ def params_from_cfg(cfg, **over) -> SimParams:
                   isolated_size_pct=float(getattr(cfg, "futures_isolated_size_pct", 100.0)),
                   isolated_breadth=int(getattr(cfg, "futures_isolated_breadth", 2)),
                   extra_size_pct=float(getattr(cfg, "futures_extra_size_pct", 100.0)),
-                  reentry_breadth=int(getattr(cfg, "futures_reentry_breadth", 0)))
+                  reentry_breadth=int(getattr(cfg, "futures_reentry_breadth", 0)),
+                  extra_be_trigger_pct=float(getattr(cfg, "futures_extra_be_trigger_pct", 0.0)))
     return replace(p, **over) if over else p
 
 
@@ -973,6 +976,9 @@ def simulate_slots(p: SimParams, data: FutData, signals: Sequence[FutSignal], wi
     usage = p.margin_usage_pct / 100
     kill_level = p.start_capital * (1 - p.kill_pct / 100) if p.kill_pct else -1.0
     first_share = slot_share(p, 0)          # Faz 6: ilk pozisyon büyük, ek pozisyonlar küçük (100% = eşit, 1/N)
+    # Faz 8: ek pozisyonlar (başka pozisyon açıkken açılanlar) kendi başabaş tetiğiyle (config.futures_be_trigger)
+    p_extra = (replace(p, be_trigger_pct=p.extra_be_trigger_pct)
+               if p.be_enabled and p.extra_be_trigger_pct > 0 and p.extra_be_trigger_pct != p.be_trigger_pct else p)
 
     def realize(until: int) -> None:
         nonlocal equity, used, freeze_until, sl_streak, day_key, day_pnl, kill_ms, ruined, stop
@@ -1048,7 +1054,7 @@ def simulate_slots(p: SimParams, data: FutData, signals: Sequence[FutSignal], wi
         if window is None or not len(window[1]):
             skipped["çıkış verisi yok"] += 1
             continue
-        tr = run_trade(p, s, window, margin, notional, data)
+        tr = run_trade(p_extra if heap else p, s, window, margin, notional, data)
         if p.entry_limit:
             limit_bar = s.close_ms
         if tr is None:
@@ -1225,11 +1231,13 @@ def exit_grid(cfg, data: FutData, signals, windows) -> List[Tuple[float, float, 
 
 
 PHASE6_SIM = dict(max_positions=4, leverage=3, extra_breadth=8, isolated_size_pct=50.0, isolated_breadth=2,
-                  extra_size_pct=16.7, reentry_breadth=3, loss_cooldown_min=240)       # config.FUTURES_PHASE6_PRESET
+                  extra_size_pct=16.7, reentry_breadth=3, loss_cooldown_min=240,       # config.FUTURES_PHASE6_PRESET
+                  extra_be_trigger_pct=0.0)                                            # (Faz 8 kapalı: saf Faz 6)
 PHASE6_SINGLE_SIM = dict(max_positions=1, leverage=2, isolated_size_pct=50.0, isolated_breadth=2, extra_size_pct=100.0,
                          reentry_breadth=3, loss_cooldown_min=240)               # config.FUTURES_PHASE6_SINGLE_PRESET
 PHASE6_WAVE = {"futures_wave_rules": "1:5,4:8", "futures_wave_breadth": 12}
 PHASE6_OFF_SIM = dict(extra_size_pct=100.0, reentry_breadth=0)
+PHASE8_BE = 0.5                                 # config.FUTURES_PHASE8_BE_TRIGGER: ek pozisyonların başabaş tetiği
 
 
 def phase6_on(cfg) -> bool:
@@ -1257,7 +1265,8 @@ def cascade_rows(cfg, ev, signals=None) -> List[Tuple[str, "Evaluation"]]:
     rows = []
     if base.max_positions == 1:
         rows.append(("🌊 Dalga modu (2 pozisyon, 3x, ek ≥8 coin, yalnız çöküş %50)",
-                     ev0(max_positions=2, leverage=3, extra_breadth=8, isolated_size_pct=50.0, isolated_breadth=2)))
+                     ev0(max_positions=2, leverage=3, extra_breadth=8, isolated_size_pct=50.0, isolated_breadth=2,
+                         extra_be_trigger_pct=0.0)))
     else:
         rows.append(("Tek pozisyon (dalga modu" + (" ve Faz 6" if on else "") + " kapalı, 2x)",
                      ev0(max_positions=1, leverage=2, isolated_size_pct=100.0)))
@@ -1283,13 +1292,33 @@ def phase6_rows(cfg, ev, signals=None, phase6=None) -> List[Tuple[str, "Evaluati
         wave = futures_wave_rules(cfg) == ((1, 5.0), (4, 8.0)) and cfg.futures_wave_breadth == 12
         cur = (base.max_positions, base.leverage, base.extra_size_pct, base.reentry_breadth, base.isolated_size_pct,
                base.loss_cooldown_min)
-        if not (wave and cur == (4, 3, 16.7, 3, 50.0, 240)):
+        if not (wave and cur == (4, 3, 16.7, 3, 50.0, 240) and not phase8_active(base)):
             rows.append(("⭐ Faz 6 seti (4 pozisyon: ilk tam + 3 × %16.7, 3x, dalgada yeniden giriş, dalga eşikleri)",
                          phase6(**PHASE6_SIM)))
         if not (wave and cur[:2] == (1, 2) and cur[3:] == (3, 50.0, 240)):
             rows.append(("⭐ Faz 6 tek pozisyon (dalgada yeniden giriş, dalga eşikleri, yalnız çöküş %50)",
                          phase6(**PHASE6_SINGLE_SIM)))
     return rows
+
+
+def phase8_active(p: SimParams) -> bool:
+    """Faz 8 etkin mi: dalga modunda ek pozisyonlar ana ayardan farklı bir başabaş tetiği kullanıyor."""
+    return (p.max_positions > 1 and p.be_enabled and p.extra_be_trigger_pct > 0
+            and p.extra_be_trigger_pct != p.be_trigger_pct)
+
+
+def phase8_rows(cfg, ev) -> List[Tuple[str, "Evaluation"]]:
+    """Faz 8 karşılaştırması (dalga modunda, başabaş açıkken): kapalıysa ek pozisyonlarda başabaş +%0.5, açıksa ana
+    ayarla aynı tetik. Tek pozisyonda ek pozisyon olmadığı için satır yok."""
+    base = params_from_cfg(cfg)
+    if base.max_positions <= 1 or not base.be_enabled:
+        return []
+    if phase8_active(base):
+        return [(f"Ek pozisyon başabaşı ana ayarla aynı (+%{base.be_trigger_pct:g}; Faz 8 kapalı)",
+                 ev(extra_be_trigger_pct=0.0))]
+    if base.be_trigger_pct <= PHASE8_BE:
+        return []
+    return [(f"Ek pozisyonlarda başabaş +%{PHASE8_BE:g} (Faz 8)", ev(extra_be_trigger_pct=PHASE8_BE))]
 
 
 def long_window_rows(cfg, other) -> List[Tuple[str, "Evaluation"]]:
@@ -1345,7 +1374,7 @@ def variant_rows(cfg, data: FutData, signals, windows) -> List[Tuple[str, Evalua
                 (f"Çöküş eşiği %{cfg.futures_crash_drop_pct + 2:g}", other(futures_crash_drop_pct=cfg.futures_crash_drop_pct + 2)),
                 ("+likidasyon dalgası şartı" if not cfg.futures_crash_liq else "Likidasyon şartı kapalı",
                  other(futures_crash_liq=not cfg.futures_crash_liq))] + long_window_rows(cfg, other)
-                + cascade_rows(cfg, ev, signals) + phase6_rows(cfg, ev, signals, phase6))
+                + cascade_rows(cfg, ev, signals) + phase6_rows(cfg, ev, signals, phase6) + phase8_rows(cfg, ev))
     out = [("Başabaş kalkanı kapalı", ev(be_enabled=False)),
            ("Zaman stopu 30 dk", ev(hold_min=30)),
            ("Zaman stopu 120 dk", ev(hold_min=120)),
@@ -2202,6 +2231,9 @@ def cascade_label(p: SimParams) -> str:
         parts.append(f"yalnız çöküşte (≤{p.isolated_breadth - 1} coin düşüyor) pozisyon %{p.isolated_size_pct:g}")
     if p.reentry_breadth > 0:
         parts.append(f"dalgada yeniden giriş: ≥{p.reentry_breadth} coin düşerken zarar sonrası bekleme yok")
+    if phase8_active(p):
+        parts.append(f"ek pozisyonlarda başabaş +%{p.extra_be_trigger_pct:g} (Faz 8; ilk pozisyonda "
+                     f"+%{p.be_trigger_pct:g})")
     return "; ".join(parts)
 
 

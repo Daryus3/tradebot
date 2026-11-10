@@ -143,6 +143,15 @@ FUTURES_PHASE6_SINGLE_PRESET = {"FUTURES_MAX_POSITIONS": 1, "FUTURES_LEVERAGE": 
                                 "FUTURES_WAVE_BREADTH": 12, "LOSS_COOLDOWN_MINUTES": 240}
 # Faz 6 eklerinin kapalı hâli (Faz 5 seti ve "dalga modunu kapat" bunları da yazar: Faz 5 tam olarak Faz 5 kalır)
 FUTURES_PHASE6_OFF = {"FUTURES_EXTRA_SIZE_PCT": 100, "FUTURES_REENTRY_BREADTH": 0, "FUTURES_WAVE_RULES": ""}
+# Faz 8 (Kasım 2026, rapor_14 araştırması; varsayılan kapalı, Faz 5 / Faz 6 ayarları ve setleri değişmez):
+#   FUTURES_EXTRA_BE_TRIGGER_PCT = dalga modunda EK pozisyonların (başka pozisyon açıkken açılanlar) başabaş tetiği
+#       (fiyat %); 0 = ana ayarla (BREAKEVEN_TRIGGER_PCT) aynı. Taban (BREAKEVEN_FLOOR_PCT) ortaktır.
+#       Dalgada ek yuvalar hep doludur (sinyallerin çoğu "açık pozisyon vardı" diye atlanır): ek pozisyon küçük kârı
+#       erken kilitleyip kapanınca yuvası hemen yeni bir sinyale geçer. İlk (büyük) pozisyonda aynı şey kârı düşürür:
+#       o kapanınca yerine gelen sinyal küçük ek pozisyon olarak açılır. Test (2020-2026, 1 dk, Faz 6 seti): yılda
+#       ~780 → ~915 işlem; yıllık getiri iki dönemde de, 3 kat kaymada da ve 2x-5x'in hepsinde arttı. Ayrıntı README.
+FUTURES_PHASE8_BE_TRIGGER = 0.5
+FUTURES_PHASE8_OFF = {"FUTURES_EXTRA_BE_TRIGGER_PCT": 0}
 FUTURES_SIDES = ("both", "long", "short")
 FUTURES_LIQ_SOURCES = ("proxy", "feed", "both")
 FUTURES_TP_ORDERS = ("limit", "market")
@@ -500,6 +509,15 @@ def futures_breadth_on(cfg) -> bool:
             or int(getattr(cfg, "futures_reentry_breadth", 0)) > 0 or bool(futures_wave_rules(cfg)))
 
 
+def futures_be_trigger(cfg, n_open: int) -> float:
+    """Yeni pozisyonun başabaş tetiği (fiyat %): ana ayar; Faz 8 açıksa (FUTURES_EXTRA_BE_TRIGGER_PCT > 0) ve pozisyon
+    dalga modunda başka pozisyon açıkken açılıyorsa (ek pozisyon, n_open ≥ 1) o değer. Canlı bot ve backtest ortak."""
+    extra = float(getattr(cfg, "futures_extra_be_trigger_pct", 0.0))
+    if extra > 0 and n_open >= 1 and int(getattr(cfg, "futures_max_positions", 1)) > 1:
+        return extra
+    return float(cfg.breakeven_trigger_pct)
+
+
 def futures_slot_share(cfg, n_open: int) -> float:
     """Yeni pozisyonun teminatı, kullanılabilir bakiyenin (bakiye × FUTURES_MARGIN_USAGE_PCT) kaçta kaçı: tek
     pozisyonda 1; dalga modunda ağırlıklar 1 (ilk pozisyon, açık pozisyon yokken) ve x = FUTURES_EXTRA_SIZE_PCT / 100
@@ -797,6 +815,8 @@ class Config:
     futures_reentry_breadth: int = 0       # Genişlik ≥ bu iken zarar sonrası bekleme atlanır (0 = kapalı)
     futures_wave_rules: str = ""           # Genişlik ≥ FUTURES_WAVE_BREADTH iken ek çöküş pencereleri ("saat:%")
     futures_wave_breadth: int = 12
+    # Faz 8: ek pozisyonların başabaş tetiği (fiyat %; 0 = BREAKEVEN_TRIGGER_PCT ile aynı)
+    futures_extra_be_trigger_pct: float = 0.0
     futures_leverage: int = 2             # Kaldıraç 1-20; her girişten hemen önce Binance'te ayarlanır
     futures_margin_usage_pct: float = 95.0  # Serbest bakiyenin teminata giden yüzdesi (bileşik; kalan pay komisyon için)
     futures_volume_ratio: float = 2.5      # Hacim onayı: sinyal mumu hacmi önceki 20 mumun ortalamasının en az bu katı
@@ -1136,6 +1156,11 @@ class Config:
             parse_crash_rules(self.futures_wave_rules)
         except ValueError as exc:
             errors.append(f"FUTURES_WAVE_RULES hatalı: {exc}")
+        if not 0 <= self.futures_extra_be_trigger_pct <= 10:
+            errors.append("FUTURES_EXTRA_BE_TRIGGER_PCT 0-10 arasında olmalı (fiyat %; 0 = ana başabaş tetiğiyle aynı)")
+        elif 0 < self.futures_extra_be_trigger_pct <= self.breakeven_floor_pct and is_futures(self.strategy):
+            errors.append(f"FUTURES_EXTRA_BE_TRIGGER_PCT ({self.futures_extra_be_trigger_pct:g}) başabaş tabanından "
+                          f"(BREAKEVEN_FLOOR_PCT={self.breakeven_floor_pct:g}) büyük olmalı")
         if self.futures_universe_mode not in FUTURES_UNIVERSE_MODES:
             errors.append("FUTURES_UNIVERSE_MODE şunlardan biri olmalı: " + ", ".join(FUTURES_UNIVERSE_MODES))
         if self.futures_confirm not in FUTURES_CONFIRMS:
@@ -1408,6 +1433,7 @@ def load_config(env_file: Optional[str] = None, mode_override: Optional[str] = N
         futures_reentry_breadth=_env_int("FUTURES_REENTRY_BREADTH", 0),
         futures_wave_rules=canonical_crash_extra(_env_str("FUTURES_WAVE_RULES", "")),
         futures_wave_breadth=_env_int("FUTURES_WAVE_BREADTH", 12),
+        futures_extra_be_trigger_pct=_env_float("FUTURES_EXTRA_BE_TRIGGER_PCT", 0.0),
         futures_leverage=_env_int("FUTURES_LEVERAGE", 2),
         futures_margin_usage_pct=_env_float("FUTURES_MARGIN_USAGE_PCT", 95.0),
         futures_volume_ratio=_env_float("FUTURES_VOLUME_RATIO", 2.5),
@@ -1712,6 +1738,27 @@ def _setting_notes(cfg: Config) -> List[str]:
         elif (cfg.futures_wave_rules or "").strip():
             notes.append("FUTURES_WAVE_RULES yazılı ama kullanılmıyor: dalga eşikleri yalnızca çöküş taktiğinde ve sabit "
                          "yüzdelerle (FUTURES_CRASH_Z=0) çalışır.")
+        xbe = cfg.futures_extra_be_trigger_pct
+        if xbe > 0:
+            if cfg.futures_max_positions <= 1 or not cfg.breakeven_enabled:
+                notes.append(f"FUTURES_EXTRA_BE_TRIGGER_PCT={xbe:g} (Faz 8) etkisiz: ek pozisyon yalnızca dalga modunda "
+                             f"(FUTURES_MAX_POSITIONS > 1) açılır ve başabaş kalkanı açık olmalı.")
+            elif xbe >= cfg.breakeven_trigger_pct:
+                notes.append(f"FUTURES_EXTRA_BE_TRIGGER_PCT={xbe:g} ana başabaş tetiğinden (BREAKEVEN_TRIGGER_PCT="
+                             f"{cfg.breakeven_trigger_pct:g}) küçük değil: Faz 8 testindeki kazanç ek pozisyonlarda "
+                             f"tetiği erkene (+%{FUTURES_PHASE8_BE_TRIGGER:g}) almaktan geldi; bu değer test edilmedi.")
+            else:
+                gap = xbe - cfg.breakeven_floor_pct
+                notes.append(f"FUTURES_EXTRA_BE_TRIGGER_PCT={xbe:g} (Faz 8): dalga modunda ek pozisyonların başabaş "
+                             f"kalkanı fiyat +%{xbe:g}'te devreye girer (ilk pozisyonda +%{cfg.breakeven_trigger_pct:g}); "
+                             f"yuvaları daha çabuk boşalıp yeni sinyale geçer. Kasım 2026 testinde (2020-2026, 1 dk; "
+                             f"+%0.5) Faz 6 setinde yılda ~780 → ~915 işlem, yıllık getiri +%1.001 / +%351 → +%1.098 / "
+                             f"+%426, 3 kat kaymada +%385 / +%223 → +%470 / +%262, kötümser stopta 647 → 757 USDT; en "
+                             f"büyük düşüş %53 / %38 → %53 / %46. Büyük dalga yıllarında (2020, 2021, 2024, 2025) "
+                             f"belirgin iyi, sakin yıllarda (2022, 2023, 2026) %5-10 geride; son 12 ayda +%164 → +%150. "
+                             f"Tetik ile stop arası dar (%{gap:g}): stop konana kadar fiyat geri dönerse bot piyasa "
+                             f"emriyle çıkar; bu çıkışlar ortalama %0.1 kötü dolsa da kapalı hâlinden kârlı, %0.2'de "
+                             f"değil. Önce test modunda deneyin.")
         if cfg.futures_universe > 0 and cfg.futures_universe_mode == "daily":
             notes.append("FUTURES_UNIVERSE_MODE=daily (dünün en hacimli coinleri): Faz 4 testinde günlük en hacimli 30 "
                          "coin, en az 3 yıllık olanlarla bile 2024-2026'da her yıl -%66 ile -%91 arası zarar etti; "

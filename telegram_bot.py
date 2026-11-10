@@ -605,7 +605,12 @@ class Messages:
         tag = futures_tag(pos)
         lev = pos.leverage
         icon = "🟢" if pos.side == "long" else "🔴"
-        be_price = pos.entry_price * (1 + (1 if pos.side == "long" else -1) * cfg.breakeven_trigger_pct / 100)
+        try:
+            be_own = float(pos.metrics.get("be_trigger", 0.0))      # Faz 8: ek pozisyonun kendi başabaş tetiği
+        except (TypeError, ValueError):
+            be_own = 0.0
+        be_pct = be_own if be_own > 0 else cfg.breakeven_trigger_pct
+        be_price = pos.entry_price * (1 + (1 if pos.side == "long" else -1) * be_pct / 100)
         floor = "üstüne" if pos.side == "long" else "altına"
         return (
             f"{icon} <b>POZİSYON AÇILDI</b> — <b>{esc(pos.symbol)}</b> {tag}\n{LINE}\n"
@@ -616,8 +621,9 @@ class Messages:
             f"{cfg.take_profit_pct * lev:.0f})\n"
             f"🛑 Zarar Kes: {fmt_price(pos.sl_price)} (fiyat -%{cfg.stop_loss_pct:g} → ROE ~-%"
             f"{cfg.stop_loss_pct * lev:.0f}) — Binance'te STOP_MARKET\n"
-            f"🔒 Başabaş kalkanı: {fmt_price(be_price)} görülünce stop girişin %{cfg.breakeven_floor_pct:g} "
-            f"{floor} çekilir\n"
+            f"🔒 Başabaş kalkanı: {fmt_price(be_price)} (+%{be_pct:g}"
+            + (", ek pozisyon" if be_own > 0 else "")
+            + f") görülünce stop girişin %{cfg.breakeven_floor_pct:g} {floor} çekilir\n"
             f"⏱️ Zaman stopu: {cfg.max_hold_minutes} dk | 💀 Likidasyon ~{fmt_price(pos.liq_price)}\n"
             f"🔍 {esc(note)}"
         )

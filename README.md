@@ -719,6 +719,61 @@ beklemesi 30-60 dk (kâr yarıya ya da daha aşağı iner), teminat %90, dalga e
 yüksek ama 5x kötümser stopta eridi). Yüzlerce ayar denendiği için seçim yanlılığı olabilir; önce test modunda izleyin.
 Backtest raporu uzun pencere varsa "12 sa %15 penceresi kapalı" satırını, ayar notu da bu uyarıyı gösterir.
 
+#### Faz 8: ek pozisyonlarda erken başabaş (Kasım 2026, rapor 14)
+Soru yine "kârı azaltmadan daha çok işlem" idi; başlangıç ayarı Faz 6 seti + 5x, giriş `1:6` + 4 saat %10, ek kapısı
+≥10 (rapor 14: 5.155 işlem, tek hesap 9.435.019 USDT; motorla birebir üretildi). ~150 ayar seçim / doğrulama dönemi,
+3 ve 5 kat kayma, kötümser stop dolumu ve bileşiksiz (sabit boy) yıllık getiriyle denendi.
+
+**Tıkanan yer yuvalar.** 33.399 sinyal mumundan 5.155'i işleme dönüşüyor; 14.803'ü "açık pozisyon vardı" diye
+atlanıyor (dalgada 4 yuva hep dolu). Daha çok yuva açmak işe yaramadı: aynı boylarla 6 yuva (6x) yılda 945 işlem ama
+yıllık getiri +%1.942 / +%875 → +%1.762 / +%612, en büyük düşüş %71 → %87 (aynı dalgadaki pozisyonlar birlikte zarar
+kesiyor); ek boyunu küçülterek 5-8 yuva da kârı düşürdü.
+
+**İşe yarayan: ek pozisyonlar yuvayı daha çabuk boşaltsın.** `FUTURES_EXTRA_BE_TRIGGER_PCT=0.5`: dalga modunda başka
+pozisyon açıkken açılan (ek) pozisyonların başabaş kalkanı fiyat +%0.5'te devreye girer (stop yine girişin
++`BREAKEVEN_FLOOR_PCT` üstüne); ilk pozisyon ana ayarda (+%1) kalır. Ek pozisyon küçük kârını kilitleyip kapanınca
+yuvası hemen yeni sinyale geçer: ek pozisyon sayısı 3.038 → 3.760 (zarar kesle bitenler %11 → %6), defter daha sık
+boşaldığı için ilk (büyük) pozisyon sayısı da 2.117 → 2.257. İlk pozisyonda aynı ayar doğrulama döneminde kârı
+düşürdü (o kapanınca yerine gelen sinyal küçük ek pozisyon olarak açılıyor), bu yüzden yalnızca eklere uygulanır.
+Tetik 0.75 → 0.6 → 0.5 → 0.4 indikçe işlem de getiri de düzenli arttı (tek bir şanslı değer değil).
+
+| Ayar (33.3 USDT, BNB indirimi) | İşlem/yıl | Yıllık seçim / doğr. | Maks. düşüş | Kayma ×3: yıllık | Kötümser stop: 33 USDT → | Son 12 ay |
+|---|---|---|---|---|---|---|
+| Rapor 14 (5x) | 752 | +%1.942 / +%875 | %71 / %54 | +%1.059 / +%454 | 105 USDT | +%353 |
+| **+ Faz 8 (5x)** | **877** | **+%2.102 / +%1.152** | %66 / %59 | **+%1.358 / +%543** | **431 USDT** | +%307 |
+| 4x | 752 | +%1.706 / +%600 | %57 / %45 | +%813 / +%346 | 427 USDT | +%257 |
+| **4x + Faz 8** | **877** | **+%1.830 / +%758** | %53 / %51 | **+%1.032 / +%417** | **1.039 USDT** | +%231 |
+| 3x | 752 | +%1.147 / +%371 | %44 / %36 | +%508 / +%239 | 790 USDT | +%173 |
+| **3x + Faz 8** | **877** | **+%1.364 / +%462** | %42 / %40 | **+%642 / +%277** | **1.322 USDT** | +%160 |
+| ⭐ Faz 6 seti (3x, kapı 8, 30 USDT, BNB yok) | 781 | +%1.001 / +%351 | %53 / %38 | +%385 / +%223 | 647 USDT | +%164 |
+| **⭐ Faz 6 seti + Faz 8** | **915** | **+%1.098 / +%426** | %53 / %46 | **+%470 / +%262** | **757 USDT** | +%150 |
+
+Rapor 14 ayarında tek hesap 9.435.019 → 11.183.255 USDT (6.014 işlem), en kötü gün (sabit boy) -%54 → -%37. Yıl yıl
+(her yıl 33.3 USDT ile): 2020 +%7.881 → +%9.708, 2021 +%152.436 → +%258.238, 2022 +%205 → +%252, 2023 +%161 → +%131,
+2024 +%1.786 → +%2.514, 2025 +%1.977 → +%3.708, 2026 +%244 → +%217.
+
+**Zayıf yanları (dürüst tablo).** (1) Kazanç büyük dalga yıllarından geliyor; sakin yıllarda (2023, 2026; Faz 6 setinde
+2022 de) %5-19 geride. Son 12 ayda bileşiksiz getiri aynı (+%188 / +%187, işlem 381 → 470) ama bileşik getiri +%353 →
++%307 ve en büyük düşüş %46 → %59: fark tek günden (5 Haziran 2026: defter daha sık boşaldığı için aynı düşen coine
+bir kez daha büyük pozisyonla girilip zarar kesildi). (2) 5 kat kaymada doğrulama dönemi getirisi biraz geride (+%204 →
++%170), tek hesap yine önde. (3) Tetik ile stop arası dar (%0.2). Canlı bot stopu taşırken fiyat stopun gerisine
+düşmüşse (Binance -2021) beklemeden piyasa emriyle çıkar; ek pozisyonların başabaş çıkışları ortalama %0.1 kötü dolsa
+da kapalı hâlinden kârlı (+%523 / +%315'e karşı +%498 / +%306 bileşiksiz yıllık getiri), %0.2'de doğrulamada değil.
+
+Telegram: 🧭 Giriş sinyali → 🌊 Dalga modu → 🔒 **ek başabaş: +%0.5** (ana ayar / 0.5 / 0.6 / 0.75; yalnızca dalga
+modunda ve başabaş açıkken görünür). ⭐ Faz 5 / ⭐ Faz 6 setleri ve "dalga modunu kapat" Faz 8'i kapatır (setler
+olduğu gibi kalır). Backtest raporunda "Ek pozisyonlarda başabaş +%0.5 (Faz 8)" satırı (açıksa kapalı hâli) çıkar.
+
+Denenen ve elenenler: daha çok yuva (yukarıda); başabaşı her pozisyonda erkene almak (yılda ~1.000 işlem, seçim
+döneminde çok iyi ama doğrulamada -%8, 3 kat kaymada -%39); kâra geçmiş pozisyonu 10-30 dk sonra kapatmak (+%1'i görmüş
+pozisyonun 20. dakikadan sonra kalan beklentisi ~%0 ölçüldü ama tam simülasyonda doğrulama getirisi %9-37 düştü);
+zarardaki pozisyonu erken kapatmak (zarardakinin kalan beklentisi 30. dakikada hâlâ +%0.2: kâr düştü); yuvalar doluyken
+eski pozisyonu kapatıp yeni sinyale geçmek (işlem +%2-10, kâr aynı ya da düşük); dalga eşiği genişliği ≥10 (işlem +%6,
+kâr aynı ama 2022 zayıf; Faz 8 ile birlikte 5 kat kaymada tek hesap yarıya iniyor); dalga eşikleri 1:4,4:7 /
+1:4.5,4:7.5 (işlem +%6-10, doğrulamada iyi, seçimde kötü; 1:4,4:7 5x kötümser stopta eridi); 2 saat %8 penceresi (7
+yılın 4'ünde geride); aynı coinde üst üste 2-3 zarardan sonra dalgada yeniden girişi kesmek (5 Haziran 2026'yı
+düzeltiyor ama 2025'te kârı %20-30 düşürüyor: tek güne göre ayar; 1 zararda kesmek kârı yarıya indiriyor). ~150 ayar denendi; seçim yanlılığı olabilir, önce test modunda izleyin.
+
 ### 🏆 Strateji turnuvası (`--turnuva`)
 Hangi strateji türünün sizin dönemde işe yaradığını **tek komutla** görmek için:
 ```bash
