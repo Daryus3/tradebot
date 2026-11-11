@@ -720,6 +720,10 @@ yüksek ama 5x kötümser stopta eridi). Yüzlerce ayar denendiği için seçim 
 Backtest raporu uzun pencere varsa "12 sa %15 penceresi kapalı" satırını, ayar notu da bu uyarıyı gösterir.
 
 #### Faz 8: ek pozisyonlarda erken başabaş (Kasım 2026, rapor 14)
+> ⚠️ **Düzeltme (rapor 15):** bu bölümdeki kâr artışı backtest motorunun iyimserliğinden geliyordu. Saniyelik veriyle
+> düzeltilmiş testte Faz 8 işlem sayısını artırıyor ama kârı artırmıyor (aşağıdaki "Saniyelik veriyle gerçekçilik
+> düzeltmesi" bölümüne bakın). Öneri: kapalı. Bölüm, ne denendiği görülsün diye olduğu gibi bırakıldı.
+
 Soru yine "kârı azaltmadan daha çok işlem" idi; başlangıç ayarı Faz 6 seti + 5x, giriş `1:6` + 4 saat %10, ek kapısı
 ≥10 (rapor 14: 5.155 işlem, tek hesap 9.435.019 USDT; motorla birebir üretildi). ~150 ayar seçim / doğrulama dönemi,
 3 ve 5 kat kayma, kötümser stop dolumu ve bileşiksiz (sabit boy) yıllık getiriyle denendi.
@@ -773,6 +777,90 @@ kâr aynı ama 2022 zayıf; Faz 8 ile birlikte 5 kat kaymada tek hesap yarıya i
 1:4.5,4:7.5 (işlem +%6-10, doğrulamada iyi, seçimde kötü; 1:4,4:7 5x kötümser stopta eridi); 2 saat %8 penceresi (7
 yılın 4'ünde geride); aynı coinde üst üste 2-3 zarardan sonra dalgada yeniden girişi kesmek (5 Haziran 2026'yı
 düzeltiyor ama 2025'te kârı %20-30 düşürüyor: tek güne göre ayar; 1 zararda kesmek kârı yarıya indiriyor). ~150 ayar denendi; seçim yanlılığı olabilir, önce test modunda izleyin.
+
+#### Saniyelik veriyle gerçekçilik düzeltmesi (Kasım 2026, rapor 15)
+Soru yine "kârı azaltmadan daha çok işlem" idi (başlangıç: rapor 15, Faz 8 açık, 5x; 6.017 işlem, tek hesap 10.647.290
+USDT, motorla birebir üretildi). Bu kez adaylar yalnız 1 dk mumlarla değil, Binance'in **saniyelik işlem verisiyle**
+(aggTrades) de sınandı ve asıl bulgu backtestin kendisiyle ilgili çıktı.
+
+**Ne yapıldı.** Örnek 920 coin-gün (2020-2026 her yıldan; 2.563 işlem) için işlem verisi indirildi ve canlı botun çıkış
+mantığı birebir oynatıldı: 2 saniyede bir son fiyat yoklaması, başabaş tetiklenince stopun tabana taşınması (fiyat tabanı
+geçmişse piyasa emriyle çıkış), borsada duran zarar kes, zaman stopu. Ayrıca 380 coin-günlük ikinci bir örnekte (1.043
+işlem) aynı şey tick düzeyinde yapıldı.
+
+**Bulgu 1: mum içi başabaş.** 1 dk mumun içindeki sıra bilinmez. Eski motor yükselen mumda "dip → tepe → kapanış"
+varsayıyordu: başabaş o mumda tetiklenir ve kapanış tabanın üstündeyse işlem sürüyor sayılıyordu. Gerçekte fiyat tetiğe
+değdikten sonra aynı dakikada çoğu zaman tabana geri dönüyor ve stop çalışıyor; tetik ile taban ne kadar yakınsa o kadar
+sık. İşlem başına ortalama brüt hareket (%; aynı işlemler, aynı giriş):
+
+| Başabaş (tetik → taban) | Eski motor | Canlı (saniyelik) | Düzeltilmiş motor |
+|---|---|---|---|
+| Ek pozisyonlar, +%1 → +%0.3 | +0.49 | +0.39 | +0.43 |
+| Ek pozisyonlar, +%0.5 → +%0.3 (Faz 8) | +0.47 | +0.30 | +0.32 |
+| Ek pozisyonlar, +%0.4 → +%0.3 | +0.46 | +0.25 | +0.23 |
+| İlk pozisyonlar, +%1 → +%0.3 | +0.44 | +0.42 | +0.39 |
+| İlk pozisyonlar, +%0.5 → +%0.3 | +0.46 | +0.33 | +0.28 |
+
+Eski motorda işlem başı kazanç başabaş tetiğinden neredeyse bağımsız görünüyordu (+0.46 ile +0.49 arası); bu yüzden dar
+tetik "bedava" daha çok işlem gibi çıkıyordu. Gerçekte tetik daraldıkça işlem başı kazanç düşüyor.
+
+**Düzeltme.** `futures_backtest.be_retouch_prob`: başabaşın tetiklendiği mumda mumun dibi tabanın altında, kapanışı
+üstündeyse fiyatın tetikten sonra tabana dönmüş olma olasılığı `1 / (1 + 45 · x)`, `x = (tetik − taban) · (kapanış −
+taban) / mum_aralığı²`. Çekiliş işlem başına sabittir (coin + giriş zamanı), sonuçlar çalıştırmadan çalıştırmaya
+değişmez. Katsayı örneğin yarısıyla ayarlandı, diğer yarısında ve tick düzeyindeki ikinci örnekte doğrulandı: 13 başabaş
+ayarı × 2 zarar kes × ilk / ek pozisyonlarda fark çoğunda ±%0.04, en kötüsünde %0.06 (eski motorda +%0.22'ye kadar).
+
+**Bulgu 2: giriş gecikmesi.** Backtest sinyal mumundan sonraki mumun açılışından girer; canlı bot mum kapandıktan ~5 sn
+sonra emir verebilir. Çöküş mumunun kapanışından sonra fiyat ortalama 3 sn'de %0.04, 5 sn'de %0.05, 10 sn'de %0.08
+yükseliyor (2.563 işlem, ± %0.01). Piyasa emriyle girişlere `ENTRY_LAG_PCT = 0.05` eklendi (limit girişte yok).
+
+**Sonuç: rakamlar küçüldü.** Kullanıcının ayarı (5x, Faz 6 ekleri, 28.93 USDT, BNB ile komisyon), 2020-2026:
+
+| | Eski motor (rapor 15) | Düzeltilmiş, Faz 8 açık | Düzeltilmiş, Faz 8 kapalı |
+|---|---|---|---|
+| İşlem / yıl | 877 | 888 | 753 |
+| İşlem başı net | +%0.36 | +%0.17 | +%0.24 |
+| Yıllık getiri (seçim / doğrulama) | +%2.124 / +%1.033 | +%463 / +%313 | +%599 / +%293 |
+| En büyük düşüş | %66 / %59 | %87 / %74 | %84 / %63 |
+| Tek hesap (2020 →) | 10.6 milyon | 1.23 milyon | 1.87 milyon |
+| Kayma 3 kat | +%1.393 / +%483 | +%120 / +%68 | +%170 / +%134 |
+| Kayma 5 kat: 28.93 USDT → | 310.032 | 11 (zarar) | 42 |
+| Kötümser stop dolumu | 261 USDT | eridi (Mayıs 2021) | eridi (Mayıs 2021) |
+| Mayıs 2021 haftası (17-25) | −%21 | −%77 | −%69 |
+
+Her yıl yeniden başlansa (Faz 8 açık): +%332, +%6.406, +%86, +%46, +%525, +%963, +%62 (7 yılın 7'si kârlı); yıl içi en
+büyük düşüşler %87, %86, %54, %49, %74, %52, %52. Kaldıraca göre (Faz 8 kapalı): 3x +%347 / +%174, düşüş %62 / %42; 2x
++%205 / +%108, düşüş %45 / %29. Hazır setler (30 USDT, TP limit): Faz 6 seti 3x +%270 / +%166, düşüş %66 / %45 (eski:
++%1.001 / +%353, %53 / %38); Faz 6 tek pozisyon 2x +%379 / +%159, %59 / %45; #2 tek pozisyon 2x +%193 / +%90, %72 / %60.
+
+**Faz 8 için düzeltme.** Faz 8 (ek pozisyonlarda başabaş +%0.5) işlem sayısını %18 artırıyor ama kârı artırmıyor: sabit
+boyda yıllık getiri aynı (+%332 / +%217 ve +%333 / +%212), bileşikte seçim döneminde düşük, doğrulamada biraz yüksek;
+düşüş doğrulamada %63 → %74, maliyet stresinde belirgin kötü. Öneri: kapalı (`FUTURES_EXTRA_BE_TRIGGER_PCT=0`).
+
+**"Daha çok işlem" adayları (hepsi elendi).** ~200 ayar denendi; eski motorla umut verenler de ayakta kalmadı:
+- Ek pozisyonlarda zarar kes −%3 (eski motorda işlem +%5, kâr iki dönemde de yüksekti): düzeltilmiş motorda seçim
+  döneminde düşük (+%424), düşüş %93. Eski motordaki kazancı da yuvalar çabuk boşalınca büyük ilk pozisyonun çöküş
+  sürerken daha sık açılmasından geliyordu (orada bile Mayıs 2021 haftası −%21 yerine −%51).
+- Büyük yuvanın yeniden dolması (ilk pozisyon kapanınca, ekler açıkken gelen sinyal yine büyük açılır) ve bununla 5-6
+  yuva (işlem +%13-33): eski motorda bile kâr yalnız seçim döneminde yüksek, en kötü gün −%37'den −%55/−%60'a, düşüş
+  %64-72'ye çıkıyor.
+- Ek başabaş +%0.4, taban +%0.4, daha çok yuva (5-8), ek kapısı ≥8, dalga eşiği genişliği ≥10, 2 saat %8 penceresi, 4
+  saat eşiği %8-9, 1 saat eşiği %5-5.5, zarar sonrası beklemeyi kısaltmak / kaldırmak, eklere kısa zaman stopu ya da
+  düşük kâr al, eklere izleyen stop, son 15-120 dakikada zarar kes olduysa ilk pozisyonu küçültmek: ya bir dönemde kârı
+  düşürüyor ya da maliyet stresine dayanmıyor.
+- Genel desen: bu stratejide işlem sayısı dalgadaki yuva sayısıyla sınırlı; eklenen her işlem ortalamanın altında
+  kazandırıyor ve en kötü günleri büyütüyor.
+
+**Raporda.** Başlıkta "Gerçekçilik payları" satırı; 🧪 "Tek kural değişince" tablosunun sonunda "Eski (iyimser) hesap"
+satırı (payları kapatır; Kasım 2026 öncesi raporlarla karşılaştırmak için). Ayar notları ve Telegram açıklamaları
+düzeltilmiş rakamlarla güncellendi; README'nin Faz 3-8 bölümlerindeki tablolar eski motorla üretilmiştir ve iyimserdir
+(sıralamalar çoğunlukla aynı, düzeyler 2-4 kat yüksek). Ayrıca düzeltildi: Faz 8 açıkken "Başabaş +%5 → +%2" satırı ek
+tetiği (+%0.5) tabanın (+%2) altında bıraktığı için hayali kâr gösteriyordu; ek tetik tabandan büyük değilse artık ana
+tetik kullanılır.
+
+**Sınırlar.** Düzeltme ortalamaları tutturur, tek tek işlemleri değil; örnekte ek pozisyonlarda ~%0.02-0.04 iyimser,
+ilk pozisyonlarda ~%0.03-0.06 kötümser kaldı. Giriş gecikmesi 5 sn varsayar; sunucu yavaşsa pay daha büyüktür. Emir
+defteri derinliği (büyük bakiyede kayma) hâlâ modellenmiyor. Geçmiş sonuç gelecek garantisi değildir.
 
 ### 🏆 Strateji turnuvası (`--turnuva`)
 Hangi strateji türünün sizin dönemde işe yaradığını **tek komutla** görmek için:

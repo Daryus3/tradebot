@@ -37,7 +37,8 @@ def test_phase8_setting_defaults_validation_env_helper_notes(fcfg, monkeypatch, 
     monkeypatch.setenv("FUTURES_EXTRA_BE_TRIGGER_PCT", "0.5")
     assert load_config(env_file=str(tmp_path / "x.env"), mode_override="paper").futures_extra_be_trigger_pct == 0.5
     notes = [n for n in _setting_notes(on) if "Faz 8" in n]
-    assert len(notes) == 1 and "+%0.5" in notes[0] and "915" in notes[0] and "test modunda" in notes[0]
+    assert len(notes) == 1 and "+%0.5" in notes[0] and "925" in notes[0] and "DÜZELTME" in notes[0]
+    assert "kâr artmaz" in notes[0] and "Öneri: kapalı" in notes[0]              # Rapor 15: saniyelik veriyle düzeltildi
     assert "etkisiz" in " ".join(_setting_notes(replace(on, futures_max_positions=1)))
     assert "etkisiz" in " ".join(_setting_notes(replace(on, breakeven_enabled=False)))
     assert "küçük değil" in " ".join(_setting_notes(replace(on, futures_extra_be_trigger_pct=1.5)))
@@ -208,7 +209,7 @@ def test_wave_page_row_hint_and_presets_turn_phase8_off(fcfg, tmp_path):
     text, keyboard, _mid = notes.menus[-1]
     data = [d for row in keyboard for _l, d in row]
     assert {f"kv:fw:FUTURES_EXTRA_BE_TRIGGER_PCT:{v}" for v in ("0", "0.5", "0.6", "0.75")} <= set(data)
-    assert all(len(d.encode()) <= 64 for d in data) and "Faz 8 testi" in text and len(text) < 4096
+    assert all(len(d.encode()) <= 64 for d in data) and "DÜZELTME" in text and "kâr artmaz" in text and len(text) < 4096
     press(bot, "kv:fw:FUTURES_EXTRA_BE_TRIGGER_PCT:0.5")
     if bot.commands.pending is not None:
         press(bot, f"yes:{bot.commands.pending.token}")

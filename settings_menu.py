@@ -67,12 +67,11 @@ PHASE6_PRESETS = {"p6": FUTURES_PHASE6_PRESET, "p6s": FUTURES_PHASE6_SINGLE_PRES
 WAVE_RULE_CHOICES = ("", "1:5,4:8")
 # Faz 8: ek pozisyonların başabaş tetiği (0 = ana ayar). Faz 5 / Faz 6 setleri ve "kapat" düğmesi bunu da kapatır.
 EXTRA_BE_CHOICES = (0, 0.5, 0.6, 0.75)
-PHASE8_HINT = ("Faz 8 testi (rapor 14; 2020-2026, 1 dk): dalgada ek yuvalar hep dolu, sinyallerin çoğu yer olmadığı için "
-               "atlanıyor. Ek pozisyonlarda başabaş +%0.5 olunca küçük pozisyon kârını erken kilitleyip kapanıyor, "
-               "yuvası yeni sinyale geçiyor: Faz 6 setinde yılda ~780 → ~915 işlem, yıllık getiri iki dönemde de, 3 kat "
-               "kaymada da ve 2x-5x'in hepsinde arttı, en kötü gün küçüldü. İlk (büyük) pozisyonda aynı ayar kârı "
-               "düşürdüğü için ona dokunulmaz. Zayıf yanı: tetik ile stop arası dar (%0.2); stop geç konursa dolum "
-               "kötüleşir (ortalama %0.15'e kadar kötü dolumda yine kârlı).")
+PHASE8_HINT = ("Faz 8 (ek pozisyonlarda başabaş +%0.5): küçük pozisyon kârını erken kilitleyip kapanır, yuvası yeni "
+               "sinyale geçer. DÜZELTME (Kasım 2026, rapor 15): ilk testteki kâr artışı backtestin iyimserliğiydi. "
+               "Saniyelik işlem verisiyle düzeltilmiş testte Faz 6 setinde yılda ~780 → ~925 işlem, ama yıllık getiri "
+               "aynı (+%270 / +%166 → +%246 / +%168), en büyük düşüş %66 / %45 → %67 / %53, 3 kat kaymada +%142 / +%92 "
+               "→ +%82 / +%53. İşlem sayısı artar, kâr artmaz, maliyete dayanıklılık azalır. Öneri: kapalı.")
 PHASE6_HINT = ("Faz 6 testi (2020-2026, 1 dk, liste + en hacimli 20 köklü coin, 🥈 #2 giriş / çıkışları, 30 USDT): "
                "dalgada zarar kesen coin genelde düşmeye devam edip daha derinden dönüyor; zarar sonrası 240 dk "
                "bekleme bu en kârlı ikinci girişi kaçırıyordu (12+ coin düşerken işlem başı +%1.10). Faz 6 seti (4 "

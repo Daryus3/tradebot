@@ -148,8 +148,10 @@ FUTURES_PHASE6_OFF = {"FUTURES_EXTRA_SIZE_PCT": 100, "FUTURES_REENTRY_BREADTH": 
 #       (fiyat %); 0 = ana ayarla (BREAKEVEN_TRIGGER_PCT) aynı. Taban (BREAKEVEN_FLOOR_PCT) ortaktır.
 #       Dalgada ek yuvalar hep doludur (sinyallerin çoğu "açık pozisyon vardı" diye atlanır): ek pozisyon küçük kârı
 #       erken kilitleyip kapanınca yuvası hemen yeni bir sinyale geçer. İlk (büyük) pozisyonda aynı şey kârı düşürür:
-#       o kapanınca yerine gelen sinyal küçük ek pozisyon olarak açılır. Test (2020-2026, 1 dk, Faz 6 seti): yılda
-#       ~780 → ~915 işlem; yıllık getiri iki dönemde de, 3 kat kaymada da ve 2x-5x'in hepsinde arttı. Ayrıntı README.
+#       o kapanınca yerine gelen sinyal küçük ek pozisyon olarak açılır. İlk test (1 dk mumlu eski motor) kârın da
+#       arttığını gösterdi; DÜZELTME (rapor 15): o artış motorun iyimserliğiydi (1 dk mum, dar aralıkta fiyatın tabana
+#       geri dönüşünü görmüyordu). Saniyelik veriyle düzeltilmiş testte (Faz 6 seti): yılda ~780 → ~925 işlem, yıllık
+#       getiri aynı (+%270 / +%166 → +%246 / +%168), düşüş ve maliyet hassasiyeti daha yüksek. Öneri: kapalı.
 FUTURES_PHASE8_BE_TRIGGER = 0.5
 FUTURES_PHASE8_OFF = {"FUTURES_EXTRA_BE_TRIGGER_PCT": 0}
 FUTURES_SIDES = ("both", "long", "short")
@@ -1644,11 +1646,10 @@ def _setting_notes(cfg: Config) -> List[str]:
                 notes.append(f"FUTURES_CRASH_EXTRA={cfg.futures_crash_extra}: uzun pencere ({names}) Kasım 2026 "
                              f"testinde (2020-2026, 1 dk) kârı düşürdü: yalnız bu pencerenin bulduğu işlemler (yılda "
                              f"~100) işlem başı ~%0 getirdi (diğerleri +%0.37) ve çoğu tam boy ilk pozisyonu kapattı. "
-                             f"Kapalıyken (yalnız 1 saatte %6) doğrulama dönemi yıllık getirisi Faz 6 setinde (3x) "
-                             f"+%209 → +%352 (en büyük düşüş %51 → %38, kötümser stopta 153 → 647 USDT), 5x'te +%378 → "
-                             f"+%795, Faz 6 tek pozisyonda +%279 → +%355, #2'de +%146 → +%212. 7 yılın 6'sında kapalı "
-                             f"olan önde (yalnız 2020'de açık). Telegram → 🧭 Giriş sinyali → ➕ uzun pencere olmadan "
-                             f"(ör. '+ 1 sa %6').")
+                             f"Kapalıyken (yalnız 1 saatte %6) doğrulama dönemi yıllık getirisi, düzeltilmiş testte "
+                             f"(giriş gecikmesi ve mum içi başabaş payıyla) Faz 6 setinde (3x) +%100 → +%166 (en büyük "
+                             f"düşüş %55 → %45), 5x'te +%133 → +%279 (%76 → %66). Telegram → 🧭 Giriş sinyali → ➕ uzun "
+                             f"pencere olmadan (ör. '+ 1 sa %6').")
             if (cfg.futures_crash_extra and cfg.breakeven_enabled
                     and (cfg.breakeven_trigger_pct > 1.2 or cfg.max_hold_minutes < 45)):
                 notes.append("FUTURES_CRASH_EXTRA: testte ek pencereler başabaş +1 → +0.3 ve 45-60 dk zaman stopuyla "
@@ -1681,10 +1682,11 @@ def _setting_notes(cfg: Config) -> List[str]:
                 per = cfg.futures_margin_usage_pct / cfg.futures_max_positions
                 notes.append(f"FUTURES_MAX_POSITIONS={cfg.futures_max_positions} (🌊 dalga modu): her pozisyon bakiyenin "
                              f"%{per:.1f}'i teminat × {cfg.futures_leverage}x; 2. ve sonraki pozisyon yalnızca son 1 "
-                             f"saatte ≥{cfg.futures_extra_breadth} coin %3+ düşerken. Faz 5 testinde (2 pozisyon, 3x, ≥8 "
-                             f"coin) yılda ~450 işlem (+%31), işlem başı +%0.34, ama en büyük düşüş %71 (12-13 Mart 2020; "
-                             f"tek pozisyonda %52) ve zarar kes emirleri fitilin yarısından dolarsa (kötümser senaryo) "
-                             f"3x'te Mayıs 2021'de hesap eridi (tek pozisyonda erimedi). Önce test modunda deneyin.")
+                             f"saatte ≥{cfg.futures_extra_breadth} coin %3+ düşerken. Düzeltilmiş testte (Kasım 2026: "
+                             f"giriş gecikmesi ve mum içi başabaş payıyla; 2 pozisyon, 3x, ≥8 coin) yılda ~445 işlem (tek "
+                             f"pozisyonda ~340), işlem başı +%0.21, yıllık getiri +%177 / +%90, en büyük düşüş %76 / %52 "
+                             f"(tek pozisyon 2x: +%193 / +%90, %72 / %60); zarar kes emirleri fitilin yarısından dolarsa "
+                             f"(kötümser senaryo) ikisinde de hesap eridi. Önce test modunda deneyin.")
                 if cfg.futures_max_positions > 2:
                     notes.append("FUTURES_MAX_POSITIONS 3 ve üstü: testte düşüşü %83-95'e çıkardı (aynı dalgadaki "
                                  "pozisyonlar birlikte zarar kesiyor). Önerilen 2.")
@@ -1696,26 +1698,30 @@ def _setting_notes(cfg: Config) -> List[str]:
                              f"{cfg.futures_extra_size_pct:g} (🌊 dalga modu, Faz 6 büyüklükleri): ilk pozisyon "
                              f"bakiyenin %{first:.1f}'i teminat × {lev}x (bakiyenin {first * lev / 100:.2f} katı; #2: 1.90), "
                              f"son 1 saatte ≥{cfg.futures_extra_breadth} coin %3+ düşerken açılan her ek pozisyon "
-                             f"%{each:.1f}'i ({each * lev / 100:.2f} katı). Faz 6 setinde (4 pozisyon, 3x, ek %16.7, "
-                             f"dalgada yeniden giriş ve dalga eşikleriyle) yılda ~780 işlem, işlem başı +%0.36, yıllık "
-                             f"getiri +%1.001 / +%353, en büyük düşüş %53 / %38 (#2: 343 işlem, +%587 / +%212, %52 / "
-                             f"%39); kötümser stop dolumunda 30 USDT → 648 USDT (#2: 374). Önce test modunda deneyin.")
+                             f"%{each:.1f}'i ({each * lev / 100:.2f} katı). Düzeltilmiş testte (Kasım 2026: giriş "
+                             f"gecikmesi ve mum içi başabaş payıyla) Faz 6 setinde (4 pozisyon, 3x, ek %16.7, dalgada "
+                             f"yeniden giriş ve dalga eşikleriyle) yılda ~780 işlem, işlem başı +%0.22, yıllık getiri "
+                             f"+%270 / +%166, en büyük düşüş %66 / %45 (#2: 341 işlem, +%193 / +%90, %72 / %60; Faz 6 tek "
+                             f"pozisyon 2x: 387 işlem, +%379 / +%159, %59 / %45); kötümser stop dolumunda 30 USDT → 12 "
+                             f"USDT (#2: eridi). 5x'te +%412 / +%279 ama düşüş %87 / %66 ve kötümser stopta hesap eridi. "
+                             f"Eski raporlardaki rakamlar (+%1.001 / +%353) iyimserdi. Önce test modunda deneyin.")
                 if first * lev / 100 < 1.8:
                     notes.append(f"İlk pozisyon #2'den küçük (bakiyenin {first * lev / 100:.2f} katı, #2: 1.90): işlemlerin "
                                  f"çoğu tek pozisyon olduğundan getiri düşer. Faz 6 seti 3x ve (pozisyon sayısı - 1) × "
                                  f"ek büyüklük = %50 ile ilk pozisyonu #2 boyunda tutar.")
                 if (cfg.futures_max_positions - 1) * x > 0.75:
-                    notes.append("Ek pozisyonların toplamı ilk pozisyonun %75'inden büyük: Faz 6 testinde (ör. 5 pozisyon, "
-                                 "ekler ilkinin %25'i, 4x) en büyük düşüş %74'e çıktı, kötümser stopta 30 USDT 142 "
-                                 "USDT'ye indi. Önerilen: 4 pozisyon, ek %16.7.")
+                    notes.append("Ek pozisyonların toplamı ilk pozisyonun %75'inden büyük: düzeltilmiş testte (ör. 5 "
+                                 "pozisyon, ekler ilkinin %25'i, 4x) yıllık getiri +%266 / +%145, en büyük düşüş %79 / "
+                                 "%58, kötümser stopta hesap eridi. Önerilen: 4 pozisyon, ek %16.7.")
             if cfg.futures_universe <= 0:
                 notes.append("Dalga modu yalnızca FUTURES_COINS listesinde: genişlik eşikleri (≥8 coin) liste + en hacimli "
                              "20 köklü coin (~25 coin) için seçildi; 10 coinlik listede ek pozisyon çok seyrek açılır.")
         if cfg.futures_isolated_size_pct < 100:
             notes.append(f"FUTURES_ISOLATED_SIZE_PCT={cfg.futures_isolated_size_pct:g}: son 1 saatte "
                          f"{cfg.futures_isolated_breadth}'den az coin %3+ düşerken açılan (yalnız çöküş) pozisyonlar "
-                         f"%{cfg.futures_isolated_size_pct:g} büyüklükte. Faz 5 testinde yalnız çöküşler işlem başı ~%0 "
-                         f"getirdi; yarım büyüklük işlem sayısını değiştirmeden düşüşü %52 / %39'dan %46 / %34'e indirdi.")
+                         f"%{cfg.futures_isolated_size_pct:g} büyüklükte. Düzeltilmiş testte (Kasım 2026) yalnız çöküşler "
+                         f"işlem başı ~%0 getirdi; yarım büyüklük işlem sayısını değiştirmeden #2'de yıllık getiriyi "
+                         f"+%193 / +%90'dan +%228 / +%103'e çıkardı, doğrulama dönemi düşüşünü %60'tan %46'ya indirdi.")
         if cfg.futures_reentry_breadth > 0:
             if cfg.loss_cooldown_minutes <= cfg.symbol_cooldown_minutes:
                 notes.append(f"FUTURES_REENTRY_BREADTH={cfg.futures_reentry_breadth}: LOSS_COOLDOWN_MINUTES="
@@ -1724,17 +1730,18 @@ def _setting_notes(cfg: Config) -> List[str]:
             else:
                 notes.append(f"FUTURES_REENTRY_BREADTH={cfg.futures_reentry_breadth} (Faz 6, dalgada yeniden giriş): son 1 "
                              f"saatte ≥{cfg.futures_reentry_breadth} coin %3+ düşerken zarar sonrası "
-                             f"{cfg.loss_cooldown_minutes} dk bekleme uygulanmaz (yalnız çöküşte sürer). Faz 6 testinde "
-                             f"dalgada zarar sonrası yeniden girişler işlem başı +%1.10 kazandırdı (12+ coin; sıradan "
-                             f"dalga işlemi +%0.69); #2 + yalnız çöküş %50'de yılda 343 → 370 işlem, yıllık getiri +%571 "
-                             f"/ +%212 → +%1.062 / +%302, kötümser stopta 699 → 3.400 USDT.")
+                             f"{cfg.loss_cooldown_minutes} dk bekleme uygulanmaz (yalnız çöküşte sürer). Düzeltilmiş "
+                             f"testte (Kasım 2026) dalgada zarar sonrası yeniden girişler işlem başı +%0.62 kazandırdı "
+                             f"(12+ coin; sıradan dalga işlemi +%0.53); #2 + yalnız çöküş %50'de yılda 341 → 369 işlem, "
+                             f"yıllık getiri +%228 / +%103 → +%367 / +%147, en büyük düşüş %71 / %46 → %61 / %45.")
         wave = futures_wave_rules(cfg)
         if wave:
             desc = " veya ".join(f"{h} saatte %{p:g}" for h, p in wave)
             notes.append(f"FUTURES_WAVE_RULES={format_crash_rules(wave)} (Faz 6, dalga eşikleri): son 1 saatte "
-                         f"≥{cfg.futures_wave_breadth} coin %3+ düşerken {desc} düşüş de sinyal. Faz 6 testinde (1:5,4:8, "
-                         f"≥12) dalgada yeniden girişle birlikte tek pozisyonda yılda 370 → 388 işlem, yıllık getiri "
-                         f"+%1.062 / +%302 → +%1.103 / +%356; Faz 6 setinde (4 pozisyon) 684 → 782 işlem.")
+                         f"≥{cfg.futures_wave_breadth} coin %3+ düşerken {desc} düşüş de sinyal. Düzeltilmiş testte "
+                         f"(Kasım 2026; 1:5,4:8, ≥12) tek pozisyonda yılda 369 → 387 işlem, yıllık getiri +%367 / +%147 "
+                         f"→ +%379 / +%159; Faz 6 setinde (4 pozisyon) 682 → 780 işlem, +%274 / +%149 → +%270 / +%166. "
+                         f"Bu sinyallerin kendi kazancı ince (işlem başı +%0.08).")
         elif (cfg.futures_wave_rules or "").strip():
             notes.append("FUTURES_WAVE_RULES yazılı ama kullanılmıyor: dalga eşikleri yalnızca çöküş taktiğinde ve sabit "
                          "yüzdelerle (FUTURES_CRASH_Z=0) çalışır.")
@@ -1751,14 +1758,14 @@ def _setting_notes(cfg: Config) -> List[str]:
                 gap = xbe - cfg.breakeven_floor_pct
                 notes.append(f"FUTURES_EXTRA_BE_TRIGGER_PCT={xbe:g} (Faz 8): dalga modunda ek pozisyonların başabaş "
                              f"kalkanı fiyat +%{xbe:g}'te devreye girer (ilk pozisyonda +%{cfg.breakeven_trigger_pct:g}); "
-                             f"yuvaları daha çabuk boşalıp yeni sinyale geçer. Kasım 2026 testinde (2020-2026, 1 dk; "
-                             f"+%0.5) Faz 6 setinde yılda ~780 → ~915 işlem, yıllık getiri +%1.001 / +%351 → +%1.098 / "
-                             f"+%426, 3 kat kaymada +%385 / +%223 → +%470 / +%262, kötümser stopta 647 → 757 USDT; en "
-                             f"büyük düşüş %53 / %38 → %53 / %46. Büyük dalga yıllarında (2020, 2021, 2024, 2025) "
-                             f"belirgin iyi, sakin yıllarda (2022, 2023, 2026) %5-10 geride; son 12 ayda +%164 → +%150. "
-                             f"Tetik ile stop arası dar (%{gap:g}): stop konana kadar fiyat geri dönerse bot piyasa "
-                             f"emriyle çıkar; bu çıkışlar ortalama %0.1 kötü dolsa da kapalı hâlinden kârlı, %0.2'de "
-                             f"değil. Önce test modunda deneyin.")
+                             f"yuvaları daha çabuk boşalıp yeni sinyale geçer. DÜZELTME (Kasım 2026, rapor 15): ilk "
+                             f"testteki kâr artışı backtestin iyimserliğiydi; 1 dk mumlar, tetik ile stop arası bu kadar "
+                             f"darken (%{gap:g}) fiyatın aynı dakikada tabana geri dönüşünü görmüyordu. Saniyelik işlem "
+                             f"verisiyle düzeltilmiş testte (+%0.5; Faz 6 seti) yılda ~780 → ~925 işlem, işlem başı "
+                             f"+%0.22 → +%0.15; yıllık getiri değişmedi (+%270 / +%166 → +%246 / +%168), en büyük düşüş "
+                             f"%66 / %45 → %67 / %53, 3 kat kaymada +%142 / +%92 → +%82 / +%53, 5 kat kaymada 30 USDT "
+                             f"243 yerine 38 USDT'ye çıktı. Yani işlem sayısı artar, kâr artmaz, maliyete dayanıklılık "
+                             f"azalır. Öneri: kapalı (0).")
         if cfg.futures_universe > 0 and cfg.futures_universe_mode == "daily":
             notes.append("FUTURES_UNIVERSE_MODE=daily (dünün en hacimli coinleri): Faz 4 testinde günlük en hacimli 30 "
                          "coin, en az 3 yıllık olanlarla bile 2024-2026'da her yıl -%66 ile -%91 arası zarar etti; "

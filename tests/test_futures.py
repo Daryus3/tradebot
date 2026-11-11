@@ -509,7 +509,9 @@ def test_leverage_buttons_in_dynamic_settings(fcfg, tmp_path):
 def params(**over):
     base = dict(leverage=10, tp_pct=1.2, sl_pct=0.9, be_enabled=True, be_trigger_pct=0.5, be_floor_pct=0.2,
                 hold_min=60, margin_usage_pct=100.0, taker_fee=0.0, maker_fee=0.0, slippage_pct=0.0, tp_limit=True,
-                mmr_pct=0.5, start_capital=100.0, kill_pct=0.0)
+                mmr_pct=0.5, start_capital=100.0, kill_pct=0.0,
+                # Motor mekaniği testleri: gerçekçilik payları kapalı (ayrı testleri: test_futures_realism.py)
+                entry_lag_pct=0.0, be_intrabar=False)
     base.update(over)
     return fb.SimParams(**base)
 

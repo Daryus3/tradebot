@@ -46,7 +46,7 @@ def test_phase6_settings_defaults_validation_env_notes(fcfg, monkeypatch, tmp_pa
     assert not any("Faz 6" in n for n in _setting_notes(fcfg))
     # Faz 5 seti (eşit büyüklük) notu aynen
     f5 = replace(fcfg, futures_max_positions=2, futures_leverage=3)
-    assert any("Faz 5 testinde" in n for n in _setting_notes(f5))
+    assert any("2 pozisyon, 3x" in n and "Düzeltilmiş testte" in n for n in _setting_notes(f5))
 
 
 def test_slot_share_wave_cfg_and_kline_limit(fcfg):

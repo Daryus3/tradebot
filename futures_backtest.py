@@ -25,6 +25,7 @@ import csv
 import heapq
 import json
 import math
+import zlib
 from collections import Counter
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -486,6 +487,13 @@ class LazyWindows(dict):
 
 
 # ===================================================================== simülasyon
+# Giriş gecikmesi. Backtest girişi sinyal mumundan sonraki mumun AÇILIŞINDAN sayar; canlı bot mum kapandıktan sonra
+# tarar (SCAN_DELAY_SEC + mumların indirilmesi + emir ≈ 5 sn). Aynı saniyelik veride çöküş mumunun kapanışından sonra
+# fiyat ortalama 3 sn'de %0.04, 5 sn'de %0.05, 10 sn'de %0.08 yükseliyor (2.563 işlem; ± %0.01): piyasa emriyle
+# girişlerde bu kadar daha pahalıya alınmış sayılır (limit girişte uygulanmaz).
+ENTRY_LAG_PCT = 0.05
+
+
 @dataclass(frozen=True)
 class SimParams:
     leverage: int
@@ -539,6 +547,11 @@ class SimParams:
     reentry_breadth: int = 0
     # Faz 8: ek pozisyonların (başka pozisyon açıkken açılanlar) başabaş tetiği (fiyat %; 0 = be_trigger_pct ile aynı)
     extra_be_trigger_pct: float = 0.0
+    # Mum içi başabaş gerçekçiliği (bkz. be_retouch_prob): başabaşın tetiklendiği 1 dk mumda fiyat tabana geri dönmüş
+    # olabilir. False = eski iyimser varsayım (yükselen mumda yalnızca kapanış tabanın altındaysa çıkılır).
+    be_intrabar: bool = True
+    entry_lag_pct: float = ENTRY_LAG_PCT   # Piyasa emriyle girişte gecikme payı (fiyat %; 0 = mum açılışından giriş)
+    be_force: Optional[bool] = None     # Yalnızca kalibrasyon / test: o mumdaki çekilişi zorla (True çık, False kal)
 
 
 def params_from_cfg(cfg, **over) -> SimParams:
@@ -596,6 +609,8 @@ class FutTrade:
     slot: int = 1           # Açıldığında kaçıncı pozisyondu (dalga modu)
     reentry: bool = False   # Faz 6: dalgada zarar sonrası beklemesi atlanarak açıldı
     wave_rule: bool = False  # Faz 6: dalga eşiğiyle (FUTURES_WAVE_RULES) gelen sinyal
+    be_bar: tuple = ()      # Başabaşın tetiklendiği mumda taban da görüldüyse o mum (açılış, lehte uç, ters uç, kapanış)
+    be_q: float = -1.0      # O mumda tabana geri dönüş olasılığı (be_retouch_prob; -1 = böyle bir mum olmadı)
 
 
 @dataclass
@@ -656,6 +671,36 @@ def limit_fill(p: SimParams, s: FutSignal, window: tuple) -> Optional[Tuple[int,
     return None
 
 
+# Mum içi başabaş gerçekçiliği. 1 dk mumun içindeki sıra bilinmez; başabaş tetiği ile taban birbirine yakınsa (ör. Faz
+# 8'de %0.2) fiyat tetiğe değdiği dakikanın içinde çoğu zaman tabana geri döner ve stop çalışır. Eski varsayım
+# (yükselen mumda dip → tepe → kapanış) bunu görmez ve dar aralıklı başabaşı olduğundan kârlı gösterir. Kasım 2026'da
+# Binance'in saniyelik işlem verisiyle (aggTrades; 920 coin-gün, 2.563 işlem) canlı botun mantığı (2 sn'de bir fiyat
+# yoklaması, stopun taşınması) yeniden oynatıldı: eski motor işlem başına tetik +%1'de ~%0.02-0.10, +%0.5'te
+# ~%0.13-0.17, +%0.4'te ~%0.16-0.21 iyimserdi. Aşağıdaki olasılık modeli o örnekle ayarlandı (örneğin yarısıyla
+# ayarlanıp diğer yarısında doğrulandı; 26 başabaş / zarar kes ayarında fark ±%0.04 içinde, bkz. README).
+BE_RETOUCH_K = 45.0
+
+
+def be_retouch_prob(side: int, best: float, adverse: float, c: float, trig: float, floor: float,
+                    k: Optional[float] = None) -> float:
+    """Başabaşın tetiklendiği mumda (ters uç tabanın gerisinde, kapanış ilerisinde) fiyatın tetiğe değdikten SONRA
+    tabana dönmüş olma olasılığı: 1 / (1 + k · x), x = aralık · (kapanış - taban) / mum_aralığı². Aralık (tetik - taban)
+    dar, mum geniş ve kapanış tabana yakınsa olasılık yüksek; geniş aralıkta ve sakin mumda sıfıra yakın."""
+    k = BE_RETOUCH_K if k is None else k
+    gap = abs(trig - floor)
+    rng = abs(best - adverse)
+    if gap <= 0 or rng <= 0:
+        return 1.0
+    x = gap * max(0.0, side * (c - floor)) / (rng * rng)
+    return 1.0 / (1.0 + k * x)
+
+
+def trade_uniform(symbol: str, close_ms: int) -> float:
+    """İşlem başına sabit, ayarlardan bağımsız [0, 1) sayı (coin + giriş zamanı): aynı işlem farklı ayarlarda aynı
+    çekilişi kullanır, sonuçlar çalıştırmadan çalıştırmaya değişmez."""
+    return zlib.crc32(f"{symbol}:{int(close_ms)}".encode()) / 4294967296.0
+
+
 def run_trade(p: SimParams, s: FutSignal, window: tuple, margin: float, notional: float,
               data: Optional[FutData] = None) -> Optional[FutTrade]:
     """Tek işlem: giriş, başabaş, izleyen stop, Kâr Al / Zarar Kes / zaman stopu, likidasyon (yalıtılmış teminat).
@@ -663,6 +708,7 @@ def run_trade(p: SimParams, s: FutSignal, window: tuple, margin: float, notional
     bar_ms, t, o, h, l, c = window
     side = 1 if s.side == "long" else -1
     slip = p.slippage_pct / 100
+    lag = p.entry_lag_pct / 100
     start, entry_ms, maker = 0, s.close_ms, False
     if p.entry_limit:
         got = limit_fill(p, s, window)
@@ -672,12 +718,12 @@ def run_trade(p: SimParams, s: FutSignal, window: tuple, margin: float, notional
             start = int(np.searchsorted(t, s.close_ms + p.limit_ttl_min * MIN_MS))
             if start >= len(t):
                 return None
-            entry = o[start] * (1 + side * slip)
+            entry = o[start] * (1 + side * (slip + lag))
         else:
             return None
         entry_ms = int(t[start])
     else:
-        entry = s.entry_open * (1 + side * slip)
+        entry = s.entry_open * (1 + side * (slip + lag))
     tp = entry * (1 + side * p.tp_pct / 100)
     sl = entry * (1 - side * p.sl_pct / 100)
     be_trig = entry * (1 + side * p.be_trigger_pct / 100)
@@ -691,6 +737,7 @@ def run_trade(p: SimParams, s: FutSignal, window: tuple, margin: float, notional
     peak = entry
     exit_price, reason, exit_ms, gap, liquidated = None, "END", None, False, False
     worst = 0.0
+    be_bar, be_q = (), -1.0
 
     def worse(price: float, level: float) -> bool:      # Fiyat seviyenin ters tarafında (veya üstünde)
         return price <= level if side > 0 else price >= level
@@ -768,12 +815,23 @@ def run_trade(p: SimParams, s: FutSignal, window: tuple, margin: float, notional
             exit_price = tp if p.tp_limit else tp * (1 - side * slip)
             reason, exit_ms = "TP", tj
             break
+        was_on = be_on
         favorable(fj)
         after = cj if adverse_first else aj                 # Tepeden sonra görülen en kötü fiyat
         if worse(after, stop):
             fill = (stop + after) / 2 if p.harsh_stops and not adverse_first else stop
             exit_price, reason, exit_ms = fill * (1 - side * slip), kind, tj
             break
+        if p.be_intrabar and be_on and not was_on and kind == "BE" and adverse_first and worse(aj, stop):
+            # Başabaş bu mumda tetiklendi, mumun ters ucu yeni stopun gerisinde ama kapanış ilerisinde. Standart sıra
+            # (dip → tepe → kapanış) "çıkılmadı" der; gerçekte fiyat tetiğe değdikten sonra tabana dönmüş olabilir
+            # (dar aralıkta sık). Olasılık be_retouch_prob ile, çekiliş işlem başına sabit (coin + giriş zamanı).
+            be_bar = (float(oj), float(fj), float(aj), float(cj))
+            be_q = be_retouch_prob(side, fj, aj, cj, be_trig, stop)
+            hit = p.be_force if p.be_force is not None else trade_uniform(s.symbol, s.close_ms) < be_q
+            if hit:
+                exit_price, reason, exit_ms = stop * (1 - side * slip), kind, tj
+                break
     if exit_price is None:                                  # Veri penceresi bitti (son mumun kapanışı)
         last = n - 1
         exit_price = (c[last] if n else entry) * (1 - side * slip)
@@ -795,7 +853,7 @@ def run_trade(p: SimParams, s: FutSignal, window: tuple, margin: float, notional
     return FutTrade(s.symbol, s.side, entry_ms, exit_ms, entry, float(exit_price), reason, p.leverage, margin,
                     notional, fees, funding, pnl, pnl / margin * 100 if margin else 0.0, 0.0, worst,
                     max(window_mae, worst), gap, liquidated, bar_ms, s.score, float(s.metrics.get("tactic", 0.0)),
-                    int(getattr(s, "breadth", 0)))
+                    int(getattr(s, "breadth", 0)), be_bar=be_bar, be_q=be_q)
 
 
 def slot_share(p: SimParams, n_open: int) -> float:
@@ -976,9 +1034,10 @@ def simulate_slots(p: SimParams, data: FutData, signals: Sequence[FutSignal], wi
     usage = p.margin_usage_pct / 100
     kill_level = p.start_capital * (1 - p.kill_pct / 100) if p.kill_pct else -1.0
     first_share = slot_share(p, 0)          # Faz 6: ilk pozisyon büyük, ek pozisyonlar küçük (100% = eşit, 1/N)
-    # Faz 8: ek pozisyonlar (başka pozisyon açıkken açılanlar) kendi başabaş tetiğiyle (config.futures_be_trigger)
-    p_extra = (replace(p, be_trigger_pct=p.extra_be_trigger_pct)
-               if p.be_enabled and p.extra_be_trigger_pct > 0 and p.extra_be_trigger_pct != p.be_trigger_pct else p)
+    # Faz 8: ek pozisyonlar (başka pozisyon açıkken açılanlar) kendi başabaş tetiğiyle (config.futures_be_trigger).
+    # Tetik stopun taşınacağı yerin (be_floor_pct) üstünde olmalı: duyarlılık satırı tabanı yükseltirse (ör. "Başabaş
+    # +%5 → +%2") ek tetik (+%0.5) geçersiz kalır ve ana tetik kullanılır (yoksa stop fiyatın üstüne konmuş sayılır).
+    p_extra = (replace(p, be_trigger_pct=p.extra_be_trigger_pct) if phase8_active(p) else p)
 
     def realize(until: int) -> None:
         nonlocal equity, used, freeze_until, sl_streak, day_key, day_pnl, kill_ms, ruined, stop
@@ -1301,9 +1360,30 @@ def phase6_rows(cfg, ev, signals=None, phase6=None) -> List[Tuple[str, "Evaluati
     return rows
 
 
+def realism_label(p: SimParams) -> str:
+    """Rapor başlığı: saniyelik veriyle ayarlanan gerçekçilik payları (Kasım 2026). Kapalıysa boş."""
+    parts = []
+    if p.entry_lag_pct > 0 and not p.entry_limit:
+        parts.append(f"giriş mum kapanışından ~5 sn sonra (fiyat ort. %{p.entry_lag_pct:g} daha yukarıda)")
+    if p.be_intrabar and p.be_enabled:
+        parts.append("başabaşın tetiklendiği dakikada fiyatın tabana geri dönme olasılığı")
+    if not parts:
+        return ""
+    return ("Gerçekçilik payları (saniyelik işlem verisiyle ölçüldü): " + "; ".join(parts)
+            + ". Kasım 2026 öncesi raporlar bunları saymadığı için daha yüksek çıkıyordu.")
+
+
+def realism_rows(cfg, ev) -> List[Tuple[str, "Evaluation"]]:
+    """Kıyas satırı: gerçekçilik payları olmadan (Kasım 2026 öncesi raporlardaki iyimser hesap)."""
+    base = params_from_cfg(cfg)
+    if not realism_label(base):
+        return []
+    return [("Eski (iyimser) hesap: giriş gecikmesi ve mum içi başabaş payı yok", ev(be_intrabar=False, entry_lag_pct=0.0))]
+
+
 def phase8_active(p: SimParams) -> bool:
     """Faz 8 etkin mi: dalga modunda ek pozisyonlar ana ayardan farklı bir başabaş tetiği kullanıyor."""
-    return (p.max_positions > 1 and p.be_enabled and p.extra_be_trigger_pct > 0
+    return (p.max_positions > 1 and p.be_enabled and p.extra_be_trigger_pct > p.be_floor_pct
             and p.extra_be_trigger_pct != p.be_trigger_pct)
 
 
@@ -1374,7 +1454,8 @@ def variant_rows(cfg, data: FutData, signals, windows) -> List[Tuple[str, Evalua
                 (f"Çöküş eşiği %{cfg.futures_crash_drop_pct + 2:g}", other(futures_crash_drop_pct=cfg.futures_crash_drop_pct + 2)),
                 ("+likidasyon dalgası şartı" if not cfg.futures_crash_liq else "Likidasyon şartı kapalı",
                  other(futures_crash_liq=not cfg.futures_crash_liq))] + long_window_rows(cfg, other)
-                + cascade_rows(cfg, ev, signals) + phase6_rows(cfg, ev, signals, phase6) + phase8_rows(cfg, ev))
+                + cascade_rows(cfg, ev, signals) + phase6_rows(cfg, ev, signals, phase6) + phase8_rows(cfg, ev)
+                + realism_rows(cfg, ev))
     out = [("Başabaş kalkanı kapalı", ev(be_enabled=False)),
            ("Zaman stopu 30 dk", ev(hold_min=30)),
            ("Zaman stopu 120 dk", ev(hold_min=120)),
@@ -1382,7 +1463,7 @@ def variant_rows(cfg, data: FutData, signals, windows) -> List[Tuple[str, Evalua
            ("Komisyonsuz + kaymasız (kıyas)", ev(taker_fee=0.0, maker_fee=0.0, slippage_pct=0.0)),
            ("Yalnızca long", ev([s for s in signals if s.side == "long"])),
            ("Yalnızca short", ev([s for s in signals if s.side == "short"]))]
-    return out
+    return out + realism_rows(cfg, ev)
 
 
 # ===================================================================== ızgara testi (--izgara)
@@ -2399,6 +2480,9 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
     L.append(f"Komisyon: piyasa %{p.taker_fee * 100:.3f} / limit %{p.maker_fee * 100:.3f}, kayma %{p.slippage_pct:g}, "
              + ("ortalama fonlama oranı (8 saatte %0.01)" if data.loader is not None else "gerçek fonlama oranları")
              + f"; çıkışlar {'1 dk' if data.exit_interval == '1m' else '5 dk'} mumlarla")
+    real = realism_label(p)
+    if real:
+        L.append(real)
     L.append(f"Likidasyon ({p.leverage}x): fiyat ~%{room:.1f} ters giderse; zarar kes bundan {room - p.sl_pct:.1f} "
              f"puan önce çalışır")
     crash = cfg.futures_tactic == "crash"
