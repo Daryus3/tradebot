@@ -293,7 +293,9 @@ def test_fast_path_is_measurably_faster_than_old_path(fcfg, tmp_path):
 
 
 def test_fast_scan_retries_until_new_candle_shows(fcfg, tmp_path):
-    # 1) Bir coin gecikiyor, diğerlerinde yeni mum var: geciken bir kez daha istenir, sonra eldekiyle devam
+    # 1) Bir coinde yeni mum hiç görünmüyor, diğerlerinde var: yalnızca o coin 0.25 sn arayla yeniden istenir; başka
+    #    coinlerde göründü diye erken kabul edilmez (kapanan mumu henüz kesinleşmemiş olabilir), eski tarama anında
+    #    (kapanış + 3 sn) eldeki mumla devam edilir
     clock = Clock(CLOSE + 1)
     fake = FastCcxt(CLOSES, clock=clock)
     fake.forming_after = {"ADAUSDT": 99}
@@ -303,9 +305,22 @@ def test_fast_scan_retries_until_new_candle_shows(fcfg, tmp_path):
     bot.next_scan_at = clock.t
     bot.tick()
     asked = [c[1] for c in fake.calls if c[0] == "klines"]
-    assert asked.count("ADAUSDT") == 2 and asked.count("SOLUSDT") == 1 and waits == [ft.FAST_SETTLE_WAIT_SEC]
+    assert asked.count("ADAUSDT") == 9 and asked.count("SOLUSDT") == 1 and waits == [ft.FAST_SETTLE_WAIT_SEC] * 8
     row = journal(bot)[-1]
-    assert row["kt"] == 2 and "ADA" in row["a"] and row["s"] == {"SOL": "açıldı"} and row["ms"] == [1000, 1250, 1250]
+    assert row["kt"] == 9 and "ADA" in row["a"] and row["s"] == {"SOL": "açıldı"} and row["ms"] == [1000, 3000, 3000]
+    # Geciken coin iki denemede yetişirse tarama o kadar bekler
+    clock1 = Clock(CLOSE + 1)
+    fake1 = FastCcxt(CLOSES, clock=clock1)
+    fake1.forming_after = {"ADAUSDT": 3}
+    (tmp_path / "a").mkdir()
+    bot1, fake1, _n1, clock1 = make_fbot(fast_cfg(fcfg), tmp_path / "a", fake=fake1, clock=clock1)
+    waits1 = stepping(bot1, clock1)
+    fake1.calls.clear()
+    bot1.next_scan_at = clock1.t
+    bot1.tick()
+    asked1 = [c[1] for c in fake1.calls if c[0] == "klines"]
+    assert asked1.count("ADAUSDT") == 3 and asked1.count("XRPUSDT") == 1 and journal(bot1)[-1]["ms"][1] == 1500
+    assert waits1 == [ft.FAST_SETTLE_WAIT_SEC] * 2
     # 2) Hiçbirinde yeni mum yok (sunucu saati ileride / veri yerleşmedi): en geç eski tarama anına (kapanış + 3 sn)
     #    kadar yeniden denenir, sonra eski davranış: az önce kapanan mum yanıttaysa yeterli
     clock2 = Clock(CLOSE + 1)

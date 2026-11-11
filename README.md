@@ -904,11 +904,10 @@ borsa saati, sunucunun saatinden bağımsız) ve dolum fiyatının sinyal mumunu
 
 **Hızlı giriş (`FUTURES_FAST_ENTRY=true`; varsayılan kapalı; Telegram → 🎯 Çıkışlar ve Emirler → ⚡ Hızlı giriş).**
 Sinyal kuralları, pozisyon boyları ve çıkışlar aynıdır; yalnızca emir daha erken gider:
-- **Tarama mum kapanışından 1 sn sonra** (3 yerine) ve döngü tam o anda uyanır. Güvence: yanıtta az önce kapanan mumun
-  ardından **yeni (süren) mum da görünmelidir**; bu, Binance'in o mumu kapattığını gösterir. Görünmeyen coinler 0.25 sn
-  sonra yeniden istenir. Coinlerin en az üçte birinde yeni mum varsa gecikenler bir kez daha denenip eldeki mumla devam
-  edilir; hiçbirinde yoksa (sunucunun saati ileride, veri henüz yerleşmemiş) en geç eski tarama anına (kapanış + 3 sn)
-  kadar yeniden denenir ve eski davranışa dönülür. En kötü durum eski zamanlamadır.
+- **Tarama mum kapanışından 1 sn sonra başlar** (3 yerine) ve döngü tam o anda uyanır. Güvence: yanıtta az önce kapanan
+  mumun ardından **yeni (süren) mum da görünmelidir**; bu, Binance'in o mumu kapattığını gösterir. Yeni mumu görünmeyen
+  **her** coin 0.25 sn arayla yeniden istenir (yalnızca o coinler); en geç eski tarama anında (kapanış + 3 sn) eski
+  davranışa dönülür: az önce kapanan mum yanıttaysa yeterlidir. En kötü durum eski zamanlamadır.
 - **Mumlar tek dalgada**: 24 işçi, CCXT beklemesi olmadan (bağlantı havuzu 32'ye büyütüldü). İstek ağırlığı tarama başına
   ~24 coin × 2 = 48; Binance'in sınırı dakikada 2.400. Küçük evrende (≤ 40 coin) 24 saatlik ön eleme yapılmaz: birkaç mum
   isteği kazandırırken taramanın başına 2 sn'ye varan bekleme ekliyordu; yalnızca sinyal veremeyecek coinleri atladığı
@@ -924,9 +923,23 @@ Sinyal kuralları, pozisyon boyları ve çıkışlar aynıdır; yalnızca emir d
   oradan teyit eder.
 - **Girişte CCXT beklemesi yok**: bakiye → fiyat → emir (3 istek) arka arkaya gider.
 
-Kalan yol: 1 sn + mumlar (1 gidiş-dönüş) + bakiye, fiyat, emir (3 gidiş-dönüş). Açık pozisyon varken pozisyon kontrolü
-yine taramadan önce yapılır (sıra değişmedi: kill-switch ve güncel pozisyon durumu önce gelir); ne kadar sürdüğü kayıttaki
-`"ms"` alanının ilk değerinden görülür.
+Kalan yol: mumların kesinleşmesi (aşağıdaki ölçüme göre kapanıştan ~1-2.5 sn sonra) + bakiye, fiyat, emir (3
+gidiş-dönüş). Açık pozisyon varken pozisyon kontrolü yine taramadan önce yapılır (sıra değişmedi: kill-switch ve güncel
+pozisyon durumu önce gelir); ne kadar sürdüğü kayıttaki `"ms"` alanının ilk değerinden görülür.
+
+**Mum sınırı ölçümü (11 Kasım 2026).** Binance'in spot herkese açık veri ucunda (`data-api.binance.vision`; vadeli API
+geliştirme ortamından erişilemiyor) 22 coin, 3 mum sınırı, 632 yanıt:
+
+| | Ortanca | En geç (3 sınır) | Kapanıştan 1 sn sonra |
+|---|---|---|---|
+| Kapanan mum son hâlini aldı | +0.3 sn | +1.9 / +2.5 / +2.3 sn | 22 coinin 18-20'sinde |
+| Yanıtta yeni mum göründü | +1.0 - +1.5 sn | +2.0 / +2.5 / +2.4 sn | 22 coinin 5-12'sinde |
+
+Yeni mumun göründüğü hiçbir yanıtta kapanan mum eksik değildi (0 / 632): kural tutuyor. Ama kapanan mum ETH, SOL, BNB
+gibi likit coinlerde bile 2-2.5 sn'ye kadar değişebiliyor; bu yüzden "coinlerin bir kısmında yeni mum göründüyse
+gecikenleri kabul et" kısayolu (ilk sürümde vardı) kesinleşmemiş mumu taramaya sokabiliyordu ve kaldırıldı. Sonuç: hızlı
+girişte tarama 1 sn'de başlar ama mumlar pratikte ~2-2.5 sn'de tamamlanır (eski yol: 3 sn + ön eleme + 4 dalga). Vadeli
+uç farklı davranabilir; sunucudaki kayıtta `"ms"` (mumlar ne zaman alındı) ve `"kt"` (kaç deneme) bunu gösterir.
 
 **Kullanım.** Önce kapalıyken birkaç gün çalıştırıp raporda / Telegram'da gecikmeyi görün, sonra açıp aynı satırlarla
 karşılaştırın. Açıkken dikkat: taranan coinlerin **hepsinde** teminat modu ISOLATED ve kaldıraç `FUTURES_LEVERAGE` olarak
@@ -934,8 +947,9 @@ karşılaştırın. Açıkken dikkat: taranan coinlerin **hepsinde** teminat mod
 yapıyorsanız ayarınız değişir. Test modunda hesap ayarı yoktur; tarama zamanlaması ve mumlar aynı şekilde hızlanır.
 
 **Sınırlar.** Hızlı yol sahte borsa ve sahte saatle test edildi (istek sırası, yeni mum kontrolü, doğrulama, geri dönüş
-yolları; `tests/test_futures_fast_entry.py`), gerçek Binance'e karşı ölçülmedi: kazanılan süre sunucunuzda görülecek.
-"Yeni mum göründüyse kapanan mum kesinleşmiştir" varsayımı Binance'in mum ucunun davranışına dayanır. Backtestteki
+yolları; `tests/test_futures_fast_entry.py`); gerçek Binance'te yalnızca spot veri ucunun mum davranışı ölçüldü
+(yukarıda). Vadeli API'ye karşı (parite ayarları ucu, emir yanıtındaki işlem zamanı, kazanılan süre) ölçüm sunucunuzda
+yapılır. Backtestteki
 `ENTRY_LAG_PCT` (5 sn = %0.05) değiştirilmedi: canlı ölçümler birikince yeniden ayarlanabilir; o zamana kadar backtest
 hızlı girişe göre biraz kötümser kalır. Emir defteri derinliği (büyük bakiyede kayma) modellenmiyor.
 
