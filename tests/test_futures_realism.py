@@ -107,6 +107,37 @@ def test_intrabar_default_on_and_not_applied_without_breakeven(fcfg):
     assert off.reason == "TIME" and off.be_bar == ()
 
 
+def test_draw_seed_changes_only_the_draw_and_spread_is_reported(fcfg):
+    """Çekiliş tohumu: 0 = eski çekiliş (sonuçlar değişmez); başka tohum aynı işlemi farklı çekebilir. draw_spread aynı
+    ayarı farklı çekilişlerle çalıştırır ve rapor aralığı yazar."""
+    assert fb.trade_uniform("BTCUSDT", BASE_MS, 0) == fb.trade_uniform("BTCUSDT", BASE_MS)
+    assert fb.trade_uniform("BTCUSDT", BASE_MS, 1) != fb.trade_uniform("BTCUSDT", BASE_MS, 2)
+    vals = [fb.trade_uniform("BTCUSDT", BASE_MS, seed) for seed in range(1, 401)]
+    assert 0.4 < sum(vals) / len(vals) < 0.6
+    q = fb.be_retouch_prob(1, 100.9, 100.1, 100.8, 100.5, 100.2)
+    out_seed = next(i for i in range(1, 60) if fb.trade_uniform("BTCUSDT", BASE_MS, i) < q)
+    stay_seed = next(i for i in range(1, 60) if fb.trade_uniform("BTCUSDT", BASE_MS, i) >= q)
+    assert _event_trade(be_intrabar=True, be_seed=out_seed).reason == "BE"
+    assert _event_trade(be_intrabar=True, be_seed=stay_seed).reason == "TIME"
+    assert fb.SimParams.__dataclass_fields__["be_seed"].default == 0
+    # draw_spread: tek hesabın son bakiyesi tohum 1..N ile; başabaş ya da pay kapalıysa boş
+    data = bt_data()
+    s1 = bt_sig("BTCUSDT", BASE_MS, 12)
+    w = {(s1.symbol, s1.close_ms): window(EVENT, start=s1.close_ms)}
+    p = params(start_capital=100.0, hold_min=3, tp_pct=5.0, sl_pct=3.0, be_intrabar=True)
+    spread = fb.draw_spread(p, data, [s1], w, seeds=59)
+    assert len(spread) == 59 and len({round(v, 6) for v in spread}) == 2          # Yalnızca iki sonuç: çık / kal
+    assert spread[out_seed - 1] < spread[stay_seed - 1]                           # Tohum sırası 1..N
+    assert fb.draw_spread(replace(p, be_intrabar=False), data, [s1], w) == []
+    assert fb.draw_spread(replace(p, be_enabled=False), data, [s1], w) == []
+    assert fb.draw_spread(p, data, [s1], w, seeds=0) == []
+    # Rapor satırı
+    ev = fb.evaluate(p, data, [s1], w)
+    text = fb.format_report(fcfg, data, ev, fb.Funnel(), draws=[150.0, 90.0, 120.0])
+    assert "Çekiliş duyarlılığı" in text and "en düşük 90" in text and "ortanca 120" in text and "en yüksek 150" in text
+    assert "Çekiliş duyarlılığı" not in fb.format_report(fcfg, data, ev, fb.Funnel())
+
+
 # ====================================================================== Faz 8 tetiği tabanın altında kalırsa
 def test_extra_trigger_below_floor_falls_back_to_main_trigger():
     """Rapor 15'teki "Başabaş +%5 → +%2" satırı: ek tetik (+%0.5) tabanın (+%2) altında kalınca stop fiyatın üstüne

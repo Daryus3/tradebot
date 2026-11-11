@@ -552,6 +552,7 @@ class SimParams:
     be_intrabar: bool = True
     entry_lag_pct: float = ENTRY_LAG_PCT   # Piyasa emriyle girişte gecikme payı (fiyat %; 0 = mum açılışından giriş)
     be_force: Optional[bool] = None     # Yalnızca kalibrasyon / test: o mumdaki çekilişi zorla (True çık, False kal)
+    be_seed: int = 0                    # Mum içi başabaş çekilişinin tohumu (0 = raporun kendi çekilişi; bkz. draw_spread)
 
 
 def params_from_cfg(cfg, **over) -> SimParams:
@@ -695,10 +696,12 @@ def be_retouch_prob(side: int, best: float, adverse: float, c: float, trig: floa
     return 1.0 / (1.0 + k * x)
 
 
-def trade_uniform(symbol: str, close_ms: int) -> float:
+def trade_uniform(symbol: str, close_ms: int, seed: int = 0) -> float:
     """İşlem başına sabit, ayarlardan bağımsız [0, 1) sayı (coin + giriş zamanı): aynı işlem farklı ayarlarda aynı
-    çekilişi kullanır, sonuçlar çalıştırmadan çalıştırmaya değişmez."""
-    return zlib.crc32(f"{symbol}:{int(close_ms)}".encode()) / 4294967296.0
+    çekilişi kullanır, sonuçlar çalıştırmadan çalıştırmaya değişmez. `seed` ≠ 0: başka bir çekiliş dizisi (aynı
+    ayarın sonucu çekilişe ne kadar bağlı: draw_spread)."""
+    key = f"{symbol}:{int(close_ms)}" if not seed else f"{int(seed)}|{symbol}:{int(close_ms)}"
+    return zlib.crc32(key.encode()) / 4294967296.0
 
 
 def run_trade(p: SimParams, s: FutSignal, window: tuple, margin: float, notional: float,
@@ -828,7 +831,7 @@ def run_trade(p: SimParams, s: FutSignal, window: tuple, margin: float, notional
             # (dar aralıkta sık). Olasılık be_retouch_prob ile, çekiliş işlem başına sabit (coin + giriş zamanı).
             be_bar = (float(oj), float(fj), float(aj), float(cj))
             be_q = be_retouch_prob(side, fj, aj, cj, be_trig, stop)
-            hit = p.be_force if p.be_force is not None else trade_uniform(s.symbol, s.close_ms) < be_q
+            hit = p.be_force if p.be_force is not None else trade_uniform(s.symbol, s.close_ms, p.be_seed) < be_q
             if hit:
                 exit_price, reason, exit_ms = stop * (1 - side * slip), kind, tj
                 break
@@ -1259,6 +1262,20 @@ def evaluate(p: SimParams, data: FutData, signals: Sequence[FutSignal], windows)
     fixed = simulate(p, data, signals, windows,
                      fixed_notional=p.start_capital * p.margin_usage_pct / 100 * p.leverage / max(1, p.max_positions))
     return Evaluation(chained, years, fixed)
+
+
+DRAW_SEEDS = 10     # Çekiliş duyarlılığı: raporda aynı ayarın denendiği farklı çekiliş sayısı
+
+
+def draw_spread(p: SimParams, data: FutData, signals: Sequence[FutSignal], windows,
+                seeds: int = DRAW_SEEDS) -> List[float]:
+    """Mum içi başabaş çekilişine duyarlılık: aynı ayarın tek hesap son bakiyesi `seeds` farklı çekilişle. Başabaşın
+    tetiklendiği dakikada fiyatın tabana dönüp dönmediği bir olasılıkla çekilir (be_retouch_prob); kaldıraçlı ve
+    bileşik hesapta birkaç işlemin çekilişi son bakiyeyi katlarca oynatır. İki ayarı tek rapordaki son bakiyeyle
+    karşılaştırmak bu yüzden yanıltabilir: fark bu aralığın içindeyse anlamlı sayılmaz. Pay kapalıysa boş liste."""
+    if seeds <= 0 or not (p.be_enabled and p.be_intrabar) or p.be_force is not None:
+        return []
+    return [simulate(replace(p, be_seed=seed), data, signals, windows).final_equity for seed in range(1, seeds + 1)]
 
 
 def btc_hold_pct(data: FutData, start_ms: Optional[int] = None, end_ms: Optional[int] = None) -> Optional[float]:
@@ -2483,7 +2500,7 @@ def live_comparison(cfg, data: FutData, trades: Sequence[FutTrade], path: Option
 
 
 def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None, grid=None, variants=None,
-                  live: Optional[List[str]] = None) -> str:
+                  live: Optional[List[str]] = None, draws: Optional[Sequence[float]] = None) -> str:
     res = ev.chained
     p = res.params
     st = stats_of(res)
@@ -2560,6 +2577,11 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
         L.append("")
     L.append(f"💰 A) {p.start_capital:g} USDT ile {_date(data.start_ms)}'de başlayıp para eklemeseydiniz (tek hesap)")
     L.append(f"  Son bakiye: {_num(res.final_equity)} USDT ({_pct(res.net_pct)}) | BTC al-tut {_pct(btc_hold_pct(data))}")
+    if draws:
+        vals = sorted(draws)
+        L.append(f"  Çekiliş duyarlılığı: aynı ayar, mum içi başabaşın {len(vals)} farklı çekilişiyle → son bakiye en düşük "
+                 f"{_num(vals[0], 0)}, ortanca {_num(float(np.median(vals)), 0)}, en yüksek {_num(vals[-1], 0)} USDT. "
+                 f"İki raporun son bakiyesi arasındaki fark bu aralığın içindeyse şans olabilir.")
     L.append(f"  İşlem {st.trades} | kazanan {st.wins} | kazanma %{st.win_rate:.1f} | kâr faktörü {_pf(st.profit_factor)}"
              f" | işlem başı ROE {st.avg_roe:+.2f}%")
     L.append(f"  Maks. düşüş %{dd:.1f}" + (f" ({_date(dd_a)} → {_date(dd_b)})" if dd_a else "")
@@ -2790,7 +2812,9 @@ def run_cli(cfg, days: Optional[int], end_ms: Optional[int], out_dir: Path, char
         levs = leverage_table(cfg, data, signals, windows)
         grid = exit_grid(cfg, data, signals, windows)
         variants = variant_rows(cfg, data, signals, windows)
-    report = format_report(cfg, data, ev, funnel, levs, grid, variants, live=live_comparison(cfg, data, ev.chained.trades))
+    draws = draw_spread(params_from_cfg(cfg), data, signals, windows) if sensitivity else []
+    report = format_report(cfg, data, ev, funnel, levs, grid, variants, live=live_comparison(cfg, data, ev.chained.trades),
+                           **({"draws": draws} if draws else {}))
     stamp = datetime.now().strftime("%Y%m%d-%H%M")
     try:
         csv_path = save_trades_csv(ev.trades, out_dir / f"vadeli_islemler_{stamp}.csv")

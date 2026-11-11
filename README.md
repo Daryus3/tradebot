@@ -953,6 +953,84 @@ yapılır. Backtestteki
 `ENTRY_LAG_PCT` (5 sn = %0.05) değiştirilmedi: canlı ölçümler birikince yeniden ayarlanabilir; o zamana kadar backtest
 hızlı girişe göre biraz kötümser kalır. Emir defteri derinliği (büyük bakiyede kayma) modellenmiyor.
 
+#### Rapor 17 araştırması: kârı ve işlem sayısını birlikte artıran ayar var mı? (Kasım 2026)
+Baz: rapor 17'nin ayarı (5x, 4 pozisyon, Faz 6 ekleri, ek kapısı ≥10, Faz 8 açık, 28.93 USDT), düzeltilmiş motor,
+2020-01 → 2026-11, 1 dk çıkışlar; motorla birebir üretildi (1.234.021,97 USDT, 6.071 işlem). ~330 ayar denendi.
+
+**Önce bir uyarı: tek raporun son bakiyesi şansa çok bağlı.** Düzeltilmiş motor, başabaşın tetiklendiği dakikada fiyatın
+tabana dönüp dönmediğini bir olasılıkla çeker. 5x ve bileşik hesapta birkaç işlemin çekilişi sonucu katlarca oynatıyor:
+aynı ayar 10 farklı çekilişle 275.539 ile 2.309.818 USDT arasında bitti (ortanca 1.352.814; rapordaki 1.234.022 bunlardan
+biri). Bu yüzden adaylar tek raporla değil **10-12 çekilişin ortancasıyla** ve "kaç çekilişte bazdan iyi" sayısıyla
+karşılaştırıldı. Rapora da eklendi: 💰 A) bölümündeki **"Çekiliş duyarlılığı"** satırı aynı ayarın 10 çekilişteki en
+düşük / ortanca / en yüksek son bakiyesini yazar; iki rapor arasındaki fark bu aralığın içindeyse şans olabilir.
+
+**Komşu değerlerde aynı yönü veren dört etki** (hepsi mevcut ayarlar):
+- **İlk pozisyonun başabaş tetiği** (`BREAKEVEN_TRIGGER_PCT`; ekler `FUTURES_EXTRA_BE_TRIGGER_PCT` ile ayrı): yükseldikçe
+  kâr artar, işlem azalır. 1.1-1.5 arasında sabit boy getiri seçim döneminde +%5-21, doğrulamada 0 ile +%5; işlem −%1-6.
+  0.8'in altı doğrulamada çöker (0.75: −%17). Zayıf yanı: sakin yıllarda (2023, 2026) geride kalır.
+- **Ek pozisyon tetiği 0.5 → 0.4**: işlem +%5, kâr aynı. 0.35 çöker (−%12).
+- **Yalnız çöküş büyüklüğü 50 → 25** (`FUTURES_ISOLATED_SIZE_PCT`): işlem aynı; bu işlemlerin kazancı sıfıra yakın olduğu için
+  küçülmeleri oynaklığı azaltır. Seçim döneminde bileşik getiri +%19, doğrulamada aynı, son 24 ayda biraz geride.
+- **Dalga eşiklerinin genişliği 12 → 10** (`FUTURES_WAVE_BREADTH`): işlem +%7, tek başına kârı değiştirmez; ≥9 ve altı
+  doğrulamada zayıflar.
+
+**Adaylar** (çekilişlerin ortancası; seçim / doğrulama dönemi; "iyi" = bazdan iyi çıkan çekiliş sayısı):
+
+| | Baz (rapor 17) | Faz 8 kapalı | A: 1.1 / 0.4 / %25 | B: 1.25 / 0.4 / %25 | C: B + dalga ≥10 |
+|---|---|---|---|---|---|
+| İşlem / yıl | 888 | 753 | 924 | 906 | 976 |
+| Sabit boy yıllık getiri | +%332 / +%212 | +%346 / +%205 | +%352 / +%215 | +%382 / +%224 | +%375 / +%230 |
+| ...bazdan iyi (10 çekilişte) | - | 8 / 3 | 10 / 9 | 10 / 10 | 10 / 10 |
+| Bileşik yıllık getiri | +%493 / +%301 | +%691 / +%273 | +%655 / +%334 | +%853 / +%358 | +%819 / +%392 |
+| ...bazdan iyi (10 çekilişte) | - | 10 / 3 | 10 / 10 | 10 / 10 | 10 / 10 |
+| En büyük düşüş | %85 / %67 | %85 / %58 | %87 / %63 | %88 / %65 | %87 / %62 |
+| Kayma 3 kat (bileşik) | +%123 / +%75 | +%175 / +%129 | +%132 / +%106 | +%224 / +%129 | +%176 / +%140 |
+| Kayma 5 kat (bileşik) | −%0 / −%28 | +%33 / +%10 | +%6 / −%10 | +%28 / −%7 | −%9 / −%3 |
+| Kötümser stop (5x) | eridi | eridi | eridi | eridi | eridi |
+| Son 12 ay | +%81 | +%95 | +%85 | +%36 | +%35 |
+| Son 24 ay | +%4.110 | +%2.590 | +%4.406 | +%5.526 | +%9.143 |
+| Geride kaldığı yıllar | - | 2021, 2025 | 2022, 2025 | 2023, 2026 | 2022, 2023, 2026 |
+| Tek rapor (kendi çekilişi) | 1.234.022 | 1.871.004 | 2.955.907 | 3.438.960 | 3.367.292 |
+| ...10 çekilişte | 0.28-2.31 M | 0.55-2.86 M | 1.30-2.76 M | 2.43-3.70 M | 1.88-3.55 M |
+
+Sütun başlıkları: ilk pozisyonun başabaş tetiği / ek pozisyon tetiği / yalnız çöküş büyüklüğü. Ayar satırları:
+- A: `BREAKEVEN_TRIGGER_PCT=1.1`, `FUTURES_EXTRA_BE_TRIGGER_PCT=0.4`, `FUTURES_ISOLATED_SIZE_PCT=25`
+- B: aynısı, `BREAKEVEN_TRIGGER_PCT=1.25`
+- C: B + `FUTURES_WAVE_BREADTH=10`
+
+**Yorum.** Üç aday da bazdan hem daha çok işlem yapıyor hem de iki dönemde, çekilişlerin neredeyse hepsinde daha çok
+kazanıyor; 3 kat kaymada da önde. Ama kazanç küçük ve kesin değil: haftalık bloklarla önyüklemede (bootstrap) farkın
+%5-95 aralığı sıfırı içeriyor (B için seçim −14..+111, doğrulama −18..+63 puan / yıl), **hiçbiri her yıl bazdan iyi
+değil** ve B ile C son 12 ayda tüm çekilişlerde geride (+%35 / +%81). Yani "her testi geçen" bir ayar yine yok; A küçük ama
+son dönemde de geride kalmayan adım, C uzun dönemde en çok işlem ve kârı veren ama sakin piyasada geride kalan seçenek.
+Faz 8'i kapatmak (önceki öneri) seçim döneminde ve maliyet stresinde iyi, doğrulamada çekilişlerin çoğunda bazın gerisinde
+ve işlem sayısını %15 düşürüyor. Düşüş ve en kötü gün hiçbir adayda azalmıyor: 5x'te kötümser stop dolumu hepsini
+eritiyor; B 3x'te erimiyor (bileşik +%455 / +%198, düşüş %69 / %42).
+
+**Denenip elenenler** (baza göre işlem / sabit boy getiri, seçim / doğrulama):
+- Daha çok yuva (5, 6, 8; eklerin toplamı sabit): işlem +%16 / +%29 / +%53, getiri −%14 ile −%31. Dalgada sonradan gelen
+  sinyaller belirgin kötü.
+- Ek kapısı ≥8: işlem +%6 / +%1, getiri −%9 / 0. Zaman stopu 30 dk: +%4 / +%5, getiri +%2 / −%30. Eklere 15-20 dk zaman
+  stopu: +%6-12, getiri −%1 ile −%17.
+- Zarar kes 6-7 (Kâr Al 8-12 ile): seçimde +%12-21, doğrulamada −%17-25. Eklerde zarar kes 3: düşüş %93.
+- Başabaş tabanı 0.4: getiri −%2 / −%21. Dalgada yeniden giriş ≥1-2: işlem +%1-8 ama doğrulamada bileşik getiri +%313 →
+  +%274-281. Zarar beklemesi 60-120 dk: işlem +%2-6, doğrulama getirisi −%9-12. Her işlemden sonra bekleme: çöküyor.
+- Düşük genişlikte hiç girmemek: işlem −%3-16, doğrulama getirisi −%13-22 (küçültmek yetiyor, atlamak zararlı).
+- Ana eşik %9: işlem +%5, getiri −%6-12; %11 ve 1 sa %6.5-7: ikisi de düşüyor. 1 sa %5.5: işlem +%7 / +%4, getiri +%5 /
+  −%3 (B ile birlikte en kötü gün −%80). 8 sa %13: doğrulamada −%21-24.
+- B üstüne daha düşük dalga eşikleri (1:4.5,4:7.5): işlem +%10, getiri aynı ama 2023, 2025 ve 2026'da geride; dalga ≥10
+  ile birlikte bileşik getiri +%598 / +%241'e düşüyor.
+- Güçlü dalgada pozisyonu büyütmek: getiri +%14-18 ama düşüş %74 → %78-79 (örtülü kaldıraç).
+
+**Hızlı giriş burada da en büyük kaldıraç.** Aynı bazda giriş gecikmesi payı %0.05 (5 sn) yerine %0.039 (3 sn) olursa
+sabit boy getiri +%6 / +%9, %0.023 (2 sn) olursa +%12 / +%16 artıyor, işlem sayısı değişmiyor. Bu, canlıda ölçülen
+gecikme düşerse geçerlidir (bkz. "Canlı giriş gecikmesi").
+
+**Sınırlar.** Seçim yanlılığı: ~330 denemenin en iyileri raporlandı; adaylar tek tek gerekçesi olan etkilerin birleşimi
+olsa da gerçek kazanç buradakinden küçük olabilir. Ek tetiği 0.4 ile taban 0.3 arası %0.1'dir: stop konana kadar fiyat
+geri dönerse bot piyasa emriyle çıkar; motor bu ayarda saniyelik veriye göre hafif kötümser kalibre edildi (+%0.23 /
++%0.25) ama canlıda dolum daha kötü olabilir. Geçmiş sonuç gelecek garantisi değildir.
+
 ### 🏆 Strateji turnuvası (`--turnuva`)
 Hangi strateji türünün sizin dönemde işe yaradığını **tek komutla** görmek için:
 ```bash
