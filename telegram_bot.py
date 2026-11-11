@@ -612,11 +612,24 @@ class Messages:
         be_pct = be_own if be_own > 0 else cfg.breakeven_trigger_pct
         be_price = pos.entry_price * (1 + (1 if pos.side == "long" else -1) * be_pct / 100)
         floor = "üstüne" if pos.side == "long" else "altına"
+        lag_line = ""
+        try:                                                        # Giriş gecikmesi ölçümü (piyasa emriyle giriş)
+            lag_ms = float(pos.metrics.get("lag_ms", 0.0))
+            slip = pos.metrics.get("slip_pct")
+            if lag_ms > 0:
+                lag_line = f"⚡ Giriş gecikmesi: mum kapanışından {lag_ms / 1000:.1f} sn sonra doldu"
+                if slip is not None:                                # + = aleyhte (long: pahalıya alış, short: ucuza satış)
+                    dear = (float(slip) > 0) == (pos.side == "long")
+                    lag_line += (f"; kapanış fiyatından %{abs(float(slip)):.3f} {'pahalıya' if dear else 'ucuza'} "
+                                 f"{'alındı' if pos.side == 'long' else 'satıldı'}")
+                lag_line += "\n"
+        except (TypeError, ValueError):
+            lag_line = ""
         return (
             f"{icon} <b>POZİSYON AÇILDI</b> — <b>{esc(pos.symbol)}</b> {tag}\n{LINE}\n"
             f"🏷️ Giriş: {fmt_price(pos.entry_price)} | 🪙 {fmt_qty(pos.qty)} {esc(pos.base_asset)}\n"
             f"💵 Teminat: {fmt_usdt(pos.margin_usdt)} {q} × {lev} = pozisyon {fmt_usdt(notional)} {q}\n"
-            f"💸 Giriş komisyonu: {pos.buy_fee_usdt:.4f} {q}\n{LINE}\n"
+            f"💸 Giriş komisyonu: {pos.buy_fee_usdt:.4f} {q}\n{lag_line}{LINE}\n"
             f"🎯 Kâr Al: {fmt_price(pos.tp_price)} (fiyat +%{cfg.take_profit_pct:g} → ROE ~+%"
             f"{cfg.take_profit_pct * lev:.0f})\n"
             f"🛑 Zarar Kes: {fmt_price(pos.sl_price)} (fiyat -%{cfg.stop_loss_pct:g} → ROE ~-%"

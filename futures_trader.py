@@ -4,12 +4,17 @@ Vadeli işlem motoru (STRATEGY=futures): Binance USDⓈ-M'de kaldıraçlı long 
 FuturesBot, TradingBot'un Telegram komutlarını, menüleri, canlı panoyu, raporları, kill-switch'i ve durum kaydını
 aynen kullanır; yalnızca tarama, pozisyon açma / yönetme / kapatma kısımları vadeli işleme göre değişir:
 
-  Döngü (her 5 dk mum kapanışından ~3 sn sonra; açık pozisyon yokken):
+  Döngü (her 5 dk mum kapanışından ~3 sn sonra, FUTURES_FAST_ENTRY=true ise 1 sn sonra; açık pozisyon yokken):
     1. FUTURES_COINS'teki coinlerin son 300 kapanmış 5 dk mumu + BTC'nin 1 saatlik mumları alınır.
     2. strategy.FuturesScalpStrategy.evaluate 4'lü onayı arar (likidasyon + hacim + RSI uyumsuzluğu + BTC trendi).
     3. En güçlü sinyalde: set_margin_mode(ISOLATED) + set_leverage(FUTURES_LEVERAGE) → serbest bakiyenin
        FUTURES_MARGIN_USAGE_PCT'si teminat (bileşik) → piyasa emri → Binance'e STOP_MARKET zarar kes (konamazsa
        pozisyon hemen kapatılır) ve Kâr Al emri.
+  Giriş gecikmesi her zaman ölçülür: taramanın aşamaları ve her girişin mum kapanışından kaç ms sonra dolduğu tarama
+  kaydına (futures_scans_<mod>.jsonl), pozisyona ve açılış mesajına yazılır; backtest raporu ortalamasını gösterir.
+  Hızlı giriş (FUTURES_FAST_ENTRY, varsayılan kapalı) aynı kurallarla yolu kısaltır: tarama 1 sn sonra (yanıtta yeni
+  mum da görünmeli, yoksa kısa aralıklarla yeniden denenir; en geç eski tarama anında eldekiyle devam edilir), mumlar
+  tek dalgada paralel istenir, teminat modu + kaldıraç önceden ayarlanıp her taramadan hemen önce doğrulanır.
   Açık pozisyonda (~2 sn'de bir):
     - Binance'te stop / hedef çalıştıysa kapanış kaydedilir (bot kapalıyken çalıştıysa açılışta).
     - Başabaş kalkanı: fiyat girişten +BREAKEVEN_TRIGGER_PCT'ye gelince Binance'teki stop girişin
@@ -21,7 +26,9 @@ Yüzdeler (Kâr Al, Zarar Kes, başabaş) FİYAT hareketidir; 10x'te fiyat +%1.2
 from __future__ import annotations
 
 import json
+import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -60,6 +67,24 @@ PAPER_LIMIT_THROUGH_PCT = 0.02     # Test modu: limit emir fiyat limitin bu kada
 LIMIT_REQUOTE_MAX = 2              # Post-only emir anında eşleşeceği için reddedilirse (-5022) yeni fiyatla yeniden dizilir
 LIMIT_CANCEL_GRACE_SEC = 5         # Süre dolunca iptal; test modunda son 1 dk mumun kapanması da beklenir
 FUNDING_LIMIT = 5                  # Fonlama modülü: coin başına istenen son ödenmiş fonlama sayısı
+# Hızlı giriş (FUTURES_FAST_ENTRY=true). Kurallar ve pozisyon boyları aynıdır; yalnızca mum kapanışı → emir süresi kısalır.
+FAST_SCAN_DELAY_SEC = 1.0          # Tarama mum kapanışından bu kadar sonra (kapalıyken SCAN_DELAY_SEC)
+FAST_KLINE_WORKERS = 24            # Mumlar tek dalgada istenir (~24 coin × ağırlık 2 = 48; sınır dakikada 2.400)
+FAST_SETTLE_WAIT_SEC = 0.25        # Yanıtta yeni mum yoksa yeniden denemeden önce beklenen süre (her denemede artar)
+FAST_SETTLE_TRIES = 2              # Coinlerin çoğunda yeni mum görünüyorsa gecikenler için toplam deneme sayısı
+FAST_SETTLE_MAX_TRIES = 6          # Her durumda en fazla bu kadar deneme (0.25 + 0.5 + 0.75... sn: eski tarama anına yeter)
+FAST_PREFILTER_MIN = 40            # Bundan az coinde 24 saatlik ön eleme yapılmaz (tek istek ama 2 sn'ye kadar bekletir)
+FAST_WARM_LEAD_SEC = 2.5           # Taramadan bu kadar önce: bağlantılar ısıtılır, teminat modu / kaldıraç doğrulanır
+FAST_WARM_MIN_SEC = 1.0            # Taramaya bundan az kaldıysa ön hazırlık atlanır (taramayı geciktirmesin)
+FAST_VERIFY_MAX_AGE_SEC = 30       # Doğrulama bundan eskiyse girişte teminat modu + kaldıraç yeniden ayarlanır (eski yol)
+FAST_VERIFY_EVERY_SEC = 300        # Ön hazırlık (taramalar arasında) için doğrulama aralığı
+FAST_PREPARE_BATCH = 2             # Ön hazırlık: döngü adımı başına en fazla bu kadar coin (2 istek / coin)
+FAST_PREPARE_GUARD_SEC = 20        # Taramaya bu kadar kala ön hazırlık / parite yenilemesi yapılmaz
+FAST_PREPARE_RETRY_SEC = 3600      # Önceden ayarlanamayan coin bu kadar sonra yeniden denenir (girişte eski yol denenir)
+FAST_PREPARE_POLL_SEC = 1.0        # Hazırlanacak coin varken döngü bu aralıkla döner
+FAST_MIN_SLEEP_SEC = 0.02
+CLOCK_WARN_MS = 750                # Sunucu saati Binance'ten bu kadar farklıysa uyarı (günlükte, saatte bir)
+MAX_LAG_MS = 10 * 60_000           # Bundan büyük "gecikme" ölçüm sayılmaz (saat atlaması / elle çağrı)
 
 
 @dataclass
@@ -93,7 +118,7 @@ class FuturesBot(TradingBot):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.next_scan_at = self._next_close(self.time_fn()) + SCAN_DELAY_SEC
+        self.next_scan_at = self._next_close(self.time_fn()) + self._scan_delay()
         self.last_signals: List[FuturesSignal] = []
         self._be_retry_at: Dict[str, float] = {}
         self._stop_passed: Set[str] = set()    # Stop taşınırken "emir hemen tetiklenir" reddi alan pariteler
@@ -113,6 +138,19 @@ class FuturesBot(TradingBot):
         self._prune_scan_log()
         self._h1_cache: Dict[str, Tuple[int, dict]] = {}   # Düzeltme modülü: parite → (saat, 1 saatlik mumlar)
         self.last_breadth: Optional[int] = None    # Dalga modu: son taramada son 1 saatte %3+ düşen coin sayısı
+        # Giriş gecikmesi ölçümü (her zaman) ve hızlı giriş (FUTURES_FAST_ENTRY) durumu
+        self.sleep_fn = time.sleep                 # Kısa beklemeler (testlerde sahte saat ilerletilir)
+        self.last_timing: Optional[dict] = None    # Son taramanın zamanlaması (/tarama)
+        self._entry_lags: Dict[str, dict] = {}     # Bu taramada açılan pozisyonların gecikmesi (tarama kaydına)
+        self._prepared: Set[str] = set()           # Teminat modu + kaldıracı Binance'ten doğrulanmış pariteler
+        self._prepared_lev = 0
+        self._verified_at = 0.0                    # Son doğrulama anı (symbol_settings)
+        self._prepare_retry: Dict[str, float] = {}
+        self._self_prepared: Set[str] = set()      # Botun önceden ayarladığı, henüz Binance'ten teyit edilmemiş pariteler
+        self._prepare_todo = 0                     # Önceden ayarlanmayı bekleyen parite sayısı (döngü hızı için)
+        self._warm_for = 0.0                       # Ön hazırlığı yapılmış tarama anı (next_scan_at)
+        self._clock_offset_ms: Optional[float] = None   # Binance saati − sunucu saati (ms; ısıtma isteklerinden)
+        self._clock_warned_at = 0.0
 
     # ================================================================ kapasite
     def slots(self) -> int:
@@ -171,6 +209,18 @@ class FuturesBot(TradingBot):
     def _next_close(now: float) -> float:
         bar = FUT_BAR_MS // 1000
         return (int(now) // bar + 1) * bar
+
+    def _fast(self) -> bool:
+        """Hızlı giriş açık mı (FUTURES_FAST_ENTRY)."""
+        return bool(getattr(self.cfg, "futures_fast_entry", False))
+
+    def _scan_delay(self) -> float:
+        """Tarama 5 dk mum kapanışından kaç sn sonra başlar."""
+        return FAST_SCAN_DELAY_SEC if self._fast() else SCAN_DELAY_SEC
+
+    def _since_ms(self, closed_ms: int) -> int:
+        """Şu an, verilen mum kapanışından kaç ms sonra (sunucu saati)."""
+        return int(round(self.time_fn() * 1000 - closed_ms))
 
     # ================================================================ açılış
     def startup(self) -> None:
@@ -249,8 +299,14 @@ class FuturesBot(TradingBot):
 
     def apply_config(self, cfg) -> None:
         """Telegram'dan değişen ayarlar: borsa katmanı da (komisyon / kayma varsayımları) yeni ayarları kullanır."""
+        old_delay = self._scan_delay()
         super().apply_config(cfg)
         self.exchange.cfg = cfg
+        new_delay = self._scan_delay()
+        if new_delay != old_delay:                 # Hızlı giriş açıldı / kapandı: sıradaki tarama yeni gecikmeyle
+            self.next_scan_at += new_delay - old_delay
+            self._prepared, self._verified_at, self._prepare_todo, self._warm_for = set(), 0.0, 0, 0.0
+            self._prepare_retry, self._self_prepared = {}, set()
 
     def _check_commission(self) -> None:
         return   # Spot BNB / komisyon kontrolü vadeli işlemde yok
@@ -264,7 +320,10 @@ class FuturesBot(TradingBot):
     def tick(self) -> None:
         now = self.time_fn()
         ex = self.exchange
-        if now - ex.markets_loaded_at > RULES_REFRESH_SEC:
+        fast = self._fast()
+        # Hızlı girişte taramaya az kala yavaş bakım işleri (parite kuralları, ön hazırlık) yapılmaz: tarama gecikmesin
+        quiet = fast and self.next_scan_at - now < FAST_PREPARE_GUARD_SEC
+        if now - ex.markets_loaded_at > RULES_REFRESH_SEC and not quiet:
             try:
                 ex.load_markets()
             except Exception as exc:  # noqa: BLE001 - eski kurallarla devam
@@ -280,8 +339,15 @@ class FuturesBot(TradingBot):
             self.trigger_kill(self.state.realized_pnl)
         if not self.running:
             return
+        if fast and now < self.next_scan_at:
+            if self._warm_for != self.next_scan_at and now >= self.next_scan_at - FAST_WARM_LEAD_SEC:
+                self._warm_for = self.next_scan_at
+                if self.next_scan_at - now >= FAST_WARM_MIN_SEC:
+                    self._pre_scan(now)                      # Bağlantıları ısıt, teminat modu / kaldıracı doğrula
+            elif not quiet:
+                self._prepare_ahead(now)                     # Taramalar arasında: eksik coinleri önceden ayarla
         if now >= self.next_scan_at:
-            self.next_scan_at = self._next_close(now) + SCAN_DELAY_SEC
+            self.next_scan_at = self._next_close(now) + self._scan_delay()
             blocked = self._scan_block_reason(now)
             bar_ms = int(now * 1000) // FUT_BAR_MS * FUT_BAR_MS
             if blocked is None:
@@ -317,13 +383,18 @@ class FuturesBot(TradingBot):
         try:
             with open(self.scan_log_path, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(entry, ensure_ascii=False, separators=(",", ":")) + "\n")
-        except OSError as exc:
+        except (OSError, TypeError, ValueError) as exc:
             log.debug("Tarama kaydı yazılamadı: %s", exc)
 
     def _journal_scan(self, closed_ms: int, universe: List[str], analyzed: List[str], breadth: Optional[int],
-                      outcome: Dict[str, str], errors: int, excluded: List[str]) -> None:
+                      outcome: Dict[str, str], errors: int, excluded: List[str],
+                      timing: Optional[dict] = None) -> None:
         """Yapılan taramanın kaydı: evren (yalnızca değişince), analiz edilen coinler, genişlik, sinyaller ve sonuçları,
-        beklemedeki / açık pozisyondaki coinler, mumu alınamayan coin sayısı."""
+        beklemedeki / açık pozisyondaki coinler, mumu alınamayan coin sayısı. `timing` (giriş gecikmesi ölçümü):
+        "ms" = [tarama başladı, mumlar alındı, sinyaller hazır] (mum kapanışından sonra ms, sunucu saati); "f" = açılan
+        her pozisyon için {"o": emir gönderildi, "r": yanıt geldi, "x": Binance'in işlem zamanı (borsa saati; varsa),
+        "p": dolum fiyatı sinyal mumunun kapanışına göre % (+ = pahalıya)}; "kt" = mumlar kaç denemede alındı (> 1 ise);
+        "co" = Binance saati − sunucu saati (ms); "fast" = 1: hızlı giriş açıktı."""
         short = [s[:-4] for s in universe]
         row: dict = {"t": closed_ms}
         if short != self._journal_universe:
@@ -338,6 +409,8 @@ class FuturesBot(TradingBot):
             row["x"] = [s[:-4] for s in excluded]
         if errors:
             row["e"] = errors
+        if timing:
+            row.update(timing)
         self._journal(row)
 
     def _prune_scan_log(self) -> None:
@@ -388,9 +461,18 @@ class FuturesBot(TradingBot):
             self.store.save(self.state)
 
     def _next_sleep(self) -> float:
-        if self.state.positions or self.state.pending_entry:
-            return POSITION_POLL_SEC
-        return max(1.0, min(self.next_scan_at - self.time_fn(), 30.0))
+        busy = bool(self.state.positions or self.state.pending_entry)
+        if not self._fast():
+            if busy:
+                return POSITION_POLL_SEC
+            return max(1.0, min(self.next_scan_at - self.time_fn(), 30.0))
+        # Hızlı giriş: döngü tam tarama anında (ve ondan önce ön hazırlık anında) uyanır; eski hâlinde tarama, uykunun
+        # denk gelişine göre 1 sn'ye (açık pozisyon varken 2 sn'ye) kadar geç başlıyordu
+        wake = self.next_scan_at
+        if self._warm_for != self.next_scan_at:
+            wake -= FAST_WARM_LEAD_SEC
+        cap = POSITION_POLL_SEC if busy else FAST_PREPARE_POLL_SEC if self._prepare_todo else 30.0
+        return max(FAST_MIN_SLEEP_SEC, min(wake - self.time_fn(), cap))
 
     def bid_ask(self, symbol: str):
         return self.exchange.bid_ask(symbol)
@@ -404,10 +486,12 @@ class FuturesBot(TradingBot):
             lag = (now_ms - closed_ms) / 1000
             self._journal({"t": closed_ms, "skip": f"gecikme (mum kapanışından {lag:.0f} sn sonra)"})
             return
+        fast = self._fast()
+        timing: dict = {"ms": [self._since_ms(closed_ms)]}     # Giriş gecikmesi ölçümü: tarama başladı
+        self._entry_lags = {}
         state = self.state
         state.cooldowns = {s: t for s, t in state.cooldowns.items() if t > now}   # Süresi dolan beklemeler
         state.wave_reentry = {s: v for s, v in state.wave_reentry.items() if s in state.cooldowns}
-        klines, errors = {}, []
         symbols, skipped = self._scan_symbols()
         limit = futures_kline_limit(self.cfg)       # En uzun pencere + izleme süresi + oynaklık geçmişi
         excluded = self._scan_excluded()
@@ -415,24 +499,10 @@ class FuturesBot(TradingBot):
         # Dalga modu: genişlik tüm taranan coinlerden ölçülür (backtestteki evrenle aynı); beklemedeki / açık
         # pozisyondaki coinlerin mumları da istenir ama onlarda sinyal aranmaz
         targets = [s for s in symbols if ex.has_market(s) and (cascade or s not in excluded)]
-
-        def fetch(symbol: str):
-            try:
-                return symbol, ex.klines(symbol, "5m", limit), None
-            except FuturesError as exc:
-                return symbol, None, exc
-
-        if len(targets) > KLINE_PARALLEL_MIN:        # Ağ hatası (ConnectionError) sıralı sürümdeki gibi yükselir
-            with ThreadPoolExecutor(max_workers=KLINE_WORKERS) as pool:
-                results = list(pool.map(fetch, targets))
-        else:
-            results = [fetch(s) for s in targets]
-        for symbol, k, exc in results:
-            if exc is not None:
-                errors.append(f"{symbol}: {exc}")
-                continue
-            if len(k["t"]) and int(k["t"][-1]) + FUT_BAR_MS == closed_ms:   # Yalnızca az önce kapanan mum
-                klines[symbol] = k
+        klines, errors, tries = self._fetch_klines(targets, limit, closed_ms, fast)
+        timing["ms"].append(self._since_ms(closed_ms))         # ...mumlar alındı
+        if tries > 1:
+            timing["kt"] = tries
         breadth = market_breadth(klines) if cascade else None
         self.last_breadth = breadth
         reentry = self._reentry_bypass(breadth, now)       # Faz 6: dalgada zarar sonrası bekleme atlanır
@@ -444,6 +514,7 @@ class FuturesBot(TradingBot):
         self._attach_extras(klines, closed_ms)       # Faz 4: fonlama oranları, 1 saatlik mumlar (modül açıksa)
         btc_1h = ex.klines("BTCUSDT", "1h", FUT_BTC_1H_LIMIT) if self.strategy.needs_btc_trend else None
         signals, rejects = self.strategy.evaluate(klines, btc_1h, now_ms, feed=self.smart.liq_feed, breadth=breadth)
+        timing["ms"].append(self._since_ms(closed_ms))         # ...sinyaller hazır
         for sig in signals:
             if sig.symbol in reentry:
                 sig.metrics["reentry"] = 1.0
@@ -493,8 +564,174 @@ class FuturesBot(TradingBot):
             outcome.setdefault(sig.symbol, stop)
         full = (self._universe_symbols() if self.cfg.futures_universe > 0
                 else [c + "USDT" for c in futures_coin_list(self.cfg)])
+        if self._entry_lags:
+            timing["f"] = {k[:-4]: v for k, v in self._entry_lags.items()}
+        if fast:
+            timing["fast"] = 1
+            if self._clock_offset_ms is not None:
+                timing["co"] = int(round(self._clock_offset_ms))
+        self.last_timing = dict(timing, t=closed_ms)
         self._journal_scan(closed_ms, full, sorted(klines), breadth, outcome, len(errors),
-                           sorted(s for s in excluded if s in set(full)))
+                           sorted(s for s in excluded if s in set(full)), timing)
+
+    def _fetch_klines(self, targets: List[str], limit: int, closed_ms: int,
+                      fast: bool) -> Tuple[Dict[str, dict], List[str], int]:
+        """Taranan coinlerin 5 dk mumları: (parite → mumlar; yalnızca son mumu az önce kapanan olanlar, hata metinleri,
+        deneme sayısı).
+
+        Hızlı girişte tarama mum kapanışından 1 sn sonra başlar: yanıtta az önce kapanan mumun ARDINDAN yeni (süren)
+        mum da görünmelidir. Bu, Binance'in o mumu kapattığını gösterir; sunucunun saati ilerideyse ya da veri henüz
+        yerleşmediyse görünmez. Görünmeyen coinler kısa aralıklarla yeniden istenir; coinlerin en az üçte birinde yeni
+        mum görünüyorsa (Binance yeni muma geçmiş, geri kalanında henüz işlem olmamış) gecikenler bir kez daha denenip
+        eldeki mumla devam edilir, hiçbirinde görünmüyorsa en geç eski tarama anında (kapanış + SCAN_DELAY_SEC) eski
+        davranışa dönülür: az önce kapanan mum yanıttaysa yeterlidir."""
+        ex = self.exchange
+
+        def fetch(symbol: str):
+            try:
+                if fast:
+                    k, open_ms = ex.klines_state(symbol, "5m", limit)
+                    return symbol, k, open_ms, None
+                return symbol, ex.klines(symbol, "5m", limit), 0, None
+            except FuturesError as exc:
+                return symbol, None, 0, exc
+
+        def burst(symbols: List[str]):                # Ağ hatası (ConnectionError) sıralı sürümdeki gibi yükselir
+            if fast:                                  # Tek dalga, CCXT'nin istekler arası beklemesi olmadan
+                with ex.unthrottled():
+                    if len(symbols) == 1:
+                        return [fetch(symbols[0])]
+                    with ThreadPoolExecutor(max_workers=min(FAST_KLINE_WORKERS, len(symbols))) as pool:
+                        return list(pool.map(fetch, symbols))
+            if len(symbols) > KLINE_PARALLEL_MIN:
+                with ThreadPoolExecutor(max_workers=KLINE_WORKERS) as pool:
+                    return list(pool.map(fetch, symbols))
+            return [fetch(s) for s in symbols]
+
+        klines: Dict[str, dict] = {}
+        failed: Dict[str, str] = {}
+        settled: Set[str] = set()
+        pending, tries = list(targets), 0
+        deadline = closed_ms / 1000 + SCAN_DELAY_SEC
+        while pending:
+            tries += 1
+            again = []
+            for symbol, k, open_ms, exc in burst(pending):
+                if exc is not None:
+                    if symbol not in klines:          # Yeniden denemede hata: önceki yanıt (aynı mum) kullanılır
+                        failed[symbol] = f"{symbol}: {exc}"
+                    continue
+                failed.pop(symbol, None)
+                fresh = bool(len(k["t"])) and int(k["t"][-1]) + FUT_BAR_MS == closed_ms
+                if fresh:                             # Yalnızca az önce kapanan mum
+                    klines[symbol] = k
+                if fresh and open_ms >= closed_ms:
+                    settled.add(symbol)
+                else:
+                    again.append(symbol)
+            if not fast or not again:
+                break
+            rolled = len(settled) * 3 >= len(targets)            # Binance yeni muma geçmiş
+            left = deadline - self.time_fn()
+            if left <= 0 or tries >= FAST_SETTLE_MAX_TRIES or (rolled and tries >= FAST_SETTLE_TRIES):
+                break
+            self.sleep_fn(min(FAST_SETTLE_WAIT_SEC * tries, left))
+            pending = again
+        if fast and tries > 1:
+            log.info("Hızlı giriş: mumlar %d denemede alındı (yeni mumu görünen %d / %d coin)", tries, len(settled),
+                     len(targets))
+        return klines, list(failed.values()), tries
+
+    # ================================================================ hızlı giriş: ön hazırlık
+    def _fast_symbols(self) -> List[str]:
+        """Önceden hazırlanacak (teminat modu + kaldıraç) pariteler: taranan evrenin tamamı."""
+        cfg = self.cfg
+        symbols = (self._universe_symbols() if cfg.futures_universe > 0
+                   else [c + "USDT" for c in futures_coin_list(cfg)])
+        return [s for s in symbols if self.exchange.has_market(s)]
+
+    def _verify_prepared(self, now: float) -> bool:
+        """Binance'teki parite ayarlarını okur (tek istek): teminat modu ISOLATED ve kaldıracı ayardakiyle aynı olan
+        pariteler "hazır" sayılır. Yalnızca bu yanıta güvenilir: bot kendi ayarladığını da buradan teyit eder, elle
+        yapılan değişiklik en geç bir sonraki taramadan önce görülür. Okunamazsa hazır parite kalmaz (girişte eski yol:
+        teminat modu + kaldıraç emirden hemen önce ayarlanır)."""
+        ex = self.exchange
+        lev = int(self.cfg.futures_leverage)
+        self._prepared, self._prepared_lev = set(), lev
+        try:
+            settings = None if ex.is_paper else ex.symbol_settings()
+        except (FuturesError, requests.ConnectionError) as exc:
+            log.warning("Hızlı giriş: parite ayarları doğrulanamadı (girişte eski yol kullanılır): %s", exc)
+            settings = None
+        self._verified_at = now if settings is not None else 0.0
+        if settings is None:
+            self._prepare_todo = 0
+            return False
+        symbols = self._fast_symbols()
+        self._prepared = {s for s in symbols if settings.get(s) == (True, lev)}
+        for symbol in self._self_prepared - self._prepared:      # Ayarlandı ama Binance farklı gösteriyor: ısrar etme
+            self._prepare_retry[symbol] = now + FAST_PREPARE_RETRY_SEC
+            log.warning("Hızlı giriş: %s önceden ayarlandı ama Binance farklı gösteriyor (%s); bu paritede girişten "
+                        "hemen önce ayarlanacak", symbol, settings.get(symbol))
+        self._self_prepared = set()
+        self._prepare_todo = sum(1 for s in symbols if s not in self._prepared and s not in self.state.positions
+                                 and now >= self._prepare_retry.get(s, 0.0))
+        return True
+
+    def _is_prepared(self, symbol: str, lev: int, now: float) -> bool:
+        """Parite için teminat modu + kaldıraç az önce (bu taramadan hemen önce) Binance'ten doğrulandı mı?"""
+        return (self._fast() and symbol in self._prepared and self._prepared_lev == lev
+                and 0 <= self.time_fn() - self._verified_at <= FAST_VERIFY_MAX_AGE_SEC)
+
+    def _pre_scan(self, now: float) -> None:
+        """Taramadan FAST_WARM_LEAD_SEC önce (mum kapanmadan): bağlantılar ısıtılır (paralel hafif istekler; aynı
+        yanıtlardan Binance ile saat farkı ölçülür) ve canlı modda teminat modu / kaldıraç doğrulanır. Tarama zaten
+        yapılmayacaksa (durdurulmuş, yer yok...) atlanır; hata taramayı engellemez."""
+        if self._scan_block_reason(now) is not None:
+            return
+        ex = self.exchange
+        try:
+            offset = ex.warm(min(FAST_KLINE_WORKERS, max(1, len(self._fast_symbols()))))
+        except Exception as exc:  # noqa: BLE001 - yalnızca hız; tarama her durumda yapılır
+            log.debug("Hızlı giriş: bağlantılar ısıtılamadı: %s", exc)
+            offset = None
+        self._clock_offset_ms = offset
+        if offset is not None and abs(offset) >= CLOCK_WARN_MS and now - self._clock_warned_at >= 3600:
+            self._clock_warned_at = now
+            log.warning("Sunucu saati Binance'in %.0f ms %s: mum kapanışı yanlış anda sanılır, hızlı giriş yeniden "
+                        "denemelerle yavaşlar ya da geç tarar. Sunucuda saat eşitlemesini (NTP / chrony) denetleyin.",
+                        abs(offset), "gerisinde" if offset > 0 else "ilerisinde")
+        if not ex.is_paper:
+            self._verify_prepared(self.time_fn())
+
+    def _prepare_ahead(self, now: float) -> None:
+        """Taramalar arasında (taramaya en az FAST_PREPARE_GUARD_SEC varken): teminat modu / kaldıracı henüz doğru
+        olmayan pariteler azar azar ayarlanır, böylece sinyal anında bu iki istek beklenmez. Açık pozisyonlu pariteye
+        dokunulmaz. Ayarlanamayan parite bir saat sonra yeniden denenir; o paritede sinyal gelirse eski yol (girişten
+        hemen önce ayarlama) çalışır ve hata her zamanki gibi bildirilir."""
+        ex = self.exchange
+        if ex.is_paper or self._scan_block_reason(now) is not None:
+            self._prepare_todo = 0                    # Tarama yapılmayacak (durdurulmuş, yer yok...): acele yok
+            return
+        lev = int(self.cfg.futures_leverage)
+        if self._prepared_lev != lev or now - self._verified_at > FAST_VERIFY_EVERY_SEC:
+            if not self._verify_prepared(now):
+                return
+        if not self._prepare_todo:
+            return
+        todo = [s for s in self._fast_symbols() if s not in self._prepared and s not in self.state.positions
+                and now >= self._prepare_retry.get(s, 0.0)]
+        for symbol in todo[:FAST_PREPARE_BATCH]:
+            try:
+                ex.prepare_symbol(symbol, lev)
+                self._prepared.add(symbol)            # Sıradaki doğrulamada Binance'ten teyit edilir
+                self._self_prepared.add(symbol)
+                log.info("Hızlı giriş: %s teminat modu ISOLATED, kaldıraç %dx önceden ayarlandı", symbol, lev)
+            except FuturesError as exc:
+                self._prepare_retry[symbol] = now + FAST_PREPARE_RETRY_SEC
+                log.warning("Hızlı giriş: %s önceden ayarlanamadı (sinyal gelirse girişte yeniden denenir): %s",
+                            symbol, exc)
+        self._prepare_todo = max(0, len(todo) - FAST_PREPARE_BATCH)
 
     def _refresh_universe(self, now: float, force: bool = False) -> None:
         """En hacimli N köklü parite listesini (gerekirse) yeniler: günde bir ya da ayar değişince. Sıralama durumda
@@ -624,6 +861,11 @@ class FuturesBot(TradingBot):
         if cfg.futures_crash_z > 0:
             least = min([cfg.futures_crash_z_min_pct] + [p for _h, p in futures_funding_rules(cfg) if "funding" in mods])
         pump = futures_pump_rules(cfg)
+        if self._fast() and len(symbols) <= FAST_PREFILTER_MIN:
+            # Hızlı giriş: küçük evrende ön eleme atlanır. Kazandırdığı birkaç mum isteğine karşılık taramanın en
+            # başında bir istek daha bekletir (CCXT bu ağır istekten önce 2 sn'ye kadar bekler). Ön eleme yalnızca
+            # sinyal veremeyecek coinleri atladığı için sinyaller ve genişlik değişmez.
+            return symbols, 0
         try:
             tickers = self.exchange.tickers_24h()
         except (FuturesError, requests.ConnectionError) as exc:
@@ -650,29 +892,68 @@ class FuturesBot(TradingBot):
         room = futures_liq_distance_pct(lev, cfg.futures_mmr_pct)
         if cfg.stop_loss_pct >= room - 0.5:   # Ayar doğrulaması da engeller; kaldıraç çalışırken değişebilir
             raise FuturesError(f"Zarar kes (%{cfg.stop_loss_pct:g}) {lev}x'te likidasyona (%{room:.1f}) çok yakın")
-        # 1) İşleme girmeden HEMEN ÖNCE: yalıtılmış teminat + kaldıraç (her girişte, zorunlu)
-        ex.prepare_symbol(symbol, lev)
+        # 1) İşleme girmeden HEMEN ÖNCE: yalıtılmış teminat + kaldıraç (her girişte, zorunlu). Hızlı girişte ikisi
+        #    önceden ayarlanır ve bu taramadan hemen önce Binance'ten doğrulanır: doğrulanmışsa yeniden istenmez
+        #    (2 istek eksik); doğrulanmamışsa (elle değişmiş, okunamamış, doğrulama eski) eski yol çalışır.
+        fast = self._fast()
+        if not self._is_prepared(symbol, lev, now):
+            ex.prepare_symbol(symbol, lev)
         # 2) Büyüklük: serbest bakiyenin FUTURES_MARGIN_USAGE_PCT'si teminat × kaldıraç (bileşik); dalga modunda
         #    bakiyenin (serbest + açık pozisyon teminatları) 1/N'i, yalnız çöküşte × FUTURES_ISOLATED_SIZE_PCT
-        free = self._available_margin()
-        margin = self._entry_margin(sig, free)
-        bid, ask = ex.bid_ask(symbol)
-        if cfg.futures_entry_order == "limit":
-            self._place_limit_entry(sig, now, lev, margin, bid, ask)
-            return None
-        price = ask if side == "long" else bid
-        qty = ex.amount_to_precision(symbol, margin * lev / price)
-        ex.check_order_size(symbol, qty, price)                  # MinNotionalError → işlem pas geçilir
-        order_side = "buy" if side == "long" else "sell"
+        with (ex.unthrottled() if fast else nullcontext()):     # Hızlı giriş: istekler arası CCXT beklemesi yok
+            free = self._available_margin()
+            margin = self._entry_margin(sig, free)
+            bid, ask = ex.bid_ask(symbol)
+            if cfg.futures_entry_order == "limit":
+                self._place_limit_entry(sig, now, lev, margin, bid, ask)
+                return None
+            price = ask if side == "long" else bid
+            qty = ex.amount_to_precision(symbol, margin * lev / price)
+            ex.check_order_size(symbol, qty, price)                  # MinNotionalError → işlem pas geçilir
+            order_side = "buy" if side == "long" else "sell"
+            sent = self.time_fn()
+            try:
+                fill = ex.market_order(symbol, order_side, qty)
+            except FuturesError as exc:
+                if exc.code != "-2019":
+                    raise
+                qty = ex.amount_to_precision(symbol, qty * MARGIN_RETRY_FACTOR)   # Komisyon payı yetmedi: biraz küçült
+                ex.check_order_size(symbol, qty, price)
+                fill = ex.market_order(symbol, order_side, qty)
         try:
-            fill = ex.market_order(symbol, order_side, qty)
-        except FuturesError as exc:
-            if exc.code != "-2019":
-                raise
-            qty = ex.amount_to_precision(symbol, qty * MARGIN_RETRY_FACTOR)   # Komisyon payı yetmedi: biraz küçült
-            ex.check_order_size(symbol, qty, price)
-            fill = ex.market_order(symbol, order_side, qty)
+            self._note_entry_lag(sig, fill, now, sent, self.time_fn())
+        except Exception as exc:  # noqa: BLE001 - ölçüm, dolmuş emrin korumasını (zarar kes) asla engellemesin
+            log.debug("Giriş gecikmesi ölçülemedi: %s", exc)
         return self._open_from_fill(sig, fill, lev, now)
+
+    def _note_entry_lag(self, sig: FuturesSignal, fill: FFill, now: float, sent: float, done: float) -> None:
+        """Giriş gecikmesi ölçümü (piyasa emriyle giriş): emrin mum kapanışından kaç ms sonra gönderildiği, yanıtın ne
+        zaman geldiği, Binance'in işlem zamanı (borsa saati; sunucu saatinden bağımsız) ve dolum fiyatının sinyal
+        mumunun kapanışına göre farkı (%; + = daha pahalıya). Tarama kaydına ve pozisyona yazılır (backtest girişte
+        +%0.05 gecikme payı + kayma varsayar: futures_backtest.ENTRY_LAG_PCT)."""
+        closed_ms = int(now * 1000) // FUT_BAR_MS * FUT_BAR_MS
+        lag: Dict[str, float] = {"o": int(round(sent * 1000 - closed_ms)), "r": int(round(done * 1000 - closed_ms))}
+        exch = int(fill.ts_ms) - closed_ms if fill.ts_ms else None
+        if exch is not None and 0 <= exch <= MAX_LAG_MS:
+            lag["x"] = exch
+        if not 0 <= lag["r"] <= MAX_LAG_MS:
+            return
+        if sig.price > 0 and fill.price > 0:
+            sign = 1 if sig.side == "long" else -1
+            lag["p"] = round(float(sign * (fill.price / sig.price - 1) * 100), 4)
+            sig.metrics["slip_pct"] = lag["p"]
+        sig.metrics["lag_ms"] = float(lag.get("x", lag["r"]))
+        self._entry_lags[sig.symbol] = lag
+
+    @staticmethod
+    def _lag_text(pos: Position) -> str:
+        """Günlük satırı için ölçülen giriş gecikmesi (ölçüm yoksa boş)."""
+        try:
+            lag = float(pos.metrics["lag_ms"]) / 1000
+            return (f" | mum kapanışından {lag:.1f} sn sonra, kapanışa göre "
+                    f"{float(pos.metrics.get('slip_pct', 0.0)):+.3f}%")
+        except (KeyError, TypeError, ValueError):
+            return ""
 
     def _open_from_fill(self, sig: FuturesSignal, fill: FFill, lev: int, now: float,
                         opened_at: Optional[float] = None) -> Optional[Position]:
@@ -718,8 +999,8 @@ class FuturesBot(TradingBot):
                                                 f"kendisi izleyecek."))
         self.store.save(self.state)
         self.day_stats.buys += 1
-        log.info("Vadeli pozisyon açıldı: %s %s %gx | giriş %.8g | miktar %g | teminat %.4f | TP %.8g | SL %.8g",
-                 symbol, side, lev, entry, qty, margin_used, tp, sl)
+        log.info("Vadeli pozisyon açıldı: %s %s %gx | giriş %.8g | miktar %g | teminat %.4f | TP %.8g | SL %.8g%s",
+                 symbol, side, lev, entry, qty, margin_used, tp, sl, self._lag_text(pos))
         self.notifier.notify(Messages.futures_open(pos, pos.signal_note, cfg, qty * entry), "open")
         return pos
 
@@ -1334,6 +1615,12 @@ class FuturesBot(TradingBot):
                 extra += f", ek pozisyon başabaşı +%{cfg.futures_extra_be_trigger_pct:g}"
             lines.append(f"🌊 Genişlik: {self.last_breadth} coin son 1 saatte %3+ düştü (dalga ≥"
                          f"{cfg.futures_extra_breadth}, yalnız çöküş <{cfg.futures_isolated_breadth}{extra})")
+        tm = self.last_timing
+        if tm and len(tm.get("ms") or []) >= 3:
+            st, kl, sg = (v / 1000 for v in tm["ms"][:3])
+            lines.append(f"⏱️ Zamanlama (mum kapanışından sonra): tarama {st:.1f} sn'de başladı, mumlar {kl:.1f} sn'de "
+                         f"alındı" + (f" ({tm['kt']} denemede)" if tm.get("kt") else "")
+                         + f", sinyaller {sg:.1f} sn'de hazırdı | hızlı giriş {'açık' if self._fast() else 'kapalı'}")
         pe = self.state.pending_entry
         if pe:
             left = max(0.0, float(pe.get("expires_at", 0.0)) - self.time_fn())

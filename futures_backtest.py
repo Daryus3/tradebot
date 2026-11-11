@@ -2388,6 +2388,38 @@ def live_status(symbol: str, row: Optional[dict]) -> Tuple[str, str]:
     return "analiz edilmedi", "coin analiz edilmedi (24 saatlik ön eleme ya da mumu alınamadı)"
 
 
+def live_timing(cfg, journal: Sequence[dict]) -> List[str]:
+    """Canlı botun ölçtüğü giriş gecikmesi (tarama kaydındaki "ms" ve "f" alanları): taramanın mum kapanışından kaç
+    saniye sonra başladığı / mumların ne zaman alındığı ve açılan pozisyonların ne zaman, kapanış fiyatına göre kaça
+    dolduğu. Hızlı giriş (FUTURES_FAST_ENTRY) açık ve kapalı dönemler ayrı satırlarda. Ölçüm yoksa boş liste."""
+    assumed = ENTRY_LAG_PCT + float(getattr(cfg, "futures_slippage_pct", 0.0))
+    out: List[str] = []
+    modes = sorted({int(bool(r.get("fast"))) for r in journal if r.get("ms") or r.get("f")})
+    for fast in modes:
+        rows = [r for r in journal if int(bool(r.get("fast"))) == fast]
+        tag = "" if len(modes) == 1 and not fast else ("hızlı giriş açık: " if fast else "hızlı giriş kapalı: ")
+        scans = [r["ms"] for r in rows if isinstance(r.get("ms"), list) and len(r["ms"]) >= 3]
+        if scans:
+            st, kl, sg = (float(np.median([m[i] for m in scans])) / 1000 for i in range(3))
+            retried = sum(1 for r in rows if r.get("kt"))
+            offsets = [abs(float(r["co"])) for r in rows if isinstance(r.get("co"), (int, float))]
+            out.append(f"  Tarama zamanlaması ({tag}mum kapanışından sonra, ortanca): başlangıç {st:.1f} sn → mumlar "
+                       f"alındı {kl:.1f} sn → sinyaller hazır {sg:.1f} sn ({len(scans)} tarama"
+                       + (f"; {retried} taramada mumlar yeniden istendi" if retried else "")
+                       + (f"; Binance ile saat farkı ortanca {np.median(offsets):.0f} ms" if offsets else "") + ")")
+        fills = [f for r in rows for f in (r.get("f") or {}).values() if isinstance(f, dict)]
+        lags = [float(f.get("x", f.get("r"))) / 1000 for f in fills if f.get("x", f.get("r")) is not None]
+        if lags:
+            slips = [float(f["p"]) for f in fills if f.get("p") is not None]
+            text = (f"  Giriş gecikmesi ({tag}mum kapanışı → dolum): ortalama {np.mean(lags):.1f} sn, ortanca "
+                    f"{np.median(lags):.1f} sn, en uzun {max(lags):.1f} sn ({len(lags)} giriş)")
+            if slips:
+                text += (f" | dolum, kapanış fiyatına göre ortalama {np.mean(slips):+.3f}% (backtest varsayımı "
+                         f"+%{assumed:.2f}: gecikme %{ENTRY_LAG_PCT:g} + kayma)")
+            out.append(text)
+    return out
+
+
 def live_comparison(cfg, data: FutData, trades: Sequence[FutTrade], path: Optional[Path] = None,
                     limit: int = 15) -> List[str]:
     """Backtestin (tek hesap) işlemlerini canlı botun aynı mumdaki tarama kaydıyla karşılaştırır: canlı da açtı mı,
@@ -2428,6 +2460,7 @@ def live_comparison(cfg, data: FutData, trades: Sequence[FutTrade], path: Option
         L.append(f"  Canlı evren (son kayıt): {len(last_u)} coin | backtest evreni: {len(bt)} coin"
                  + (f" | backtestte olup canlıda olmayan: {', '.join(missing[:12])}" + (" …" if len(missing) > 12 else "")
                     if missing else ""))
+    L.extend(live_timing(cfg, journal))
     inside = [tr for tr in trades if first <= tr.entry_ms <= last]
     if not inside:
         L.append("  Bu aralıkta backtestte işlem yok.")

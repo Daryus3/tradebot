@@ -835,6 +835,10 @@ class Config:
     futures_slippage_pct: float = 0.02     # Test modu / backtest: piyasa emirlerinde kayma (%)
     futures_mmr_pct: float = 0.5           # Bakım teminatı oranı (likidasyon fiyatı tahmini için, %)
     futures_exchange_stop: bool = True     # Girişten hemen sonra Binance'e STOP_MARKET; konamazsa pozisyon kapatılır
+    # Hızlı giriş (varsayılan kapalı): tarama 5 dk mum kapanışından 3 yerine 1 sn sonra; mumlar tek dalgada paralel
+    # istenir; teminat modu ve kaldıraç evrendeki coinlerde ÖNCEDEN ayarlanıp her taramadan hemen önce doğrulanır
+    # (girişte 2 istek eksilir). Strateji kuralları ve pozisyon boyları değişmez. Ayrıntı: README "Canlı giriş gecikmesi".
+    futures_fast_entry: bool = False
     # 0 = yalnızca FUTURES_COINS listesi; N = "en hacimli N köklü coin": en az FUTURES_UNIVERSE_MIN_AGE_DAYS gündür
     # listelenen kripto USDT süresiz paritelerinden son FUTURES_UNIVERSE_AVG_DAYS günün ortalama USDT hacmine göre ilk N
     # (stabil coin, endeks, hisse / emtia ve kaldırılması planlanan pariteler hariç; sıralama günde bir yenilenir).
@@ -1452,6 +1456,7 @@ def load_config(env_file: Optional[str] = None, mode_override: Optional[str] = N
         futures_slippage_pct=_env_float("FUTURES_SLIPPAGE_PCT", 0.02),
         futures_mmr_pct=_env_float("FUTURES_MMR_PCT", 0.5),
         futures_exchange_stop=_env_bool("FUTURES_EXCHANGE_STOP", True),
+        futures_fast_entry=_env_bool("FUTURES_FAST_ENTRY", False),
         futures_universe=_env_int("FUTURES_UNIVERSE", 0),
         futures_universe_with_list=_env_bool("FUTURES_UNIVERSE_WITH_LIST", True),
         futures_universe_min_age_days=_env_int("FUTURES_UNIVERSE_MIN_AGE_DAYS", 1095),
@@ -1766,6 +1771,12 @@ def _setting_notes(cfg: Config) -> List[str]:
                              f"%66 / %45 → %67 / %53, 3 kat kaymada +%142 / +%92 → +%82 / +%53, 5 kat kaymada 30 USDT "
                              f"243 yerine 38 USDT'ye çıktı. Yani işlem sayısı artar, kâr artmaz, maliyete dayanıklılık "
                              f"azalır. Öneri: kapalı (0).")
+        if cfg.futures_fast_entry:
+            notes.append("FUTURES_FAST_ENTRY=true (hızlı giriş): tarama 5 dk mum kapanışından 3 yerine 1 sn sonra yapılır; "
+                         "taranan coinlerin hepsinde teminat modu (ISOLATED) ve kaldıraç önceden ayarlanır, her taramadan "
+                         "hemen önce Binance'ten doğrulanır (bu coinlerde elle farklı kaldıraçla işlem yapıyorsanız "
+                         "ayarınız değişir). Kurallar ve pozisyon boyları aynıdır; ölçülen giriş gecikmesi pozisyon "
+                         "mesajında ve backtest raporunun canlı karşılaştırma bölümünde görünür.")
         if cfg.futures_universe > 0 and cfg.futures_universe_mode == "daily":
             notes.append("FUTURES_UNIVERSE_MODE=daily (dünün en hacimli coinleri): Faz 4 testinde günlük en hacimli 30 "
                          "coin, en az 3 yıllık olanlarla bile 2024-2026'da her yıl -%66 ile -%91 arası zarar etti; "

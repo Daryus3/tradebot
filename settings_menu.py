@@ -72,6 +72,11 @@ PHASE8_HINT = ("Faz 8 (ek pozisyonlarda başabaş +%0.5): küçük pozisyon kâr
                "Saniyelik işlem verisiyle düzeltilmiş testte Faz 6 setinde yılda ~780 → ~925 işlem, ama yıllık getiri "
                "aynı (+%270 / +%166 → +%246 / +%168), en büyük düşüş %66 / %45 → %67 / %53, 3 kat kaymada +%142 / +%92 "
                "→ +%82 / +%53. İşlem sayısı artar, kâr artmaz, maliyete dayanıklılık azalır. Öneri: kapalı.")
+FAST_ENTRY_HINT = ("Hızlı giriş: saniyelik veride çöküş mumunun kapanışından sonra fiyat ortalama 1 sn'de %0.015, 3 sn'de "
+                   "%0.04, 5 sn'de %0.05, 10 sn'de %0.08 yükseliyor; backtest 5 sn (%0.05) varsayar. Kurallar ve "
+                   "pozisyon boyları değişmez, yalnızca emir daha erken gider. Açıkken taranan coinlerin hepsinde "
+                   "teminat modu ve kaldıraç önceden ayarlanır. Ölçülen gecikme her pozisyon mesajında ve backtest "
+                   "raporunda (canlı bot karşılaştırması) görünür: önce kapalıyken ölçüp sonra açarak karşılaştırın.")
 PHASE6_HINT = ("Faz 6 testi (2020-2026, 1 dk, liste + en hacimli 20 köklü coin, 🥈 #2 giriş / çıkışları, 30 USDT): "
                "dalgada zarar kesen coin genelde düşmeye devam edip daha derinden dönüyor; zarar sonrası 240 dk "
                "bekleme bu en kârlı ikinci girişi kaçırıyordu (12+ coin düşerken işlem başı +%1.10). Faz 6 seti (4 "
@@ -382,6 +387,7 @@ PAGES: Dict[str, Page] = {
             show=lambda cfg: cfg.futures_entry_order == "limit", per_row=4),
         Row("FUTURES_LIMIT_TTL_MIN", icon="⏳", values=(1, 3, 5), fmt=lambda v: f"{v} dk bekle",
             show=lambda cfg: cfg.futures_entry_order == "limit", per_row=3),
+        Row("FUTURES_FAST_ENTRY", name="⚡ Hızlı giriş (mum kapanışından 1 sn sonra tara)"),
     ), back=(("⬅️ Vadeli ayarlar", "cfg"), ("🏠 Menü", "menu")), futures=True),
     "fb": Page("🔒 Başabaş ve İzleyen Stop", rows=(
         Row("BREAKEVEN_ENABLED", name="🔒 Başabaş kalkanı"),
@@ -976,6 +982,10 @@ class SettingsMenu:
         entry = ("piyasa emri (taker; kayma girişte de ödenir)" if cfg.futures_entry_order == "market" else
                  f"limit (maker): bid'in %{cfg.futures_limit_offset_pct:g} altına post-only emir, "
                  f"{cfg.futures_limit_ttl_min} dk dolmazsa iptal (fırsat kaçar)")
+        fast = ("açık: tarama mum kapanışından 1 sn sonra, mumlar tek dalgada, teminat modu + kaldıraç önceden ayarlı "
+                "(her taramadan önce Binance'ten doğrulanır)" if cfg.futures_fast_entry else
+                "kapalı: tarama mum kapanışından 3 sn sonra, teminat modu + kaldıraç her girişte ayarlanır")
+        timing = self._timing_line()
         return (f"🎯 <b>Vadeli Çıkışlar ve Emirler</b>\n{LINE}\n"
                 f"🎯 Kâr Al: fiyat +%{cfg.take_profit_pct:g} → ROE ~+%{cfg.take_profit_pct * lev:.0f}\n"
                 f"🛑 Zarar Kes: fiyat -%{cfg.stop_loss_pct:g} → ROE ~-%{cfg.stop_loss_pct * lev:.0f} | likidasyon "
@@ -984,10 +994,19 @@ class SettingsMenu:
                 f"⏱️ Zaman stopu: {cfg.max_hold_minutes} dk (dolunca piyasa emriyle kapanır)\n"
                 f"📌 Kâr Al emri: {tp_order}\n"
                 f"🚪 Giriş emri: {entry}\n"
-                f"🛡️ Zarar kes emri Binance'e konamazsa: {stop}\n{LINE}\n"
+                f"⚡ Hızlı giriş: {fast}\n"
+                f"🛡️ Zarar kes emri Binance'e konamazsa: {stop}\n{timing}{LINE}\n"
                 "<i>Kâr Al / Zarar Kes değişikliği SONRAKİ işlemde geçerli (açık pozisyonun Binance emirleri "
                 "değişmez); zaman stopu ve başabaş açık pozisyona da uygulanır. Testte seçilen (çöküş dönüşü): Kâr Al "
-                "%6, Zarar Kes %4, başabaş 1.5 → 0.3, 30 dk.</i>")
+                f"%6, Zarar Kes %4, başabaş 1.5 → 0.3, 30 dk.\n{esc(FAST_ENTRY_HINT)}</i>")
+
+    def _timing_line(self) -> str:
+        """Son taramanın ölçülen zamanlaması (FuturesBot.last_timing); ölçüm yoksa boş."""
+        tm = getattr(self.bot, "last_timing", None)
+        if not tm or len(tm.get("ms") or []) < 3:
+            return ""
+        st, kl, _sg = (v / 1000 for v in tm["ms"][:3])
+        return f"⏱️ Son tarama: mum kapanışından {st:.1f} sn sonra başladı, mumlar {kl:.1f} sn'de alındı\n"
 
     def _text_fb(self) -> str:
         cfg = self.cfg

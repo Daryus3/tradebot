@@ -3,7 +3,9 @@ Binance USDⓈ-M vadeli işlem bağlantısı (CCXT, 'defaultType': 'future').
 
   - Açılışta hesabın tek yönlü (One-Way) modda olduğu API'den teyit edilir; Hedge modundaysa ve açık pozisyon
     yoksa tek yönlü moda alınır, alınamazsa bot işlem açmaz.
-  - Her girişten HEMEN ÖNCE set_margin_mode('isolated') ve set_leverage(kaldıraç) çağrılır.
+  - Her girişten HEMEN ÖNCE set_margin_mode('isolated') ve set_leverage(kaldıraç) çağrılır. Hızlı girişte
+    (FUTURES_FAST_ENTRY) ikisi önceden ayarlanır ve her taramadan hemen önce symbol_settings() ile doğrulanır;
+    doğrulanamayan paritede yine girişten hemen önce çağrılır.
   - Miktar ve fiyatlar CCXT'nin amount_to_precision / price_to_precision fonksiyonlarıyla Binance'in adım
     kurallarına yuvarlanır; emir tutarı Binance'in minimum emir tutarının (notional) altındaysa emir hiç
     gönderilmez (MinNotionalError), Binance bu hatayı yine de verirse (-4164) aynı hata olarak yakalanır.
@@ -16,6 +18,8 @@ emirler ve bakiye sanaldır; borsadaki stop / hedef emirlerinin yerine bot her k
 from __future__ import annotations
 
 import time
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -34,6 +38,7 @@ QUOTE = "USDT"
 KLINE_FIELDS = ("t", "o", "h", "l", "c", "v", "qv", "n", "tb")
 _KLINE_COLS = (0, 1, 2, 3, 4, 5, 7, 8, 9)
 DEFAULT_MIN_NOTIONAL = 5.0
+POOL_SIZE = 32          # Aynı anda açık tutulan HTTPS bağlantısı (hızlı girişte mumlar tek dalgada, paralel istenir)
 
 
 class FuturesError(Exception):
@@ -54,6 +59,7 @@ class FFill:
     qty: float
     fee: float
     order_id: str = ""
+    ts_ms: int = 0       # Binance'in emri işlediği an (ms, borsa saati); bilinmiyorsa 0 (giriş gecikmesi ölçümü)
 
 
 @dataclass
@@ -93,6 +99,37 @@ def _is_network(exc: Exception) -> bool:
     return ccxt is not None and isinstance(exc, (ccxt.NetworkError,)) and not isinstance(exc, ccxt.InvalidNonce)
 
 
+def _order_ts(order: dict) -> int:
+    """Emir yanıtındaki işlem zamanı (ms, Binance saati): updateTime; yoksa CCXT'nin zaman alanları. Bulunamazsa 0."""
+    try:
+        info = order.get("info") if isinstance(order.get("info"), dict) else {}
+        values = (info.get("updateTime"), order.get("lastTradeTimestamp"), order.get("lastUpdateTimestamp"),
+                  order.get("timestamp"))
+    except AttributeError:                    # Beklenmedik yanıt biçimi: ölçüm yok, dolum bilgisi etkilenmez
+        return 0
+    for value in values:
+        try:
+            ts = int(value)
+        except (TypeError, ValueError):
+            continue
+        if ts > 0:
+            return ts
+    return 0
+
+
+def _widen_pool(ex) -> None:
+    """CCXT'nin requests oturumundaki bağlantı havuzunu büyütür: varsayılan 10 bağlantıdır, fazlası her seferinde yeniden
+    kurulur (TLS el sıkışması = 2-3 gidiş-dönüş). Sahte borsalarda (testler) oturum yoktur: dokunulmaz."""
+    session = getattr(ex, "session", None)
+    if session is None or not hasattr(session, "mount"):
+        return
+    try:
+        from requests.adapters import HTTPAdapter
+        session.mount("https://", HTTPAdapter(pool_connections=4, pool_maxsize=POOL_SIZE))
+    except Exception as exc:  # noqa: BLE001 - yalnızca hız iyileştirmesi; olmazsa varsayılan havuzla devam
+        log.debug("Bağlantı havuzu büyütülemedi: %s", exc)
+
+
 def _code_of(exc: Exception) -> str:
     text = str(exc)
     for code in ("-4164", "-2019", "-4046", "-4047", "-4048", "-4059", "-2021", "-2022", "-4061", "-1111", "-4005",
@@ -111,6 +148,7 @@ class FuturesExchange:
     def __init__(self, cfg, exchange=None, time_fn=time.time):
         self.cfg = cfg
         self.ex = exchange if exchange is not None else make_ccxt(cfg, with_keys=True)
+        _widen_pool(self.ex)
         self.time_fn = time_fn
         self.markets_loaded_at = 0.0
         self.time_offset_ms = 0
@@ -254,6 +292,61 @@ class FuturesExchange:
                 raise                                     # -4046: zaten isolated
         self._call(f"{symbol} kaldıraç {leverage}x yapılamadı", self.ex.set_leverage, int(leverage), sym)
 
+    def symbol_settings(self) -> Optional[Dict[str, Tuple[bool, int]]]:
+        """Hesabın parite ayarları (tek istek): parite → (teminat modu ISOLATED mı, kaldıraç). Hızlı girişte teminat modu
+        ve kaldıraç önceden ayarlanır; girişte yeniden ayarlamak yerine her taramadan hemen önce bu yanıtla DOĞRULANIR
+        (elle değiştirilmişse o coinde eski yol: girişten hemen önce ayarlanır). Uç yoksa None."""
+        fn = getattr(self.ex, "fapiPrivateGetSymbolConfig", None)
+        if fn is None:
+            return None
+        rows = self._call("Parite ayarları (teminat modu / kaldıraç) okunamadı", fn)
+        out: Dict[str, Tuple[bool, int]] = {}
+        for row in rows or []:
+            try:
+                out[str(row["symbol"])] = (str(row.get("marginType", "")).upper() == "ISOLATED",
+                                           int(float(row.get("leverage") or 0)))
+            except (KeyError, TypeError, ValueError):
+                continue
+        return out
+
+    # ------------------------------------------------------------------ hız (hızlı giriş)
+    @contextmanager
+    def unthrottled(self):
+        """CCXT'nin istekler arası beklemesi (istek ağırlığı × 50 ms; mumlarda 100, emirde 200 ms, 24 saatlik özetlerde
+        2 sn) bu blokta uygulanmaz. Yalnızca kısa, sayısı belli istek dizilerinde kullanılır (bir taramanın mumları ya da
+        tek girişin 3 isteği): Binance'in dakikalık 2.400 ağırlık sınırının çok altında kalır."""
+        prev = getattr(self.ex, "enableRateLimit", None)
+        if prev is None:
+            yield
+            return
+        self.ex.enableRateLimit = False
+        try:
+            yield
+        finally:
+            self.ex.enableRateLimit = prev
+
+    def warm(self, count: int) -> Optional[float]:
+        """Taramadan hemen önce `count` paralel hafif istek (Binance saati; istek başına ağırlık 1): bağlantılar önceden
+        kurulur / canlı tutulur, böylece mum istekleri TLS el sıkışması beklemez. Dönen: Binance saati − botun çalıştığı
+        sunucunun saati (ms; en hızlı yanıttan, ± yarım gidiş-dönüş) ya da ölçülemediyse None. Hata bildirilmez."""
+        fn = getattr(self.ex, "fapiPublicGetTime", None)
+        if fn is None or count <= 0:
+            return None
+
+        def one(_i: int):
+            try:
+                t0 = self.time_fn()
+                server = float((fn() or {}).get("serverTime") or 0.0)
+                t1 = self.time_fn()
+            except Exception:  # noqa: BLE001 - ısıtma en iyi çaba
+                return None
+            return (t1 - t0, server - (t0 + t1) / 2 * 1000) if server > 0 else None
+
+        with self.unthrottled():
+            with ThreadPoolExecutor(max_workers=min(int(count), POOL_SIZE)) as pool:
+                samples = [r for r in pool.map(one, range(int(count))) if r is not None]
+        return min(samples)[1] if samples else None
+
     # ------------------------------------------------------------------ emirler
     def market_order(self, symbol: str, side: str, qty: float, reduce_only: bool = False) -> FFill:
         """Piyasa emri (side: 'buy' | 'sell'). Miktar adım kuralına yuvarlanır."""
@@ -284,7 +377,7 @@ class FuturesExchange:
             filled = amount
         if not fee:
             fee = filled * price * self.cfg.futures_taker_fee
-        return FFill(price, filled, fee, oid)
+        return FFill(price, filled, fee, oid, _order_ts(order))
 
     def limit_order(self, symbol: str, side: str, qty: float, price: float, post_only: bool = True) -> str:
         """Giriş için limit emir (FUTURES_ENTRY_ORDER=limit). post_only: GTX (yalnızca maker; anında eşleşecekse Binance
@@ -430,19 +523,26 @@ class FuturesExchange:
     def klines(self, symbol: str, interval: str, limit: int) -> Dict[str, "object"]:
         """KAPANMIŞ mumlar (son satır bitmemiş mumsa atılır): futures_data.FIELDS dizileri. Taker buy hacmi CCXT'nin
         birleşik fetch_ohlcv'sinde olmadığı için Binance'in ham klines ucu kullanılır."""
+        return self.klines_state(symbol, interval, limit)[0]
+
+    def klines_state(self, symbol: str, interval: str, limit: int) -> Tuple[Dict[str, "object"], int]:
+        """klines + yanıttaki bitmemiş (süren) mumun açılış zamanı (ms; yanıtta yoksa 0). Hızlı girişte tarama mum
+        kapanışından 1 sn sonra yapılır: yanıtta YENİ mumun da bulunması Binance'in o mumu kapattığının kanıtıdır
+        (sunucu saati ilerideyse ya da veri henüz yerleşmediyse yeni mum görünmez, kısa süre sonra yeniden denenir)."""
         import numpy as np
         rows = self._call(f"{symbol} mumları alınamadı", self.ex.fapiPublicGetKlines,
-                          {"symbol": symbol, "interval": interval, "limit": int(limit)})
+                          {"symbol": symbol, "interval": interval, "limit": int(limit)}) or []
         now_ms = int(self.time_fn() * 1000)
-        rows = [r for r in rows or [] if int(r[6]) < now_ms]
+        open_ms = max((int(r[0]) for r in rows if int(r[6]) >= now_ms), default=0)
+        rows = [r for r in rows if int(r[6]) < now_ms]
         if not rows:
             out = {k: np.zeros(0) for k in KLINE_FIELDS}
             out["t"] = np.zeros(0, dtype=np.int64)
-            return out
+            return out, open_ms
         data = np.array([[float(r[i]) for i in _KLINE_COLS] for r in rows], dtype=np.float64)
         out = {k: data[:, i] for i, k in enumerate(KLINE_FIELDS)}
         out["t"] = data[:, 0].astype(np.int64)
-        return out
+        return out, open_ms
 
     def eligible_symbols(self, min_age_days: float = 0.0) -> List[str]:
         """En hacimli N evrenine girebilecek pariteler (futures_universe.market_eligible) ve en az min_age_days
@@ -548,6 +648,9 @@ class PaperFuturesExchange(FuturesExchange):
 
     def prepare_symbol(self, symbol: str, leverage: int) -> None:
         self.market(symbol)        # Parite yoksa hata
+
+    def symbol_settings(self) -> Optional[Dict[str, Tuple[bool, int]]]:
+        return None                # Test modu: hesap yok (teminat modu / kaldıraç ayarlanmaz)
 
     def market_order(self, symbol: str, side: str, qty: float, reduce_only: bool = False) -> FFill:
         amount = self.amount_to_precision(symbol, qty)

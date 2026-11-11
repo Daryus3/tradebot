@@ -296,7 +296,8 @@ bir coin son `FUTURES_CRASH_HOURS` (4) saatte en az `FUTURES_CRASH_DROP_PCT` (%1
 `FUTURES_TACTIC=liq4`: ilk 4'lü onay sürümü (likidasyon + hacim + RSI uyumsuzluğu + BTC trendi; aşağıda neden
 bırakıldığı).
 
-**İşlem altyapısı:** her girişten HEMEN önce `set_margin_mode('isolated')` + `set_leverage`; vadeli cüzdandaki serbest
+**İşlem altyapısı:** her girişten HEMEN önce `set_margin_mode('isolated')` + `set_leverage` (hızlı girişte önceden
+ayarlanıp her taramadan önce doğrulanır, bkz. "Canlı giriş gecikmesi"); vadeli cüzdandaki serbest
 bakiyenin `FUTURES_MARGIN_USAGE_PCT`'si (95) teminat × kaldıraç (bileşik); miktar / fiyat CCXT `amount_to_precision` /
 `price_to_precision` ile; tutar Binance'in en küçük emir tutarının altındaysa işlem pas geçilir ve Telegram'a yazılır
 (bot çökmez). Hesap tek yönlü (One-Way) olmalı: açılışta API'den teyit edilir. Telegram: pozisyonlarda `[LONG 2X]`
@@ -367,6 +368,7 @@ durdurulmuş, kill-switch, dondurulmuş, boş yer yok, gecikme; 30 gün tutulur)
 dönemde backtestin her işlemini canlı botun aynı mumdaki kaydıyla karşılaştırır ("🔍 CANLI BOT KARŞILAŞTIRMASI"): canlı da
 açtı mı, açmadıysa neden (kayıt yok = bot kapalıydı, taranmadı, coin canlı evrende yoktu, coin beklemedeydi, sinyal
 çıkmadı, sinyal vardı ama boş yer yoktu / minimum emir / hata). Telegram'dan 🧪 Backtest → 7 gün ile kontrol edilir.
+Aynı bölüm canlı botun **ölçtüğü giriş gecikmesini** de gösterir (bkz. "Canlı giriş gecikmesi: ölçüm ve hızlı giriş").
 
 - **İzleyen stop** (`FUTURES_TRAILING`, varsayılan kapalı; fiyat +`FUTURES_TRAILING_ACT_PCT` gidince zarar kes en iyi
   fiyatın `FUTURES_TRAILING_GAP_PCT` gerisine çekilir, Binance'teki stop emri de taşınır): seçim döneminde çoğu ayarda
@@ -861,6 +863,81 @@ tetik kullanılır.
 **Sınırlar.** Düzeltme ortalamaları tutturur, tek tek işlemleri değil; örnekte ek pozisyonlarda ~%0.02-0.04 iyimser,
 ilk pozisyonlarda ~%0.03-0.06 kötümser kaldı. Giriş gecikmesi 5 sn varsayar; sunucu yavaşsa pay daha büyüktür. Emir
 defteri derinliği (büyük bakiyede kayma) hâlâ modellenmiyor. Geçmiş sonuç gelecek garantisi değildir.
+
+#### Canlı giriş gecikmesi: ölçüm ve hızlı giriş (Kasım 2026)
+Backtest girişi mum kapanışından sayar; canlı bot mumu kapandıktan sonra tarar ve emri birkaç saniye sonra verir. Çöküş
+mumunun kapanışından sonra fiyat ortalama şu kadar yükseliyor (rapor 15'in saniyelik verisi, 2.563 işlem, ± %0.01):
+
+| Mum kapanışından sonra | 1 sn | 2 sn | 3 sn | 5 sn | 8 sn | 10 sn | 15 sn |
+|---|---|---|---|---|---|---|---|
+| Fiyat (ortalama) | +%0.015 | +%0.023 | +%0.039 | +%0.050 | +%0.074 | +%0.081 | +%0.101 |
+
+Backtest 5 sn (`ENTRY_LAG_PCT = 0.05`) varsayar. İşlem başı net kazanç +%0.17-0.24 olduğundan her saniye önemlidir.
+
+**Gecikme nereden geliyor (eski yol).** Koddan ve CCXT'nin ağ olmadan ölçülen beklemelerinden; ağın payı sunucunun
+Binance'e uzaklığına bağlıdır (her istek bir gidiş-dönüş) ve yalnızca canlıda ölçülür:
+
+| Adım | İstek | Not |
+|---|---|---|
+| Döngünün uyanması | - | Tarama anı uykunun ortasına denk gelirse 1 sn'ye, açık pozisyon varken 2 sn'ye kadar geç |
+| Bekleme (`SCAN_DELAY_SEC`) | - | 3 sn |
+| Açık pozisyonların kontrolü | pozisyon başına 2 | Yalnızca pozisyon açıkken (ek pozisyonlar), taramadan önce |
+| 24 saatlik ön eleme | 1 | CCXT bu ağır istekten önce, son 2 sn'de başka istek atıldıysa 2 sn'ye kadar bekler (ölçüldü: 2.0 sn) |
+| Mumlar (24 coin) | 24 | 6 işçi = 4 dalga; CCXT dalga başına 100 ms bekletir (ölçüldü: 0.4 sn) |
+| Teminat modu + kaldıraç | 2 | Her girişte, sıralı |
+| Bakiye, fiyat, emir | 3 | CCXT fiyat isteğinden önce 100, emirden önce 200 ms'ye kadar bekletir |
+
+Yani ilk pozisyonda 3 sn + yaklaşık 10 sıralı gidiş-dönüş; pozisyon açıkken (dalgadaki ek pozisyonlar) üstüne 2 sn'ye
+varan uyku, pozisyon kontrolü ve 2 sn'lik CCXT beklemesi biner.
+
+**Ölçüm (her zaman açık, davranışı değiştirmez).** Her taramada aşamaların mum kapanışından kaç ms sonra bittiği ve
+açılan her pozisyonda emrin gönderildiği an, yanıtın geldiği an, Binance'in emri işlediği an (yanıttaki `updateTime`:
+borsa saati, sunucunun saatinden bağımsız) ve dolum fiyatının sinyal mumunun kapanışına göre farkı kaydedilir:
+- `data/futures_scans_<mod>.jsonl`: `"ms": [tarama başladı, mumlar alındı, sinyaller hazır]`, `"f": {"SOL": {"o": emir
+  gönderildi, "r": yanıt geldi, "x": Binance'in işlem zamanı, "p": kapanışa göre dolum farkı %}}`, `"kt"` (mumlar kaç
+  denemede alındı), `"co"` (Binance saati − sunucu saati, ms), `"fast": 1` (hızlı giriş açıktı).
+- Telegram: pozisyon açılış mesajında "⚡ Giriş gecikmesi: mum kapanışından 2.1 sn sonra doldu; kapanış fiyatından
+  %0.031 pahalıya alındı"; `/tarama` ve 🎯 Çıkışlar ve Emirler sayfasında son taramanın zamanlaması.
+- Backtest raporu, 🔍 CANLI BOT KARŞILAŞTIRMASI: "Tarama zamanlaması (… ortanca): başlangıç → mumlar alındı → sinyaller
+  hazır" ve "Giriş gecikmesi (mum kapanışı → dolum): ortalama / ortanca / en uzun | dolum, kapanış fiyatına göre ortalama
+  +%… (backtest varsayımı +%0.07: gecikme %0.05 + kayma)". Hızlı giriş açık ve kapalı dönemler ayrı satırlarda.
+
+**Hızlı giriş (`FUTURES_FAST_ENTRY=true`; varsayılan kapalı; Telegram → 🎯 Çıkışlar ve Emirler → ⚡ Hızlı giriş).**
+Sinyal kuralları, pozisyon boyları ve çıkışlar aynıdır; yalnızca emir daha erken gider:
+- **Tarama mum kapanışından 1 sn sonra** (3 yerine) ve döngü tam o anda uyanır. Güvence: yanıtta az önce kapanan mumun
+  ardından **yeni (süren) mum da görünmelidir**; bu, Binance'in o mumu kapattığını gösterir. Görünmeyen coinler 0.25 sn
+  sonra yeniden istenir. Coinlerin en az üçte birinde yeni mum varsa gecikenler bir kez daha denenip eldeki mumla devam
+  edilir; hiçbirinde yoksa (sunucunun saati ileride, veri henüz yerleşmemiş) en geç eski tarama anına (kapanış + 3 sn)
+  kadar yeniden denenir ve eski davranışa dönülür. En kötü durum eski zamanlamadır.
+- **Mumlar tek dalgada**: 24 işçi, CCXT beklemesi olmadan (bağlantı havuzu 32'ye büyütüldü). İstek ağırlığı tarama başına
+  ~24 coin × 2 = 48; Binance'in sınırı dakikada 2.400. Küçük evrende (≤ 40 coin) 24 saatlik ön eleme yapılmaz: birkaç mum
+  isteği kazandırırken taramanın başına 2 sn'ye varan bekleme ekliyordu; yalnızca sinyal veremeyecek coinleri atladığı
+  için sinyaller ve genişlik değişmez.
+- **Ön hazırlık (taramadan 2.5 sn önce, mum kapanmadan)**: paralel hafif isteklerle bağlantılar açılır (mum istekleri TLS
+  el sıkışması beklemez; aynı yanıtlardan Binance ile saat farkı ölçülür, 750 ms'yi aşarsa günlüğe uyarı yazılır) ve
+  Binance'ten **parite ayarları okunur** (tek istek): teminat modu ISOLATED ve kaldıracı ayardakiyle aynı olan coinler
+  "hazır" sayılır.
+- **Teminat modu + kaldıraç önceden**: taramalar arasında, hazır olmayan coinler azar azar ayarlanır (adım başına 2
+  coin, taramaya 20 sn kala durur, açık pozisyonlu coine dokunulmaz). Sinyal anında coin az önce doğrulanmışsa bu iki
+  istek atlanır; doğrulanmamışsa (elle değiştirilmiş, okunamamış, doğrulama 30 sn'den eski, kaldıraç ayarı değişmiş)
+  eski yol çalışır: girişten hemen önce ayarlanır. Bot yalnızca Binance'ten okuduğuna güvenir, kendi ayarladığını da
+  oradan teyit eder.
+- **Girişte CCXT beklemesi yok**: bakiye → fiyat → emir (3 istek) arka arkaya gider.
+
+Kalan yol: 1 sn + mumlar (1 gidiş-dönüş) + bakiye, fiyat, emir (3 gidiş-dönüş). Açık pozisyon varken pozisyon kontrolü
+yine taramadan önce yapılır (sıra değişmedi: kill-switch ve güncel pozisyon durumu önce gelir); ne kadar sürdüğü kayıttaki
+`"ms"` alanının ilk değerinden görülür.
+
+**Kullanım.** Önce kapalıyken birkaç gün çalıştırıp raporda / Telegram'da gecikmeyi görün, sonra açıp aynı satırlarla
+karşılaştırın. Açıkken dikkat: taranan coinlerin **hepsinde** teminat modu ISOLATED ve kaldıraç `FUTURES_LEVERAGE` olarak
+önceden ayarlanır (kapalıyken yalnızca girilen coinde ayarlanırdı); aynı hesapta bu coinlerde elle farklı kaldıraçla işlem
+yapıyorsanız ayarınız değişir. Test modunda hesap ayarı yoktur; tarama zamanlaması ve mumlar aynı şekilde hızlanır.
+
+**Sınırlar.** Hızlı yol sahte borsa ve sahte saatle test edildi (istek sırası, yeni mum kontrolü, doğrulama, geri dönüş
+yolları; `tests/test_futures_fast_entry.py`), gerçek Binance'e karşı ölçülmedi: kazanılan süre sunucunuzda görülecek.
+"Yeni mum göründüyse kapanan mum kesinleşmiştir" varsayımı Binance'in mum ucunun davranışına dayanır. Backtestteki
+`ENTRY_LAG_PCT` (5 sn = %0.05) değiştirilmedi: canlı ölçümler birikince yeniden ayarlanabilir; o zamana kadar backtest
+hızlı girişe göre biraz kötümser kalır. Emir defteri derinliği (büyük bakiyede kayma) modellenmiyor.
 
 ### 🏆 Strateji turnuvası (`--turnuva`)
 Hangi strateji türünün sizin dönemde işe yaradığını **tek komutla** görmek için:
