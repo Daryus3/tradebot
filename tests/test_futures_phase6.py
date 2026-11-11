@@ -174,7 +174,7 @@ def test_phase6_rows_and_phase5_rows_without_phase6(fcfg):
     rows = fb.cascade_rows(p6, ev, sigs)                                # Faz 6 açıkken: Faz 6'sız #2
     assert rows[0][0] == "Tek pozisyon (dalga modu ve Faz 6 kapalı, 2x)"
     assert calls[0] == (["AAAUSDT"], dict(extra_size_pct=100.0, reentry_breadth=0, max_positions=1, leverage=2,
-                                          isolated_size_pct=100.0))
+                                          isolated_size_pct=100.0, wave_hold_min=0))          # Faz 9 da kapalı
     labels = [r[0] for r in fb.phase6_rows(p6, ev, sigs, phase6=lambda **o: o)]
     assert labels[:3] == ["Dalgada yeniden giriş kapalı (zarar sonrası bekleme hep)", "Dalga eşikleri kapalı",
                           "Ek pozisyonlar eşit büyüklükte (Faz 5 gibi)"]

@@ -547,6 +547,11 @@ class SimParams:
     reentry_breadth: int = 0
     # Faz 8: ek pozisyonların (başka pozisyon açıkken açılanlar) başabaş tetiği (fiyat %; 0 = be_trigger_pct ile aynı)
     extra_be_trigger_pct: float = 0.0
+    # Faz 9: pozisyona göre zaman stopu (dk; 0 = hold_min): ek pozisyonlar; ilk pozisyon girişte genişlik ≥
+    # wave_hold_breadth ise (config.futures_hold_minutes ile aynı kural)
+    extra_hold_min: int = 0
+    wave_hold_min: int = 0
+    wave_hold_breadth: int = 8
     # Mum içi başabaş gerçekçiliği (bkz. be_retouch_prob): başabaşın tetiklendiği 1 dk mumda fiyat tabana geri dönmüş
     # olabilir. False = eski iyimser varsayım (yükselen mumda yalnızca kapanış tabanın altındaysa çıkılır).
     be_intrabar: bool = True
@@ -578,8 +583,34 @@ def params_from_cfg(cfg, **over) -> SimParams:
                   isolated_breadth=int(getattr(cfg, "futures_isolated_breadth", 2)),
                   extra_size_pct=float(getattr(cfg, "futures_extra_size_pct", 100.0)),
                   reentry_breadth=int(getattr(cfg, "futures_reentry_breadth", 0)),
-                  extra_be_trigger_pct=float(getattr(cfg, "futures_extra_be_trigger_pct", 0.0)))
+                  extra_be_trigger_pct=float(getattr(cfg, "futures_extra_be_trigger_pct", 0.0)),
+                  extra_hold_min=int(getattr(cfg, "futures_extra_hold_minutes", 0)),
+                  wave_hold_min=int(getattr(cfg, "futures_wave_hold_minutes", 0)),
+                  wave_hold_breadth=int(getattr(cfg, "futures_wave_hold_breadth", 8)))
     return replace(p, **over) if over else p
+
+
+def hold_minutes(p: SimParams, n_open: int, breadth: int) -> int:
+    """Yeni pozisyonun zaman stopu (dk), config.futures_hold_minutes ile aynı kural (Faz 9): ek pozisyonda (n_open ≥ 1,
+    dalga modu) extra_hold_min; ilk pozisyonda genişlik ≥ wave_hold_breadth ise wave_hold_min; yoksa hold_min."""
+    if n_open >= 1:
+        return p.extra_hold_min if p.extra_hold_min > 0 and p.max_positions > 1 else p.hold_min
+    if p.wave_hold_min > 0 and breadth >= p.wave_hold_breadth:
+        return p.wave_hold_min
+    return p.hold_min
+
+
+def phase9_active(p: SimParams) -> bool:
+    """Faz 9 etkin mi: bazı pozisyonlar ana ayardan farklı bir zaman stopu kullanıyor."""
+    return (p.extra_hold_min > 0 and p.max_positions > 1 and p.extra_hold_min != p.hold_min) or (
+        p.wave_hold_min > 0 and p.wave_hold_min != p.hold_min)
+
+
+def window_minutes(cfg) -> int:
+    """Çıkış penceresinin uzunluğu (dk): en uzun zaman stopu + pay (Faz 9 süreleri dahil)."""
+    longest = max(int(cfg.max_hold_minutes), int(getattr(cfg, "futures_extra_hold_minutes", 0)),
+                  int(getattr(cfg, "futures_wave_hold_minutes", 0)))
+    return max(MAX_WINDOW_MIN, longest + 10)
 
 
 @dataclass
@@ -965,7 +996,8 @@ def simulate(p: SimParams, data: FutData, signals: Sequence[FutSignal], windows:
         if window is None or not len(window[1]):
             skipped["çıkış verisi yok"] += 1
             continue
-        tr = run_trade(p, s, window, margin, notional, data)
+        hold = hold_minutes(p, 0, s.breadth)            # Faz 9: dalgada açılan pozisyon daha uzun tutulur
+        tr = run_trade(p if hold == p.hold_min else replace(p, hold_min=hold), s, window, margin, notional, data)
         if tr is None:                                  # Limit emir süresinde dolmadı: iptal, işlem yok
             skipped[f"limit emir {p.limit_ttl_min} dk içinde dolmadı"] += 1
             busy_until = s.close_ms + p.limit_ttl_min * MIN_MS
@@ -1041,6 +1073,7 @@ def simulate_slots(p: SimParams, data: FutData, signals: Sequence[FutSignal], wi
     # Tetik stopun taşınacağı yerin (be_floor_pct) üstünde olmalı: duyarlılık satırı tabanı yükseltirse (ör. "Başabaş
     # +%5 → +%2") ek tetik (+%0.5) geçersiz kalır ve ana tetik kullanılır (yoksa stop fiyatın üstüne konmuş sayılır).
     p_extra = (replace(p, be_trigger_pct=p.extra_be_trigger_pct) if phase8_active(p) else p)
+    hold_cache: Dict[tuple, SimParams] = {}
 
     def realize(until: int) -> None:
         nonlocal equity, used, freeze_until, sl_streak, day_key, day_pnl, kill_ms, ruined, stop
@@ -1116,7 +1149,14 @@ def simulate_slots(p: SimParams, data: FutData, signals: Sequence[FutSignal], wi
         if window is None or not len(window[1]):
             skipped["çıkış verisi yok"] += 1
             continue
-        tr = run_trade(p_extra if heap else p, s, window, margin, notional, data)
+        pp = p_extra if heap else p
+        hold = hold_minutes(p, len(heap), s.breadth)    # Faz 9: ek pozisyon / dalgada ilk pozisyon kendi zaman stopuyla
+        if hold != pp.hold_min:
+            key = (bool(heap), hold)
+            if key not in hold_cache:
+                hold_cache[key] = replace(pp, hold_min=hold)
+            pp = hold_cache[key]
+        tr = run_trade(pp, s, window, margin, notional, data)
         if p.entry_limit:
             limit_bar = s.close_ms
         if tr is None:
@@ -1308,12 +1348,15 @@ def exit_grid(cfg, data: FutData, signals, windows) -> List[Tuple[float, float, 
 
 PHASE6_SIM = dict(max_positions=4, leverage=3, extra_breadth=8, isolated_size_pct=50.0, isolated_breadth=2,
                   extra_size_pct=16.7, reentry_breadth=3, loss_cooldown_min=240,       # config.FUTURES_PHASE6_PRESET
-                  extra_be_trigger_pct=0.0)                                            # (Faz 8 kapalı: saf Faz 6)
+                  extra_be_trigger_pct=0.0,                                            # (Faz 8 kapalı: saf Faz 6)
+                  extra_hold_min=0, wave_hold_min=0)                                   # (Faz 9 kapalı)
 PHASE6_SINGLE_SIM = dict(max_positions=1, leverage=2, isolated_size_pct=50.0, isolated_breadth=2, extra_size_pct=100.0,
-                         reentry_breadth=3, loss_cooldown_min=240)               # config.FUTURES_PHASE6_SINGLE_PRESET
+                         reentry_breadth=3, loss_cooldown_min=240,               # config.FUTURES_PHASE6_SINGLE_PRESET
+                         extra_hold_min=0, wave_hold_min=0)
 PHASE6_WAVE = {"futures_wave_rules": "1:5,4:8", "futures_wave_breadth": 12}
 PHASE6_OFF_SIM = dict(extra_size_pct=100.0, reentry_breadth=0)
 PHASE8_BE = 0.5                                 # config.FUTURES_PHASE8_BE_TRIGGER: ek pozisyonların başabaş tetiği
+PHASE9_EXTRA, PHASE9_WAVE = 35, 60              # config.FUTURES_PHASE9_EXTRA_HOLD / _WAVE_HOLD (zaman stopları, dk)
 
 
 def phase6_on(cfg) -> bool:
@@ -1342,10 +1385,10 @@ def cascade_rows(cfg, ev, signals=None) -> List[Tuple[str, "Evaluation"]]:
     if base.max_positions == 1:
         rows.append(("🌊 Dalga modu (2 pozisyon, 3x, ek ≥8 coin, yalnız çöküş %50)",
                      ev0(max_positions=2, leverage=3, extra_breadth=8, isolated_size_pct=50.0, isolated_breadth=2,
-                         extra_be_trigger_pct=0.0)))
+                         extra_be_trigger_pct=0.0, extra_hold_min=0, wave_hold_min=0)))
     else:
         rows.append(("Tek pozisyon (dalga modu" + (" ve Faz 6" if on else "") + " kapalı, 2x)",
-                     ev0(max_positions=1, leverage=2, isolated_size_pct=100.0)))
+                     ev0(max_positions=1, leverage=2, isolated_size_pct=100.0, wave_hold_min=0)))
     if base.isolated_size_pct >= 100:
         rows.append(("Yalnız çöküş yarım büyüklük (<2 coin)", ev(isolated_size_pct=50.0, isolated_breadth=2)))
     return rows
@@ -1418,6 +1461,29 @@ def phase8_rows(cfg, ev) -> List[Tuple[str, "Evaluation"]]:
     return [(f"Ek pozisyonlarda başabaş +%{PHASE8_BE:g} (Faz 8)", ev(extra_be_trigger_pct=PHASE8_BE))]
 
 
+def phase9_label(p: SimParams) -> str:
+    """Faz 9 açıklaması (rapor başlığı): hangi pozisyon kaç dakika tutulur; kapalıysa boş."""
+    parts = []
+    if p.extra_hold_min > 0 and p.max_positions > 1 and p.extra_hold_min != p.hold_min:
+        parts.append(f"ek pozisyonlarda {p.extra_hold_min} dk")
+    if p.wave_hold_min > 0 and p.wave_hold_min != p.hold_min:
+        parts.append(f"son 1 saatte ≥{p.wave_hold_breadth} coin %3+ düşerken açılan ilk pozisyonda {p.wave_hold_min} dk")
+    return "; ".join(parts)
+
+
+def phase9_rows(cfg, ev) -> List[Tuple[str, "Evaluation"]]:
+    """Faz 9 karşılaştırması: açıksa tüm pozisyonlarda aynı zaman stopu; kapalıysa dalgada ilk pozisyonu uzun tutmak ve
+    (dalga modunda) ek pozisyonları erken kapatmakla birlikte."""
+    base = params_from_cfg(cfg)
+    if phase9_active(base):
+        return [(f"Zaman stopu her pozisyonda {base.hold_min} dk (Faz 9 kapalı)", ev(extra_hold_min=0, wave_hold_min=0))]
+    rows = [(f"Dalgada (≥8 coin) ilk pozisyon {PHASE9_WAVE} dk (Faz 9)", ev(wave_hold_min=PHASE9_WAVE, wave_hold_breadth=8))]
+    if base.max_positions > 1:
+        rows.append((f"Faz 9: ek pozisyonlar {PHASE9_EXTRA} dk + dalgada ilk pozisyon {PHASE9_WAVE} dk",
+                     ev(extra_hold_min=PHASE9_EXTRA, wave_hold_min=PHASE9_WAVE, wave_hold_breadth=8)))
+    return rows
+
+
 def long_window_rows(cfg, other) -> List[Tuple[str, "Evaluation"]]:
     """Uzun ek pencere (≥8 saat, ör. 12 sa %15) varsa onsuz satır: Kasım 2026 testinde (rapor_13) bu pencerenin tek
     başına bulduğu işlemler işlem başı ~%0 getirip tam boy ilk pozisyonu kapattı. `other(**cfg değişikliği)` yeni
@@ -1439,7 +1505,7 @@ def variant_rows(cfg, data: FutData, signals, windows) -> List[Tuple[str, Evalua
         def other(**changes):
             c2 = replace(cfg, **changes)
             sigs, _f = find_signals(c2, data)
-            load_windows(data, sigs, max(MAX_WINDOW_MIN, cfg.max_hold_minutes + 10), cache=windows)
+            load_windows(data, sigs, window_minutes(cfg), cache=windows)
             return evaluate(params_from_cfg(c2), data, sigs, windows)
         wave_cache: List[List[FutSignal]] = []
 
@@ -1450,7 +1516,7 @@ def variant_rows(cfg, data: FutData, signals, windows) -> List[Tuple[str, Evalua
                     wave_cache.append(list(signals))
                 else:
                     sigs, _f = find_signals(replace(cfg, **PHASE6_WAVE), data)
-                    load_windows(data, sigs, max(MAX_WINDOW_MIN, cfg.max_hold_minutes + 10), cache=windows)
+                    load_windows(data, sigs, window_minutes(cfg), cache=windows)
                     wave_cache.append(sigs)
             return evaluate(params_from_cfg(cfg, **over), data, wave_cache[0], windows)
         base = params_from_cfg(cfg)
@@ -1472,7 +1538,7 @@ def variant_rows(cfg, data: FutData, signals, windows) -> List[Tuple[str, Evalua
                 ("+likidasyon dalgası şartı" if not cfg.futures_crash_liq else "Likidasyon şartı kapalı",
                  other(futures_crash_liq=not cfg.futures_crash_liq))] + long_window_rows(cfg, other)
                 + cascade_rows(cfg, ev, signals) + phase6_rows(cfg, ev, signals, phase6) + phase8_rows(cfg, ev)
-                + realism_rows(cfg, ev))
+                + phase9_rows(cfg, ev) + realism_rows(cfg, ev))
     out = [("Başabaş kalkanı kapalı", ev(be_enabled=False)),
            ("Zaman stopu 30 dk", ev(hold_min=30)),
            ("Zaman stopu 120 dk", ev(hold_min=120)),
@@ -1687,7 +1753,9 @@ def grid_search(cfg, data: FutData, variants: Optional[Sequence[GridVariant]] = 
     say = progress or (lambda _m: None)
     split_ms = split_ms if split_ms is not None else _ms(GRID_SPLIT)
     cfgs = [v.cfg(cfg) for v in variants]
-    hold = max([c.max_hold_minutes for c in cfgs] + [int(o.get("hold_min", 0)) for _n, o in exits])
+    hold = max([c.max_hold_minutes for c in cfgs] + [int(o.get("hold_min", 0)) for _n, o in exits]
+               + [int(getattr(c, "futures_extra_hold_minutes", 0)) for c in cfgs]          # Faz 9 süreleri
+               + [int(getattr(c, "futures_wave_hold_minutes", 0)) for c in cfgs])
     windows = GridWindows(hold // 5 + 2)
     store: List[List[tuple]] = [[] for _ in variants]
     coins = len(data.lean_symbols) if data.loader is not None else len(data.k5)
@@ -2000,7 +2068,8 @@ def run_grid_cli(cfg, days: Optional[int], end_ms: Optional[int], out_dir: Path,
             if r.variant.label not in found:                    # Aynı giriş kuralının sinyalleri bir kez bulunur
                 found[r.variant.label] = find_signals(c2, data)[0]
             sigs = found[r.variant.label]
-            windows = load_windows(data, sigs, max(MAX_WINDOW_MIN, p2.hold_min + 10), cache=windows)
+            windows = load_windows(data, sigs, max(MAX_WINDOW_MIN, max(p2.hold_min, p2.extra_hold_min,
+                                                                     p2.wave_hold_min) + 10), cache=windows)
             r1 = grid_row(r.variant, p2, data, sigs, windows, split)
             r1.exit_label, r1.exit_over = r.exit_label, r.exit_over
             verified.append((r1, evaluate(p2, data, sigs, windows)))
@@ -2086,7 +2155,7 @@ def module_universe(cfg, n: int, start: int, end: int, segments, verify: bool,
             c2 = r.variant.cfg(c_u)
             progress(f"✔️ 1 dk doğrulama ({n or 'liste'}): {r.variant.label}")
             sigs, _f = find_signals(c2, data)
-            windows = load_windows(data, sigs, max(MAX_WINDOW_MIN, c2.max_hold_minutes + 10), cache=windows)
+            windows = load_windows(data, sigs, window_minutes(c2), cache=windows)
             r1 = grid_row(r.variant, params_from_cfg(c2), data, sigs, windows, _ms(GRID_SPLIT))
             out.verified.append((r1, evaluate(params_from_cfg(c2), data, sigs, windows)))
     return out
@@ -2223,7 +2292,7 @@ def phase4_universe(cfg, label: str, over, start: int, end: int, segments, verif
             c2 = r.variant.cfg(c_u)
             progress(f"✔️ 1 dk doğrulama ({label}): {r.variant.label} / {name}")
             sigs, _f = find_signals(c2, data)
-            windows = load_windows(data, sigs, max(MAX_WINDOW_MIN, c2.max_hold_minutes + 10), cache=windows)
+            windows = load_windows(data, sigs, window_minutes(c2), cache=windows)
             p = params_from_cfg(c2, **ov)
             r1 = grid_row(r.variant, p, data, sigs, windows, _ms(GRID_SPLIT))
             r3 = grid_row(r.variant, replace(p, slippage_pct=p.slippage_pct * GRID_STRESS_SLIP), data, sigs, windows,
@@ -2526,7 +2595,8 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
              + (f"başabaş +%{p.be_trigger_pct:g} → stop +%{p.be_floor_pct:g}" if p.be_enabled else "başabaş kapalı")
              + (f" | izleyen stop +%{p.trail_act_pct:g}'de, tepenin %{p.trail_gap_pct:g} gerisinden"
                 if p.trail_enabled else "")
-             + f" | zaman stopu {p.hold_min} dk (fiyat %, girişten)")
+             + f" | zaman stopu {p.hold_min} dk (fiyat %, girişten)"
+             + (f"; Faz 9: {phase9_label(p)}" if phase9_label(p) else ""))
     L.append(f"Komisyon: piyasa %{p.taker_fee * 100:.3f} / limit %{p.maker_fee * 100:.3f}, kayma %{p.slippage_pct:g}, "
              + ("ortalama fonlama oranı (8 saatte %0.01)" if data.loader is not None else "gerçek fonlama oranları")
              + f"; çıkışlar {'1 dk' if data.exit_interval == '1m' else '5 dk'} mumlarla")
@@ -2804,7 +2874,7 @@ def run_cli(cfg, days: Optional[int], end_ms: Optional[int], out_dir: Path, char
              + ("çöküş dönüşü" if cfg.futures_tactic == "crash" else "4'lü onay") + ")...")
     signals, funnel = find_signals(cfg, data)
     progress(f"   {len(signals)} sinyal; çıkışlar için mumlar okunuyor...")
-    windows = load_windows(data, signals, max(MAX_WINDOW_MIN, cfg.max_hold_minutes + 10), progress)
+    windows = load_windows(data, signals, window_minutes(cfg), progress)
     ev = evaluate(params_from_cfg(cfg), data, signals, windows)
     levs = grid = variants = None
     if sensitivity:

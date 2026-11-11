@@ -154,6 +154,17 @@ FUTURES_PHASE6_OFF = {"FUTURES_EXTRA_SIZE_PCT": 100, "FUTURES_REENTRY_BREADTH": 
 #       getiri aynı (+%270 / +%166 → +%246 / +%168), düşüş ve maliyet hassasiyeti daha yüksek. Öneri: kapalı.
 FUTURES_PHASE8_BE_TRIGGER = 0.5
 FUTURES_PHASE8_OFF = {"FUTURES_EXTRA_BE_TRIGGER_PCT": 0}
+# Faz 9 (Kasım 2026, rapor 17 araştırması; varsayılan kapalı): pozisyona göre zaman stopu.
+#   FUTURES_EXTRA_HOLD_MINUTES = dalga modunda EK pozisyonların (başka pozisyon açıkken açılanlar) zaman stopu (dk);
+#       0 = MAX_HOLD_MINUTES ile aynı. Dalgada ek yuvalar hep doludur: ek pozisyon 45 yerine 30-35 dk'da kapanınca
+#       yuvası yeni (taze) sinyale geçer.
+#   FUTURES_WAVE_HOLD_MINUTES = İLK pozisyon, girişte genişlik (son 1 saatte %3+ düşen coin) ≥ FUTURES_WAVE_HOLD_BREADTH
+#       ise bu kadar dakika tutulur; 0 = kapalı (MAX_HOLD_MINUTES). Piyasa geneli dalgada toparlanma daha uzun sürüyor;
+#       yalnız çöküşte uzun tutmak ise zarar ettiriyor (bu yüzden genişlik şartı).
+#   Test (2020-2026, 1 dk, 10 çekiliş; rapor 17 ayarı üstüne): ayrıntı README "Faz 9".
+FUTURES_PHASE9_EXTRA_HOLD = 35
+FUTURES_PHASE9_WAVE_HOLD = 60
+FUTURES_PHASE9_OFF = {"FUTURES_EXTRA_HOLD_MINUTES": 0, "FUTURES_WAVE_HOLD_MINUTES": 0}
 FUTURES_SIDES = ("both", "long", "short")
 FUTURES_LIQ_SOURCES = ("proxy", "feed", "both")
 FUTURES_TP_ORDERS = ("limit", "market")
@@ -508,7 +519,8 @@ def futures_breadth_on(cfg) -> bool:
     dalgada yeniden giriş / dalga eşikleri (Faz 6)."""
     return (int(getattr(cfg, "futures_max_positions", 1)) > 1
             or float(getattr(cfg, "futures_isolated_size_pct", 100.0)) < 100
-            or int(getattr(cfg, "futures_reentry_breadth", 0)) > 0 or bool(futures_wave_rules(cfg)))
+            or int(getattr(cfg, "futures_reentry_breadth", 0)) > 0 or bool(futures_wave_rules(cfg))
+            or int(getattr(cfg, "futures_wave_hold_minutes", 0)) > 0)       # Faz 9: dalgada ilk pozisyon zaman stopu
 
 
 def futures_be_trigger(cfg, n_open: int) -> float:
@@ -518,6 +530,20 @@ def futures_be_trigger(cfg, n_open: int) -> float:
     if extra > 0 and n_open >= 1 and int(getattr(cfg, "futures_max_positions", 1)) > 1:
         return extra
     return float(cfg.breakeven_trigger_pct)
+
+
+def futures_hold_minutes(cfg, n_open: int, breadth: Optional[int]) -> int:
+    """Yeni pozisyonun zaman stopu (dk): ana ayar (MAX_HOLD_MINUTES); Faz 9 açıksa dalga modunda başka pozisyon açıkken
+    açılan (ek, n_open ≥ 1) pozisyonda FUTURES_EXTRA_HOLD_MINUTES, ilk pozisyonda (n_open = 0) girişteki genişlik ≥
+    FUTURES_WAVE_HOLD_BREADTH ise FUTURES_WAVE_HOLD_MINUTES. Canlı bot ve backtest ortak."""
+    base = int(cfg.max_hold_minutes)
+    if n_open >= 1:
+        extra = int(getattr(cfg, "futures_extra_hold_minutes", 0))
+        return extra if extra > 0 and int(getattr(cfg, "futures_max_positions", 1)) > 1 else base
+    wave = int(getattr(cfg, "futures_wave_hold_minutes", 0))
+    if wave > 0 and breadth is not None and int(breadth) >= int(getattr(cfg, "futures_wave_hold_breadth", 8)):
+        return wave
+    return base
 
 
 def futures_slot_share(cfg, n_open: int) -> float:
@@ -819,6 +845,10 @@ class Config:
     futures_wave_breadth: int = 12
     # Faz 8: ek pozisyonların başabaş tetiği (fiyat %; 0 = BREAKEVEN_TRIGGER_PCT ile aynı)
     futures_extra_be_trigger_pct: float = 0.0
+    # Faz 9: pozisyona göre zaman stopu (dk; 0 = MAX_HOLD_MINUTES): ek pozisyonlar / dalgada (genişlik ≥ eşik) ilk pozisyon
+    futures_extra_hold_minutes: int = 0
+    futures_wave_hold_minutes: int = 0
+    futures_wave_hold_breadth: int = 8
     futures_leverage: int = 2             # Kaldıraç 1-20; her girişten hemen önce Binance'te ayarlanır
     futures_margin_usage_pct: float = 95.0  # Serbest bakiyenin teminata giden yüzdesi (bileşik; kalan pay komisyon için)
     futures_volume_ratio: float = 2.5      # Hacim onayı: sinyal mumu hacmi önceki 20 mumun ortalamasının en az bu katı
@@ -1167,6 +1197,12 @@ class Config:
         elif 0 < self.futures_extra_be_trigger_pct <= self.breakeven_floor_pct and is_futures(self.strategy):
             errors.append(f"FUTURES_EXTRA_BE_TRIGGER_PCT ({self.futures_extra_be_trigger_pct:g}) başabaş tabanından "
                           f"(BREAKEVEN_FLOOR_PCT={self.breakeven_floor_pct:g}) büyük olmalı")
+        if not (self.futures_extra_hold_minutes == 0 or 5 <= self.futures_extra_hold_minutes <= 1440):
+            errors.append("FUTURES_EXTRA_HOLD_MINUTES 0 (ana zaman stopuyla aynı) ya da 5-1440 dakika olmalı")
+        if not (self.futures_wave_hold_minutes == 0 or 5 <= self.futures_wave_hold_minutes <= 1440):
+            errors.append("FUTURES_WAVE_HOLD_MINUTES 0 (kapalı) ya da 5-1440 dakika olmalı")
+        if not 1 <= self.futures_wave_hold_breadth <= 200:
+            errors.append("FUTURES_WAVE_HOLD_BREADTH 1-200 arasında olmalı (son 1 saatte %3+ düşen coin sayısı)")
         if self.futures_universe_mode not in FUTURES_UNIVERSE_MODES:
             errors.append("FUTURES_UNIVERSE_MODE şunlardan biri olmalı: " + ", ".join(FUTURES_UNIVERSE_MODES))
         if self.futures_confirm not in FUTURES_CONFIRMS:
@@ -1440,6 +1476,9 @@ def load_config(env_file: Optional[str] = None, mode_override: Optional[str] = N
         futures_wave_rules=canonical_crash_extra(_env_str("FUTURES_WAVE_RULES", "")),
         futures_wave_breadth=_env_int("FUTURES_WAVE_BREADTH", 12),
         futures_extra_be_trigger_pct=_env_float("FUTURES_EXTRA_BE_TRIGGER_PCT", 0.0),
+        futures_extra_hold_minutes=_env_int("FUTURES_EXTRA_HOLD_MINUTES", 0),
+        futures_wave_hold_minutes=_env_int("FUTURES_WAVE_HOLD_MINUTES", 0),
+        futures_wave_hold_breadth=_env_int("FUTURES_WAVE_HOLD_BREADTH", 8),
         futures_leverage=_env_int("FUTURES_LEVERAGE", 2),
         futures_margin_usage_pct=_env_float("FUTURES_MARGIN_USAGE_PCT", 95.0),
         futures_volume_ratio=_env_float("FUTURES_VOLUME_RATIO", 2.5),
@@ -1771,6 +1810,25 @@ def _setting_notes(cfg: Config) -> List[str]:
                              f"%66 / %45 → %67 / %53, 3 kat kaymada +%142 / +%92 → +%82 / +%53, 5 kat kaymada 30 USDT "
                              f"243 yerine 38 USDT'ye çıktı. Yani işlem sayısı artar, kâr artmaz, maliyete dayanıklılık "
                              f"azalır. Öneri: kapalı (0).")
+        xh, wh = cfg.futures_extra_hold_minutes, cfg.futures_wave_hold_minutes
+        if xh > 0 and cfg.futures_max_positions <= 1:
+            notes.append(f"FUTURES_EXTRA_HOLD_MINUTES={xh} (Faz 9) etkisiz: ek pozisyon yalnızca dalga modunda "
+                         f"(FUTURES_MAX_POSITIONS > 1) açılır.")
+        elif xh > 0 or wh > 0:
+            parts = []
+            if xh > 0:
+                parts.append(f"ek pozisyonlar {xh} dk'da")
+            if wh > 0:
+                parts.append(f"son 1 saatte ≥{cfg.futures_wave_hold_breadth} coin %3+ düşerken açılan ilk pozisyon "
+                             f"{wh} dk'da")
+            notes.append(f"Faz 9 (pozisyona göre zaman stopu): {', '.join(parts)} kapatılır (diğerleri "
+                         f"{cfg.max_hold_minutes} dk). Kasım 2026 testinde (2020-2026, 1 dk, 10 çekilişin ortancası; "
+                         f"rapor 17 ayarı üstüne) yalnızca dalgada ilk pozisyon 60 dk: bileşiksiz yıllık getiri +%332 / "
+                         f"+%212 → +%341 / +%222, son 12 ay +%81 → +%120, hiçbir yılda geride değil, işlem sayısı aynı. "
+                         f"İlk başabaş 1.1 + ek başabaş 0.4 + yalnız çöküş %25 + ek 35 dk + dalgada ilk 60 dk: yılda 888 "
+                         f"→ 929 işlem, +%379 / +%236, son 12 ay +%152, 3 kat kaymada +%123 / +%75 → +%224 / +%147; "
+                         f"2025'te geride (+%582 / +%975). Düşüş ve kötümser stop riski değişmez; ek 25 dk ve altı ile "
+                         f"dalgada 50-55 dk testte kötüydü. Önce test modunda deneyin.")
         if cfg.futures_fast_entry:
             notes.append("FUTURES_FAST_ENTRY=true (hızlı giriş): tarama 5 dk mum kapanışından 3 yerine 1 sn sonra yapılır; "
                          "taranan coinlerin hepsinde teminat modu (ISOLATED) ve kaldıraç önceden ayarlanır, her taramadan "

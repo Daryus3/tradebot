@@ -612,6 +612,12 @@ class Messages:
         be_pct = be_own if be_own > 0 else cfg.breakeven_trigger_pct
         be_price = pos.entry_price * (1 + (1 if pos.side == "long" else -1) * be_pct / 100)
         floor = "üstüne" if pos.side == "long" else "altına"
+        try:                                                        # Faz 9: pozisyonun kendi zaman stopu
+            hold_own = int(float(pos.metrics.get("hold_min", 0)))
+        except (TypeError, ValueError):
+            hold_own = 0
+        hold_text = (f"{hold_own} dk (Faz 9; ana ayar {cfg.max_hold_minutes} dk)" if hold_own > 0
+                     else f"{cfg.max_hold_minutes} dk")
         lag_line = ""
         try:                                                        # Giriş gecikmesi ölçümü (piyasa emriyle giriş)
             lag_ms = float(pos.metrics.get("lag_ms", 0.0))
@@ -637,7 +643,7 @@ class Messages:
             f"🔒 Başabaş kalkanı: {fmt_price(be_price)} (+%{be_pct:g}"
             + (", ek pozisyon" if be_own > 0 else "")
             + f") görülünce stop girişin %{cfg.breakeven_floor_pct:g} {floor} çekilir\n"
-            f"⏱️ Zaman stopu: {cfg.max_hold_minutes} dk | 💀 Likidasyon ~{fmt_price(pos.liq_price)}\n"
+            f"⏱️ Zaman stopu: {hold_text} | 💀 Likidasyon ~{fmt_price(pos.liq_price)}\n"
             f"🔍 {esc(note)}"
         )
 

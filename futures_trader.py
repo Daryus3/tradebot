@@ -34,7 +34,8 @@ from typing import Dict, List, Optional, Set, Tuple
 
 import requests
 
-from config import (futures_be_trigger, futures_breadth_on, futures_coin_list, scan_log_path, futures_crash_rules, futures_funding_rules,
+from config import (futures_be_trigger, futures_breadth_on, futures_coin_list, futures_hold_minutes, scan_log_path,
+                    futures_crash_rules, futures_funding_rules,
                     futures_liq_distance_pct, futures_modules, futures_pump_rules, futures_slot_share,
                     futures_wave_rules)
 from futures_exchange import FFill, FuturesError, MinNotionalError, describe_error
@@ -978,6 +979,14 @@ class FuturesBot(TradingBot):
                        regime=f"{side.upper()} {lev}X")      # İşlem kaydında (CSV) yön ve kaldıraç görünsün
         if cfg.breakeven_enabled and be_trigger != cfg.breakeven_trigger_pct:
             pos.metrics["be_trigger"] = be_trigger
+        # Faz 9: ek pozisyon / dalgada açılan ilk pozisyon kendi zaman stopuyla izlenir (backtest: hold_minutes)
+        try:
+            breadth = int(float(sig.metrics["breadth"])) if "breadth" in sig.metrics else None
+        except (TypeError, ValueError):
+            breadth = None
+        hold = futures_hold_minutes(cfg, n_open, breadth)
+        if hold != cfg.max_hold_minutes:
+            pos.metrics["hold_min"] = float(hold)
         self.state.positions[symbol] = pos
         if ex.is_paper:
             ex.open_paper(symbol, side, qty, entry, margin_used, lev)
@@ -1304,9 +1313,18 @@ class FuturesBot(TradingBot):
                              fmt_duration(now - pos.opened_at))
         self._check_kill_switch()
 
+    def _hold_minutes(self, pos: Position) -> int:
+        """Pozisyonun zaman stopu (dk): Faz 9'da ek pozisyon / dalgada açılan ilk pozisyon için girişte kaydedilen değer
+        (pos.metrics["hold_min"]), yoksa güncel MAX_HOLD_MINUTES."""
+        try:
+            own = int(float(pos.metrics.get("hold_min", 0)))
+        except (TypeError, ValueError):
+            own = 0
+        return own if own > 0 else int(self.cfg.max_hold_minutes)
+
     def _exit_reason(self, pos: Position, price: float, now: float) -> Optional[ExitReason]:
-        cfg = self.cfg
-        if self.cfg.max_hold_minutes > 0 and now - pos.opened_at >= cfg.max_hold_minutes * 60:
+        hold = self._hold_minutes(pos)
+        if hold > 0 and now - pos.opened_at >= hold * 60:
             return ExitReason.MAX_HOLD                           # Zaman stopu: piyasa emriyle kapat
         stop_reason = _stop_reason(pos)
         if _worse(pos, price, pos.sl_price):
@@ -1614,6 +1632,11 @@ class FuturesBot(TradingBot):
             if (cfg.futures_max_positions > 1 and cfg.breakeven_enabled
                     and futures_be_trigger(cfg, 1) != cfg.breakeven_trigger_pct):
                 extra += f", ek pozisyon başabaşı +%{cfg.futures_extra_be_trigger_pct:g}"
+            if futures_hold_minutes(cfg, 1, None) != cfg.max_hold_minutes:
+                extra += f", ek pozisyon zaman stopu {cfg.futures_extra_hold_minutes} dk"
+            if cfg.futures_wave_hold_minutes > 0:
+                extra += (f", ≥{cfg.futures_wave_hold_breadth} coin düşerken ilk pozisyon "
+                          f"{cfg.futures_wave_hold_minutes} dk")
             lines.append(f"🌊 Genişlik: {self.last_breadth} coin son 1 saatte %3+ düştü (dalga ≥"
                          f"{cfg.futures_extra_breadth}, yalnız çöküş <{cfg.futures_isolated_breadth}{extra})")
         tm = self.last_timing

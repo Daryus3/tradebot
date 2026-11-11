@@ -1005,7 +1005,8 @@ değil** ve B ile C son 12 ayda tüm çekilişlerde geride (+%35 / +%81). Yani "
 son dönemde de geride kalmayan adım, C uzun dönemde en çok işlem ve kârı veren ama sakin piyasada geride kalan seçenek.
 Faz 8'i kapatmak (önceki öneri) seçim döneminde ve maliyet stresinde iyi, doğrulamada çekilişlerin çoğunda bazın gerisinde
 ve işlem sayısını %15 düşürüyor. Düşüş ve en kötü gün hiçbir adayda azalmıyor: 5x'te kötümser stop dolumu hepsini
-eritiyor; B 3x'te erimiyor (bileşik +%455 / +%198, düşüş %69 / %42).
+eritiyor; B 3x'te erimiyor (bileşik +%455 / +%198, düşüş %69 / %42). **İkinci tur (aşağıda, Faz 9) bu adayların yerini
+aldı:** A'nın üstüne iki yeni kural ekleyen set hepsinden iyi çıktı.
 
 **Denenip elenenler** (baza göre işlem / sabit boy getiri, seçim / doğrulama):
 - Daha çok yuva (5, 6, 8; eklerin toplamı sabit): işlem +%16 / +%29 / +%53, getiri −%14 ile −%31. Dalgada sonradan gelen
@@ -1030,6 +1031,78 @@ gecikme düşerse geçerlidir (bkz. "Canlı giriş gecikmesi").
 olsa da gerçek kazanç buradakinden küçük olabilir. Ek tetiği 0.4 ile taban 0.3 arası %0.1'dir: stop konana kadar fiyat
 geri dönerse bot piyasa emriyle çıkar; motor bu ayarda saniyelik veriye göre hafif kötümser kalibre edildi (+%0.23 /
 +%0.25) ama canlıda dolum daha kötü olabilir. Geçmiş sonuç gelecek garantisi değildir.
+
+#### Faz 9: pozisyona göre zaman stopu (Kasım 2026, rapor 17 araştırmasının ikinci turu)
+İkinci turda ~225 ayar daha denendi (toplam ~550), bu kez baştan 6-10 çekilişle ve son 12 ay ayrıca izlenerek. Mevcut
+ayarlarla yeni bir kazanç çıkmadı; komşu değerlerde tutarlı çıkan iki **yeni kural** eklendi (ikisi de varsayılan kapalı;
+Telegram → 🧭 Giriş sinyali → 🌊 Dalga modu):
+
+- **Dalgada açılan ilk pozisyon daha uzun tutulur** (`FUTURES_WAVE_HOLD_MINUTES=60`, `FUTURES_WAVE_HOLD_BREADTH=8`):
+  girişte son 1 saatte en az 8 coin %3+ düşüyorsa ilk (büyük) pozisyonun zaman stopu 45 yerine 60 dk. Piyasa geneli
+  dalgada toparlanma daha uzun sürüyor; yalnız çöküşte uzun tutmak ise zarar ettiriyor (genişlik şartı bu yüzden).
+- **Ek pozisyonlar daha erken kapatılır** (`FUTURES_EXTRA_HOLD_MINUTES=35`): dalgada ek yuvalar hep dolu; ek pozisyon 45
+  yerine 35 dk'da kapanınca yuvası yeni sinyale geçer.
+
+10 çekilişin ortancası (seçim / doğrulama dönemi; "iyi" = bazdan iyi çıkan çekiliş sayısı):
+
+| | Baz (rapor 17) | Yalnız dalga kuralı | F: A + iki kural |
+|---|---|---|---|
+| İşlem / yıl | 888 | 883 | 929 |
+| Sabit boy yıllık getiri | +%332 / +%212 | +%341 / +%222 | +%379 / +%236 |
+| ...bazdan iyi (10 çekilişte) | - | 10 / 10 | 10 / 10 |
+| Bileşik yıllık getiri | +%493 / +%301 | +%580 / +%339 | +%875 / +%412 |
+| ...bazdan iyi (10 çekilişte) | - | 10 / 10 | 10 / 10 |
+| En büyük düşüş | %85 / %67 | %85 / %68 | %87 / %68 |
+| Kayma 3 kat (bileşik) | +%123 / +%75 | +%141 / +%88 | +%224 / +%147 |
+| Kayma 5 kat (bileşik) | −%0 / −%28 | +%2 / −%21 | +%42 / −%9 |
+| Kötümser stop (5x) | eridi | eridi | eridi |
+| Son 12 ay | +%81 | +%120 | +%152 |
+| Son 24 ay | +%4.110 | +%5.708 | +%6.252 |
+| Geride kaldığı yıllar | - | yok (2023 eşit) | 2025 (+%582 / +%975) |
+| Önyükleme: fark > 0 olasılığı (seçim / doğrulama / tümü) | - | 0.85 / 0.82 / 0.92 | 0.95 / 0.85 / 0.98 |
+| Tek rapor (kendi çekilişi) | 1.234.022 | 1.820.651 | 3.871.663 |
+| ...10 çekilişte | 0.28-2.31 M | 1.06-2.80 M | 2.32-3.89 M |
+
+Ayar satırları (rapor 17 ayarının üstüne):
+- Yalnız dalga kuralı: `FUTURES_WAVE_HOLD_MINUTES=60`
+- F: `FUTURES_WAVE_HOLD_MINUTES=60`, `FUTURES_EXTRA_HOLD_MINUTES=35`, `BREAKEVEN_TRIGGER_PCT=1.1`,
+  `FUTURES_EXTRA_BE_TRIGGER_PCT=0.4`, `FUTURES_ISOLATED_SIZE_PCT=25`
+
+**Yorum.** Yalnız dalga kuralı işlem sayısını değiştirmeden kârı artırıyor ve bu araştırmada hiçbir yılda geride kalmayan
+tek değişiklik. F hem işlemi (+%5) hem kârı artırıyor: iki dönemde de 10 çekilişin 10'unda bazdan iyi, 3 ve 5 kat kaymada
+da önde, son 12 ve 24 ayda da; farkın tüm dönemde sıfırdan büyük olma olasılığı %98. Zayıf yanı 2025 (tüm çekilişlerde
+geride) ve düşüşün azalmaması. Aynı set 4x'te bazın 5x'inden geri kalmıyor (bileşik +%676 / +%315; seçimde 10, doğrulamada
+6 çekilişte bazın 5x'inden iyi), düşüş %79 / %58, ama kötümser stop 10 çekilişin 8'inde yine eritiyor. 3x'te bileşik
++%457 / +%217, düşüş %67 / %47 ve kötümser stopta erimiyor (bazın 3x'i: +%314 / +%176).
+
+**Komşu değerler** (6 çekiliş). Dalga kuralı (baz üstünde): 60 dk iki dönemde de tüm çekilişlerde iyi; 65-70 dk
+doğrulamada iyi, seçimde eşit ya da biraz geride; 50-55 dk doğrulamada geride; 75-120 dk seçimde geride. Genişlik eşiği
+5-12 aynı sonucu veriyor, ≥3 doğrulamada kötü; genişlik şartı olmadan (her ilk pozisyon 60 dk) daha kötü. Ek zaman stopu
+(A üstünde): 27-35 dk tüm çekilişlerde iyi, 25 dk kötü, 38-42 dk etkisiz. Baz üstünde tek başına etkisi küçük (son 12
+ayda geride); ek pozisyon başabaşı 0.4 ile birlikte işe yarıyor.
+
+**İkinci turda elenenler.** Limit (maker) giriş (işlem −%40, doğrulamada getiri düşük), zarar serisi molası (işlem
+−%7-28, getiri iki dönemde de düşük), izleyen stop (seçimde iyi, doğrulamada kötü), tüm pozisyonlarda zaman stopu 30-90 dk,
+zarar kes 4-6, dalgada yeniden giriş ≥1-2, ek kapısı ≥8 (seçimde kötü), 5 yuva, yalnız çöküş eşiği 3-4, genişliğe göre
+başabaş tetiği (son 12 ayda kötü) ya da Kâr Al (etkisiz). Başabaş tabanı: 0.25 biraz iyi görünüyor ama komşuları tutarsız
+(0.2 seçimde iyi, doğrulamada kararsız; 0.35-0.4 kötü) ve son 12 ayda geride; alınmadı. Nötr kalanlar: ek kapısı ≥9
+(seçimde işlem +%3, kâr aynı), Kâr Al'ı limit emirle almak (çok küçük artı). Ek pozisyon boyunu küçültmek (%16.7 → %10)
+sabit boy getiriyi artırıyor ama işlem sayısını değiştirmiyor ve düşüşü büyütüyor (para ilk pozisyona yığılıyor): bu bir
+risk ayarı, iyileştirme değil.
+
+Coin evreni de değişmemeli (6 çekiliş, doğrulama dönemi sabit boy getiri; baz +%217): en hacimli 15 +%88, 25 +%146,
+30 +%107, 2 yıllık yaş sınırı +%155, 90 gün ortalama +%165. 25-30 coin doğrulamada işlem sayısını %19-38 artırıyor ama
+getiriyi üçte bir ile yarı arasında düşürüyor. Listesiz en hacimli 20 doğrulamada eşit (+%213) ama seçimde çok kötü
+(+%332 → +%224, işlem −%22).
+
+**Canlıda.** Süre pozisyon açılırken belirlenir ve pozisyona yazılır; açılış mesajında "Zaman stopu: 60 dk (Faz 9; ana
+ayar 45 dk)" görünür, açık pozisyon ayar sonradan değişse de kendi süresiyle kapanır. Dalga kuralı tek pozisyon modunda da
+çalışır (genişlik ölçümünü açar). Backtest raporunda başlıkta "Faz 9: …", 🧪 tabloda açıkken "Faz 9 kapalı", kapalıyken
+iki deneme satırı yer alır. Canlı bot ve backtest aynı kuralı kullanır (`config.futures_hold_minutes`).
+
+**Sınırlar.** Seçim yanlılığı: ~550 denemenin en iyileri. Süreler 5 dk'lık tarama adımına duyarlı (ek pozisyonda 25 dk
+kötü, 27-35 dk iyi): bu kadar keskin bir geçişin bir kısmı geçmişe özgü olabilir. Düşüş azalmıyor; 5x'te kötümser stop
+dolumu her ayarı eritiyor. Geçmiş sonuç gelecek garantisi değildir.
 
 ### 🏆 Strateji turnuvası (`--turnuva`)
 Hangi strateji türünün sizin dönemde işe yaradığını **tek komutla** görmek için:

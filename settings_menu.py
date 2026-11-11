@@ -25,8 +25,9 @@ from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Tuple
 
 from config import (DEFAULT_FUTURES_COINS, FUTURES_BB_MODES, FUTURES_CASCADE_PRESET, FUTURES_CONFIRMS,
                     FUTURES_ENTRY_ORDERS, FUTURES_PHASE6_OFF, FUTURES_PHASE6_PRESET, FUTURES_PHASE6_SINGLE_PRESET,
-                    FUTURES_PHASE8_OFF, FUTURES_GRID_PRESETS, FUTURES_LIQ_SOURCES, FUTURES_RECOMMENDED, FUTURES_SIDES,
+                    FUTURES_PHASE8_OFF, FUTURES_PHASE9_OFF, FUTURES_GRID_PRESETS, FUTURES_LIQ_SOURCES, FUTURES_RECOMMENDED, FUTURES_SIDES,
                     FUTURES_TACTIC_EXITS, FUTURES_TACTICS, FUTURES_TP_ORDERS, FUTURES_UNIVERSE_MODES, futures_be_trigger,
+                    futures_hold_minutes,
                     futures_coin_list, futures_crash_rules,
                     futures_funding_rules, futures_liq_distance_pct, futures_modules, futures_pump_rules,
                     futures_slot_share, futures_wave_rules, is_futures, is_rotation, parse_crash_rules)
@@ -66,7 +67,16 @@ CASCADE_OFF = {"FUTURES_MAX_POSITIONS": 1, "FUTURES_ISOLATED_SIZE_PCT": 100, "FU
 PHASE6_PRESETS = {"p6": FUTURES_PHASE6_PRESET, "p6s": FUTURES_PHASE6_SINGLE_PRESET}
 WAVE_RULE_CHOICES = ("", "1:5,4:8")
 # Faz 8: ek pozisyonların başabaş tetiği (0 = ana ayar). Faz 5 / Faz 6 setleri ve "kapat" düğmesi bunu da kapatır.
-EXTRA_BE_CHOICES = (0, 0.5, 0.6, 0.75)
+EXTRA_BE_CHOICES = (0, 0.4, 0.5, 0.6, 0.75)
+# Faz 9: pozisyona göre zaman stopu (0 = ana ayar). Faz 5 / Faz 6 setleri ve "kapat" düğmesi bunları da kapatır.
+EXTRA_HOLD_CHOICES = (0, 30, 35)
+WAVE_HOLD_CHOICES = (0, 60, 70)
+PHASE9_HINT = ("Faz 9 testi (rapor 17 araştırması; 2020-2026, 1 dk, 10 çekilişin ortancası): dalgada (≥8 coin düşerken) "
+               "açılan ilk pozisyonu 45 yerine 60 dk tutmak, mevcut ayarın üstünde işlem sayısını değiştirmeden bileşiksiz "
+               "getiriyi +%332 / +%212'den +%341 / +%222'ye, son 12 ayı +%81'den +%120'ye çıkardı ve hiçbir yılda geride "
+               "kalmadı. İlk başabaş 1.1 + ek başabaş 0.4 + yalnız çöküş %25 + ek pozisyon 35 dk ile birlikte yılda 888 → "
+               "929 işlem, +%379 / +%236, son 12 ay +%152; 2025'te geride. Ek pozisyonda 25 dk ve altı, dalgada 50-55 dk "
+               "testte kötüydü; düşüş ve kötümser stop riski değişmiyor.")
 PHASE8_HINT = ("Faz 8 (ek pozisyonlarda başabaş +%0.5): küçük pozisyon kârını erken kilitleyip kapanır, yuvası yeni "
                "sinyale geçer. DÜZELTME (Kasım 2026, rapor 15): ilk testteki kâr artışı backtestin iyimserliğiydi. "
                "Saniyelik işlem verisiyle düzeltilmiş testte Faz 6 setinde yılda ~780 → ~925 işlem, ama yıllık getiri "
@@ -369,6 +379,12 @@ PAGES: Dict[str, Page] = {
         Row("FUTURES_EXTRA_BE_TRIGGER_PCT", icon="🔒", values=EXTRA_BE_CHOICES,
             fmt=lambda v: "ek başabaş: ana ayar" if float(v) <= 0 else f"ek başabaş: +%{float(v):g}",
             show=lambda cfg: _crash(cfg) and cfg.futures_max_positions > 1 and cfg.breakeven_enabled, per_row=2),
+        Row("FUTURES_EXTRA_HOLD_MINUTES", icon="⏱️", values=EXTRA_HOLD_CHOICES,
+            fmt=lambda v: "ek zaman stopu: ana ayar" if int(v) <= 0 else f"ek zaman stopu: {int(v)} dk",
+            show=lambda cfg: _crash(cfg) and cfg.futures_max_positions > 1, per_row=3),
+        Row("FUTURES_WAVE_HOLD_MINUTES", icon="🌊", values=WAVE_HOLD_CHOICES,
+            fmt=lambda v: "dalgada ilk: ana ayar" if int(v) <= 0 else f"dalgada ilk: {int(v)} dk",
+            show=_crash, per_row=3),
         Link(lambda m: "⛔ Dalga modunu kapat (tek pozisyon, 2x)" + (" ve Faz 6'yı" if m.phase6_on() else ""),
              "fcm:off", show=lambda m: (m.cfg.futures_max_positions > 1 or m.cfg.futures_isolated_size_pct < 100
                                         or m.phase6_on())),
@@ -656,11 +672,11 @@ class SettingsMenu:
                 or (cfg.futures_max_positions > 1 and cfg.futures_extra_size_pct < 100))
 
     def cascade_preset_label(self) -> str:
-        on = self._matches({**FUTURES_CASCADE_PRESET, **FUTURES_PHASE6_OFF, **FUTURES_PHASE8_OFF})
+        on = self._matches({**FUTURES_CASCADE_PRESET, **FUTURES_PHASE6_OFF, **FUTURES_PHASE8_OFF, **FUTURES_PHASE9_OFF})
         return f"{'✅ ' if on else ''}⭐ Faz 5 seti: 2 pozisyon, 3x, ek ≥8 coin, yalnız çöküş %50"
 
     def phase6_preset_label(self, key: str) -> str:
-        on = self._matches({**PHASE6_PRESETS[key], **FUTURES_PHASE8_OFF})
+        on = self._matches({**PHASE6_PRESETS[key], **FUTURES_PHASE8_OFF, **FUTURES_PHASE9_OFF})
         name = ("Faz 6 seti: 4 pozisyon (ilk tam + 3 küçük), 3x, dalgada yeniden giriş, dalga eşikleri" if key == "p6"
                 else "Faz 6 tek pozisyon: dalgada yeniden giriş, dalga eşikleri, yalnız çöküş %50")
         return f"{'✅ ' if on else ''}⭐ {name}"
@@ -676,7 +692,8 @@ class SettingsMenu:
             return
         cfg = self.cfg
         preset = FUTURES_CASCADE_PRESET if arg == "on" else CASCADE_OFF
-        values = {k: format_value(v) for k, v in {**preset, **FUTURES_PHASE6_OFF, **FUTURES_PHASE8_OFF}.items()}
+        values = {k: format_value(v) for k, v in {**preset, **FUTURES_PHASE6_OFF, **FUTURES_PHASE8_OFF,
+                                                  **FUTURES_PHASE9_OFF}.items()}
         changed = [f"{k}={v}" for k, v in values.items() if v != format_value(getattr(cfg, EDITABLE[k].attr))]
         if not changed:
             self.show("fw", mid, "✅ Zaten bu ayarlar kullanılıyor.")
@@ -700,7 +717,8 @@ class SettingsMenu:
     def ask_phase6(self, arg: str, mid: Optional[int]) -> None:
         """fcm:p6 → Faz 6 seti (4 pozisyon); fcm:p6s → Faz 6 tek pozisyon. Faz 5 seti değişmez."""
         cfg = self.cfg
-        values = {k: format_value(v) for k, v in {**PHASE6_PRESETS[arg], **FUTURES_PHASE8_OFF}.items()}
+        values = {k: format_value(v) for k, v in {**PHASE6_PRESETS[arg], **FUTURES_PHASE8_OFF,
+                                                  **FUTURES_PHASE9_OFF}.items()}
         changed = [f"{k}={v}" for k, v in values.items() if v != format_value(getattr(cfg, EDITABLE[k].attr))]
         if not changed:
             self.show("fw", mid, "✅ Zaten bu ayarlar kullanılıyor.")
@@ -924,13 +942,22 @@ class SettingsMenu:
         if k > 1 and cfg.breakeven_enabled and futures_be_trigger(cfg, 1) != cfg.breakeven_trigger_pct:
             lines.append(f"🔒 Ek pozisyon başabaşı (Faz 8): fiyat +%{cfg.futures_extra_be_trigger_pct:g}'e gelince stop "
                          f"girişin +%{cfg.breakeven_floor_pct:g} üstüne (ilk pozisyonda +%{cfg.breakeven_trigger_pct:g}).")
+        if futures_hold_minutes(cfg, 1, None) != cfg.max_hold_minutes or cfg.futures_wave_hold_minutes > 0:
+            parts = []
+            if futures_hold_minutes(cfg, 1, None) != cfg.max_hold_minutes:
+                parts.append(f"ek pozisyonlar {cfg.futures_extra_hold_minutes} dk")
+            if cfg.futures_wave_hold_minutes > 0:
+                parts.append(f"≥{cfg.futures_wave_hold_breadth} coin düşerken açılan ilk pozisyon "
+                             f"{cfg.futures_wave_hold_minutes} dk")
+            lines.append(f"⏱️ Zaman stopu (Faz 9): {', '.join(parts)} (diğerleri {cfg.max_hold_minutes} dk).")
         breadth = getattr(bot, "last_breadth", None)
         if breadth is not None:
             lines.append(f"Son tarama: {breadth} coin son 1 saatte %3+ düştü.")
         if k > 1 and cfg.futures_universe <= 0:
             lines.append("⚠️ Yalnızca FUTURES_COINS listesi taranıyor: eşikler ~25 coinlik evren (liste + en hacimli 20) "
                          "için seçildi, ek pozisyon çok seyrek açılır.")
-        lines += [LINE, f"<i>{esc(CASCADE_HINT)}</i>", f"<i>{esc(PHASE6_HINT)}</i>", f"<i>{esc(PHASE8_HINT)}</i>"]
+        lines += [LINE, f"<i>{esc(CASCADE_HINT)}</i>", f"<i>{esc(PHASE6_HINT)}</i>", f"<i>{esc(PHASE8_HINT)}</i>",
+                  f"<i>{esc(PHASE9_HINT)}</i>"]
         return "\n".join(lines)
 
     def _text_fm(self) -> str:
