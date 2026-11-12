@@ -2674,8 +2674,19 @@ def live_comparison(cfg, data: FutData, trades: Sequence[FutTrade], path: Option
     rows = []
     for tr in inside:
         # Sinyal mumunun kapanışı: piyasa girişinde giriş anının kendisi, limit girişte (dolum birkaç dk sonra) o mum
-        row = by_t.get(int(tr.entry_ms) // MIN_MS * MIN_MS) if int(tr.entry_ms) % FUT_BAR_MS else None
-        key, text = live_status(tr.symbol, row if row is not None else by_t.get(int(tr.entry_ms) // FUT_BAR_MS * FUT_BAR_MS))
+        between = bool(int(tr.entry_ms) % FUT_BAR_MS)             # Dakikalık taramanın ara dakikasında açılan işlem
+        row = by_t.get(int(tr.entry_ms) // MIN_MS * MIN_MS) if between else None
+        if between and row is None:
+            # Canlı bot o dakikada taramamış (o sırada 5 dk'da bir tarıyordu): aynı 5 dk içinde açtıysa söylenir
+            near = by_t.get(int(tr.entry_ms) // FUT_BAR_MS * FUT_BAR_MS)
+            base = tr.symbol[:-4] if tr.symbol.endswith("USDT") else tr.symbol
+            if near is not None and (near.get("s") or {}).get(base) == "açıldı":
+                key, text = "açtı", "✅ canlı da açtı (5 dk kapanışında; o sırada dakikalık tarama kapalıydı)"
+            else:
+                key, text = ("ara dakika taranmadı", "ara dakika: canlı bot o sırada 5 dk'da bir tarıyordu "
+                                                    "(dakikalık tarama kapalıydı)")
+        else:
+            key, text = live_status(tr.symbol, row if between else by_t.get(int(tr.entry_ms) // FUT_BAR_MS * FUT_BAR_MS))
         counts[key] += 1
         rows.append(f"  {when(tr.entry_ms)} {tr.symbol[:-4]}: {text}")
     L.append(f"  Backtest işlemleri bu aralıkta: {len(inside)} | canlı da açtı: {counts.get('açtı', 0)}")

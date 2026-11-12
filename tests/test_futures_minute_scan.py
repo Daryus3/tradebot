@@ -159,6 +159,15 @@ def test_live_comparison_reads_minute_rows(fcfg, tmp_path):
                         3.0, 0.0, 0.0, 0.0, False, False, MIN)
     text = "\n".join(fb.live_comparison(fcfg, data, [trade], path=path))
     assert "Kayıtlı tarama (dakikada bir): 4 / 4" in text and "canlı da açtı: 1" in text
+    # Canlı bot o sırada 5 dk'da bir tarıyorsa (rapor 20): ara dakikadaki backtest işlemi "sinyal çıkmadı" diye değil,
+    # "o dakika taranmadı" diye yazılır; aynı 5 dk'nın kapanışında açtıysa açtı sayılır
+    old = [{"t": T0, "u": ["SOL"], "a": ["SOL"]}, {"t": T0 + 5 * MIN, "a": ["SOL"], "s": {"SOL": "açıldı"}},
+           {"t": T0 + 10 * MIN, "a": ["SOL"]}]
+    path.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in old), encoding="utf-8")
+    late = replace(trade, entry_ms=T0 + 7 * MIN)
+    text = "\n".join(fb.live_comparison(fcfg, data, [trade, late], path=path))
+    assert "ara dakika: canlı bot o sırada 5 dk'da bir tarıyordu" in text and "sinyal çıkmadı" not in text
+    assert "✅ canlı da açtı (5 dk kapanışında" in text and "canlı da açtı: 1" in text
 
 
 # ====================================================================== canlı bot
