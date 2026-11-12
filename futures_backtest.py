@@ -1601,7 +1601,8 @@ def variant_rows(cfg, data: FutData, signals, windows) -> List[Tuple[str, Evalua
             return evaluate(params_from_cfg(cfg, **over), data, wave_cache[0], windows)
         base = params_from_cfg(cfg)
         trail = (("İzleyen stop kapalı", ev(trail_enabled=False)) if base.trail_enabled else
-                 ("İzleyen stop +%3 / %1.5", ev(trail_enabled=True, trail_act_pct=3.0, trail_gap_pct=1.5)))
+                 ("İzleyen stop +%3 / %1.5 (iyimser: saniyelik veride işlem başı %0.06-0.09 daha kötü)",
+                  ev(trail_enabled=True, trail_act_pct=3.0, trail_gap_pct=1.5)))
         return ([("Başabaş kalkanı kapalı", ev(be_enabled=False)),
                 trail,
                 ("Başabaş +%5 → +%2", ev(be_enabled=True, be_trigger_pct=5.0, be_floor_pct=2.0)),
@@ -2728,6 +2729,10 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
                 if p.trail_enabled else "")
              + f" | zaman stopu {p.hold_min} dk (fiyat %, girişten)"
              + (f"; Faz 9: {phase9_label(p)}" if phase9_label(p) else ""))
+    if p.trail_enabled:
+        L.append("⚠️ İzleyen stop açık: backtest bu çıkışı iyimser hesaplar (1 dk mumda dakika içi geri çekilme görünmez). "
+                 "Saniyelik veriyle kalibrasyonda (Kasım 2026, 1.935 işlem) izleyen stop işlem başı getiriyi %0.04-0.13 "
+                 "düşürdü; gerçek sonuç bu rapordan belirgin düşük olur.")
     L.append(f"Komisyon: piyasa %{p.taker_fee * 100:.3f} / limit %{p.maker_fee * 100:.3f}, kayma %{p.slippage_pct:g}, "
              + ("ortalama fonlama oranı (8 saatte %0.01)" if data.loader is not None else "gerçek fonlama oranları")
              + f"; çıkışlar {'1 dk' if data.exit_interval == '1m' else '5 dk'} mumlarla")

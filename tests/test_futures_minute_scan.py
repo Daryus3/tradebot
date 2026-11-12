@@ -274,6 +274,25 @@ def test_telegram_page_has_the_switch(fcfg):
     assert "1.662" in MINUTE_SCAN_HINT and "3 kat kaymada" in MINUTE_SCAN_HINT
 
 
+def test_trailing_stop_is_flagged_as_optimistic_in_report_and_notes(fcfg):
+    """Saniyelik veri kalibrasyonu (Kasım 2026): backtest izleyen stopu olduğundan iyi gösterir; rapor ve notlar söyler."""
+    k1 = {"SOLUSDT": k1_of(minute_closes()), "ADAUSDT": k1_of(minute_closes(dip=0.0) * 0 + 100.0)}
+    on = scan_cfg(fcfg, futures_coins="SOL,ADA")
+    data = bt_data(k1)
+    sigs, funnel = fb.find_signals(on, data)
+    win = fb.slice_range(k1["SOLUSDT"], sigs[0].close_ms, sigs[0].close_ms + 60 * MIN)
+    windows = {(sigs[0].symbol, sigs[0].close_ms): (MIN, win["t"], win["o"], win["h"], win["l"], win["c"])}
+    rows = dict(fb.variant_rows(on, data, sigs, windows))
+    assert any(name.startswith("İzleyen stop +%3 / %1.5 (iyimser") for name in rows)
+    trail = replace(on, futures_trailing=True)
+    text = fb.format_report(trail, data, fb.evaluate(fb.params_from_cfg(trail), data, sigs, windows), funnel)
+    assert "⚠️ İzleyen stop açık: backtest bu çıkışı iyimser hesaplar" in text
+    assert "⚠️ İzleyen stop açık" not in fb.format_report(on, data, fb.evaluate(fb.params_from_cfg(on), data, sigs, windows),
+                                                         funnel)
+    note = [n for n in _setting_notes(trail) if "FUTURES_TRAILING" in n]
+    assert len(note) == 1 and "1.935 işlemde" in note[0] and "Öneri: kapalı" in note[0]
+
+
 def test_config_rejects_nothing_new_and_validates(fcfg):
     scan_cfg(fcfg).validate()
     with pytest.raises(ConfigError):

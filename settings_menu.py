@@ -121,7 +121,8 @@ UNIVERSE_HINT = ("En iyi sonuç: 📋 liste + en hacimli 20 köklü coin (beklem
                  "ilk 80 -%42. Yaş filtresi olmadan (yeni / hype coinler dahil) her N'de hesap eridi.")
 TRAIL_HINT = ("Test (2023-11 → 2026-10): izleyen stop bu stratejide sonucu iyileştirmedi (sabit listede çoğu ayarda "
               "+%62 → +%27-48/yıl); başabaş +1.5 → +0.3 en düşük düşüşü verdi, +4 / +5 tetik getiri kazandırmadan "
-              "düşüşü %25'ten %39'a çıkardı.")
+              "düşüşü %25'ten %39'a çıkardı. Backtest izleyen stopu olduğundan iyi gösterir: saniyelik veriyle "
+              "kalibrasyonda (Kasım 2026, 1.935 işlem) izleyen stop işlem başı getiriyi %0.04-0.13 düşürdü.")
 MODULES_HINT = ("Faz 3 testi (2020-2026, TP 8 / SL 5 / başabaş +1 → +0.3 / 45 dk, 1 dk doğrulama): üç modül de zarar "
                 "etti. Pompa short yılda ~740 işlem, kazanma %71 ama işlem başı -%0.11; çöküşle birlikte yılda ~1.000 "
                 "işlem ama hesap eridi. Bollinger ve kırılım binlerce işlem, işlem başı -%0.1 civarı; hepsi birlikte "

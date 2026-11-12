@@ -1267,6 +1267,77 @@ Canlı yol sahte borsayla test edildi (`tests/test_futures_minute_scan.py`: ara 
 sınırda eski davranış, hızlı giriş); gerçek Binance'te ilk kez sizin sunucunuzda çalışacak. İşlem sayısı iki katına
 çıktığı için komisyon da iki katına çıkar: kayma varsayımı tutmazsa kazanç daha çabuk erir. Önce test modunda deneyin.
 
+#### Rapor 20 araştırması: dakikalık taramada ayarlar, izleyen stopun saniyelik veriyle sınanması (Kasım 2026)
+Dakikalık tarama (`FUTURES_MINUTE_SCAN`) açıkken ~110 ayar / kural yeniden denendi (toplam ~900). Üç sonuç:
+
+**1) İzleyen stop: backtest iyimser, gerçekte zararlı.** Dakikalık taramada rapordaki "İzleyen stop +%3 / %1.5" satırı
+çok iyi görünür (rapor 20: +%4.9e+07, tabanda +%2.6e+07) ve çok çekilişli testte 7 komşu ayarın 7'si tabandan iyi çıktı
+(ör. +2/1: bileşiksiz getiri +%526 / +%276 → +%728 / +%390). Canlı bot izleyen stopu 2 saniyede bir fiyat yoklayarak
+uygular; 1 dk mumda dakika içi geri çekilme görünmez. Bu yüzden 300 coin-gün (150 seçim + 150 doğrulama dönemi), 1.935
+işlem için Binance'in saniyelik işlem kayıtları (aggTrades) indirildi ve canlı mantık birebir oynatıldı (2 sn yoklama,
+stop taşıma gecikmesi 0.5 sn, borsadaki stop en sık 10 sn'de bir taşınır, geri çekilmede piyasa emriyle çıkış). Aynı
+işlemlerde izleyen stoplu − izleyen stopsuz çıkış getirisi (%; ortalama ± standart hata):
+
+| İzleyen stop | İlk pozisyon (757 işlem) | Ek pozisyon (1.178 işlem) | Motorun (1 dk) gösterdiği: ilk / ek |
+|---|---|---|---|
+| +3 / 1 | −0.060 ± 0.042 | −0.092 ± 0.033 | +0.038 / +0.181 |
+| +2 / 1 | −0.104 ± 0.049 | −0.115 ± 0.037 | +0.034 / +0.263 |
+| +3 / 1.5 | −0.045 ± 0.039 | −0.091 ± 0.031 | +0.031 / +0.157 |
+| +2 / 0.75 | −0.072 ± 0.049 | −0.131 ± 0.038 | +0.058 / +0.288 |
+| +4 / 2 | −0.035 ± 0.030 | −0.056 ± 0.026 | +0.012 / +0.098 |
+| +1.5 / 0.75 | −0.068 ± 0.052 | −0.123 ± 0.040 | +0.088 / +0.343 |
+
+İzleyen stop altı ayarın altısında işlem başı getiriyi düşürüyor; izleyen stopla kapanan işlemler, bırakılsaydı ilk
+pozisyonda %0.15-0.48, eklerde %0.55-0.83 daha iyi kapanacaktı (çöküş dönüşlerinde fiyat dakika içinde sık sık geri
+çekilip devam ediyor). Motorda en kötümser dakika içi sıra varsayımı (her mumda önce tepe, sonra dip) iyimserliği
+azaltıyor ama gidermiyor. İzleyen stop olmadan aynı oynatma motorla uyumlu (fark: ilk −0.038 ± 0.081, ek −0.003 ±
+0.087), yani motorun başabaş modeli dakikalık girişlerde de geçerli. **Sonuç: izleyen stop önerilmez**; ayar notu,
+Telegram ipucu ve rapor satırı artık bunu söylüyor, izleyen stop açıkken rapor başlığına uyarı düşüyor.
+
+**2) Giriş gecikmesinin maliyeti (aynı saniyelik veri, 2.001 giriş).** Sinyal dakikasının kapanışından sonra fiyat
+ortalama 1 sn'de +%0.023, 2 sn'de +%0.053, 3 sn'de +%0.040, 5 sn'de +%0.066 (± 0.016), 10 sn'de +%0.080, 30 sn'de
++%0.142 yukarıda. 5 dk sınırındaki girişlerle (5 sn'de +%0.068) ara dakikalardaki girişler (+%0.065) aynı: motorun ara
+dakikalar için de kullandığı %0.05 varsayımı ölçümle uyumlu (biraz düşük).
+
+**3) Dakikalık taramada dalga eşikleri kapatılmalı.** 10 çekilişin ortancası; "iyi" = dakikalık tarama tabanından (F seti)
+iyi çıkan çekiliş, seçim / doğrulama:
+
+| | Taban (F, her dakika) | Dalga eşikleri kapalı | Ek kapısı 12 | Başabaş tabanı 0.2 | Dalga kapalı + taban 0.2 | Faz 8 kapalı |
+|---|---|---|---|---|---|---|
+| İşlem / yıl | 1.662 | 1.436 | 1.528 | 1.537 | 1.323 | 1.073 |
+| İşlem başı net | +%0.149 | +%0.187 | +%0.163 | +%0.207 | +%0.252 | +%0.336 |
+| Sabit boy yıllık getiri | +%536 / +%278 | +%550 / +%305 (9 / 10) | +%561 / +%289 (10 / 9) | +%567 / +%281 (9 / 8) | +%572 / +%310 (10 / 10) | +%511 / +%301 (4 / 10) |
+| Bileşik yıllık getiri | +%1.954 / +%423 | +%2.071 / +%661 (10 / 10) | +%1.986 / +%481 (6 / 9) | +%2.270 / +%448 (10 / 7) | +%2.348 / +%708 (10 / 10) | +%2.159 / +%680 (10 / 10) |
+| En büyük düşüş | %87 / %77 | %84 / %72 | %83 / %76 | %72 / %76 | %70 / %72 | %79 / %66 |
+| Kayma 3 kat (bileşik) | +%526 / +%56 | +%574 / +%168 | +%659 / +%68 | +%772 / +%81 | +%965 / +%177 | +%769 / +%226 |
+| Kayma 5 kat (bileşik) | +%90 / −%22 | +%147 / +%33 | +%84 / −%24 | +%135 / −%12 | +%194 / +%70 | +%116 / +%30 |
+| Son 12 ay | +%112 | +%79 (iyi 2) | +%132 (iyi 8) | +%107 (iyi 4) | +%77 (iyi 4) | +%216 (iyi 8) |
+| Son 24 ay | +%3.467 | +%6.222 (iyi 10) | +%4.301 (iyi 8) | +%4.111 (iyi 7) | +%8.566 (iyi 10) | +%5.275 (iyi 7) |
+| Geride kaldığı yıllar | - | 2023, 2026 | yok | 2023 | 2023, 2026 | 2020, 2022, 2023 |
+
+Bu kez adaylar yalnızca seçim / doğrulama ayrımıyla değil **başka tarama ızgaralarında** da sınandı (2 dk'da bir × 2
+faz, 3 dk'da bir × 3 faz ve 1 dk: altı ayrı işlem dizisi; kaç ızgarada kendi tabanından iyi):
+
+| | Seçim | Doğrulama | Kayma 3 kat (doğrulama) | Son 12 ay |
+|---|---|---|---|---|
+| Dalga eşikleri kapalı | 6 / 6 | 5 / 6 | 6 / 6 | 5 / 6 |
+| Dalga kapalı + başabaş tabanı 0.2 | 5 / 6 | 6 / 6 | 5 / 6 | 6 / 6 |
+| Dalga kapalı + ek kapısı 12 | 5 / 6 | 6 / 6 | 6 / 6 | 5 / 6 |
+| Başabaş tabanı 0.2 | 6 / 6 | 5 / 6 | 4 / 6 | 2 / 6 |
+| Ek kapısı 12 | 5 / 6 | 5 / 6 | 4 / 6 | 1 / 6 |
+| Ek başabaş 0.5 / 0.6, Faz 8 kapalı | 4 / 6 | 3 / 6 | 3-5 / 6 | 2-5 / 6 |
+
+Dalga eşiği sinyalleri (son 1 saatte ≥12 coin düşerken 1 sa %5 / 4 sa %8) önceki ızgaraya uydurulmuş çıktı: kaydırılmış
+ızgaralarda işlem başı −%0.05 ile −%0.12, dakikalık taramada −%0.03 (rapor 20). Kapatmak her ızgarada kârı ve maliyete
+dayanıklılığı artırıyor; bedeli %14 daha az işlem (yılda 1.436; eski 5 dk botunun 929'una göre hâlâ +%55) ve bu ızgarada
+son 12 ayın geride kalması (diğer beş ızgarada önde). **Öneri (dakikalık tarama açıkken): `FUTURES_WAVE_RULES=` (boş;
+Telegram → 🧭 Giriş sinyali → 🌊 Dalga modu → "Dalga eşikleri: kapalı").** Başabaş tabanını 0.2'ye indirmek ek küçük bir
+kazanç: saniyelik veride eklerde +%0.058 ± 0.027 (motor +%0.091 diyor, biraz iyimser), ilk pozisyonda etkisiz.
+
+**Bu turda etkisiz ya da tutarsız çıkanlar** (dakikalık taramada, 3 çekiliş): Kâr Al 5-12, Zarar Kes 4-6, ilk başabaş
+0.9-1.5, zaman stopu 30 / 60, dalgada ilk pozisyon 45-90 dk, ek zaman stopu 25-45, 3 / 5 yuva, ek boyu %10 / %25,
+dalgada yeniden giriş ≥2-8, zarar beklemesi 120 / 480 dk, yalnız çöküş %10 / %50, ek kapısı 8 / 15.
+
 ### 🏆 Strateji turnuvası (`--turnuva`)
 Hangi strateji türünün sizin dönemde işe yaradığını **tek komutla** görmek için:
 ```bash

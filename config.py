@@ -1721,7 +1721,11 @@ def _setting_notes(cfg: Config) -> List[str]:
                          f"yeni / hype coinler (TRUMP, FARTCOIN, WIF...) çöküşten toparlanmadı, hesap eridi. Önerilen ≥ 1095.")
         if cfg.futures_trailing:
             notes.append("FUTURES_TRAILING=true: izleyen stop 2023-2026 testinde bu stratejinin sonucunu iyileştirmedi "
-                         "(sabit listede çoğu ayarda yıllık getiri +%62'den +%27-48'e indi).")
+                         "(sabit listede çoğu ayarda yıllık getiri +%62'den +%27-48'e indi). DİKKAT: backtest izleyen "
+                         "stopu olduğundan İYİ gösterir (1 dk mumda dakika içi geri çekilme görünmez; dakikalık taramada "
+                         "raporda büyük artış çıkar). Kasım 2026'da saniyelik işlem verisiyle canlı botun mantığı (2 sn'de "
+                         "bir yoklama) 1.935 işlemde oynatıldı: izleyen stop işlem başı getiriyi ilk pozisyonda %0.04-"
+                         "0.10, ek pozisyonda %0.06-0.13 DÜŞÜRDÜ (+1.5/0.75 … +4/2 ayarlarının hepsinde). Öneri: kapalı.")
         if cfg.futures_tactic == "crash":
             if cfg.futures_confirm in ("green", "either"):
                 notes.append(f"FUTURES_CONFIRM={cfg.futures_confirm}: ızgara testinde (2020-2026) ilk yeşil mum teyidi "
@@ -1830,7 +1834,13 @@ def _setting_notes(cfg: Config) -> List[str]:
                          f"≥{cfg.futures_wave_breadth} coin %3+ düşerken {desc} düşüş de sinyal. Düzeltilmiş testte "
                          f"(Kasım 2026; 1:5,4:8, ≥12) tek pozisyonda yılda 369 → 387 işlem, yıllık getiri +%367 / +%147 "
                          f"→ +%379 / +%159; Faz 6 setinde (4 pozisyon) 682 → 780 işlem, +%274 / +%149 → +%270 / +%166. "
-                         f"Bu sinyallerin kendi kazancı ince (işlem başı +%0.08).")
+                         f"Bu sinyallerin kendi kazancı ince (işlem başı +%0.08). GÜNCELLEME (ızgara testi, rapor 19-20 "
+                         f"araştırması): aynı kural 1-4 dk kaydırılmış mumlarla uygulandığında dalga eşiği işlemleri "
+                         f"işlem başı -%0.05 ile -%0.12 getirdi (ayarların denendiği ızgaraya uydurulmuş). Dakikalık "
+                         f"taramada kapatmak yılda 1.662 → 1.436 işlem, bileşiksiz getiri +%536 / +%278 → +%550 / +%305, "
+                         f"en büyük düşüş %87 / %77 → %84 / %72, 3 kat kaymada doğrulama +%56 → +%168; 6 farklı tarama "
+                         f"ızgarasının 6'sında (seçim) / 5'inde (doğrulama) daha iyi. Zayıf yanı: bu ızgarada son 12 ay "
+                         f"+%112 → +%79, 2023 ve 2026'da geride. Öneri: kapalı (FUTURES_WAVE_RULES boş).")
         elif (cfg.futures_wave_rules or "").strip():
             notes.append("FUTURES_WAVE_RULES yazılı ama kullanılmıyor: dalga eşikleri yalnızca çöküş taktiğinde ve sabit "
                          "yüzdelerle (FUTURES_CRASH_Z=0) çalışır.")
