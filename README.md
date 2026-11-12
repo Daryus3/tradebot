@@ -953,6 +953,15 @@ yapılır. Backtestteki
 `ENTRY_LAG_PCT` (5 sn = %0.05) değiştirilmedi: canlı ölçümler birikince yeniden ayarlanabilir; o zamana kadar backtest
 hızlı girişe göre biraz kötümser kalır. Emir defteri derinliği (büyük bakiyede kayma) modellenmiyor.
 
+**İlk canlı ölçüm (rapor 18, 9-12 Kasım 2026, gerçek vadeli hesap).** Hızlı giriş kapalıyken sinyaller mum kapanışından
+ortanca 6.1 sn sonra hazırdı (backtestin varsaydığı 5 sn'den de geç); açıkken 103 taramada ortanca 3.8 sn (tarama 1.0
+sn'de başladı, mumlar 3.7 sn'de alındı; sunucu saati ile Binance arası fark ortanca 185 ms). 103 taramanın 61'inde en az
+bir coinin yeni mumu ilk yanıtta görünmediği için mumlar yeniden istendi ve tarama eski tarama anına (3 sn) kadar bekledi.
+Bu taramaların neredeyse tamamı sakin piyasadaydı (aralıkta yalnızca 3 sinyal var): sakin piyasada az işlem gören coinde
+yeni mumun ilk işlemi saniyeler sonra gelir; dalgada her coin saniyede birçok kez işlem gördüğü için bekleme kısalır.
+Asıl ölçü pozisyon açıldığında yazılan "Giriş gecikmesi" satırıdır; canlı bot bu aralıkta hesap modu yüzünden pozisyon
+açamadığı için (Sorun giderme: "Pozisyon açılamıyor: Çoklu Varlık modu") henüz yok.
+
 #### Rapor 17 araştırması: kârı ve işlem sayısını birlikte artıran ayar var mı? (Kasım 2026)
 Baz: rapor 17'nin ayarı (5x, 4 pozisyon, Faz 6 ekleri, ek kapısı ≥10, Faz 8 açık, 28.93 USDT), düzeltilmiş motor,
 2020-01 → 2026-11, 1 dk çıkışlar; motorla birebir üretildi (1.234.021,97 USDT, 6.071 işlem). ~330 ayar denendi.
@@ -1104,6 +1113,33 @@ iki deneme satırı yer alır. Canlı bot ve backtest aynı kuralı kullanır (`
 kötü, 27-35 dk iyi): bu kadar keskin bir geçişin bir kısmı geçmişe özgü olabilir. Düşüş azalmıyor; 5x'te kötümser stop
 dolumu her ayarı eritiyor. Geçmiş sonuç gelecek garantisi değildir.
 
+#### Rapor 18 araştırması: üçüncü tur (Kasım 2026) — F setini geçen kural çıkmadı
+Rapor 18 (F seti uygulanmış) üstünde ~110 kural / ayar daha denendi (toplam ~660). Bu turda ayar değerleri değil **yeni
+kural aileleri** sınandı. Hiçbiri kabul ölçütünü (seçim ve doğrulama döneminde ayrı ayrı iyi ya da eşit, kayma stresinde
+kötüleşmeme) geçemedi; **yeni ayar eklenmedi, öneri F setidir.** Rakamlar sabit boy yıllık getiri, seçim / doğrulama;
+F: +%379 / +%236, yılda 929 işlem (6 çekiliş; 30-45 dk'lık dalga eşiği satırı 10 çekiliş).
+
+| Fikir | Sonuç | Neden elendi |
+|---|---|---|
+| **Ana yuva yeniden dolsun**: büyük pozisyon kapanınca (ekler açıkken) sıradaki sinyal yine büyük boyla açılsın | +%412 / +%212; son 12 ay +%152 → +%33; düşüş %69 → %78 | Seçimde iyi, doğrulamada 6 çekilişin 6'sında kötü. Dalganın ilk sinyali özel; sonradan gelenler büyük boyu taşımıyor |
+| **Daha çok yuva** (5 / 6 / 8; ek toplamı sabit) | İşlem +%16 / +%30 / +%54; getiri +%323 / +%196, +%307 / +%187, +%304 / +%191 | İşlem artıyor, kâr düşüyor (yeniden dolan ana yuvayla birlikte de: +%400 / +%206) |
+| **Taze dip**: büyük pozisyon yalnızca sinyal mumu son 4 saatin dibini gördüyse | Tek tek sinyallerde çok güçlü (taze: işlem başı +%0.38 / +%0.29, 7 yılın 7'sinde artı; dip 3+ mum önceyse −%0.08 / +%0.18) ama yuva simülasyonunda bayatı atlamak +%293 / +%158, küçültmek +%250-322 / +%136-195 | Şimdiki kuralın seçtiği ilk pozisyonlar (dalgada işlem başı +%0.35-0.6) taze / bayat ayrımından daha iyi bir seçim yapıyor |
+| **Büyük pozisyona eleme**: dalga eşiği sinyali, düşük puan, BTC son 5 dk'da yükseliyor, yeşil mum ilk pozisyon olamasın | +%316-369 / +%114-204 | Hepsi iki dönemde de kötü |
+| **Eş zamanlı sinyallerin sırası**: düşüş yüzdesi, taze dip önce, satış hacmi, 1 sa / 4 sa kuralı önce | +%245-402 / +%135-231 | Hiçbiri iki dönemde birden iyi değil (taze dip önce: seçimde +%402, doğrulamada +%224). Ters sıra +%92 / +%96: şimdiki sıra (eşiğini en çok aşan önce) çok önemli, değiştirilmemeli |
+| **15 / 30 dk'lık çöküş kuralı** (ana kural olarak: 15 dk %3-5, 30 dk %4-5.5) | İşlem +%3 ile +%34; getiri +%279-391 / +%172-213 | Doğrulamada hepsi kötü |
+| **30-45 dk'lık dalga eşiği** (yalnızca ≥12 coin düşerken; en iyisi 30 dk %3.5) | İşlem +%5 (seçim +%2.5, doğrulama +%10); +%403 / +%235; bileşik +%1.159 / +%391 (F: +%875 / +%412); son 12 ay +%170 | Eklenen işlemlerin kendi kazancı sıfır (dalga eşiği işlemleri işlem başı +%0.036 → %0.000); 3 kat kaymada doğrulama +%147 → +%103; 2022, 2025 ve son 24 ayda geride; önyüklemede doğrulama farkının artı olma olasılığı %49. Komşular (%3.25, %3.75, 45 dk %4) daha zayıf |
+| **Pozisyona göre Kâr Al / Zarar Kes** (eklerde Kâr Al 3-6, Zarar Kes 3-4; ilkte Kâr Al 10-12, Zarar Kes 4 / 6) | +%366-394 / +%204-242 | Etkisiz ya da karışık (eklerde Zarar Kes 3: doğrulamada iyi, seçimde bileşik getiri kötü, düşüş %87 → %90) |
+
+**Faz 8 (ek pozisyon başabaşı) notu düzeltildi.** Eski "Öneri: kapalı" notu F setiyle çelişiyordu. F setinde Faz 8'i
+kapatmak işlem sayısını %19-22 düşürdü, getiriyi değiştirmedi (+%379 / +%236 → +%376 / +%226), son 12 ayı +%152'den
++%36'ya indirdi; 0.5 yerine 0.4 son 12 ayda 6 çekilişin 6'sında iyi. Notlar buna göre güncellendi: daha çok işlem için
+açık (0.4), maliyete dayanıklılık için kapalı.
+
+**Sonuç.** Backtestte bu stratejinin ayar ve kural uzayı büyük ölçüde tüketildi: işlem sayısını artıran her şey ya kârı
+düşürüyor ya da sıfır kazançlı işlem ekliyor (komisyon ve risk artar, kâr artmaz). Kâr ve işlem sayısı için bundan
+sonraki gerçek kazanç ayarlarda değil **canlı tarafta**: botun sinyalleri gerçekten açabilmesi (rapor 15-18'de 3
+sinyalin 3'ü de hesap modu yüzünden açılamadı) ve girişin hızı.
+
 ### 🏆 Strateji turnuvası (`--turnuva`)
 Hangi strateji türünün sizin dönemde işe yaradığını **tek komutla** görmek için:
 ```bash
@@ -1234,6 +1270,7 @@ tradebot/
 | Telegram komutlarına cevap yok / mesajlar iki kez geliyor | Aynı token'la başka bir bot (ör. bilgisayardaki) çalışıyor; onu kapatın |
 | `Timestamp ... recvWindow` (-1021) | `timedatectl` ile saatin senkronize olduğunu kontrol edin |
 | `Invalid API-key, IP, or permissions` (-2015) | Anahtarı, izinleri ve IP kısıtlamasını (sunucu IP'si) kontrol edin |
+| **Pozisyon açılamıyor: Çoklu Varlık modu** (`-4168`, "Unable to adjust to isolated-margin mode under the Multi-Assets mode"; Telegram'da ve `/tarama`'da ⛔, backtest raporunda "CANLI BOT POZİSYON AÇAMIYOR") | Binance vadeli hesabı **Çoklu Varlık (Multi-Assets)** modunda; bu modda yalıtılmış teminat kullanılamaz ve bot **hiçbir** sinyali açamaz. Açık vadeli pozisyon ve emirleri kapatıp Binance uygulaması → Vadeli → ⚙️ Tercihler → **Varlık Modu → Tek Varlık Modu** seçin; bot yeniden başlatılmadan devam eder. Bot bunu kendisi de dener; seçenek yoksa ya da değişmiyorsa hesap Kredi İşlem Modu'nda (Credits Trading Mode, BNFCR) olabilir: o modda yalıtılmış teminat yoktur, Binance desteğine danışın |
 | "Serbest USDT bakiyesi yok" | USDT'yi Binance'te **Cüzdan → Transfer** ile **Spot**'a aktarın |
 | Coinler Binance'te "kilitli" görünüyor | Normal: yedek zarar-kes emri bekliyor |
 | Kill-switch kilidi | Servisi durdurun, `python main.py --mode paper --reset-state --yes`, servisi başlatın |

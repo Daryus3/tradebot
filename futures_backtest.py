@@ -2506,6 +2506,26 @@ def live_timing(cfg, journal: Sequence[dict]) -> List[str]:
     return out
 
 
+def live_account_block(journal: Sequence[dict]) -> Optional[str]:
+    """Canlı bot tarama kaydında hesap modu engeli (Binance -4168: hesap Çoklu Varlık modunda, yalıtılmış teminat
+    reddediliyor) var mı: varsa rapora yazılacak uyarı satırı. Bu engel sürdükçe canlı bot HİÇBİR pozisyon açamaz;
+    engelden sonra açılmış pozisyon varsa "sonradan düzelmiş" diye belirtilir."""
+    hits = [int(r["t"]) for r in journal
+            if any("-4168" in str(o) or "Çoklu Varlık" in str(o) for o in (r.get("s") or {}).values())]
+    if not hits:
+        return None
+    last = max(hits)
+    opened_after = any(int(r["t"]) > last and "açıldı" in (r.get("s") or {}).values() for r in journal)
+    when = datetime.fromtimestamp(last / 1000).strftime("%d.%m %H:%M")
+    if opened_after:
+        return (f"  ℹ️ {len(hits)} taramada giriş, Binance hesabı Çoklu Varlık (Multi-Assets) modunda olduğu için "
+                f"reddedildi (-4168; son {when}); sonrasında pozisyon açılabilmiş, engel kalkmış görünüyor.")
+    return (f"  ⛔ CANLI BOT POZİSYON AÇAMIYOR: {len(hits)} taramada giriş reddedildi (son {when}). Binance hesabı Çoklu "
+            f"Varlık (Multi-Assets) modunda; bu modda yalıtılmış teminat kullanılamaz (-4168) ve bot hiçbir sinyali "
+            f"açamaz. Çözüm: Binance → Vadeli → Tercihler (⚙️) → Varlık Modu → 'Tek Varlık Modu' (README: \"Pozisyon "
+            f"açılamıyor: Çoklu Varlık modu\"). Düzelince bot yeniden başlatılmadan da çalışır; /tarama'da ⛔ satırı kalkar.")
+
+
 def live_comparison(cfg, data: FutData, trades: Sequence[FutTrade], path: Optional[Path] = None,
                     limit: int = 15) -> List[str]:
     """Backtestin (tek hesap) işlemlerini canlı botun aynı mumdaki tarama kaydıyla karşılaştırır: canlı da açtı mı,
@@ -2547,6 +2567,9 @@ def live_comparison(cfg, data: FutData, trades: Sequence[FutTrade], path: Option
                  + (f" | backtestte olup canlıda olmayan: {', '.join(missing[:12])}" + (" …" if len(missing) > 12 else "")
                     if missing else ""))
     L.extend(live_timing(cfg, journal))
+    block = live_account_block(journal)
+    if block:
+        L.append(block)
     inside = [tr for tr in trades if first <= tr.entry_ms <= last]
     if not inside:
         L.append("  Bu aralıkta backtestte işlem yok.")

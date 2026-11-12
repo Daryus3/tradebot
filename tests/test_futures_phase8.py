@@ -38,7 +38,7 @@ def test_phase8_setting_defaults_validation_env_helper_notes(fcfg, monkeypatch, 
     assert load_config(env_file=str(tmp_path / "x.env"), mode_override="paper").futures_extra_be_trigger_pct == 0.5
     notes = [n for n in _setting_notes(on) if "Faz 8" in n]
     assert len(notes) == 1 and "+%0.5" in notes[0] and "925" in notes[0] and "DÜZELTME" in notes[0]
-    assert "kâr artmaz" in notes[0] and "Öneri: kapalı" in notes[0]              # Rapor 15: saniyelik veriyle düzeltildi
+    assert "kâr artmaz" in notes[0] and "Daha çok işlem isteniyorsa açık" in notes[0]   # Rapor 15 + çok çekilişli test
     assert "etkisiz" in " ".join(_setting_notes(replace(on, futures_max_positions=1)))
     assert "etkisiz" in " ".join(_setting_notes(replace(on, breakeven_enabled=False)))
     assert "küçük değil" in " ".join(_setting_notes(replace(on, futures_extra_be_trigger_pct=1.5)))

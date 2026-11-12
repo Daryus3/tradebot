@@ -130,6 +130,16 @@ def _widen_pool(ex) -> None:
         log.debug("Bağlantı havuzu büyütülemedi: %s", exc)
 
 
+# Binance -4168: hesap Çoklu Varlık (Multi-Assets) modunda → yalıtılmış (ISOLATED) teminat reddedilir, bot HİÇBİR
+# pozisyon açamaz. Mesajın başı tarama kaydına (120 karakter) sığacak kadar kısa tutulur.
+MULTI_ASSETS_HEAD = ("Binance hesabı Çoklu Varlık (Multi-Assets) modunda: yalıtılmış teminat reddediliyor (-4168), "
+                     "bot pozisyon AÇAMIYOR.")
+MULTI_ASSETS_FIX = ("Çözüm: açık vadeli pozisyon ve emirleri kapatıp Binance → Vadeli → Tercihler (⚙️) → Varlık Modu → "
+                    "'Tek Varlık Modu'nu seçin. Seçenek yoksa ya da değişmiyorsa hesabınız Kredi İşlem Modu'nda "
+                    "(Credits Trading Mode, BNFCR; Binance bu modda Çoklu Varlık modunu zorunlu tutar) olabilir: bu "
+                    "modda yalıtılmış teminat kullanılamaz, Binance desteğine danışın.")
+
+
 def _code_of(exc: Exception) -> str:
     text = str(exc)
     for code in ("-4164", "-2019", "-4046", "-4047", "-4048", "-4059", "-2021", "-2022", "-4061", "-1111", "-4005",
@@ -256,21 +266,26 @@ class FuturesExchange:
         bal = self._call("Vadeli bakiye okunamadı", self.ex.fetch_balance)
         return float((bal.get("total") or {}).get(asset) or 0.0)
 
+    def _multi_assets(self) -> bool:
+        info = self._call("Varlık modu okunamadı", self.ex.fapiPrivateGetMultiAssetsMargin)
+        return str((info or {}).get("multiAssetsMargin")).lower() == "true"
+
     def check_single_asset(self) -> Optional[str]:
         """Hesap Çoklu Varlık (Multi-Assets) modundaysa Tek Varlık moduna alır: Çoklu Varlık modunda Binance yalıtılmış
         (ISOLATED) teminata izin vermez (-4168) ve hiçbir pozisyon açılamaz. Değişiklik olduysa bilgi notu döner
-        (zaten Tek Varlık modundaysa None); geçilemezse FuturesError."""
-        info = self._call("Varlık modu okunamadı", self.ex.fapiPrivateGetMultiAssetsMargin)
-        if str((info or {}).get("multiAssetsMargin")).lower() != "true":
+        (zaten Tek Varlık modundaysa None); geçilemezse ya da Binance "tamam" deyip modu değiştirmediyse FuturesError
+        (kod MULTI_ASSETS)."""
+        if not self._multi_assets():
             return None
         try:
             self._call("Tek Varlık moduna geçilemedi", self.ex.fapiPrivatePostMultiAssetsMargin,
                        {"multiAssetsMargin": "false"})
         except FuturesError as exc:
-            raise FuturesError(f"Binance vadeli hesabınız Çoklu Varlık (Multi-Assets) modunda ve Tek Varlık moduna "
-                               f"alınamadı: {exc}. Bu modda yalıtılmış teminat kullanılamadığı için bot işlem açamaz. "
-                               f"Açık vadeli pozisyon ve emirleri kapatıp Binance → Vadeli → Ayarlar (Tercihler) → "
-                               f"Varlık Modu'ndan 'Tek Varlık Modu'nu seçin.", "MULTI_ASSETS") from exc
+            raise FuturesError(f"{MULTI_ASSETS_HEAD} Bot Tek Varlık moduna almayı denedi, Binance reddetti: {exc}. "
+                               f"{MULTI_ASSETS_FIX}", "MULTI_ASSETS") from exc
+        if self._multi_assets():                # Binance isteği kabul etti ama mod değişmedi (ör. Kredi İşlem Modu)
+            raise FuturesError(f"{MULTI_ASSETS_HEAD} Bot Tek Varlık moduna almayı denedi; Binance isteği kabul etti "
+                               f"ama hesap hâlâ Çoklu Varlık modunda. {MULTI_ASSETS_FIX}", "MULTI_ASSETS")
         return ("🔁 Hesap Çoklu Varlık (Multi-Assets) modundaydı; Tek Varlık moduna alındı (bu modda yalıtılmış "
                 "teminat kullanılamıyor, bot işlem açamıyordu)")
 
@@ -282,10 +297,15 @@ class FuturesExchange:
             self._call(what, self.ex.set_margin_mode, "isolated", sym)
         except FuturesError as exc:
             if exc.code == "-4168":                       # Çoklu Varlık modu: Tek Varlık moduna al, bir kez daha dene
-                self.check_single_asset()
+                switched = self.check_single_asset()      # Alınamazsa FuturesError (MULTI_ASSETS): ne yapılacağı yazılı
                 try:
                     self._call(what, self.ex.set_margin_mode, "isolated", sym)
                 except FuturesError as again:
+                    if again.code == "-4168":             # Mod "Tek Varlık" görünüyor ama Binance yine reddediyor
+                        seen = ("Bot hesabı az önce Tek Varlık moduna aldı ama Binance yine reddetti."
+                                if switched else "Binance'in API yanıtı hesabı Tek Varlık modunda gösteriyor ama "
+                                                 "teminat modu isteğini yine bu gerekçeyle reddediyor.")
+                        raise FuturesError(f"{MULTI_ASSETS_HEAD} {seen} {MULTI_ASSETS_FIX}", "MULTI_ASSETS") from again
                     if again.code != "-4046" and "no need to change" not in str(again).lower():
                         raise
             elif exc.code != "-4046" and "no need to change" not in str(exc).lower():

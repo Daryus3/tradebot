@@ -151,7 +151,8 @@ FUTURES_PHASE6_OFF = {"FUTURES_EXTRA_SIZE_PCT": 100, "FUTURES_REENTRY_BREADTH": 
 #       o kapanınca yerine gelen sinyal küçük ek pozisyon olarak açılır. İlk test (1 dk mumlu eski motor) kârın da
 #       arttığını gösterdi; DÜZELTME (rapor 15): o artış motorun iyimserliğiydi (1 dk mum, dar aralıkta fiyatın tabana
 #       geri dönüşünü görmüyordu). Saniyelik veriyle düzeltilmiş testte (Faz 6 seti): yılda ~780 → ~925 işlem, yıllık
-#       getiri aynı (+%270 / +%166 → +%246 / +%168), düşüş ve maliyet hassasiyeti daha yüksek. Öneri: kapalı.
+#       getiri aynı (+%270 / +%166 → +%246 / +%168), düşüş ve maliyet hassasiyeti daha yüksek. Çok çekilişli
+#       testte kapatmak işlemi %15-20 düşürdü, getiriyi artırmadı: daha çok işlem için açık (0.4), dayanıklılık için kapalı.
 FUTURES_PHASE8_BE_TRIGGER = 0.5
 FUTURES_PHASE8_OFF = {"FUTURES_EXTRA_BE_TRIGGER_PCT": 0}
 # Faz 9 (Kasım 2026, rapor 17 araştırması; varsayılan kapalı): pozisyona göre zaman stopu.
@@ -1809,7 +1810,11 @@ def _setting_notes(cfg: Config) -> List[str]:
                              f"+%0.22 → +%0.15; yıllık getiri değişmedi (+%270 / +%166 → +%246 / +%168), en büyük düşüş "
                              f"%66 / %45 → %67 / %53, 3 kat kaymada +%142 / +%92 → +%82 / +%53, 5 kat kaymada 30 USDT "
                              f"243 yerine 38 USDT'ye çıktı. Yani işlem sayısı artar, kâr artmaz, maliyete dayanıklılık "
-                             f"azalır. Öneri: kapalı (0).")
+                             f"azalır. GÜNCELLEME (çok çekilişli test, rapor 17-18 araştırması): kapatmak işlem sayısını "
+                             f"%15-20 düşürdü; getiri seçim döneminde biraz iyi, doğrulama döneminde çekilişlerin "
+                             f"çoğunda kötü çıktı. Faz 9 setinde (ilk 1.1 / ek 0.4 / ek 35 dk / dalgada ilk 60 dk) "
+                             f"kapatınca getiri değişmedi (+%379 / +%236 → +%376 / +%226), son 12 ay +%152 → +%36. "
+                             f"Daha çok işlem isteniyorsa açık (0.4), maliyete dayanıklılık isteniyorsa kapalı (0).")
         xh, wh = cfg.futures_extra_hold_minutes, cfg.futures_wave_hold_minutes
         if xh > 0 and cfg.futures_max_positions <= 1:
             notes.append(f"FUTURES_EXTRA_HOLD_MINUTES={xh} (Faz 9) etkisiz: ek pozisyon yalnızca dalga modunda "

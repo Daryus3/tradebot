@@ -81,7 +81,9 @@ PHASE8_HINT = ("Faz 8 (ek pozisyonlarda başabaş +%0.5): küçük pozisyon kâr
                "sinyale geçer. DÜZELTME (Kasım 2026, rapor 15): ilk testteki kâr artışı backtestin iyimserliğiydi. "
                "Saniyelik işlem verisiyle düzeltilmiş testte Faz 6 setinde yılda ~780 → ~925 işlem, ama yıllık getiri "
                "aynı (+%270 / +%166 → +%246 / +%168), en büyük düşüş %66 / %45 → %67 / %53, 3 kat kaymada +%142 / +%92 "
-               "→ +%82 / +%53. İşlem sayısı artar, kâr artmaz, maliyete dayanıklılık azalır. Öneri: kapalı.")
+               "→ +%82 / +%53. İşlem sayısı artar, kâr artmaz, maliyete dayanıklılık azalır. Çok çekilişli testte kapatmak "
+               "işlem sayısını %15-20 düşürdü ve getiriyi artırmadı (Faz 9 setinde +%379 / +%236 → +%376 / +%226, son 12 ay "
+               "+%152 → +%36): daha çok işlem için açık (0.4), maliyete dayanıklılık için kapalı.")
 FAST_ENTRY_HINT = ("Hızlı giriş: saniyelik veride çöküş mumunun kapanışından sonra fiyat ortalama 1 sn'de %0.015, 3 sn'de "
                    "%0.04, 5 sn'de %0.05, 10 sn'de %0.08 yükseliyor; backtest 5 sn (%0.05) varsayar. Kurallar ve "
                    "pozisyon boyları değişmez, yalnızca emir daha erken gider. Açıkken taranan coinlerin hepsinde "

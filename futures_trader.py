@@ -84,6 +84,7 @@ FAST_PREPARE_RETRY_SEC = 3600      # Önceden ayarlanamayan coin bu kadar sonra 
 FAST_PREPARE_POLL_SEC = 1.0        # Hazırlanacak coin varken döngü bu aralıkla döner
 FAST_MIN_SLEEP_SEC = 0.02
 CLOCK_WARN_MS = 750                # Sunucu saati Binance'ten bu kadar farklıysa uyarı (günlükte, saatte bir)
+ACCOUNT_WARN_EVERY_SEC = 3600      # Hesap modu engeli (Çoklu Varlık, -4168) Telegram'a en fazla bu aralıkla yazılır
 MAX_LAG_MS = 10 * 60_000           # Bundan büyük "gecikme" ölçüm sayılmaz (saat atlaması / elle çağrı)
 
 
@@ -151,6 +152,9 @@ class FuturesBot(TradingBot):
         self._warm_for = 0.0                       # Ön hazırlığı yapılmış tarama anı (next_scan_at)
         self._clock_offset_ms: Optional[float] = None   # Binance saati − sunucu saati (ms; ısıtma isteklerinden)
         self._clock_warned_at = 0.0
+        # Hesap düzeyinde giriş engeli (Çoklu Varlık modu, -4168): hiçbir pozisyon açılamaz; /tarama'da görünür
+        self.account_block = ""
+        self._account_warned_at = 0.0
 
     # ================================================================ kapasite
     def slots(self) -> int:
@@ -248,6 +252,8 @@ class FuturesBot(TradingBot):
                 except (FuturesError, requests.ConnectionError) as exc:
                     log.warning("Varlık modu denetlenemedi: %s", exc)
                     asset_note = str(exc) if getattr(exc, "code", "") == "MULTI_ASSETS" else None
+                    if asset_note:
+                        self.account_block, self._account_warned_at = asset_note, now
                 if asset_note:
                     self.notifier.send(Messages.warning(asset_note))
             if not ex.is_paper and not self.state.positions:
@@ -553,11 +559,17 @@ class FuturesBot(TradingBot):
                 continue                 # Sıradaki sinyal denenir (backtest de minimum emrin altındakini atlar)
             except FuturesError as exc:
                 log.error("Vadeli pozisyon açılamadı: %s", exc)
+                if self._note_account_block(exc, now, sig.symbol):   # Hesap modu engeli: saatte bir kritik uyarı
+                    outcome[sig.symbol] = f"açılamadı: {exc}"[:120]
+                    stop = "hesap modu engeli (Çoklu Varlık, -4168)"
+                    break
                 self.notifier.send(Messages.error(f"{sig.symbol} {sig.side.upper()} pozisyonu açılamadı: "
                                                   f"{describe_error(exc)}"))
                 outcome[sig.symbol] = f"açılamadı: {describe_error(exc)}"[:120]
                 stop = "önceki girişte hata"
                 break
+            if sig.symbol in self.state.positions:
+                self.account_block = ""
             outcome[sig.symbol] = ("açıldı" if sig.symbol in self.state.positions
                                    else "limit emir kondu" if self.state.pending_entry else "açılmadı (koruma)")
         for sig in signals:
@@ -728,12 +740,31 @@ class FuturesBot(TradingBot):
                 ex.prepare_symbol(symbol, lev)
                 self._prepared.add(symbol)            # Sıradaki doğrulamada Binance'ten teyit edilir
                 self._self_prepared.add(symbol)
+                self.account_block = ""
                 log.info("Hızlı giriş: %s teminat modu ISOLATED, kaldıraç %dx önceden ayarlandı", symbol, lev)
             except FuturesError as exc:
                 self._prepare_retry[symbol] = now + FAST_PREPARE_RETRY_SEC
                 log.warning("Hızlı giriş: %s önceden ayarlanamadı (sinyal gelirse girişte yeniden denenir): %s",
                             symbol, exc)
+                if self._note_account_block(exc, now):          # Hesap düzeyinde: diğer coinler de aynı yanıtı alır
+                    for other in todo:
+                        self._prepare_retry[other] = now + FAST_PREPARE_RETRY_SEC
+                    self._prepare_todo = 0
+                    return
         self._prepare_todo = max(0, len(todo) - FAST_PREPARE_BATCH)
+
+    def _note_account_block(self, exc: Exception, now: float, symbol: str = "") -> bool:
+        """Hata hesap düzeyinde bir giriş engeliyse (Binance hesabı Çoklu Varlık modunda: yalıtılmış teminat reddedilir,
+        -4168) kaydeder ve Telegram'a kritik uyarı yollar (en fazla saatte bir; sinyal her 5 dk'da yinelenebilir).
+        Engel /tarama'da da görünür; teminat modu ayarlanabildiğinde ya da pozisyon açıldığında kalkar."""
+        if getattr(exc, "code", "") != "MULTI_ASSETS":
+            return False
+        self.account_block = str(exc)
+        if now - self._account_warned_at >= ACCOUNT_WARN_EVERY_SEC:
+            self._account_warned_at = now
+            head = f"{symbol} sinyali açılamadı. " if symbol else ""
+            self.notifier.send(Messages.error(head + str(exc)), critical=True)
+        return True
 
     def _refresh_universe(self, now: float, force: bool = False) -> None:
         """En hacimli N köklü parite listesini (gerekirse) yeniler: günde bir ya da ayar değişince. Sıralama durumda
@@ -1611,6 +1642,8 @@ class FuturesBot(TradingBot):
         age = self.time_fn() - self.last_scan_at
         lines = [f"🔍 <b>Son Vadeli Tarama</b> ({age:.0f} sn önce)",
                  f"Coin: {r.candidates} | Analiz: {r.analyzed} | Sinyal: {len(r.signals)}"]
+        if self.account_block:
+            lines.append(f"⛔ {esc(self.account_block[:600])}")
         names = [s[:-4] for s in (self._universe_symbols() if self.cfg.futures_universe > 0
                                   else [c + "USDT" for c in futures_coin_list(self.cfg)])]
         lines.append(f"🪙 Evren: {esc(self.universe_label())}: {esc(', '.join(names[:30]))}"
