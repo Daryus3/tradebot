@@ -601,6 +601,14 @@ def futures_scan_shifts(cfg) -> Tuple[int, ...]:
     return tuple(range(MINUTE_SCAN_STEP_MS, MINUTE_SCAN_BAR_MS, MINUTE_SCAN_STEP_MS))
 
 
+def futures_snapshot_on(cfg) -> bool:
+    """Anlık tarama (FUTURES_SNAPSHOT_SCAN) bu ayarlarla çalışır mı: hızlı giriş açık, sinyal yalnızca kapanışlara bağlı
+    (futures_close_only: az önce kapanan mumun kapanışı yerine o andaki son işlem fiyatı kullanılabilir) ve piyasa
+    emriyle giriş. Değilse bot hızlı girişin olağan yolunu (mumların kesinleşmesini bekleme) kullanır."""
+    return (bool(getattr(cfg, "futures_snapshot_scan", False)) and bool(getattr(cfg, "futures_fast_entry", False))
+            and futures_close_only(cfg) and getattr(cfg, "futures_entry_order", "market") == "market")
+
+
 def futures_modules(cfg) -> Tuple[str, ...]:
     """Çöküş taktiğinde açık olan ek giriş modülleri (öncelik sırasıyla): funding, pump, pullback, breakout, bb."""
     if getattr(cfg, "futures_tactic", "crash") != "crash":
@@ -913,6 +921,7 @@ class Config:
     # (girişte 2 istek eksilir). Strateji kuralları ve pozisyon boyları değişmez. Ayrıntı: README "Canlı giriş gecikmesi".
     futures_fast_entry: bool = False
     futures_minute_scan: bool = False   # Her dakika tarama (ara dakikalarda 1 dk mumlardan kaydırılmış 5 dk mumlar)
+    futures_snapshot_scan: bool = False  # Anlık tarama: mum kapanır kapanmaz anlık fiyatla (mumun kesinleşmesi beklenmez)
     # 0 = yalnızca FUTURES_COINS listesi; N = "en hacimli N köklü coin": en az FUTURES_UNIVERSE_MIN_AGE_DAYS gündür
     # listelenen kripto USDT süresiz paritelerinden son FUTURES_UNIVERSE_AVG_DAYS günün ortalama USDT hacmine göre ilk N
     # (stabil coin, endeks, hisse / emtia ve kaldırılması planlanan pariteler hariç; sıralama günde bir yenilenir).
@@ -1541,6 +1550,7 @@ def load_config(env_file: Optional[str] = None, mode_override: Optional[str] = N
         futures_exchange_stop=_env_bool("FUTURES_EXCHANGE_STOP", True),
         futures_fast_entry=_env_bool("FUTURES_FAST_ENTRY", False),
         futures_minute_scan=_env_bool("FUTURES_MINUTE_SCAN", False),
+        futures_snapshot_scan=_env_bool("FUTURES_SNAPSHOT_SCAN", False),
         futures_universe=_env_int("FUTURES_UNIVERSE", 0),
         futures_universe_with_list=_env_bool("FUTURES_UNIVERSE_WITH_LIST", True),
         futures_universe_min_age_days=_env_int("FUTURES_UNIVERSE_MIN_AGE_DAYS", 1095),
@@ -1910,6 +1920,24 @@ def _setting_notes(cfg: Config) -> List[str]:
                              "tarama yalnızca sade çöküş taktiğinde (ek modül, likidasyon şartı, oynaklık eşiği ve onay "
                              "modu kapalı), piyasa emriyle girişte ve en uzun çöküş penceresi 24 saati aşmıyorken "
                              "çalışır.")
+        if getattr(cfg, "futures_snapshot_scan", False):
+            if futures_snapshot_on(cfg):
+                notes.append("FUTURES_SNAPSHOT_SCAN=true (anlık tarama): tarama mum kapanışından ~0.15 sn sonra yapılır. "
+                             "Geçmiş mumlar kapanıştan hemen önce alınır, az önce kapanan mumun kapanışı yerine Binance'in "
+                             "o andaki son işlem fiyatı (tek istek) kullanılır; giriş emri bakiye ve emir defteri isteği "
+                             "beklemeden gider (bakiye taramadan hemen önce okunur) ve açık pozisyon varken tarama "
+                             "pozisyon kontrolünü beklemez. Kural, eşikler, pozisyon boyları ve çıkışlar aynıdır. "
+                             "Saniyelik veride fiyat mum kapanışından sonra 1 sn'de +%0.02, 3 sn'de +%0.04, 5 sn'de "
+                             "+%0.05-0.07 yukarıda (backtest 5 sn varsayar); backtestte gecikme payı %0.05 → %0.02 "
+                             "olunca (dakikalık tarama, dalga eşikleri kapalı; 3 çekiliş) bileşiksiz yıllık getiri "
+                             "+%558 / +%305 → +%598 / +%345. Bot her anlık taramayı "
+                             "sonradan kesinleşmiş mumlarla kendisi doğrular (rapor: 'Anlık tarama doğrulaması'); fiyat "
+                             "alınamazsa ya da doğrulama bozuk veri gösterirse olağan hızlı yola döner. Vadeli API'de "
+                             "yalnızca sunucunuzda ölçülebilir: önce test modunda deneyin.")
+            else:
+                notes.append("FUTURES_SNAPSHOT_SCAN=true ama bu ayarlarla kullanılamıyor (olağan tarama yapılır): anlık "
+                             "tarama hızlı giriş açıkken (FUTURES_FAST_ENTRY=true), sade çöküş taktiğinde (ek modül, "
+                             "likidasyon şartı, oynaklık eşiği ve onay modu kapalı) ve piyasa emriyle girişte çalışır.")
         if cfg.futures_universe > 0 and cfg.futures_universe_mode == "daily":
             notes.append("FUTURES_UNIVERSE_MODE=daily (dünün en hacimli coinleri): Faz 4 testinde günlük en hacimli 30 "
                          "coin, en az 3 yıllık olanlarla bile 2024-2026'da her yıl -%66 ile -%91 arası zarar etti; "

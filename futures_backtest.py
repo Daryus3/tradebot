@@ -566,6 +566,10 @@ class LazyWindows(dict):
 # fiyat ortalama 3 sn'de %0.04, 5 sn'de %0.05, 10 sn'de %0.08 yükseliyor (2.563 işlem; ± %0.01): piyasa emriyle
 # girişlerde bu kadar daha pahalıya alınmış sayılır (limit girişte uygulanmaz).
 ENTRY_LAG_PCT = 0.05
+# Aynı ölçümlerde 1 sn'de +%0.015 (2.563 işlem) ve +%0.023 (2.001 giriş): giriş ~1 sn'de dolsaydı (anlık tarama,
+# FUTURES_SNAPSHOT_SCAN'in hedefi) ödenecek pay. Yalnızca rapordaki kıyas satırında kullanılır; canlı ölçüm
+# ("Giriş gecikmesi" satırı) birikene kadar varsayılan hesap 5 sn'de kalır.
+FAST_ENTRY_LAG_PCT = 0.02
 
 
 @dataclass(frozen=True)
@@ -1512,7 +1516,12 @@ def realism_rows(cfg, ev) -> List[Tuple[str, "Evaluation"]]:
     base = params_from_cfg(cfg)
     if not realism_label(base):
         return []
-    return [("Eski (iyimser) hesap: giriş gecikmesi ve mum içi başabaş payı yok", ev(be_intrabar=False, entry_lag_pct=0.0))]
+    rows = []
+    if base.entry_lag_pct > FAST_ENTRY_LAG_PCT and not base.entry_limit:
+        rows.append((f"Giriş 1 sn'de dolsaydı (gecikme payı %{base.entry_lag_pct:g} → %{FAST_ENTRY_LAG_PCT:g}; anlık "
+                     f"taramanın hedefi)", ev(entry_lag_pct=FAST_ENTRY_LAG_PCT)))
+    return rows + [("Eski (iyimser) hesap: giriş gecikmesi ve mum içi başabaş payı yok",
+                    ev(be_intrabar=False, entry_lag_pct=0.0))]
 
 
 def phase8_active(p: SimParams) -> bool:
@@ -2566,18 +2575,24 @@ def live_timing(cfg, journal: Sequence[dict]) -> List[str]:
     dolduğu. Hızlı giriş (FUTURES_FAST_ENTRY) açık ve kapalı dönemler ayrı satırlarda. Ölçüm yoksa boş liste."""
     assumed = ENTRY_LAG_PCT + float(getattr(cfg, "futures_slippage_pct", 0.0))
     out: List[str] = []
-    modes = sorted({int(bool(r.get("fast"))) for r in journal if r.get("ms") or r.get("f")})
+
+    def mode_of(r: dict) -> int:                  # 2: anlık tarama (o taramada kullanıldı), 1: hızlı giriş, 0: eski yol
+        return 2 if r.get("sn") else int(bool(r.get("fast")))
+    tags = {0: "hızlı giriş kapalı: ", 1: "hızlı giriş açık: ", 2: "anlık tarama: "}
+    modes = sorted({mode_of(r) for r in journal if r.get("ms") or r.get("f")})
     for fast in modes:
-        rows = [r for r in journal if int(bool(r.get("fast"))) == fast]
-        tag = "" if len(modes) == 1 and not fast else ("hızlı giriş açık: " if fast else "hızlı giriş kapalı: ")
+        rows = [r for r in journal if mode_of(r) == fast]
+        tag = "" if len(modes) == 1 and not fast else tags[fast]
         scans = [r["ms"] for r in rows if isinstance(r.get("ms"), list) and len(r["ms"]) >= 3]
         if scans:
             st, kl, sg = (float(np.median([m[i] for m in scans])) / 1000 for i in range(3))
             retried = sum(1 for r in rows if r.get("kt"))
             quiet = sum(1 for r in rows if r.get("kq"))
             offsets = [abs(float(r["co"])) for r in rows if isinstance(r.get("co"), (int, float))]
-            out.append(f"  Tarama zamanlaması ({tag}mum kapanışından sonra, ortanca): başlangıç {st:.1f} sn → mumlar "
-                       f"alındı {kl:.1f} sn → sinyaller hazır {sg:.1f} sn ({len(scans)} tarama"
+            got = "anlık fiyatlar" if fast == 2 else "mumlar"
+            digits = 2 if fast == 2 else 1
+            out.append(f"  Tarama zamanlaması ({tag}mum kapanışından sonra, ortanca): başlangıç {st:.{digits}f} sn → "
+                       f"{got} alındı {kl:.{digits}f} sn → sinyaller hazır {sg:.{digits}f} sn ({len(scans)} tarama"
                        + (f"; {retried} taramada mumlar yeniden istendi" if retried else "")
                        + (f"; {quiet} taramada sakin coinlerin yeni mumu beklenmedi" if quiet else "")
                        + (f"; Binance ile saat farkı ortanca {np.median(offsets):.0f} ms" if offsets else "") + ")")
@@ -2591,6 +2606,31 @@ def live_timing(cfg, journal: Sequence[dict]) -> List[str]:
                 text += (f" | dolum, kapanış fiyatına göre ortalama {np.mean(slips):+.3f}% (backtest varsayımı "
                          f"+%{assumed:.2f}: gecikme %{ENTRY_LAG_PCT:g} + kayma)")
             out.append(text)
+    return out + live_snapshot_check(journal)
+
+
+def live_snapshot_check(journal: Sequence[dict]) -> List[str]:
+    """Anlık taramanın (FUTURES_SNAPSHOT_SCAN) canlıdaki kendi doğrulaması (tarama kaydındaki "sv" ve "sx" alanları): bot
+    her anlık taramadan sonra, kesinleşen mumlarla anlık fiyatın kapanıştan ne kadar saptığına ve aynı sinyallerin çıkıp
+    çıkmadığına bakar. Kayıt yoksa boş liste."""
+    out: List[str] = []
+    checks = [c for r in journal for c in (r.get("sv") if isinstance(r.get("sv"), list) else [r.get("sv")])
+              if isinstance(c, dict) and c.get("n")]
+    if checks:
+        av = float(np.mean([float(c.get("av", 0.0)) for c in checks]))
+        mx = max(float(c.get("mx", 0.0)) for c in checks)
+        same = [int(c["ok"]) for c in checks if "ok" in c]
+        text = (f"  Anlık tarama doğrulaması ({len(checks)} tarama, sonradan kesinleşen mumlarla): anlık fiyat ile mum "
+                f"kapanışı arasındaki fark ortalama %{av:.3f}, en çok %{mx:.3f}")
+        if same:
+            text += f" | kesinleşmiş mumlarla aynı sinyaller: {sum(same)} / {len(same)} tarama"
+            if sum(same) < len(same):
+                text += " (fark, eşiği kıl payı geçen / geçemeyen sinyallerdedir)"
+        out.append(text)
+    missed = Counter(str(r["sx"]).split(":")[0].strip() for r in journal if r.get("sx"))
+    if missed:
+        out.append(f"  Anlık fiyat {sum(missed.values())} taramada kullanılamadı (olağan hızlı yoldan tarandı): "
+                   + "; ".join(f"{why}: {n}" for why, n in missed.most_common(3)))
     return out
 
 

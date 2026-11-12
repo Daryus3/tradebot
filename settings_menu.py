@@ -23,7 +23,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Tuple
 
-from config import (futures_scan_shifts, DEFAULT_FUTURES_COINS, FUTURES_BB_MODES, FUTURES_CASCADE_PRESET, FUTURES_CONFIRMS,
+from config import (futures_scan_shifts, futures_snapshot_on, DEFAULT_FUTURES_COINS, FUTURES_BB_MODES, FUTURES_CASCADE_PRESET, FUTURES_CONFIRMS,
                     FUTURES_ENTRY_ORDERS, FUTURES_PHASE6_OFF, FUTURES_PHASE6_PRESET, FUTURES_PHASE6_SINGLE_PRESET,
                     FUTURES_PHASE8_OFF, FUTURES_PHASE9_OFF, FUTURES_GRID_PRESETS, FUTURES_LIQ_SOURCES, FUTURES_RECOMMENDED, FUTURES_SIDES,
                     FUTURES_TACTIC_EXITS, FUTURES_TACTICS, FUTURES_TP_ORDERS, FUTURES_UNIVERSE_MODES, futures_be_trigger,
@@ -93,6 +93,13 @@ FAST_ENTRY_HINT = ("Hızlı giriş: saniyelik veride çöküş mumunun kapanış
                    "pozisyon boyları değişmez, yalnızca emir daha erken gider. Açıkken taranan coinlerin hepsinde "
                    "teminat modu ve kaldıraç önceden ayarlanır. Ölçülen gecikme her pozisyon mesajında ve backtest "
                    "raporunda (canlı bot karşılaştırması) görünür: önce kapalıyken ölçüp sonra açarak karşılaştırın.")
+SNAPSHOT_HINT = ("Anlık tarama (hızlı giriş açıkken): Binance az önce kapanan mumu 0.3-2.5 sn sonra kesinleştirir; bot "
+                 "bunu beklemek yerine geçmiş mumları kapanıştan hemen önce alır, kapanıştan ~0.15 sn sonra tek istekle "
+                 "son işlem fiyatlarını okur ve kapanış olarak onu kullanır. Emir de bakiye / emir defteri isteği "
+                 "beklemeden gider, açık pozisyon varken tarama pozisyon kontrolünü beklemez. Kural ve eşikler aynıdır. "
+                 "Backtestte giriş payı %0.05 → %0.02 olunca bileşiksiz yıllık getiri +%558 / +%305 → +%598 / +%345 "
+                 "(rapordaki 'Giriş 1 sn'de dolsaydı' satırı). Bot her anlık taramayı sonradan kesinleşen mumlarla "
+                 "kendisi doğrular; sonuç raporda 'Anlık tarama doğrulaması' satırındadır.")
 PHASE6_HINT = ("Faz 6 testi (2020-2026, 1 dk, liste + en hacimli 20 köklü coin, 🥈 #2 giriş / çıkışları, 30 USDT): "
                "dalgada zarar kesen coin genelde düşmeye devam edip daha derinden dönüyor; zarar sonrası 240 dk "
                "bekleme bu en kârlı ikinci girişi kaçırıyordu (12+ coin düşerken işlem başı +%1.10). Faz 6 seti (4 "
@@ -412,6 +419,7 @@ PAGES: Dict[str, Page] = {
             show=lambda cfg: cfg.futures_entry_order == "limit", per_row=3),
         Row("FUTURES_FAST_ENTRY", name="⚡ Hızlı giriş (mum kapanışından 1 sn sonra tara)"),
         Row("FUTURES_MINUTE_SCAN", name="⏱️ Her dakika tara (5 dk kapanışını bekleme)"),
+        Row("FUTURES_SNAPSHOT_SCAN", name="🚀 Anlık tarama (mumun kesinleşmesini bekleme)"),
     ), back=(("⬅️ Vadeli ayarlar", "cfg"), ("🏠 Menü", "menu")), futures=True),
     "fb": Page("🔒 Başabaş ve İzleyen Stop", rows=(
         Row("BREAKEVEN_ENABLED", name="🔒 Başabaş kalkanı"),
@@ -1027,6 +1035,12 @@ class SettingsMenu:
             minute = "açık ama bu ayarlarla kullanılamıyor (sade çöküş taktiği + piyasa emriyle giriş gerekir)"
         else:
             minute = "kapalı: yalnızca 5 dk mum kapanışlarında"
+        if futures_snapshot_on(cfg):
+            snap = "açık: tarama mum kapanışından ~0.15 sn sonra anlık fiyatla; emir bakiye / emir defteri beklemeden"
+        elif cfg.futures_snapshot_scan:
+            snap = "açık ama bu ayarlarla kullanılamıyor (hızlı giriş + sade çöküş taktiği + piyasa emriyle giriş gerekir)"
+        else:
+            snap = "kapalı: mumların kesinleşmesi beklenir (kapanıştan 1-2.5 sn sonra)"
         return (f"🎯 <b>Vadeli Çıkışlar ve Emirler</b>\n{LINE}\n"
                 f"🎯 Kâr Al: fiyat +%{cfg.take_profit_pct:g} → ROE ~+%{cfg.take_profit_pct * lev:.0f}\n"
                 f"🛑 Zarar Kes: fiyat -%{cfg.stop_loss_pct:g} → ROE ~-%{cfg.stop_loss_pct * lev:.0f} | likidasyon "
@@ -1037,10 +1051,11 @@ class SettingsMenu:
                 f"🚪 Giriş emri: {entry}\n"
                 f"⚡ Hızlı giriş: {fast}\n"
                 f"⏱️ Her dakika tarama: {minute}\n"
+                f"🚀 Anlık tarama: {snap}\n"
                 f"🛡️ Zarar kes emri Binance'e konamazsa: {stop}\n{timing}{LINE}\n"
                 "<i>Kâr Al / Zarar Kes değişikliği SONRAKİ işlemde geçerli (açık pozisyonun Binance emirleri "
                 "değişmez); zaman stopu ve başabaş açık pozisyona da uygulanır. Testte seçilen (çöküş dönüşü): Kâr Al "
-                f"%6, Zarar Kes %4, başabaş 1.5 → 0.3, 30 dk.\n{esc(FAST_ENTRY_HINT)}\n{esc(MINUTE_SCAN_HINT)}</i>")
+                f"%6, Zarar Kes %4, başabaş 1.5 → 0.3, 30 dk.\n{esc(FAST_ENTRY_HINT)}\n{esc(MINUTE_SCAN_HINT)}\n{esc(SNAPSHOT_HINT)}</i>")
 
     def _timing_line(self) -> str:
         """Son taramanın ölçülen zamanlaması (FuturesBot.last_timing); ölçüm yoksa boş."""

@@ -549,20 +549,52 @@ class FuturesExchange:
         """klines + yanıttaki bitmemiş (süren) mumun açılış zamanı (ms; yanıtta yoksa 0). Hızlı girişte tarama mum
         kapanışından 1 sn sonra yapılır: yanıtta YENİ mumun da bulunması Binance'in o mumu kapattığının kanıtıdır
         (sunucu saati ilerideyse ya da veri henüz yerleşmediyse yeni mum görünmez, kısa süre sonra yeniden denenir)."""
+        out, forming = self.klines_open(symbol, interval, limit)
+        return out, (int(forming["t"]) if forming else 0)
+
+    def klines_open(self, symbol: str, interval: str,
+                    limit: int) -> Tuple[Dict[str, "object"], Optional[Dict[str, float]]]:
+        """klines + yanıttaki bitmemiş (süren) mumun o ana kadarki değerleri ({"t", "o", "h", "l", "c", "v", ...}; yanıtta
+        yoksa None). Anlık taramada (FUTURES_SNAPSHOT_SCAN) geçmiş mumlar kapanıştan hemen önce bu çağrıyla alınır; süren
+        mum kapanış anında anlık fiyatla tamamlanır (FuturesBot._take_snapshot)."""
         import numpy as np
         rows = self._call(f"{symbol} mumları alınamadı", self.ex.fapiPublicGetKlines,
                           {"symbol": symbol, "interval": interval, "limit": int(limit)}) or []
         now_ms = int(self.time_fn() * 1000)
-        open_ms = max((int(r[0]) for r in rows if int(r[6]) >= now_ms), default=0)
+        forming = None
+        running = [r for r in rows if int(r[6]) >= now_ms]
+        if running:
+            last = max(running, key=lambda r: int(r[0]))
+            forming = {k: float(last[i]) for k, i in zip(KLINE_FIELDS, _KLINE_COLS)}
+            forming["t"] = int(last[0])
         rows = [r for r in rows if int(r[6]) < now_ms]
         if not rows:
             out = {k: np.zeros(0) for k in KLINE_FIELDS}
             out["t"] = np.zeros(0, dtype=np.int64)
-            return out, open_ms
+            return out, forming
         data = np.array([[float(r[i]) for i in _KLINE_COLS] for r in rows], dtype=np.float64)
         out = {k: data[:, i] for i, k in enumerate(KLINE_FIELDS)}
         out["t"] = data[:, 0].astype(np.int64)
-        return out, open_ms
+        return out, forming
+
+    def last_prices(self) -> Dict[str, Tuple[float, int]]:
+        """Tüm USDⓈ-M paritelerinin SON İŞLEM fiyatı (tek istek, ağırlık 2): parite → (fiyat, işlem zamanı ms; yoksa 0).
+        Mum ucundan farklı olarak gecikmesizdir: ölçümde (Binance spot veri ucu, Kasım 2026, 624 örnek) fiyat her
+        örnekte günceldi ve dakika sınırından 0-0.5 sn sonra istenen fiyat kesinleşmiş mum kapanışından en çok %0.008
+        farklıydı (aradaki işlemler). Uç yoksa FuturesError."""
+        fn = getattr(self.ex, "fapiPublicV2GetTickerPrice", None) or getattr(self.ex, "fapiPublicGetTickerPrice", None)
+        if fn is None:
+            raise FuturesError("Toplu fiyat ucu (ticker/price) bu CCXT sürümünde yok", "NO_TICKER")
+        rows = self._call("Vadeli anlık fiyatlar alınamadı", fn)
+        out: Dict[str, Tuple[float, int]] = {}
+        for row in rows or []:
+            try:
+                price = float(row["price"])
+                if price > 0:
+                    out[str(row["symbol"])] = (price, int(float(row.get("time") or 0)))
+            except (KeyError, TypeError, ValueError, AttributeError):
+                continue
+        return out
 
     def eligible_symbols(self, min_age_days: float = 0.0) -> List[str]:
         """En hacimli N evrenine girebilecek pariteler (futures_universe.market_eligible) ve en az min_age_days

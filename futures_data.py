@@ -104,6 +104,26 @@ def resample(arrs: Dict[str, np.ndarray], interval_ms: int, shift_ms: int = 0) -
     return {k: v[complete] for k, v in out.items()}
 
 
+def with_bar(arrs: Dict[str, np.ndarray], t_open: int, close: float,
+             forming: Optional[Dict[str, float]] = None) -> Dict[str, np.ndarray]:
+    """Kapanmış mumların sonuna, borsada henüz kesinleşmemiş son mumu ekler: açılışı `t_open`, kapanışı `close` (o
+    andaki son işlem fiyatı). Diğer alanlar `forming`den (yanıttaki süren mumun o ana kadarki değerleri) alınır; yoksa
+    ya da başka bir muma aitse önceki kapanıştan düz, hacimsiz mum. Tepe / dip kapanışı kapsayacak şekilde genişletilir.
+    Anlık taramada (FUTURES_SNAPSHOT_SCAN) canlı bot az önce kapanan mumu böyle tamamlar; kural yalnızca kapanışlara
+    bağlıyken (config.futures_close_only) diğer alanlar kararı etkilemez."""
+    close = float(close)
+    row = dict(forming) if forming and int(forming.get("t", -1)) == int(t_open) else None
+    if row is None:
+        prev = float(arrs["c"][-1]) if len(arrs["c"]) else close
+        row = {"o": prev, "h": prev, "l": prev, "v": 0.0, "qv": 0.0, "n": 0.0, "tb": 0.0}
+    row["c"] = close
+    row["h"] = max(float(row["h"]), close)
+    row["l"] = min(float(row["l"]), close)
+    out = {k: np.append(arrs[k], float(row[k])) for k in FIELDS if k != "t"}
+    out["t"] = np.append(arrs["t"], np.int64(t_open)).astype(np.int64)
+    return out
+
+
 class FuturesArchive:
     """data.binance.vision'dan vadeli mum indirir ve önbelleğe yazar."""
 

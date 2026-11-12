@@ -925,7 +925,9 @@ Sinyal kuralları, pozisyon boyları ve çıkışlar aynıdır; yalnızca emir d
 
 Kalan yol: mumların kesinleşmesi (aşağıdaki ölçüme göre kapanıştan ~1-2.5 sn sonra) + bakiye, fiyat, emir (3
 gidiş-dönüş). Açık pozisyon varken pozisyon kontrolü yine taramadan önce yapılır (sıra değişmedi: kill-switch ve güncel
-pozisyon durumu önce gelir); ne kadar sürdüğü kayıttaki `"ms"` alanının ilk değerinden görülür.
+pozisyon durumu önce gelir); ne kadar sürdüğü kayıttaki `"ms"` alanının ilk değerinden görülür. Bu kalan yolun
+üç parçasını da (mumların kesinleşmesi, bakiye + emir defteri istekleri, pozisyon kontrolünün taramadan önce gelmesi)
+kaldıran ayar: **anlık tarama** (`FUTURES_SNAPSHOT_SCAN`, varsayılan kapalı; aşağıda "Rapor 20 araştırması, ikinci tur").
 
 **Mum sınırı ölçümü (11 Kasım 2026).** Binance'in spot herkese açık veri ucunda (`data-api.binance.vision`; vadeli API
 geliştirme ortamından erişilemiyor) 22 coin, 3 mum sınırı, 632 yanıt:
@@ -1337,6 +1339,100 @@ kazanç: saniyelik veride eklerde +%0.058 ± 0.027 (motor +%0.091 diyor, biraz i
 **Bu turda etkisiz ya da tutarsız çıkanlar** (dakikalık taramada, 3 çekiliş): Kâr Al 5-12, Zarar Kes 4-6, ilk başabaş
 0.9-1.5, zaman stopu 30 / 60, dalgada ilk pozisyon 45-90 dk, ek zaman stopu 25-45, 3 / 5 yuva, ek boyu %10 / %25,
 dalgada yeniden giriş ≥2-8, zarar beklemesi 120 / 480 dk, yalnız çöküş %10 / %50, ek kapısı 8 / 15.
+
+#### Rapor 20 araştırması, ikinci tur: yeni kural çıkmadı; kalan kaldıraç giriş hızı → anlık tarama (Kasım 2026)
+Taban: F seti + dakikalık tarama + dalga eşikleri kapalı (yılda seçimde 1.829 / doğrulamada 945 işlem, bileşiksiz yıllık
+getiri +%558 / +%305, bileşik +%2.126 / +%687, en büyük düşüş %79 / %72, 3 kat kaymada +%645 / +%173; 3 çekilişin
+ortancası). Bunun üstünde ~50 kural / ayar daha denendi (toplam ~950).
+
+**1) İşlem sayısını artıran her kural kârı ya da dayanıklılığı düşürdü.** İşlem / yıl, bileşiksiz ve bileşik yıllık getiri
+seçim / doğrulama:
+
+| Değişiklik | İşlem / yıl | Bileşiksiz | Bileşik | Düşüş | 3 kat kayma | Son 12 ay |
+|---|---|---|---|---|---|---|
+| Taban | 1.829 / 945 | +%558 / +%305 | +%2.126 / +%687 | %79 / %72 | +%645 / +%173 | +%81 |
+| 1 saat eşiği %6 → %5.5 | 2.015 / 1.078 | +%534 / +%215 | +%1.888 / +%217 | %84 / %88 | +%336 / +%25 | −%8 |
+| 1 saat eşiği %6 → %5 | 2.259 / 1.305 | +%456 / +%201 | +%1.049 / +%149 | %89 / %97 | +%60 / −%0 | −%17 |
+| 4 saat eşiği %10 → %9 | 1.927 / 1.017 | +%503 / +%295 | +%1.897 / +%584 | %87 / %75 | +%282 / +%92 | +%17 |
+| + 30 dk'da %4 kuralı | 2.320 / 1.318 | +%461 / +%232 | +%1.413 / +%223 | %86 / %95 | +%138 / −%23 | +%20 |
+| + 15 dk'da %4 kuralı | 2.061 / 1.123 | +%555 / +%271 | +%2.057 / +%382 | %77 / %93 | +%546 / +%63 | +%155 |
+| + 5 dk'da %2.5 kuralı | 2.211 / 1.245 | +%566 / +%290 | +%1.907 / +%489 | %84 / %90 | +%450 / +%43 | −%3 |
+| + 2 saatte %8 / 8 saatte %13 / 12 saatte %15 | 1.899-1.921 / 983-1.026 | +%535-546 / +%276-292 | +%1.934-1.979 / +%498-575 | %77-88 / %72-73 | +%475-653 / +%77-182 | +%12-83 |
+| En hacimli 25 coin (20 yerine) | 1.837 / 1.071 | +%568 / +%302 | +%2.147 / +%650 | %79 / %70 | doğr. +%102 | +%59 |
+| En hacimli 30 coin | 1.841 / 1.229 | +%571 / +%275 | +%2.154 / +%362 | %79 / %79 | doğr. +%40 | +%87 |
+
+Eşikleri düşürmek ve kısa pencereler işlem sayısını %5-58 artırıyor ama eklenen işlemlerin getirisi maliyeti
+karşılamıyor (işlem başı net +%0.187 → +%0.10-0.17); daha çok coin doğrulamada %13-30 fazla işlem getiriyor, kâr aynı ya da
+düşük, maliyete dayanıklılık belirgin kötü. Eşikleri yükseltmek (1 sa %6.5-7, 4 sa %11-12) işlemi azaltıyor, getiri
+karışık. Ek boyu, ek kapısı, yeniden giriş ve başabaş komşuları önceki turdaki gibi: "dalga eşikleri kapalı"nın üstüne
+başabaş tabanı 0.2 (+%560 / +%323, bileşik +%2.356 / +%813, 3 kat kaymada +%984 / +%222, işlem −%6-9) ve ek kapısı 12
+(+%569 / +%323) küçük, isteğe bağlı kazançlar; işlem sayısını artıran yok.
+
+**2) Asıl kaldıraç giriş hızı.** Aynı tabanda yalnızca giriş gecikmesi payı değiştirildi (backtest 5 sn = %0.05 varsayar;
+saniyelik veride fiyat mum kapanışından sonra 1 sn'de +%0.015-0.023, 3 sn'de +%0.04, 5 sn'de +%0.05-0.066 yukarıda):
+
+| Giriş payı (yaklaşık dolum anı) | İşlem / yıl | Bileşiksiz | Bileşik | 3 kat kayma | Son 12 ay | İşlem başı net |
+|---|---|---|---|---|---|---|
+| %0.065 (≈5 sn; ikinci ölçüm) | 1.813 / 931 | +%532 / +%251 | +%1.965 / +%391 | +%523 / +%145 | +%70 | +%0.171 |
+| %0.05 (≈5 sn; backtest varsayımı) | 1.829 / 945 | +%558 / +%305 | +%2.126 / +%687 | +%645 / +%173 | +%81 | +%0.187 |
+| %0.04 (≈3 sn) | 1.837 / 950 | +%601 / +%317 | +%2.285 / +%796 | +%783 / +%189 | +%83 | +%0.197 |
+| %0.03 (1-2 sn) | 1.843 / 956 | +%586 / +%318 | +%2.196 / +%791 | +%1.240 / +%218 | +%89 | +%0.203 |
+| %0.02 (≈1 sn) | 1.855 / 960 | +%598 / +%345 | +%2.237 / +%1.070 | +%1.474 / +%382 | +%94 | +%0.213 |
+| %0.01 (1 sn'nin altı; ölçülmedi) | 1.864 / 965 | +%607 / +%382 | +%2.353 / +%1.555 | +%1.618 / +%429 | +%176 | +%0.219 |
+
+Daha erken giriş hem kârı hem (az da olsa, %1-2) işlem sayısını artırıyor, maliyete dayanıklılığı da (3 kat kaymada
+doğrulama +%173 → +%382); hiçbir kural değişikliği bunu vermedi. Dalga eşikleri açıkken (raporlardaki ayar) %0.05 → %0.03:
++%526 / +%276 → +%561 / +%297, bileşik +%1.929 / +%419 → +%2.058 / +%540. Raporda artık bu kıyas satırı var:
+"Giriş 1 sn'de dolsaydı (gecikme payı %0.05 → %0.02; anlık taramanın hedefi)".
+
+**3) Süre nereye gidiyordu (hızlı giriş açıkken).**
+- Binance az önce kapanan mumu mum ucunda 0.3-2.5 sn sonra kesinleştirir; bot bunu bekler (tarama 1 sn'de başlar,
+  sinyal adayı coinin yeni mumu görünene kadar yeniden ister).
+- Sinyalden sonra emirden önce iki istek daha: serbest bakiye ve emir defteri.
+- Açık pozisyon varken (ek pozisyonlar: rapor 20'de işlemlerin %77'si) tarama, pozisyon kontrolünün arkasında bekler:
+  pozisyon başına iki sıralı istek + CCXT'nin istekler arası beklemesi (istek ağırlığı × 50 ms; pozisyon sorgusunda ~0.25 sn).
+
+**Ölçüm (12 Kasım 2026):** mum ucunun tersine **toplu fiyat ucu (`ticker/price`) gecikmesiz**. Binance spot herkese açık
+veri ucunda 3 dakika sınırı, 8 coin, 624 örnek: fiyat her örnekte günceldi (o ana kadarki son işlem fiyatı; bayat örnek
+0) ve sınırdan 0-0.5 sn sonra istenen fiyat, sonradan kesinleşen 1 dk mum kapanışıyla 27 örneğin 21'inde birebir aynı,
+kalanında en çok %0.008 farklıydı (aradaki işlemler). Vadeli API geliştirme ortamından erişilemiyor (bölge engeli);
+vadelide ölçümü bot sunucunuzda kendisi yapar (aşağıda).
+
+**4) Anlık tarama (`FUTURES_SNAPSHOT_SCAN=true`; varsayılan kapalı; Telegram → 🎯 Çıkışlar ve Emirler → 🚀 Anlık tarama).**
+Hızlı giriş açıkken, sade çöküş kuralında (sinyal yalnızca kapanışlara bağlı) ve piyasa emriyle girişte çalışır. Kural,
+eşikler, pozisyon boyları ve çıkışlar aynıdır:
+- **Kapanıştan ~2 sn önce:** bağlantılar ısıtılır, teminat modu / kaldıraç doğrulanır, serbest bakiye okunur ve taranan
+  coinlerin geçmiş mumları (süren mumla birlikte) alınır. Bu mumlar çoktan kesinleşmiştir.
+- **Kapanıştan ~0.15 sn sonra (Binance saatiyle):** tek istekle tüm paritelerin son işlem fiyatı okunur; az önce kapanan
+  mumun kapanışı olarak o fiyat kullanılır (`futures_data.with_bar`), ara dakikalarda 1 dk mumlar her zamanki gibi
+  kaydırılmış 5 dk mumlara çevrilir ve aynı strateji fonksiyonu çalışır.
+- **Emir hemen gider:** bakiye az önce okunmuştur, miktar sinyal fiyatından hesaplanır (emir defteri istenmez). Aynı
+  taramadaki ikinci girişte bakiyeden ilk pozisyonun teminatı ve komisyonu düşülür; emir "teminat yetersiz" ile dönerse
+  eski yoldaki gibi küçültülüp yeniden denenir.
+- **Açık pozisyon varken tarama pozisyon kontrolünü beklemez:** ön hazırlıktan taramanın bitimine kadar (~2-3 sn) kontrol
+  ertelenir, taramadan hemen sonra yapılır. Bu sürede zarar kes / Kâr Al emirleri Binance'te durur; eski yolda da tarama
+  boyunca (1.5-2.5 sn) kontrol yapılmıyordu.
+- **Kendi kendini doğrular:** her anlık taramadan sonra, kesinleşen mumlar gelince bot anlık fiyatın mum kapanışından ne
+  kadar saptığına ve kesin mumlarla aynı sinyallerin çıkıp çıkmadığına bakar; sonuç tarama kaydına (`"sv"`) ve rapora
+  yazılır: "Anlık tarama doğrulaması (N tarama …): fark ortalama %…, en çok %… | kesinleşmiş mumlarla aynı sinyaller: M / N".
+  Coinlerin ortanca farkı %0.3'ü aşarsa (bozuk / bayat veri) anlık tarama 1 saat kullanılmaz ve Telegram'a uyarı gelir.
+- **Geri dönüş:** fiyat isteği başarısızsa, en yeni fiyat kapanıştan 0.3 sn'den fazla önceye aitse (bayat veri / saat
+  farkı), tarama 0.45 sn'den fazla geciktiyse, geçmiş mumlar hazırlanamadıysa ya da ikiden çok coinin verisi eksikse o
+  tarama olağan hızlı yoldan yapılır (mumlar kapanıştan 1 sn sonra istenir); nedeni kayıtta (`"sx"`), `/tarama`'da ve
+  raporda görünür. En kötü durum bugünkü zamanlamadır. 40'tan çok coinlik (ön elemeli) evrende desteklenmez.
+
+Sahte borsayla ölçüm (istek başına 20 ms; `tests/test_futures_snapshot_scan.py`): mum kapanışından emrin yanıtına olağan
+hızlı yolda 1.14 sn (ek pozisyonda 1.17 sn), anlık taramada 0.18 sn; iki yol aynı coini, aynı miktarla açıyor. Gerçek
+sunucuda kazanç istek süresine bağlıdır (her istek bir gidiş-dönüş); istek başına ~0.3 sn varsayımıyla tahmin: ~3-4.5 sn
+yerine ~0.6-0.8 sn. Gerçek değer rapordaki "Giriş gecikmesi (anlık tarama …)" satırında görünür.
+
+**Sınırlar (dürüstçe).** (a) Anlık tarama gerçek vadeli API'ye karşı yalnızca sunucunuzda çalışır; burada sahte borsa ve
+spot veri ucuyla sınandı. Bu yüzden varsayılan kapalıdır ve kendi doğrulamasını raporlar; açtıktan sonraki ilk raporda
+"Anlık tarama doğrulaması" ve "Giriş gecikmesi (anlık tarama …)" satırlarına bakın. (b) Sinyal, mum kapanışı yerine ~0.2-0.5
+sn sonraki fiyatla değerlendirilir: eşiği kıl payı geçen / geçemeyen sinyallerde canlı bot ile backtest ayrışabilir
+(doğrulama satırı kaç taramada ayrıştığını gösterir). (c) Backtestin varsayılan gecikme payı (%0.05) değiştirilmedi;
+canlı "Giriş gecikmesi" ölçümleri birikince yeniden ayarlanır, o zamana kadar rapordaki ana rakamlar anlık taramaya göre
+kötümser kalır. (d) Hız kazancı, emir defteri derinliğini değiştirmez: büyük bakiyede kayma modellenmiyor.
 
 ### 🏆 Strateji turnuvası (`--turnuva`)
 Hangi strateji türünün sizin dönemde işe yaradığını **tek komutla** görmek için:

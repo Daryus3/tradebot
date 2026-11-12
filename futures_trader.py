@@ -15,6 +15,10 @@ aynen kullanır; yalnızca tarama, pozisyon açma / yönetme / kapatma kısımla
   Hızlı giriş (FUTURES_FAST_ENTRY, varsayılan kapalı) aynı kurallarla yolu kısaltır: tarama 1 sn sonra (yanıtta yeni
   mum da görünmeli, yoksa kısa aralıklarla yeniden denenir; en geç eski tarama anında eldekiyle devam edilir), mumlar
   tek dalgada paralel istenir, teminat modu + kaldıraç önceden ayarlanıp her taramadan hemen önce doğrulanır.
+  Anlık tarama (FUTURES_SNAPSHOT_SCAN, varsayılan kapalı; hızlı giriş açıkken, sade çöküş kuralında): geçmiş mumlar
+  kapanıştan önce alınır, kapanıştan ~0.15 sn sonra tek istekle son işlem fiyatları okunup az önce kapanan mumun kapanışı
+  olarak kullanılır; emir bakiye / emir defteri isteği beklemeden gider, açık pozisyon varken tarama pozisyon kontrolünü
+  beklemez. Her anlık tarama sonradan kesinleşen mumlarla doğrulanır; sorun olursa olağan hızlı yola dönülür.
   Açık pozisyonda (~2 sn'de bir):
     - Binance'te stop / hedef çalıştıysa kapanış kaydedilir (bot kapalıyken çalıştıysa açılışta).
     - Başabaş kalkanı: fiyat girişten +BREAKEVEN_TRIGGER_PCT'ye gelince Binance'teki stop girişin
@@ -38,8 +42,8 @@ from config import (MINUTE_SCAN_STEP_MS, futures_be_trigger, futures_breadth_on,
                     futures_hold_minutes, scan_log_path,
                     futures_crash_rules, futures_funding_rules,
                     futures_liq_distance_pct, futures_minute_limit, futures_modules, futures_pump_rules, futures_scan_shifts,
-                    futures_slot_share, futures_wave_cfg, futures_wave_rules)
-from futures_data import resample
+                    futures_slot_share, futures_snapshot_on, futures_wave_cfg, futures_wave_rules)
+from futures_data import resample, with_bar
 from futures_exchange import FFill, FuturesError, MinNotionalError, describe_error
 from logger import get_logger
 from risk import ExitReason, Position, cooldown_minutes, kill_switch_hit
@@ -90,6 +94,26 @@ FAST_PREPARE_GUARD_SEC = 20        # Taramaya bu kadar kala ön hazırlık / par
 FAST_PREPARE_RETRY_SEC = 3600      # Önceden ayarlanamayan coin bu kadar sonra yeniden denenir (girişte eski yol denenir)
 FAST_PREPARE_POLL_SEC = 1.0        # Hazırlanacak coin varken döngü bu aralıkla döner
 FAST_MIN_SLEEP_SEC = 0.02
+# Anlık tarama (FUTURES_SNAPSHOT_SCAN; hızlı giriş açıkken). Kural, eşikler ve pozisyon boyları aynıdır. Mum ucu az önce
+# kapanan mumu 0.3-2.5 sn sonra kesinleştirir; toplu fiyat ucu ise gecikmesizdir (ölçüm: FuturesExchange.last_prices).
+# Bu yüzden geçmiş mumlar kapanıştan hemen ÖNCE alınır, kapanış anında tek istekle son işlem fiyatları okunur ve az önce
+# kapanan mumun kapanışı olarak o fiyat kullanılır (futures_data.with_bar); kural yalnızca kapanışlara bağlıdır.
+SNAP_SCAN_DELAY_SEC = 0.15         # Tarama mum kapanışından bu kadar sonra (Binance saatiyle)
+SNAP_MIN_DELAY_SEC = 0.02          # ...sunucu saatiyle en erken (kapanan mum sunucu saatinden bulunur)
+SNAP_MAX_OFFSET_MS = 500           # Tarama anı Binance ile saat farkı kadar kaydırılır; en çok bu kadar
+SNAP_LEAD_SEC = 2.2                # Ön hazırlık (bağlantılar, doğrulama, bakiye, geçmiş mumlar) taramadan bu kadar önce
+SNAP_LEAD_MAX_SEC = 5.0            # ...ön hazırlık bundan uzun sürüyorsa (yavaş bağlantı) o kadar erken; en çok bu kadar
+SNAP_MAX_LATE_SEC = 0.45           # Tarama planlanan andan bu kadar geç başladıysa anlık fiyat kullanılmaz (olağan yol)
+SNAP_EARLY_MS = 300                # En yeni fiyat kapanıştan bu kadar ÖNCEYE aitse (bayat veri / saat farkı) kullanılmaz
+SNAP_MAX_MISSING = 2               # En çok bu kadar coinin verisi eksik olabilir (o coinler taranmaz); fazlası: olağan yol
+SNAP_BALANCE_MAX_AGE_SEC = 15      # Önceden okunan serbest bakiye bundan eskiyse girişte yeniden okunur
+SNAP_POLL_GUARD_SEC = 1.0          # Pozisyon kontrolü ön hazırlığa sarkacaksa ertelenir; en çok bu kadar erken
+SNAP_BAD_PCT = 0.3                 # Doğrulamada coinlerin ORTANCA farkı (anlık fiyat / kesin kapanış) bunu aşarsa veri bozuk
+SNAP_BAD_MIN_COINS = 5             # ...en az bu kadar coin karşılaştırıldıysa
+SNAP_OFF_SEC = 3600                # Veri bozuksa anlık tarama bu kadar süre kullanılmaz (olağan hızlı yol)
+SNAP_NOTE_LOG_SEC = 600            # "Anlık fiyat kullanılamadı" günlüğe en sık bu aralıkla yazılır
+SNAP_CHECK_KEEP = 3                # Doğrulanmayı bekleyen en fazla bu kadar anlık tarama tutulur
+SNAP_CHECK_MAX_AGE_MS = 3 * FUT_BAR_MS   # ...ve bundan eskisi doğrulanmadan bırakılır
 CLOCK_WARN_MS = 750                # Sunucu saati Binance'ten bu kadar farklıysa uyarı (günlükte, saatte bir)
 ACCOUNT_WARN_EVERY_SEC = 3600      # Hesap modu engeli (Çoklu Varlık, -4168) Telegram'a en fazla bu aralıkla yazılır
 MAX_LAG_MS = 10 * 60_000           # Bundan büyük "gecikme" ölçüm sayılmaz (saat atlaması / elle çağrı)
@@ -126,6 +150,8 @@ class FuturesBot(TradingBot):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self._clock_offset_ms: Optional[float] = None   # Binance saati − sunucu saati (ms; ısıtma isteklerinden)
+        self._snap_off_until = 0.0                 # Anlık tarama: doğrulama bozuk veri gösterdiyse bu ana kadar olağan yol
         self.next_scan_at = self._next_close(self.time_fn()) + self._scan_delay()
         self.last_signals: List[FuturesSignal] = []
         self._be_retry_at: Dict[str, float] = {}
@@ -157,13 +183,26 @@ class FuturesBot(TradingBot):
         self._self_prepared: Set[str] = set()      # Botun önceden ayarladığı, henüz Binance'ten teyit edilmemiş pariteler
         self._prepare_todo = 0                     # Önceden ayarlanmayı bekleyen parite sayısı (döngü hızı için)
         self._warm_for = 0.0                       # Ön hazırlığı yapılmış tarama anı (next_scan_at)
-        self._clock_offset_ms: Optional[float] = None   # Binance saati − sunucu saati (ms; ısıtma isteklerinden)
         self._clock_warned_at = 0.0
         self._quiet_for, self._quiet_val = None, None   # Sakin coin kuralının eşikleri (ayar nesnesi başına bir kez)
         self._last_quiet = 0                       # Son taramada yeni mumu beklenmeden kabul edilen coin sayısı
         # Hesap düzeyinde giriş engeli (Çoklu Varlık modu, -4168): hiçbir pozisyon açılamaz; /tarama'da görünür
         self.account_block = ""
         self._account_warned_at = 0.0
+        # Anlık tarama (FUTURES_SNAPSHOT_SCAN)
+        self._snap: Optional[dict] = None          # Sıradaki tarama için kapanıştan önce alınan geçmiş mumlar
+        self._snap_live = False                    # Bu taramanın sinyalleri anlık fiyatla üretildi (girişte kısa yol)
+        self._snap_info: List[int] = []            # [fiyatlar kapanıştan kaç ms sonra alındı, en yeni fiyat − kapanış ms]
+        self._snap_used: Optional[dict] = None     # Süren anlık taramanın fiyatları (sinyaller eklenince doğrulamaya)
+        self._snap_pending: List[dict] = []        # Kesinleşmiş mumlarla doğrulanmayı bekleyen anlık taramalar
+        self._snap_checks: List[dict] = []         # Doğrulama sonuçları (sıradaki tarama kaydına yazılır)
+        self._snap_note = ""                       # Son taramada anlık fiyat neden kullanılamadı (/tarama, kayıt)
+        self._snap_miss = ""                       # Ön hazırlıkta geçmiş mumlar neden hazırlanamadı
+        self._snap_armed = True                    # Son ön hazırlıkta anlık tarama kurulabildi mi (pozisyon kontrolü sırası)
+        self._snap_note_logged: Tuple[str, float] = ("", 0.0)
+        self._free_cache: Optional[Tuple[float, float]] = None   # (serbest bakiye, okunduğu an): girişte istenmez
+        self._manage_sec = 0.0                     # Son pozisyon kontrolünün süresi (ön hazırlığa sarkmasın diye)
+        self._prep_sec = 0.0                       # Son ön hazırlığın süresi (sıradaki ona göre erken başlar)
 
     # ================================================================ kapasite
     def slots(self) -> int:
@@ -230,9 +269,28 @@ class FuturesBot(TradingBot):
         """Hızlı giriş açık mı (FUTURES_FAST_ENTRY)."""
         return bool(getattr(self.cfg, "futures_fast_entry", False))
 
+    def _snapshot_on(self) -> bool:
+        """Anlık tarama açık ve bu ayarlarla çalışır mı (FUTURES_SNAPSHOT_SCAN; hızlı giriş + sade çöküş kuralı + piyasa
+        emri). Doğrulama bozuk veri gösterdiyse SNAP_OFF_SEC boyunca kapalı sayılır."""
+        return futures_snapshot_on(self.cfg) and self.time_fn() >= self._snap_off_until
+
+    def _scan_lead(self) -> float:
+        """Ön hazırlık taramadan kaç sn önce başlar. Anlık taramada geçmiş mumlar da o sırada alındığı için, son ön
+        hazırlık uzun sürdüyse (yavaş bağlantı) sıradaki o kadar erken başlar: tarama anına sarkmasın."""
+        if not (self._fast() and self._snapshot_on()):
+            return FAST_WARM_LEAD_SEC
+        return max(SNAP_LEAD_SEC, min(SNAP_LEAD_MAX_SEC, self._prep_sec * 1.3 + 0.4))
+
     def _scan_delay(self) -> float:
-        """Tarama 5 dk mum kapanışından kaç sn sonra başlar."""
-        return FAST_SCAN_DELAY_SEC if self._fast() else SCAN_DELAY_SEC
+        """Tarama mum kapanışından kaç sn sonra başlar (sunucu saatiyle)."""
+        if not self._fast():
+            return SCAN_DELAY_SEC
+        if not self._snapshot_on():
+            return FAST_SCAN_DELAY_SEC
+        # Anlık tarama: Binance saatiyle kapanış + SNAP_SCAN_DELAY_SEC. Sunucu saati ilerideyse o kadar geç başlanır
+        # (fiyat kapanıştan önce alınmasın); gerideyse en erken sunucu saatiyle kapanışta (kapanan mum oradan bulunur)
+        off = max(-SNAP_MAX_OFFSET_MS, min(SNAP_MAX_OFFSET_MS, self._clock_offset_ms or 0.0))
+        return max(SNAP_MIN_DELAY_SEC, SNAP_SCAN_DELAY_SEC - off / 1000)
 
     def _since_ms(self, closed_ms: int) -> int:
         """Şu an, verilen mum kapanışından kaç ms sonra (sunucu saati)."""
@@ -321,10 +379,11 @@ class FuturesBot(TradingBot):
         super().apply_config(cfg)
         self.exchange.cfg = cfg
         new_delay = self._scan_delay()
+        self._snap = None                          # Önceden alınan mumlar eski ayara göreydi
         if self._scan_step_ms() != old_step:       # Dakikalık tarama açıldı / kapandı: sıradaki tarama yeni adımla
             self.next_scan_at = self._next_close(self.time_fn()) + new_delay
             self._warm_for = 0.0
-        elif new_delay != old_delay:               # Hızlı giriş açıldı / kapandı: sıradaki tarama yeni gecikmeyle
+        elif new_delay != old_delay:               # Hızlı giriş / anlık tarama açıldı / kapandı: yeni gecikmeyle
             self.next_scan_at += new_delay - old_delay
             self._prepared, self._verified_at, self._prepare_todo, self._warm_for = set(), 0.0, 0, 0.0
             self._prepare_retry, self._self_prepared = {}, set()
@@ -342,6 +401,8 @@ class FuturesBot(TradingBot):
         now = self.time_fn()
         ex = self.exchange
         fast = self._fast()
+        snap = fast and self._snapshot_on()
+        lead = self._scan_lead()
         # Hızlı girişte taramaya az kala yavaş bakım işleri (parite kuralları, ön hazırlık) yapılmaz: tarama gecikmesin
         quiet = fast and self.next_scan_at - now < FAST_PREPARE_GUARD_SEC
         if now - ex.markets_loaded_at > RULES_REFRESH_SEC and not quiet:
@@ -354,17 +415,25 @@ class FuturesBot(TradingBot):
             return
         if self.state.pending_entry:
             self._check_pending_entry(now)                   # Limit giriş emri: doldu mu / süresi doldu mu
+        # Anlık tarama: ön hazırlıktan taramanın bitimine kadar pozisyon kontrolü ertelenir. Kontrol pozisyon başına iki
+        # sıralı istektir; ek pozisyonların (işlemlerin çoğu) taraması onu beklemesin. Bu kısa sürede zarar kes / Kâr Al
+        # emirleri Binance'te durur; ertelenen kontrol taramadan hemen sonra yapılır.
+        hold = snap and bool(self.state.positions) and self._hold_poll(now, lead)
+        scanned = False
         if self.state.positions:
-            self.manage_positions(now)
+            if not hold:
+                self._timed_manage(now)
         elif self.state.killed or kill_switch_hit(self.state.realized_pnl, 0.0, self.loss_limit):
             self.trigger_kill(self.state.realized_pnl)
         if not self.running:
             return
         if fast and now < self.next_scan_at:
-            if self._warm_for != self.next_scan_at and now >= self.next_scan_at - FAST_WARM_LEAD_SEC:
+            if self._warm_for != self.next_scan_at and now >= self.next_scan_at - lead:
                 self._warm_for = self.next_scan_at
                 if self.next_scan_at - now >= FAST_WARM_MIN_SEC:
+                    started = self.time_fn()
                     self._pre_scan(now)                      # Bağlantıları ısıt, teminat modu / kaldıracı doğrula
+                    self._prep_sec = max(0.0, self.time_fn() - started)
             elif not quiet:
                 self._prepare_ahead(now)                     # Taramalar arasında: eksik coinleri önceden ayarla
         if now >= self.next_scan_at:
@@ -372,6 +441,7 @@ class FuturesBot(TradingBot):
             blocked = self._scan_block_reason(now)
             step = self._scan_step_ms()
             bar_ms = int(now * 1000) // step * step
+            scanned = True
             if blocked is None:
                 try:
                     self.scan_and_enter(now)
@@ -380,7 +450,27 @@ class FuturesBot(TradingBot):
                     raise
             else:
                 self._journal({"t": bar_ms, "skip": blocked})
+        if hold and scanned and self.running and self.state.positions:
+            self._timed_manage(self.time_fn())               # Ertelenen pozisyon kontrolü: taramadan hemen sonra
         self._periodic(now)
+
+    def _timed_manage(self, now: float) -> None:
+        """Pozisyon kontrolü + ne kadar sürdüğü (anlık taramada ön hazırlıkla çakışmasın diye ölçülür)."""
+        started = self.time_fn()
+        self.manage_positions(now)
+        self._manage_sec = max(0.0, self.time_fn() - started)
+
+    def _hold_poll(self, now: float, lead: float) -> bool:
+        """Anlık taramada pozisyon kontrolü taramanın arkasına bırakılsın mı: ön hazırlık yapıldı ve anlık tarama kurulduysa
+        taramaya kadar; öncesinde, kontrol (son ölçülen süresiyle) ön hazırlığın başlangıcına sarkacaksa (son ön hazırlık
+        kurulabildiyse). Tarama zaten yapılmayacaksa (yer yok, durdurulmuş, kill-switch...) ya da anlık tarama bu mum
+        için kurulamadıysa ertelenmez: eski sıra (önce pozisyon kontrolü, sonra tarama)."""
+        if self._scan_block_reason(now) is not None:
+            return False
+        left = self.next_scan_at - now
+        if left <= 0 or self._warm_for == self.next_scan_at:
+            return self._snap is not None             # Kurulamadıysa eski sıra: önce pozisyon kontrolü, sonra tarama
+        return self._snap_armed and left - lead <= min(SNAP_POLL_GUARD_SEC, self._manage_sec * 1.25 + 0.05)
 
     def _scan_block_reason(self, now: float) -> Optional[str]:
         """Bu mum kapanışında neden taranmıyor (None = taranır)."""
@@ -416,7 +506,12 @@ class FuturesBot(TradingBot):
         "ms" = [tarama başladı, mumlar alındı, sinyaller hazır] (mum kapanışından sonra ms, sunucu saati); "f" = açılan
         her pozisyon için {"o": emir gönderildi, "r": yanıt geldi, "x": Binance'in işlem zamanı (borsa saati; varsa),
         "p": dolum fiyatı sinyal mumunun kapanışına göre % (+ = pahalıya)}; "kt" = mumlar kaç denemede alındı (> 1 ise);
-        "co" = Binance saati − sunucu saati (ms); "fast" = 1: hızlı giriş açıktı."""
+        "co" = Binance saati − sunucu saati (ms); "fast" = 1: hızlı giriş açıktı. Anlık tarama: "sn" = [son işlem
+        fiyatları kapanıştan kaç ms sonra alındı, en yeni fiyatın işlem zamanı − kapanış (ms; Binance saati)]: bu tarama
+        anlık fiyatla yapıldı; "sx" = anlık fiyat neden kullanılamadı (olağan yol); "sv" = önceki anlık taramaların
+        kesinleşmiş mumlarla doğrulaması, her biri {"t": o taramanın kapanışı, "n": karşılaştırılan coin, "av" / "mx":
+        anlık fiyat ile kesin kapanış arasındaki ortalama / en büyük fark (%), "ok": kesin mumlarla aynı sinyaller çıktı
+        mı (1 / 0), "b": genişlik farklıysa [anlık, kesin]}."""
         short = [s[:-4] for s in universe]
         row: dict = {"t": closed_ms}
         if short != self._journal_universe:
@@ -492,7 +587,7 @@ class FuturesBot(TradingBot):
         # denk gelişine göre 1 sn'ye (açık pozisyon varken 2 sn'ye) kadar geç başlıyordu
         wake = self.next_scan_at
         if self._warm_for != self.next_scan_at:
-            wake -= FAST_WARM_LEAD_SEC
+            wake -= self._scan_lead()
         cap = POSITION_POLL_SEC if busy else FAST_PREPARE_POLL_SEC if self._prepare_todo else 30.0
         return max(FAST_MIN_SLEEP_SEC, min(wake - self.time_fn(), cap))
 
@@ -501,6 +596,13 @@ class FuturesBot(TradingBot):
 
     # ================================================================ tarama ve giriş
     def scan_and_enter(self, now: float) -> None:
+        self._snap_live = False
+        try:
+            self._scan_and_enter(now)
+        finally:                                   # Anlık taramanın kısa giriş yolu yalnızca o taramanın girişlerinde
+            self._snap_live, self._free_cache = False, None
+
+    def _scan_and_enter(self, now: float) -> None:
         ex = self.exchange
         now_ms = int(now * 1000)
         step = self._scan_step_ms()
@@ -525,7 +627,23 @@ class FuturesBot(TradingBot):
         # Dalga modu: genişlik tüm taranan coinlerden ölçülür (backtestteki evrenle aynı); beklemedeki / açık
         # pozisyondaki coinlerin mumları da istenir ama onlarda sinyal aranmaz
         targets = [s for s in symbols if ex.has_market(s) and (cascade or s not in excluded)]
-        klines, errors, tries = self._fetch_klines(targets, limit, closed_ms, fast, shift)
+        # Anlık tarama: kapanıştan önce alınan geçmiş mumlar + şu anki son işlem fiyatları (tek istek). Kullanılamıyorsa
+        # olağan hızlı yol: mumlar kapanıştan FAST_SCAN_DELAY_SEC sonra istenir, kesinleşmeleri beklenir
+        snap = self._take_snapshot(targets, closed_ms, shift) if fast else None
+        if snap is not None:
+            klines, errors = snap
+            tries, self._last_quiet, self._snap_live = 1, 0, True
+            timing["sn"] = list(self._snap_info)
+        else:
+            if fast and self._snapshot_on():
+                wait = closed_ms / 1000 + FAST_SCAN_DELAY_SEC - self.time_fn()
+                if wait > 0:
+                    self.sleep_fn(wait)
+                if self._snap_note:
+                    timing["sx"] = self._snap_note[:80]
+            klines, errors, tries = self._fetch_klines(targets, limit, closed_ms, fast, shift)
+        if self._snap_checks:                                  # Önceki anlık taramaların doğrulaması (kesin mumlarla)
+            timing["sv"], self._snap_checks = self._snap_checks, []
         timing["ms"].append(self._since_ms(closed_ms))         # ...mumlar alındı
         if tries > 1:
             timing["kt"] = tries
@@ -538,11 +656,16 @@ class FuturesBot(TradingBot):
             excluded = excluded - reentry
             log.info("Dalgada yeniden giriş: %s coin düşüyor, zarar sonrası beklemesi atlanan: %s", breadth,
                      ", ".join(sorted(reentry)))
+        scanned_all = sorted(klines)
         klines = {s: k for s, k in klines.items() if s not in excluded}
         self._attach_extras(klines, closed_ms)       # Faz 4: fonlama oranları, 1 saatlik mumlar (modül açıksa)
         btc_1h = ex.klines("BTCUSDT", "1h", FUT_BTC_1H_LIMIT) if self.strategy.needs_btc_trend else None
         signals, rejects = self.strategy.evaluate(klines, btc_1h, now_ms, feed=self.smart.liq_feed, breadth=breadth)
         timing["ms"].append(self._since_ms(closed_ms))         # ...sinyaller hazır
+        if self._snap_live and self._snap_used is not None:    # Sonradan kesinleşmiş mumlarla doğrulanır
+            self._snap_used.update(all=scanned_all, scan=sorted(klines), sig=sorted(s.symbol for s in signals), b=breadth)
+            self._snap_pending = self._snap_pending[-(SNAP_CHECK_KEEP - 1):] + [self._snap_used]
+        self._snap_used = None
         for sig in signals:
             if sig.symbol in reentry:
                 sig.metrics["reentry"] = 1.0
@@ -799,6 +922,200 @@ class FuturesBot(TradingBot):
                         abs(offset), "gerisinde" if offset > 0 else "ilerisinde")
         if not ex.is_paper:
             self._verify_prepared(self.time_fn())
+        if self._snapshot_on():
+            try:
+                self._prefetch()
+            except Exception as exc:  # noqa: BLE001 - yalnızca hız; tarama olağan hızlı yoldan yapılır
+                self._snap, self._snap_miss = None, f"ön hazırlık hatası ({type(exc).__name__}: {exc})"[:120]
+                log.warning("Anlık tarama ön hazırlığı yapılamadı (tarama olağan hızlı yoldan): %s", exc)
+            self._snap_armed = self._snap is not None
+
+    def _prefetch(self) -> None:
+        """Anlık tarama ön hazırlığı (mum kapanmadan ~1 sn önce): serbest bakiye okunur (girişte istek atılmasın) ve
+        taranacak coinlerin geçmiş mumları, süren mumlarıyla birlikte alınır. Bu yanıtlardaki artık kesinleşmiş mumlarla
+        bir önceki anlık tarama doğrulanır. Geçmiş mumlar eksik ya da geç kaldıysa anlık tarama bu mum için kurulmaz:
+        tarama olağan hızlı yoldan yapılır."""
+        self._snap, self._free_cache, self._snap_miss = None, None, ""
+        ex, cfg = self.exchange, self.cfg
+        step = self._scan_step_ms()
+        closed_ms = int(round(self.next_scan_at * 1000)) // step * step     # Sıradaki taramanın değerlendireceği kapanış
+        at = closed_ms / 1000 + self._scan_delay()
+        if abs(at - self.next_scan_at) > 1e-6:       # Saat farkı az önce ölçüldü: tarama anı ona göre
+            self.next_scan_at = self._warm_for = at
+        if not ex.is_paper:
+            try:
+                with ex.unthrottled():
+                    self._free_cache = (ex.free_balance(), self.time_fn())
+            except (FuturesError, requests.ConnectionError) as exc:
+                log.debug("Anlık tarama: serbest bakiye önceden okunamadı (girişte okunur): %s", exc)
+        shift = closed_ms % FUT_BAR_MS
+        interval, bar_ms = ("1m", MINUTE_SCAN_STEP_MS) if shift else ("5m", FUT_BAR_MS)
+        limit = futures_minute_limit(cfg) if shift else futures_kline_limit(cfg)
+        try:
+            symbols, skipped = self._scan_symbols()
+        except (FuturesError, requests.ConnectionError) as exc:
+            self._snap_miss = f"taranacak coinler belirlenemedi: {exc}"
+            return
+        symbols = [s for s in symbols if ex.has_market(s)]
+        if skipped or not symbols or len(symbols) > FAST_PREFILTER_MIN:     # Ön elemeli (büyük) evren desteklenmez
+            self._snap_miss = (f"evren {FAST_PREFILTER_MIN} coinden büyük (ön elemeli)" if symbols
+                               else "taranacak coin yok")
+            return
+
+        def fetch(symbol: str):
+            try:
+                return symbol, ex.klines_open(symbol, interval, limit), None
+            except FuturesError as exc:
+                return symbol, None, exc
+
+        try:
+            with ex.unthrottled():
+                if len(symbols) == 1:
+                    rows = [fetch(symbols[0])]
+                else:
+                    with ThreadPoolExecutor(max_workers=min(FAST_KLINE_WORKERS, len(symbols))) as pool:
+                        rows = list(pool.map(fetch, symbols))
+        except requests.ConnectionError as exc:
+            self._snap_miss = f"geçmiş mumlar alınamadı: {exc}"
+            return
+        got = {symbol: res for symbol, res, exc in rows if exc is None}
+        self._check_snapshot(got, bar_ms, closed_ms)
+        if not self._snapshot_on():                  # Doğrulama bozuk veri gösterdi: bu tarama da olağan hızlı yoldan
+            self.next_scan_at = self._warm_for = closed_ms / 1000 + self._scan_delay()
+            return
+        # Geçerli: son kapanmış mum, sıradaki kapanışta kapanacak mumdan bir önceki (mumlar kapanıştan önce alındı)
+        ready = {symbol: (k, forming) for symbol, (k, forming) in got.items()
+                 if len(k["t"]) and int(k["t"][-1]) + 2 * bar_ms == closed_ms}
+        if len(ready) < max(1, len(symbols) - SNAP_MAX_MISSING):
+            self._snap_miss = f"geçmiş mumlar {len(ready)} / {len(symbols)} coinde hazır"
+            return
+        self._snap = {"closed_ms": closed_ms, "shift": shift, "bar_ms": bar_ms, "k": ready}
+
+    def _no_snapshot(self, why: str) -> None:
+        """Bu taramada anlık fiyat kullanılamadı: neden kayda / /tarama'ya, seyrek olarak günlüğe."""
+        self._snap_note = why
+        last, at = self._snap_note_logged
+        now = self.time_fn()
+        if why != last or now - at >= SNAP_NOTE_LOG_SEC:
+            self._snap_note_logged = (why, now)
+            log.info("Anlık tarama bu mumda kullanılamadı (%s): olağan hızlı yol", why)
+
+    def _take_snapshot(self, targets: List[str], closed_ms: int,
+                       shift: int) -> Optional[Tuple[Dict[str, dict], List[str]]]:
+        """Anlık tarama: kapanıştan önce alınan geçmiş mumlar + şu anki son işlem fiyatları (tek istek) → (parite →
+        taranacak mumlar, verisi eksik coinlerin hata metinleri). Az önce kapanan mumun kapanışı o fiyattır; ara
+        dakikada 1 dk mumlar olağan yoldaki gibi kaydırılmış 5 dk mumlara çevrilir. Kullanılamıyorsa None (nedeni
+        self._snap_note'ta): tarama olağan hızlı yoldan yapılır."""
+        pre, self._snap, self._snap_note, self._snap_used = self._snap, None, "", None
+        if not self._snapshot_on():
+            return None
+        if not pre or pre["closed_ms"] != closed_ms or pre["shift"] != shift:
+            return self._no_snapshot(self._snap_miss or "ön hazırlık yapılamadı")
+        if self.time_fn() - closed_ms / 1000 - self._scan_delay() > SNAP_MAX_LATE_SEC:
+            return self._no_snapshot("tarama geç başladı")
+        ex = self.exchange
+        try:
+            with ex.unthrottled():
+                prices = ex.last_prices()
+        except (FuturesError, requests.ConnectionError) as exc:
+            return self._no_snapshot(f"anlık fiyatlar alınamadı: {exc}")
+        newest = max((t for _p, t in prices.values()), default=0)
+        rel = int(newest - closed_ms) if newest else None       # En yeni işlem kapanıştan kaç ms sonra (Binance saati)
+        if rel is not None and rel < -SNAP_EARLY_MS:
+            return self._no_snapshot(f"fiyatlar kapanıştan {-rel} ms önceye ait (bayat veri ya da saat farkı)")
+        bar_ms = pre["bar_ms"]
+        klines: Dict[str, dict] = {}
+        errors: List[str] = []
+        try:
+            for symbol in targets:
+                item, quote = pre["k"].get(symbol), prices.get(symbol)
+                if item is None or quote is None:
+                    errors.append(f"{symbol}: {'geçmiş mumlar' if item is None else 'anlık fiyat'} yok")
+                    continue
+                k = with_bar(item[0], closed_ms - bar_ms, quote[0], item[1])
+                if shift:                             # 1 dk mumlar → bu dakikada kapanan 5 dk mumlar
+                    k = resample(k, FUT_BAR_MS, shift_ms=shift)
+                if len(k["t"]) and int(k["t"][-1]) + FUT_BAR_MS == closed_ms:
+                    klines[symbol] = k
+                else:
+                    errors.append(f"{symbol}: mumlar tamamlanamadı")
+        except Exception as exc:  # noqa: BLE001 - beklenmeyen veri: bu tarama olağan hızlı yoldan
+            return self._no_snapshot(f"mumlar kurulamadı ({type(exc).__name__}: {exc})")
+        if len(errors) > SNAP_MAX_MISSING:
+            return self._no_snapshot(f"{len(errors)} coinin verisi eksik")
+        self._snap_info = [self._since_ms(closed_ms)] + ([rel] if rel is not None else [])
+        self._snap_used = {"closed_ms": closed_ms, "shift": shift, "px": {s: prices[s][0] for s in klines}}
+        return klines, errors
+
+    def _check_snapshot(self, got: Dict[str, tuple], bar_ms: int, closed_ms: int) -> None:
+        """Önceki anlık taramaları, şimdi kesinleşmiş mumlarla doğrular: anlık fiyat ile mumun kesin kapanışı arasındaki
+        fark (%) ve kesin mumlarla aynı sinyallerin çıkıp çıkmadığı. Sonuçlar sıradaki tarama kaydına yazılır ("sv") ve
+        backtest raporunda özetlenir. Ara dakikanın kapanışı 5 dk mumlarla doğrulanamaz: o tarama sıradaki 1 dk ön
+        hazırlığını bekler (SNAP_CHECK_MAX_AGE_MS'den eskiyse bırakılır). Coinlerin ortanca farkı SNAP_BAD_PCT'yi aşarsa
+        veri bozuk sayılır: anlık tarama SNAP_OFF_SEC kullanılmaz ve uyarı gönderilir."""
+        pending, self._snap_pending = self._snap_pending, []
+        for used in pending:
+            if "sig" not in used or closed_ms - int(used["closed_ms"]) > SNAP_CHECK_MAX_AGE_MS:
+                continue
+            if int(used["closed_ms"]) % bar_ms:
+                self._snap_pending.append(used)
+                continue
+            check = self._verify_snapshot(used, got, bar_ms)
+            if check is not None:
+                self._snap_checks.append(check)
+
+    def _verify_snapshot(self, used: dict, got: Dict[str, tuple], bar_ms: int) -> Optional[dict]:
+        """Tek bir anlık taramanın doğrulaması (bkz. _check_snapshot); karşılaştırılacak mum yoksa None."""
+        t_prev, shift = int(used["closed_ms"]), int(used["shift"])
+        final: Dict[str, dict] = {}
+        diffs: List[Tuple[float, str]] = []
+        for symbol in used["all"]:
+            item = got.get(symbol)
+            if item is None:
+                continue
+            k = item[0]
+            n = len(k["t"])
+            while n and int(k["t"][n - 1]) + bar_ms > t_prev:
+                n -= 1
+            if not n or int(k["t"][n - 1]) + bar_ms != t_prev:
+                continue
+            cut = {f: v[:n] for f, v in k.items()}
+            px, close = used["px"].get(symbol), float(cut["c"][-1])
+            if px and close > 0:
+                diffs.append((abs(px / close - 1) * 100, symbol))
+            if bar_ms != FUT_BAR_MS:
+                cut = resample(cut, FUT_BAR_MS, shift_ms=shift)
+                if not len(cut["t"]) or int(cut["t"][-1]) + FUT_BAR_MS != t_prev:
+                    continue
+            final[symbol] = cut
+        if not diffs:
+            return None
+        vals = sorted(d for d, _s in diffs)
+        median = vals[len(vals) // 2] if len(vals) % 2 else (vals[len(vals) // 2 - 1] + vals[len(vals) // 2]) / 2
+        worst, worst_symbol = max(diffs)
+        check: dict = {"t": t_prev, "n": len(vals), "av": round(sum(vals) / len(vals), 4), "mx": round(worst, 4)}
+        if len(final) == len(used["all"]):            # Tüm coinler kesin mumlarla yeniden değerlendirilebildi
+            try:
+                breadth = market_breadth(final) if self._cascade_on() else None
+                scan = {sym: final[sym] for sym in used["scan"] if sym in final}
+                signals, _rej = self.strategy.evaluate(scan, None, t_prev, feed=self.smart.liq_feed, breadth=breadth)
+                settled = sorted(sg.symbol for sg in signals)
+                check["ok"] = int(settled == list(used["sig"]))
+                if breadth != used.get("b"):
+                    check["b"] = [used.get("b"), breadth]
+                if not check["ok"]:
+                    log.info("Anlık tarama doğrulaması: kesinleşmiş mumlarla sinyaller farklı (anlık: %s | kesin: %s; "
+                             "en büyük fiyat farkı %s %%%.3f)", ", ".join(used["sig"]) or "yok",
+                             ", ".join(settled) or "yok", worst_symbol, worst)
+            except Exception as exc:  # noqa: BLE001 - doğrulama yalnızca ölçümdür; taramayı engellemesin
+                log.debug("Anlık tarama doğrulanamadı: %s", exc)
+        if len(vals) >= SNAP_BAD_MIN_COINS and median > SNAP_BAD_PCT:
+            self._snap_off_until = self.time_fn() + SNAP_OFF_SEC
+            self.notifier.send(Messages.warning(
+                f"Anlık tarama {SNAP_OFF_SEC // 60} dakikalığına kapatıldı: anlık fiyatlar kesinleşmiş mum kapanışlarından "
+                f"ortanca %{median:.2f} farklı çıktı (en çok {worst_symbol} %{worst:.2f}). Bu sürede tarama olağan hızlı "
+                f"yoldan (mumların kesinleşmesi beklenerek) yapılır."))
+        return check
 
     def _prepare_ahead(self, now: float) -> None:
         """Taramalar arasında (taramaya en az FAST_PREPARE_GUARD_SEC varken): teminat modu / kaldıracı henüz doğru
@@ -1018,7 +1335,10 @@ class FuturesBot(TradingBot):
         with (ex.unthrottled() if fast else nullcontext()):     # Hızlı giriş: istekler arası CCXT beklemesi yok
             free = self._available_margin()
             margin = self._entry_margin(sig, free)
-            bid, ask = ex.bid_ask(symbol)
+            # Anlık tarama: sinyal fiyatı zaten az önce okunan son işlem fiyatıdır; emir defteri ayrıca istenmez (fiyat
+            # yalnızca miktarı hesaplamak için gerekir, emir piyasa emridir)
+            quick = sig.price if self._snap_live and cfg.futures_entry_order == "market" and sig.price > 0 else 0.0
+            bid, ask = (quick, quick) if quick else ex.bid_ask(symbol)
             if cfg.futures_entry_order == "limit":
                 self._place_limit_entry(sig, now, lev, margin, bid, ask)
                 return None
@@ -1032,6 +1352,7 @@ class FuturesBot(TradingBot):
             except FuturesError as exc:
                 if exc.code != "-2019":
                     raise
+                self._free_cache = None              # Önceden okunan bakiye güncel değilmiş: sıradaki girişte yeniden okunur
                 qty = ex.amount_to_precision(symbol, qty * MARGIN_RETRY_FACTOR)   # Komisyon payı yetmedi: biraz küçült
                 ex.check_order_size(symbol, qty, price)
                 fill = ex.market_order(symbol, order_side, qty)
@@ -1085,6 +1406,8 @@ class FuturesBot(TradingBot):
         tp = ex.price_to_precision(symbol, entry * (1 + sign * cfg.take_profit_pct / 100))
         sl = ex.price_to_precision(symbol, entry * (1 - sign * cfg.stop_loss_pct / 100))
         margin_used = qty * entry / lev
+        if self._free_cache is not None:             # Aynı taramadaki sıradaki giriş: bakiye bu girişin teminatı kadar az
+            self._free_cache = (max(0.0, self._free_cache[0] - margin_used - fill.fee), self._free_cache[1])
         # Faz 8: başka pozisyon açıkken açılan (ek) pozisyon kendi başabaş tetiğiyle izlenir (backtest: simulate_slots)
         n_open = sum(1 for p in self.state.positions.values() if p.futures and p.symbol != symbol)
         be_trigger = futures_be_trigger(cfg, n_open)
@@ -1138,7 +1461,11 @@ class FuturesBot(TradingBot):
         sermayesiyle sınırlı (başlangıç + K/Z - açık pozisyonlara bağlı tutar). Bot yalnızca kendisine verilen sermayeyle
         işlem yapar: cüzdana eklenen para /sermayeekle ile tanıtılınca kullanılır, kill-switch limiti de onunla büyür
         (tanıtılmadan kullanılsaydı pozisyonlar büyür ama kill-switch eski küçük sermayeye göre kalırdı)."""
-        free = self.exchange.free_balance()
+        cache = self._free_cache if self._snap_live else None
+        if cache is not None and 0 <= self.time_fn() - cache[1] <= SNAP_BALANCE_MAX_AGE_SEC:
+            free = cache[0]                          # Anlık tarama: bakiye taramadan hemen önce okundu, istek atılmaz
+        else:
+            free = self.exchange.free_balance()
         if self.exchange.is_paper:
             return free
         return max(0.0, min(free, self.state.capital - self.state.committed))
@@ -1770,6 +2097,17 @@ class FuturesBot(TradingBot):
             lines.append(f"⏱️ Zamanlama (mum kapanışından sonra): tarama {st:.1f} sn'de başladı, mumlar {kl:.1f} sn'de "
                          f"alındı" + (f" ({tm['kt']} denemede)" if tm.get("kt") else "")
                          + f", sinyaller {sg:.1f} sn'de hazırdı | hızlı giriş {'açık' if self._fast() else 'kapalı'}")
+            if tm.get("sn"):
+                lines.append(f"⚡ Anlık tarama: bu taramada kullanıldı (fiyatlar mum kapanışından "
+                             f"{tm['sn'][0] / 1000:.2f} sn sonra alındı; mumların kesinleşmesi beklenmedi)")
+            elif futures_snapshot_on(self.cfg):
+                why = tm.get("sx") or ("doğrulama bozuk veri gösterdiği için geçici olarak kapalı"
+                                       if self.time_fn() < self._snap_off_until else "")
+                lines.append("⚡ Anlık tarama açık" + (f" ama bu taramada kullanılamadı ({esc(str(why))}): olağan "
+                                                      f"hızlı yoldan tarandı" if why else ""))
+        if getattr(self.cfg, "futures_snapshot_scan", False) and not futures_snapshot_on(self.cfg):
+            lines.append("⚡ Anlık tarama açık ama bu ayarlarla kullanılamıyor (hızlı giriş + sade çöküş taktiği + piyasa "
+                         "emriyle giriş gerekir).")
         pe = self.state.pending_entry
         if pe:
             left = max(0.0, float(pe.get("expires_at", 0.0)) - self.time_fn())

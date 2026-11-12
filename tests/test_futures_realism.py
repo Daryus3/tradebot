@@ -165,10 +165,16 @@ def test_realism_label_and_comparison_row(fcfg):
     assert "tabana" not in fb.realism_label(replace(p, be_enabled=False)) and "~5 sn" in fb.realism_label(
         replace(p, be_enabled=False))
     assert "~5 sn" not in fb.realism_label(replace(p, entry_limit=True))       # Limit girişte gecikme payı yok
-    seen = {}
+    seen = []
 
     def ev(**over):
-        seen.update(over)
+        seen.append(over)
         return "E"
     rows = fb.realism_rows(fcfg, ev)
-    assert len(rows) == 1 and "Eski (iyimser) hesap" in rows[0][0] and seen == {"be_intrabar": False, "entry_lag_pct": 0.0}
+    # İki kıyas satırı: giriş 1 sn'de dolsaydı (anlık taramanın hedefi) ve eski iyimser hesap
+    assert [r[0][:22] for r in rows] == ["Giriş 1 sn'de dolsaydı", "Eski (iyimser) hesap: "]
+    assert "%0.05 → %0.02" in rows[0][0] and fb.FAST_ENTRY_LAG_PCT == 0.02
+    assert seen == [{"entry_lag_pct": 0.02}, {"be_intrabar": False, "entry_lag_pct": 0.0}]
+    seen.clear()                                 # Limit girişte gecikme payı yok: hız satırı da yok
+    rows = fb.realism_rows(replace(fcfg, futures_entry_order="limit"), ev)
+    assert len(rows) == 1 and "Eski (iyimser) hesap" in rows[0][0]
