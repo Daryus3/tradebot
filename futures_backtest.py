@@ -2488,10 +2488,12 @@ def live_timing(cfg, journal: Sequence[dict]) -> List[str]:
         if scans:
             st, kl, sg = (float(np.median([m[i] for m in scans])) / 1000 for i in range(3))
             retried = sum(1 for r in rows if r.get("kt"))
+            quiet = sum(1 for r in rows if r.get("kq"))
             offsets = [abs(float(r["co"])) for r in rows if isinstance(r.get("co"), (int, float))]
             out.append(f"  Tarama zamanlaması ({tag}mum kapanışından sonra, ortanca): başlangıç {st:.1f} sn → mumlar "
                        f"alındı {kl:.1f} sn → sinyaller hazır {sg:.1f} sn ({len(scans)} tarama"
                        + (f"; {retried} taramada mumlar yeniden istendi" if retried else "")
+                       + (f"; {quiet} taramada sakin coinlerin yeni mumu beklenmedi" if quiet else "")
                        + (f"; Binance ile saat farkı ortanca {np.median(offsets):.0f} ms" if offsets else "") + ")")
         fills = [f for r in rows for f in (r.get("f") or {}).values() if isinstance(f, dict)]
         lags = [float(f.get("x", f.get("r"))) / 1000 for f in fills if f.get("x", f.get("r")) is not None]
@@ -2506,24 +2508,31 @@ def live_timing(cfg, journal: Sequence[dict]) -> List[str]:
     return out
 
 
+ACCOUNT_BLOCK_RECENT_MS = 6 * FUT_HOUR_MS    # Hesap modu reddi bundan yeniyse "hâlâ sürüyor olabilir" diye uyarılır
+
+
 def live_account_block(journal: Sequence[dict]) -> Optional[str]:
-    """Canlı bot tarama kaydında hesap modu engeli (Binance -4168: hesap Çoklu Varlık modunda, yalıtılmış teminat
-    reddediliyor) var mı: varsa rapora yazılacak uyarı satırı. Bu engel sürdükçe canlı bot HİÇBİR pozisyon açamaz;
-    engelden sonra açılmış pozisyon varsa "sonradan düzelmiş" diye belirtilir."""
+    """Canlı bot tarama kaydında hesap modu reddi (Binance -4168: hesap o an Çoklu Varlık modunda, yalıtılmış teminat
+    reddedildi) var mı: varsa rapora yazılacak satır. Ret eskiyse (kaydın sonundan 6 saatten önce) ya da sonrasında
+    pozisyon açılabildiyse yalnızca bilgi verilir: bot bu modu kendisi Tek Varlık moduna alır, eski kayıt sorunun
+    sürdüğünü göstermez. Yalnızca kaydın sonuna yakın bir ret "hâlâ engelliyor olabilir" diye uyarılır."""
     hits = [int(r["t"]) for r in journal
             if any("-4168" in str(o) or "Çoklu Varlık" in str(o) for o in (r.get("s") or {}).values())]
     if not hits:
         return None
-    last = max(hits)
-    opened_after = any(int(r["t"]) > last and "açıldı" in (r.get("s") or {}).values() for r in journal)
+    last, end = max(hits), max(int(r["t"]) for r in journal)
     when = datetime.fromtimestamp(last / 1000).strftime("%d.%m %H:%M")
-    if opened_after:
-        return (f"  ℹ️ {len(hits)} taramada giriş, Binance hesabı Çoklu Varlık (Multi-Assets) modunda olduğu için "
-                f"reddedildi (-4168; son {when}); sonrasında pozisyon açılabilmiş, engel kalkmış görünüyor.")
-    return (f"  ⛔ CANLI BOT POZİSYON AÇAMIYOR: {len(hits)} taramada giriş reddedildi (son {when}). Binance hesabı Çoklu "
-            f"Varlık (Multi-Assets) modunda; bu modda yalıtılmış teminat kullanılamaz (-4168) ve bot hiçbir sinyali "
-            f"açamaz. Çözüm: Binance → Vadeli → Tercihler (⚙️) → Varlık Modu → 'Tek Varlık Modu' (README: \"Pozisyon "
-            f"açılamıyor: Çoklu Varlık modu\"). Düzelince bot yeniden başlatılmadan da çalışır; /tarama'da ⛔ satırı kalkar.")
+    head = (f"{len(hits)} taramada giriş reddedildi (son {when}): Binance hesabı o an Çoklu Varlık (Multi-Assets) "
+            f"modundaydı, bu modda yalıtılmış teminat kullanılamaz (-4168)")
+    if any(int(r["t"]) > last and "açıldı" in (r.get("s") or {}).values() for r in journal):
+        return f"  ℹ️ {head}. Sonrasında pozisyon açılabilmiş: engel kalkmış."
+    if end - last <= ACCOUNT_BLOCK_RECENT_MS:
+        return (f"  ⛔ {head}. Ret çok yeni; hesap hâlâ bu moddaysa bot hiçbir sinyali açamaz. Binance → Vadeli → "
+                f"Tercihler (⚙️) → Varlık Modu 'Tek Varlık Modu' olmalı (bot bunu kendisi de dener; /tarama'da ⛔ satırı "
+                f"varsa engel sürüyordur).")
+    return (f"  ℹ️ {head}. O zamandan beri giriş denemesi olmadı. Bot bu modu kendisi Tek Varlık moduna alır; Binance → "
+            f"Vadeli → Tercihler → Varlık Modu 'Tek Varlık Modu' görünüyorsa ve /tarama'da ⛔ satırı yoksa sorun "
+            f"kalmamıştır.")
 
 
 def live_comparison(cfg, data: FutData, trades: Sequence[FutTrade], path: Optional[Path] = None,

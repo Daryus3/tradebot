@@ -959,8 +959,21 @@ sn'de başladı, mumlar 3.7 sn'de alındı; sunucu saati ile Binance arası fark
 bir coinin yeni mumu ilk yanıtta görünmediği için mumlar yeniden istendi ve tarama eski tarama anına (3 sn) kadar bekledi.
 Bu taramaların neredeyse tamamı sakin piyasadaydı (aralıkta yalnızca 3 sinyal var): sakin piyasada az işlem gören coinde
 yeni mumun ilk işlemi saniyeler sonra gelir; dalgada her coin saniyede birçok kez işlem gördüğü için bekleme kısalır.
-Asıl ölçü pozisyon açıldığında yazılan "Giriş gecikmesi" satırıdır; canlı bot bu aralıkta hesap modu yüzünden pozisyon
-açamadığı için (Sorun giderme: "Pozisyon açılamıyor: Çoklu Varlık modu") henüz yok.
+Asıl ölçü pozisyon açıldığında yazılan "Giriş gecikmesi" satırıdır; bu aralıkta canlı bot pozisyon açmadığı için henüz
+yok. (Aralıktaki sinyallerin ikisi 10 Kasım 15:40-15:45 UTC'de, hesap o an Çoklu Varlık modunda olduğu için `-4168` ile
+reddedildi; bot aynı gün 16:02 UTC'deki güncellemeyle bu modu kendisi Tek Varlık'a alır oldu ve hesap o zamandan beri Tek
+Varlık modunda. Sonrasında yeni sinyal gelmedi.)
+
+**Sakin coin kuralı (12 Kasım 2026; bu ölçümün sonucu).** Yukarıdaki beklemeyi kaldırır. Yeni mumu henüz görünmeyen bir
+coinin az önce kapanan mumu kesinleşmemiş olabilir; ama o coinin düşüşü hiçbir çöküş / dalga eşiğine 1 puandan, 1
+saatlik düşüşü de genişlik eşiğine (%3) 0.5 puandan yakın değilse kapanışı biraz oynasa bile taramanın sonucu (sinyaller
+ve genişlik) değişemez. Böyle coinler artık beklenmez; eşiğe yakın ya da eşiğin üstündeki coinler (sinyal adayları dahil)
+eskisi gibi kendi yeni mumunu bekler. Tarama kaydına beklenmeyen coin sayısı yazılır (`kq`), rapordaki zamanlama satırı
+"N taramada sakin coinlerin yeni mumu beklenmedi" der. Sinyal yalnızca kapanışlara bağlı değilse (ek modül, likidasyon
+şartı, oynaklık eşiği, onay modu) kural uygulanmaz. Beklenen etki: sinyalli taramalarda mumların alınması 3.7 sn yerine
+aday coinin yeni mumunun göründüğü ana (spot ölçümünde ortanca 1-1.5 sn) iner; kazanç canlıda "Giriş gecikmesi"
+satırından ölçülecek. Tek sınırı: sınırın son bir saniyesinde eşiğe 1 puandan uzak bir coin o bir saniyede eşiği aşarsa
+canlı bot o (en zayıf, eşiği kıl payı geçen) sinyali kaçırabilir; tersine yanlış sinyal üretemez.
 
 #### Rapor 17 araştırması: kârı ve işlem sayısını birlikte artıran ayar var mı? (Kasım 2026)
 Baz: rapor 17'nin ayarı (5x, 4 pozisyon, Faz 6 ekleri, ek kapısı ≥10, Faz 8 açık, 28.93 USDT), düzeltilmiş motor,
@@ -1135,10 +1148,23 @@ kapatmak işlem sayısını %19-22 düşürdü, getiriyi değiştirmedi (+%379 /
 +%36'ya indirdi; 0.5 yerine 0.4 son 12 ayda 6 çekilişin 6'sında iyi. Notlar buna göre güncellendi: daha çok işlem için
 açık (0.4), maliyete dayanıklılık için kapalı.
 
+**Ek denemeler (aynı gün, ~25 kural daha; toplam ~690).**
+- **Dalga başında büyük pozisyonu aynı mumdaki en güçlü 2-3 sinyale bölmek** (toplam büyüklük aynı): 2'ye bölünce
+  +%303-328 / +%188-206, 3'e bölünce +%276-282 / +%164-169; düşüş azalmıyor (%86 / %65). İkinci en güçlü sinyal birinciden
+  belirgin kötü: bölmek kârı düşürüyor.
+- **Kâr Al'ı limit emirle koymak** (`FUTURES_TP_ORDER=limit`): modelde 10 çekilişin 10'unda, her yıl ve iki dönemde F'den
+  iyi ama fark çok küçük (+%379.4 / +%235.6 → +%382.6 / +%236.5; bileşik +%875 / +%412 → +%902 / +%416). Kazanç yalnızca
+  Kâr Al'la kapanan işlemlerin (6.340 işlemin 161'i, %2.5) komisyon ve kayma farkından (işlem başı +%0.05) geliyor ve
+  motor "fiyat dokundu = emir doldu" varsayıyor. Gerçekte fiyat hedefe dokunup dönerse limit emir dolmayabilir; 100
+  dokunuştan 1'inden fazlası dolmazsa kazanç silinir. Bu yüzden önerilmiyor (zararsız, ama kâr beklenmemeli).
+- **Ek kapısı ≥9**: işlem +%2 (yılda 929 → 950), doğrulamada 10 çekilişin 10'unda F'nin gerisinde. Kâr Al %7 / %9: kötü.
+- Başka giriş modülleri (pompa short, Bollinger + RSI, kırılım, fonlama sıkışması, trend içi düzeltme) Faz 3-4'te
+  denenmişti: 28 birleşimin 28'i zararda; yeniden denenmedi.
+
 **Sonuç.** Backtestte bu stratejinin ayar ve kural uzayı büyük ölçüde tüketildi: işlem sayısını artıran her şey ya kârı
-düşürüyor ya da sıfır kazançlı işlem ekliyor (komisyon ve risk artar, kâr artmaz). Kâr ve işlem sayısı için bundan
-sonraki gerçek kazanç ayarlarda değil **canlı tarafta**: botun sinyalleri gerçekten açabilmesi (rapor 15-18'de 3
-sinyalin 3'ü de hesap modu yüzünden açılamadı) ve girişin hızı.
+düşürüyor ya da sıfır kazançlı işlem ekliyor (komisyon ve risk artar, kâr artmaz). ~690 denemeden sonra aynı 7 yıllık
+veride bulunacak yeni bir "iyileşme" büyük olasılıkla rastlantı olur. Kalan gerçek kazanç ayarlarda değil girişin
+hızında: bu yüzden hızlı girişe sakin coin kuralı eklendi (bkz. "Canlı giriş gecikmesi").
 
 ### 🏆 Strateji turnuvası (`--turnuva`)
 Hangi strateji türünün sizin dönemde işe yaradığını **tek komutla** görmek için:
@@ -1270,7 +1296,7 @@ tradebot/
 | Telegram komutlarına cevap yok / mesajlar iki kez geliyor | Aynı token'la başka bir bot (ör. bilgisayardaki) çalışıyor; onu kapatın |
 | `Timestamp ... recvWindow` (-1021) | `timedatectl` ile saatin senkronize olduğunu kontrol edin |
 | `Invalid API-key, IP, or permissions` (-2015) | Anahtarı, izinleri ve IP kısıtlamasını (sunucu IP'si) kontrol edin |
-| **Pozisyon açılamıyor: Çoklu Varlık modu** (`-4168`, "Unable to adjust to isolated-margin mode under the Multi-Assets mode"; Telegram'da ve `/tarama`'da ⛔, backtest raporunda "CANLI BOT POZİSYON AÇAMIYOR") | Binance vadeli hesabı **Çoklu Varlık (Multi-Assets)** modunda; bu modda yalıtılmış teminat kullanılamaz ve bot **hiçbir** sinyali açamaz. Açık vadeli pozisyon ve emirleri kapatıp Binance uygulaması → Vadeli → ⚙️ Tercihler → **Varlık Modu → Tek Varlık Modu** seçin; bot yeniden başlatılmadan devam eder. Bot bunu kendisi de dener; seçenek yoksa ya da değişmiyorsa hesap Kredi İşlem Modu'nda (Credits Trading Mode, BNFCR) olabilir: o modda yalıtılmış teminat yoktur, Binance desteğine danışın |
+| **Pozisyon açılamıyor: Çoklu Varlık modu** (`-4168`, "Unable to adjust to isolated-margin mode under the Multi-Assets mode"; Telegram'da ve `/tarama`'da ⛔, backtest raporunda "N taramada giriş reddedildi") | Binance vadeli hesabı **Çoklu Varlık (Multi-Assets)** modunda; bu modda yalıtılmış teminat kullanılamaz ve bot **hiçbir** sinyali açamaz. Açık vadeli pozisyon ve emirleri kapatıp Binance uygulaması → Vadeli → ⚙️ Tercihler → **Varlık Modu → Tek Varlık Modu** seçin; bot yeniden başlatılmadan devam eder. Bot bunu kendisi de dener; seçenek yoksa ya da değişmiyorsa hesap Kredi İşlem Modu'nda (Credits Trading Mode, BNFCR) olabilir: o modda yalıtılmış teminat yoktur, Binance desteğine danışın |
 | "Serbest USDT bakiyesi yok" | USDT'yi Binance'te **Cüzdan → Transfer** ile **Spot**'a aktarın |
 | Coinler Binance'te "kilitli" görünüyor | Normal: yedek zarar-kes emri bekliyor |
 | Kill-switch kilidi | Servisi durdurun, `python main.py --mode paper --reset-state --yes`, servisi başlatın |

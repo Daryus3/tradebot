@@ -1,6 +1,7 @@
 """Hesap modu engeli (Binance -4168: hesap Çoklu Varlık / Multi-Assets modunda → yalıtılmış teminat reddedilir, bot hiçbir
 pozisyon açamaz): açık hata mesajı, saatte bir kritik Telegram uyarısı, /tarama'da ve backtest raporunun canlı bot
-karşılaştırmasında görünür uyarı. Rapor 15-18'de canlı bot 3 sinyalin 3'ünü de bu yüzden açamamıştı."""
+karşılaştırmasında görünür satır. 10 Kasım 2026'da iki giriş bu yüzden reddedilmişti (aynı gün bot modu kendisi düzeltir
+oldu); eski bir ret raporda yanlış alarm vermemeli."""
 import json
 
 import pytest
@@ -116,12 +117,7 @@ def test_startup_warning_keeps_the_block_visible(fcfg, tmp_path):
 
 
 # ====================================================================== backtest raporu
-def _data(t0):
-    return fb.FutData(t0, t0 + 6 * FUT_BAR_MS, [fb.Segment(t0 - 1, t0 + 6 * FUT_BAR_MS, ("ZEC", "NEAR"))], {},
-                      ((), (), ()), (None, None), {}, None, "5m")
-
-
-def test_report_says_live_bot_cannot_open_positions(fcfg, tmp_path):
+def test_report_mentions_account_mode_rejections_without_false_alarm(fcfg, tmp_path):
     t0 = BASE_MS
     path = tmp_path / "futures_scans_paper.jsonl"
     old = ('açılamadı: ZECUSDT teminat modu ISOLATED yapılamadı: binance {"code":-4168,"msg":"Unable to adjust to '
@@ -129,18 +125,25 @@ def test_report_says_live_bot_cannot_open_positions(fcfg, tmp_path):
     rows = [{"t": t0, "u": ["ZEC", "NEAR"], "a": ["ZEC", "NEAR"], "s": {"ZEC": old, "NEAR": "önceki girişte hata"}},
             {"t": t0 + FUT_BAR_MS, "a": ["ZEC", "NEAR"], "s": {"ZEC": old}},
             {"t": t0 + 2 * FUT_BAR_MS, "a": ["ZEC", "NEAR"]}]
-    path.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
-    text = "\n".join(fb.live_comparison(fcfg, _data(t0), [], path=path))
-    assert "⛔ CANLI BOT POZİSYON AÇAMIYOR: 2 taramada giriş reddedildi" in text
-    assert "Tek Varlık Modu" in text and "-4168" in text
+
+    def report(rows, end=6):
+        path.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
+        data = fb.FutData(t0, t0 + end * FUT_BAR_MS, [fb.Segment(t0 - 1, t0 + end * FUT_BAR_MS, ("ZEC", "NEAR"))], {},
+                          ((), (), ()), (None, None), {}, None, "5m")
+        return "\n".join(fb.live_comparison(fcfg, data, [], path=path))
+    # Ret kaydın sonuna yakın: hâlâ sürüyor olabilir → uyarı
+    text = report(rows)
+    assert "⛔ 2 taramada giriş reddedildi" in text and "Tek Varlık Modu" in text and "-4168" in text
     assert text.index("⛔") < text.index("Bu aralıkta backtestte işlem yok")
+    # Ret eski (rapor 15-18: hata 10 Kasım'da, bot aynı gün modu kendisi düzeltir oldu): yanlış alarm yok, yalnız bilgi
+    late = rows + [{"t": t0 + 100 * FUT_BAR_MS, "a": ["ZEC", "NEAR"]}]
+    text = report(late, end=101)
+    assert "⛔ 2 taramada" not in text and "ℹ️ 2 taramada giriş reddedildi" in text and "sorun kalmamıştır" in text
     # Yeni mesaj biçimi de tanınır; sonradan pozisyon açılabildiyse engel kalkmış sayılır
     rows[1]["s"] = {"ZEC": "açılamadı: Binance hesabı Çoklu Varlık (Multi-Assets) modunda: yalıtılmış teminat"}
     rows[2]["s"] = {"NEAR": "açıldı"}
-    path.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
-    text = "\n".join(fb.live_comparison(fcfg, _data(t0), [], path=path))
-    assert "⛔" not in text and "engel kalkmış görünüyor" in text
-    # Engel yoksa satır da yok
-    path.write_text(json.dumps({"t": t0, "u": ["ZEC"], "a": ["ZEC"], "s": {"ZEC": "açıldı"}}) + "\n", encoding="utf-8")
-    assert "Çoklu Varlık" not in "\n".join(fb.live_comparison(fcfg, _data(t0), [], path=path))
+    text = report(rows)
+    assert "⛔" not in text and "engel kalkmış" in text
+    # Ret yoksa satır da yok
+    assert "Çoklu Varlık" not in report([{"t": t0, "u": ["ZEC"], "a": ["ZEC"], "s": {"ZEC": "açıldı"}}])
     assert fb.live_account_block([]) is None

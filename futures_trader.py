@@ -37,11 +37,12 @@ import requests
 from config import (futures_be_trigger, futures_breadth_on, futures_coin_list, futures_hold_minutes, scan_log_path,
                     futures_crash_rules, futures_funding_rules,
                     futures_liq_distance_pct, futures_modules, futures_pump_rules, futures_slot_share,
-                    futures_wave_rules)
+                    futures_wave_cfg, futures_wave_rules)
 from futures_exchange import FFill, FuturesError, MinNotionalError, describe_error
 from logger import get_logger
 from risk import ExitReason, Position, cooldown_minutes, kill_switch_hit
-from strategy import (FUT_BAR_MS, FUT_BREADTH_DROP_PCT, FUT_BTC_1H_LIMIT, FUT_H1_LIMIT, FUT_HOUR_MS, FuturesSignal,
+from strategy import (FUT_BAR_MS, FUT_BREADTH_DROP_PCT, FUT_BREADTH_HOURS, FUT_BTC_1H_LIMIT, FUT_H1_LIMIT, FUT_HOUR_MS,
+                      FuturesSignal,
                       ScanResult, funding_per_bar, futures_kline_limit, isolated_factor, market_breadth)
 from telegram_bot import CRITICAL_EXITS, Messages, esc, fmt_duration, fmt_price, fmt_signed, fmt_usdt, futures_tag
 from trader import ALIVE_SAVE_SEC, POSITION_LOG_SEC, RULES_REFRESH_SEC, Mark, TradingBot
@@ -73,6 +74,10 @@ FAST_SCAN_DELAY_SEC = 1.0          # Tarama mum kapanışından bu kadar sonra (
 FAST_KLINE_WORKERS = 24            # Mumlar tek dalgada istenir (~24 coin × ağırlık 2 = 48; sınır dakikada 2.400)
 FAST_SETTLE_WAIT_SEC = 0.25        # Yanıtta yeni mum yoksa o coin bu kadar sonra yeniden istenir
 FAST_SETTLE_MAX_TRIES = 12         # Her durumda en fazla bu kadar deneme (normalde eski tarama anı önce gelir)
+# Sakin coin kuralı: yeni mumu henüz görünmeyen coinin az önce kapanan mumu kesinleşmemiş olabilir; ama kapanışı bu
+# kadar puan oynasa bile hiçbir kararı (çöküş eşiği, genişlik sayımı) değiştiremeyecekse o coin beklenmez
+FAST_NEAR_CRASH_PCT = 1.0          # Düşüşü bir çöküş / dalga eşiğine bu kadar puan yakın (ya da üstünde) coin bekler
+FAST_NEAR_BREADTH_PCT = 0.5        # 1 saatlik düşüşü genişlik eşiğine (%3) bu kadar puan yakın coin bekler
 FAST_PREFILTER_MIN = 40            # Bundan az coinde 24 saatlik ön eleme yapılmaz (tek istek ama 2 sn'ye kadar bekletir)
 FAST_WARM_LEAD_SEC = 2.5           # Taramadan bu kadar önce: bağlantılar ısıtılır, teminat modu / kaldıraç doğrulanır
 FAST_WARM_MIN_SEC = 1.0            # Taramaya bundan az kaldıysa ön hazırlık atlanır (taramayı geciktirmesin)
@@ -152,6 +157,8 @@ class FuturesBot(TradingBot):
         self._warm_for = 0.0                       # Ön hazırlığı yapılmış tarama anı (next_scan_at)
         self._clock_offset_ms: Optional[float] = None   # Binance saati − sunucu saati (ms; ısıtma isteklerinden)
         self._clock_warned_at = 0.0
+        self._quiet_for, self._quiet_val = None, None   # Sakin coin kuralının eşikleri (ayar nesnesi başına bir kez)
+        self._last_quiet = 0                       # Son taramada yeni mumu beklenmeden kabul edilen coin sayısı
         # Hesap düzeyinde giriş engeli (Çoklu Varlık modu, -4168): hiçbir pozisyon açılamaz; /tarama'da görünür
         self.account_block = ""
         self._account_warned_at = 0.0
@@ -509,6 +516,8 @@ class FuturesBot(TradingBot):
         timing["ms"].append(self._since_ms(closed_ms))         # ...mumlar alındı
         if tries > 1:
             timing["kt"] = tries
+        if self._last_quiet:
+            timing["kq"] = self._last_quiet                    # Yeni mumu beklenmeden kabul edilen sakin coin sayısı
         breadth = market_breadth(klines) if cascade else None
         self.last_breadth = breadth
         reentry = self._reentry_bypass(breadth, now)       # Faz 6: dalgada zarar sonrası bekleme atlanır
@@ -599,8 +608,16 @@ class FuturesBot(TradingBot):
         ortanca 0.3 sn, en geç 2.5 sn sonra son hâlini aldı (ETH, SOL, BNB gibi likit coinlerde de); yeni mum ortanca
         1-1.5 sn, en geç 2.5 sn sonra göründü ve göründüğü hiçbir yanıtta kapanan mum eksik değildi. Coinlerin bir
         kısmında yeni mum göründü diye gecikenleri beklemeden kabul etmek kesinleşmemiş mumu taramaya sokabiliyordu;
-        bu yüzden her coin kendi yeni mumunu bekler."""
+        bu yüzden kararı etkileyebilecek her coin kendi yeni mumunu bekler.
+
+        Sakin coin kuralı (rapor 18 ölçümü: 103 canlı taramanın 61'i tek tük coinin yeni mumu için eski tarama anına
+        kadar bekledi, mumlar ortanca 3.7 sn'de alındı): yeni mumu görünmeyen coinin kapanışı FAST_NEAR_* puan oynasa
+        bile ne bir çöküş / dalga eşiğine ne de genişlik eşiğine ulaşamıyorsa o coin beklenmez; kesinleşmemiş mumu
+        taramanın sonucunu değiştiremez. Eşiğe yakın ya da eşiğin üstündeki (sinyal adayı) coinler eskisi gibi bekler.
+        Sinyal yalnızca kapanışlara bağlı değilse (ek modül, likidasyon şartı, oynaklık eşiği...) kural uygulanmaz."""
         ex = self.exchange
+        quiet_rules = self._quiet_rules() if fast else None
+        quiet: Set[str] = set()
 
         def fetch(symbol: str):
             try:
@@ -642,6 +659,9 @@ class FuturesBot(TradingBot):
                     klines[symbol] = k
                 if fresh and open_ms >= closed_ms:
                     settled.add(symbol)
+                    quiet.discard(symbol)
+                elif fresh and quiet_rules is not None and not self._near_decision(k, quiet_rules):
+                    quiet.add(symbol)                 # Kesinleşmemiş olsa da kararı değiştiremez: beklenmez
                 else:
                     again.append(symbol)
             if not fast or not again:
@@ -651,10 +671,53 @@ class FuturesBot(TradingBot):
                 break                                 # Eski tarama anı: eldeki (az önce kapanan) mumlarla devam
             self.sleep_fn(min(FAST_SETTLE_WAIT_SEC, left))
             pending = again
-        if fast and tries > 1:
-            log.info("Hızlı giriş: mumlar %d denemede alındı (yeni mumu görünen %d / %d coin)", tries, len(settled),
-                     len(targets))
+        self._last_quiet = len(quiet)
+        if fast and (tries > 1 or quiet):
+            log.info("Hızlı giriş: mumlar %d denemede alındı (yeni mumu görünen %d / %d coin; beklenmeyen sakin coin %d)",
+                     tries, len(settled), len(targets), len(quiet))
         return klines, list(failed.values()), tries
+
+    def _quiet_rules(self) -> Optional[Tuple[Tuple[int, float], ...]]:
+        """Sakin coin kuralının eşikleri: ((mum sayısı, düşüş eşiği %), ...), ana + ek + dalga kurallarının saat başına
+        en düşüğü. Sinyal yalnızca kapanışlara bağlı değilse None (kural uygulanmaz: her coin yeni mumunu bekler)."""
+        cfg = self.cfg
+        if self._quiet_for is cfg:
+            return self._quiet_val
+        rules = None
+        if (getattr(cfg, "futures_tactic", "crash") == "crash" and not futures_modules(cfg)
+                and not float(getattr(cfg, "futures_crash_z", 0.0) or 0.0)
+                and getattr(cfg, "futures_confirm", "close") == "close" and not getattr(cfg, "futures_crash_liq", False)):
+            merged: Dict[int, float] = {}
+            for c in (cfg, futures_wave_cfg(cfg)):
+                for hours, pct in (futures_crash_rules(c) if c is not None else ()):
+                    merged[int(hours)] = min(float(pct), merged.get(int(hours), float(pct)))
+            rules = tuple(sorted((h * 12, pct) for h, pct in merged.items()))
+        self._quiet_for, self._quiet_val = cfg, rules
+        return rules
+
+    def _near_decision(self, k: dict, rules: Tuple[Tuple[int, float], ...]) -> bool:
+        """Coinin az önce kapanan mumu bir kararı değiştirebilir mi: düşüşü bir çöküş / dalga eşiğine FAST_NEAR_CRASH_PCT
+        puandan yakın (ya da üstünde), ya da 1 saatlik düşüşü genişlik eşiğine FAST_NEAR_BREADTH_PCT puandan yakın.
+        Yetersiz geçmiş → True (temkinli). Hesap strategy.crash_drop_pct ile aynı: kapanıştan kapanışa düşüş."""
+        c = k["c"]
+        n = len(c)
+        last = float(c[-1]) if n else 0.0
+        if last <= 0:
+            return True
+        for bars, pct in rules:
+            if n <= bars:
+                return True
+            ref = float(c[-1 - bars])
+            if ref <= 0 or (1 - last / ref) * 100 >= pct - FAST_NEAR_CRASH_PCT:
+                return True
+        if self._cascade_on():
+            bars = FUT_BREADTH_HOURS * 12
+            if n <= bars:
+                return True
+            ref = float(c[-1 - bars])
+            if ref <= 0 or abs((1 - last / ref) * 100 - FUT_BREADTH_DROP_PCT) <= FAST_NEAR_BREADTH_PCT:
+                return True
+        return False
 
     # ================================================================ hızlı giriş: ön hazırlık
     def _fast_symbols(self) -> List[str]:

@@ -292,12 +292,15 @@ def test_fast_path_is_measurably_faster_than_old_path(fcfg, tmp_path):
     assert 1000 + 4 * 20 <= lags["fast"] < lags["old"] - 2000    # 1 dalga mum + bakiye + fiyat + emir
 
 
+NEAR = dict(CLOSES, ADAUSDT=crashing(drop=5.5))      # ADA 1 sa %6 eşiğine 0.5 puan uzakta: sinyal yok ama karara yakın
+
+
 def test_fast_scan_retries_until_new_candle_shows(fcfg, tmp_path):
-    # 1) Bir coinde yeni mum hiç görünmüyor, diğerlerinde var: yalnızca o coin 0.25 sn arayla yeniden istenir; başka
-    #    coinlerde göründü diye erken kabul edilmez (kapanan mumu henüz kesinleşmemiş olabilir), eski tarama anında
-    #    (kapanış + 3 sn) eldeki mumla devam edilir
+    # 1) Karara yakın bir coinde (düşüşü eşiğe 1 puandan yakın) yeni mum hiç görünmüyor, diğerlerinde var: yalnızca o
+    #    coin 0.25 sn arayla yeniden istenir; başka coinlerde göründü diye erken kabul edilmez (kapanan mumu henüz
+    #    kesinleşmemiş olabilir), eski tarama anında (kapanış + 3 sn) eldeki mumla devam edilir
     clock = Clock(CLOSE + 1)
-    fake = FastCcxt(CLOSES, clock=clock)
+    fake = FastCcxt(NEAR, clock=clock)
     fake.forming_after = {"ADAUSDT": 99}
     bot, fake, _notes, clock = make_fbot(fast_cfg(fcfg), tmp_path, fake=fake, clock=clock)
     waits = stepping(bot, clock)
@@ -310,7 +313,7 @@ def test_fast_scan_retries_until_new_candle_shows(fcfg, tmp_path):
     assert row["kt"] == 9 and "ADA" in row["a"] and row["s"] == {"SOL": "açıldı"} and row["ms"] == [1000, 3000, 3000]
     # Geciken coin iki denemede yetişirse tarama o kadar bekler
     clock1 = Clock(CLOSE + 1)
-    fake1 = FastCcxt(CLOSES, clock=clock1)
+    fake1 = FastCcxt(NEAR, clock=clock1)
     fake1.forming_after = {"ADAUSDT": 3}
     (tmp_path / "a").mkdir()
     bot1, fake1, _n1, clock1 = make_fbot(fast_cfg(fcfg), tmp_path / "a", fake=fake1, clock=clock1)
@@ -334,6 +337,8 @@ def test_fast_scan_retries_until_new_candle_shows(fcfg, tmp_path):
     row2 = journal(bot2)[-1]
     assert sum(waits2) == pytest.approx(2.0) and row2["kt"] == len(waits2) + 1 and row2["ms"][1] == 3000
     assert row2["s"] == {"SOL": "açıldı"} and sorted(row2["a"]) == ["ADA", "DOGE", "SOL", "XRP"]
+    asked2 = [c[1] for c in fake2.calls if c[0] == "klines"]
+    assert asked2.count("SOLUSDT") == row2["kt"] and asked2.count("ADAUSDT") == 1 and row2["kq"] == 3   # Yalnız aday bekler
     # 3) Yeni mum ikinci denemede görünür: beklemeden devam
     clock3 = Clock(CLOSE + 1)
     fake3 = FastCcxt(CLOSES, clock=clock3)
@@ -344,6 +349,77 @@ def test_fast_scan_retries_until_new_candle_shows(fcfg, tmp_path):
     bot3.next_scan_at = clock3.t
     bot3.tick()
     assert waits3 == [ft.FAST_SETTLE_WAIT_SEC] and journal(bot3)[-1]["kt"] == 2
+
+
+def test_quiet_coins_do_not_delay_the_scan(fcfg, tmp_path):
+    """Sakin coin kuralı (rapor 18: 103 canlı taramanın 61'i tek tük coinin yeni mumunu 3 sn'ye kadar bekledi): yeni mumu
+    görünmeyen coinin kapanışı hiçbir eşiğe yakın değilse beklenmez; tarama ve giriş 1 sn'de yapılır, sonuç aynıdır."""
+    clock = Clock(CLOSE + 1)
+    fake = FastCcxt(CLOSES, clock=clock)
+    fake.forming_after = {"ADAUSDT": 99, "XRPUSDT": 99}          # İki sakin coinde yeni mum hiç görünmüyor
+    bot, fake, _notes, clock = make_fbot(fast_cfg(fcfg), tmp_path, fake=fake, clock=clock)
+    waits = stepping(bot, clock)
+    fake.calls.clear()
+    bot.next_scan_at = clock.t
+    bot.tick()
+    asked = [c[1] for c in fake.calls if c[0] == "klines"]
+    assert asked.count("ADAUSDT") == 1 and asked.count("XRPUSDT") == 1 and not waits
+    row = journal(bot)[-1]
+    assert "kt" not in row and row["kq"] == 2 and row["ms"] == [1000, 1000, 1000] and row["s"] == {"SOL": "açıldı"}
+    assert sorted(row["a"]) == ["ADA", "DOGE", "SOL", "XRP"]                 # Sakin coinler de analiz edildi
+    # Aday coinin (SOL) kendi yeni mumu görünmüyorsa eskisi gibi beklenir: kesinleşmemiş mumla sinyal verilmez
+    clock1 = Clock(CLOSE + 1)
+    fake1 = FastCcxt(CLOSES, clock=clock1)
+    fake1.forming_after = {"SOLUSDT": 4, "ADAUSDT": 99}
+    (tmp_path / "a").mkdir()
+    bot1, fake1, _n1, clock1 = make_fbot(fast_cfg(fcfg), tmp_path / "a", fake=fake1, clock=clock1)
+    waits1 = stepping(bot1, clock1)
+    fake1.calls.clear()
+    bot1.next_scan_at = clock1.t
+    bot1.tick()
+    asked1 = [c[1] for c in fake1.calls if c[0] == "klines"]
+    assert asked1.count("SOLUSDT") == 4 and asked1.count("ADAUSDT") == 1 and len(waits1) == 3
+    assert journal(bot1)[-1]["ms"][1] == 1750 and journal(bot1)[-1]["kq"] == 1
+
+
+def test_quiet_rule_thresholds_and_when_it_is_off(fcfg, tmp_path):
+    bot, _fake, _notes, _clock = make_fbot(fast_cfg(fcfg), tmp_path)
+    rules = bot._quiet_rules()
+    assert rules == ((12, 6.0), (48, 10.0))                                  # 1 sa %6 (ek kural), 4 sa %10 (ana kural)
+    k = lambda closes: {"c": closes}                                         # noqa: E731
+    assert bot._near_decision(k(flat()), rules) is False
+    assert bot._near_decision(k(crashing(drop=4.9)), rules) is False        # Eşiğe 1.1 puan uzak
+    assert bot._near_decision(k(crashing(drop=5.1)), rules) is True         # Eşiğe 0.9 puan uzak: bekler
+    assert bot._near_decision(k(crashing(drop=8.0)), rules) is True         # Eşiğin üstünde (aday): bekler
+    assert bot._near_decision(k(flat(n=30)), rules) is True                 # Yetersiz geçmiş: temkinli
+    # Dalga eşikleri (1 sa %5) daha düşük eşik getirir; genişlik ölçülüyorsa %3'e 0.5 puan yakın coin de bekler
+    wave = fast_cfg(fcfg, futures_wave_rules="1:5", futures_max_positions=2, futures_extra_breadth=3)
+    (tmp_path / "w").mkdir()
+    wbot, _f, _n, _c = make_fbot(wave, tmp_path / "w")
+    wrules = wbot._quiet_rules()
+    assert wrules == ((12, 5.0), (48, 10.0))
+    assert wbot._near_decision(k(crashing(drop=4.1)), wrules) is True       # 5 - 1 = 4'ün üstünde
+    assert wbot._near_decision(k(crashing(drop=3.3)), wrules) is True       # Genişlik eşiğine (%3) 0.3 puan
+    assert wbot._near_decision(k(crashing(drop=2.6)), wrules) is True
+    assert wbot._near_decision(k(crashing(drop=3.8)), wrules) is False      # %3'ü açık farkla geçmiş, eşiğe uzak
+    assert wbot._near_decision(k(crashing(drop=2.0)), wrules) is False
+    assert bot._near_decision(k(crashing(drop=3.3)), rules) is False        # Genişlik ölçülmüyorsa bu şart yok
+    # Sinyal yalnızca kapanışlara bağlı değilse kural kapalı: her coin yeni mumunu bekler
+    for over in (dict(futures_crash_liq=True), dict(futures_crash_z=2.0), dict(futures_pump_rules="1:8")):
+        strict = fast_cfg(fcfg, **over)
+        (tmp_path / str(len(over) + sum(map(ord, next(iter(over)))))).mkdir()
+        sbot, _f2, _n2, _c2 = make_fbot(strict, tmp_path / str(len(over) + sum(map(ord, next(iter(over))))))
+        assert sbot._quiet_rules() is None, over
+    clock = Clock(CLOSE + 1)
+    fake = FastCcxt(CLOSES, clock=clock)
+    fake.forming_after = {"ADAUSDT": 99}
+    (tmp_path / "s").mkdir()
+    sbot, fake, _n3, clock = make_fbot(fast_cfg(fcfg, futures_crash_z=2.0), tmp_path / "s", fake=fake, clock=clock)
+    stepping(sbot, clock)
+    fake.calls.clear()
+    sbot.next_scan_at = clock.t
+    sbot.tick()
+    assert [c[1] for c in fake.calls if c[0] == "klines"].count("ADAUSDT") == 9 and "kq" not in journal(sbot)[-1]
 
 
 def test_old_path_asks_each_coin_once_without_new_candle_check(fcfg, tmp_path):
@@ -548,6 +624,9 @@ def test_report_shows_measured_scan_timing_and_entry_lag(fcfg, tmp_path):
     assert "zamanlaması" not in "\n".join(fb.live_comparison(fcfg, data, [], path=path))
     assert fb.live_timing(fcfg, [{"t": t0, "ms": [3000, 3100, 3100]}])[0].startswith(
         "  Tarama zamanlaması (mum kapanışından sonra, ortanca): başlangıç 3.0 sn")
+    quiet = fb.live_timing(fcfg, [{"t": t0, "ms": [1000, 1500, 1550], "fast": 1, "kq": 14},
+                                  {"t": t0 + FUT_BAR_MS, "ms": [1000, 3600, 3650], "fast": 1, "kt": 9, "kq": 12}])[0]
+    assert "(2 tarama; 1 taramada mumlar yeniden istendi; 2 taramada sakin coinlerin yeni mumu beklenmedi)" in quiet
 
 
 # ====================================================================== gerçek CCXT nesnesi (ağ yok: istekler sahte)
