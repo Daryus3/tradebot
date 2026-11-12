@@ -35,8 +35,8 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from config import (DATA_DIR, format_crash_rules, futures_coin_list, futures_crash_rules, futures_funding_rules,
-                    futures_liq_distance_pct, futures_long_windows, futures_modules, futures_wave_cfg,
-                    futures_wave_rules, parse_crash_rules, scan_log_path)
+                    futures_liq_distance_pct, futures_long_windows, futures_modules, futures_scan_shifts,
+                    futures_wave_cfg, futures_wave_rules, parse_crash_rules, scan_log_path)
 from futures_data import FuturesArchive, concat, resample, slice_range
 from strategy import (FUT_BAR_MS, FUT_HOUR_MS, breadth_flags, btc_trend_1h, crash_state, funding_per_bar,
                       futures_candidates, futures_entries, futures_features, isolated_factor, pick_signal, trend_at)
@@ -112,6 +112,11 @@ class FutData:
     universe_note: str = ""
     # Dalga modu genişliği: (ilk mum kapanışı ms, mum başına son 1 saatte %3+ düşen evren coini sayısı)
     breadth: Optional[Tuple[int, np.ndarray]] = None
+    # Dakikalık tarama (FUTURES_MINUTE_SCAN): coinin 1 dk mumlarını veren yükleyici, ara dakikaların genişliği (mum içi
+    # kayma ms → (ilk kapanış ms, sayılar)) ve çıkış pencerelerinin aylık 1 dk dosyalardan okunması
+    minute_loader: Optional[Callable[[str], Dict[str, np.ndarray]]] = None
+    breadth_shift: Dict[int, Tuple[int, np.ndarray]] = field(default_factory=dict)
+    monthly_windows: bool = False
 
 
 def history_segments(end_ms: int, start_ms: Optional[int] = None) -> List[Segment]:
@@ -162,6 +167,11 @@ def prepare_universe(cfg, start_ms: int, end_ms: int, segments: List[Segment], a
                  for k in sorted(months.get(symbol, ())) if k >= "2020-01"]
         return concat(parts)
 
+    def minute_loader(symbol: str) -> Dict[str, np.ndarray]:     # Dakikalık tarama: aynı ayların 1 dk mumları
+        parts = [archive.klines(symbol, month_ms(k), min(month_ms(month_add(k, 1)), end_ms), "1m")
+                 for k in sorted(months.get(symbol, ())) if k >= "2020-01" and month_ms(k) < end_ms]
+        return concat(parts)
+
     say(f"📥 BTCUSDT: trend için 5 dk mumlar | evren: {len(months)} farklı coin")
     btc = archive.klines("BTCUSDT", start_ms - WARMUP_MS, end_ms, "5m")
     inside = slice_range(btc, start_ms, end_ms)
@@ -175,7 +185,7 @@ def prepare_universe(cfg, start_ms: int, end_ms: int, segments: List[Segment], a
                 f" (en az {age} gün listelenmiş, son {avg} gün ortalama hacim; toplam {len(months)} farklı coin)")
     return FutData(start_ms, end_ms, segments, {}, btc_trend_1h(resample(btc, FUT_HOUR_MS)), (inside["t"], inside["c"]),
                    {}, archive, exit_interval, ["Evren modunda fonlama için ortalama oran (8 saatte %0.01) kullanıldı."],
-                   loader=loader, lean_symbols=sorted(months), universe_note=note)
+                   loader=loader, lean_symbols=sorted(months), universe_note=note, minute_loader=minute_loader)
 
 
 def prepare(cfg, start_ms: int, end_ms: int, segments: Optional[List[Segment]] = None, cache_dir=None,
@@ -213,7 +223,8 @@ def prepare(cfg, start_ms: int, end_ms: int, segments: Optional[List[Segment]] =
     btc_1h = resample(btc, FUT_HOUR_MS)
     inside = slice_range(btc, start_ms, end_ms)
     return FutData(start_ms, end_ms, segments, k5, btc_trend_1h(btc_1h), (inside["t"], inside["c"]), funding, archive,
-                   exit_interval, notes)
+                   exit_interval, notes,
+                   minute_loader=lambda symbol: archive.klines(symbol, start_ms - WARMUP_MS, end_ms, "1m"))
 
 
 # ===================================================================== sinyaller
@@ -243,6 +254,7 @@ class Funnel:
     liq_vol_trend: int = 0
     signals: int = 0
     wave: int = 0           # Faz 6: dalga eşiğiyle gelen (genişlik şartını geçen) ek sinyal
+    between: int = 0        # Dakikalık tarama: 5 dk sınırları dışındaki dakikalarda bulunan sinyaller (dalga eşiği dahil)
 
 
 def _active_mask(t_close: np.ndarray, coin: str, segments: List[Segment]) -> np.ndarray:
@@ -318,10 +330,10 @@ class BreadthCounter:
     """Dalga modu genişliği: sinyal taramasıyla aynı geçişte her coinin "son 1 saatte %3+ düştü" mumları sayılır (o tarihte
     evrende olan coinler; canlıda taranan coinler)."""
 
-    def __init__(self, data: FutData):
-        self.data = data
-        self.t0 = data.start_ms // FUT_BAR_MS * FUT_BAR_MS
-        self.need = data.breadth is None
+    def __init__(self, data: FutData, shift: int = 0):
+        self.data, self.shift = data, int(shift)        # shift > 0: dakikalık taramanın ara dakikası (mum içi kayma ms)
+        self.t0 = data.start_ms // FUT_BAR_MS * FUT_BAR_MS + self.shift
+        self.need = (data.breadth if not self.shift else data.breadth_shift.get(self.shift)) is None
         self.counts = np.zeros((data.end_ms - self.t0) // FUT_BAR_MS + 2, dtype=np.int32) if self.need else None
 
     def add(self, f: Dict[str, np.ndarray], close: np.ndarray, coin: str) -> None:
@@ -332,44 +344,46 @@ class BreadthCounter:
         np.add.at(self.counts, idx[ok], 1)
 
     def finish(self, signals: Sequence[FutSignal]) -> None:
-        if self.need:
+        if self.need and self.shift:
+            self.data.breadth_shift[self.shift] = (self.t0, self.counts)
+        elif self.need:
             self.data.breadth = (self.t0, self.counts)
         for s in signals:
             s.breadth = breadth_at(self.data, s.close_ms)
 
 
 def breadth_at(data: FutData, close_ms: int) -> int:
-    if data.breadth is None:
+    """O kapanıştaki genişlik; 5 dk sınırı dışındaki (dakikalık tarama) kapanışlar kendi kaydırılmış ızgarasından."""
+    shift = int(close_ms) % FUT_BAR_MS
+    store = data.breadth if not shift else data.breadth_shift.get(shift)
+    if store is None:
         return 0
-    t0, counts = data.breadth
+    t0, counts = store
     i = (int(close_ms) - t0) // FUT_BAR_MS
     return int(counts[i]) if 0 <= i < len(counts) else 0
 
 
-def find_signals(cfg, data: FutData) -> Tuple[List[FutSignal], Funnel]:
-    """Canlı botun her 5 dk kapanışında yaptığı değerlendirmenin tüm geçmişe uygulanışı."""
-    signals: List[FutSignal] = []
-    wave_sigs: List[FutSignal] = []
-    funnel = Funnel()
-    breadth = BreadthCounter(data)
-    wave_cfg = futures_wave_cfg(cfg)            # Faz 6 dalga eşikleri (kapalıysa None)
-    for symbol, k in _series(data):
-        coin = symbol[:-4]
-        k = with_extras(k, symbol, data, [cfg])
-        t = k["t"]
-        close = t + FUT_BAR_MS
-        f = futures_features(k, cfg)
-        breadth.add(f, close, coin)
-        active = _active_mask(close, coin, data.segments)
-        nxt_ok = np.zeros(len(t), dtype=bool)
-        nxt_ok[:-1] = t[1:] == close[:-1]                 # Bir sonraki mum boşluksuz geliyor (giriş yapılabilir)
-        active &= nxt_ok
-        up = down = None
-        crash = cfg.futures_tactic == "crash"
-        if cfg.futures_btc_trend and not crash:
-            up, down = trend_at(close, data.btc_trend)
-        long_ok, short_ok = futures_candidates(f, cfg, up, down)
-        both = (long_ok | short_ok) & active
+def _coin_signals(cfg, wave_cfg, data: FutData, symbol: str, k: Dict[str, np.ndarray], breadth: "BreadthCounter",
+                  funnel: Optional[Funnel], signals: List[FutSignal], wave_sigs: List[FutSignal]) -> None:
+    """Bir coinin 5 dk mumlarında (dakikalık taramada: kaydırılmış 5 dk mumlarında) canlı botun her mum kapanışındaki
+    değerlendirmesi; sinyaller listelere eklenir. `funnel` verilirse huni sayıları güncellenir."""
+    coin = symbol[:-4]
+    k = with_extras(k, symbol, data, [cfg])
+    t = k["t"]
+    close = t + FUT_BAR_MS
+    f = futures_features(k, cfg)
+    breadth.add(f, close, coin)
+    active = _active_mask(close, coin, data.segments)
+    nxt_ok = np.zeros(len(t), dtype=bool)
+    nxt_ok[:-1] = t[1:] == close[:-1]                 # Bir sonraki mum boşluksuz geliyor (giriş yapılabilir)
+    active &= nxt_ok
+    up = down = None
+    crash = cfg.futures_tactic == "crash"
+    if cfg.futures_btc_trend and not crash:
+        up, down = trend_at(close, data.btc_trend)
+    long_ok, short_ok = futures_candidates(f, cfg, up, down)
+    both = (long_ok | short_ok) & active
+    if funnel is not None:
         funnel.candles += int(active.sum())
         if crash:   # Huni: çöküş (tüm kurallar) → (likidasyon dalgası) → sinyal (teyitle)
             drop = crash_state(f, cfg)[0] & active
@@ -380,33 +394,68 @@ def find_signals(cfg, data: FutData) -> Tuple[List[FutSignal], Funnel]:
             funnel.liq += int(((f["liq_long"] | f["liq_short"]) & active).sum())
             funnel.liq_vol += int(((f["liq_long"] | f["liq_short"]) & f["vol_ok"] & active).sum())
             funnel.liq_vol_trend += int(both.sum())
-        for i in np.flatnonzero(both):
-            found = pick_signal(f, i, cfg, long_ok, short_ok)          # Canlıdaki seçim (öncelik, puan, long)
+    for i in np.flatnonzero(both):
+        found = pick_signal(f, i, cfg, long_ok, short_ok)          # Canlıdaki seçim (öncelik, puan, long)
+        if found is None:
+            continue
+        found["btc_trend"] = (1.0 if up is not None and up[i] else -1.0 if down is not None and down[i] else 0.0)
+        signals.append(FutSignal(int(close[i]), symbol, found["side"], found["score"], float(k["o"][i + 1]),
+                                 {key: v for key, v in found.items() if key not in ("side", "price", "priority")},
+                                 int(found.get("priority", 0))))
+    if wave_cfg is not None:    # Ana kuralın sinyal vermediği mumlarda dalga eşikleri (genişlik sonra süzülür)
+        wl, ws = futures_candidates(f, wave_cfg, up, down)
+        for i in np.flatnonzero((wl | ws) & active & ~both):
+            found = pick_signal(f, i, wave_cfg, wl, ws)
             if found is None:
                 continue
-            found["btc_trend"] = (1.0 if up is not None and up[i] else -1.0 if down is not None and down[i] else 0.0)
-            signals.append(FutSignal(int(close[i]), symbol, found["side"], found["score"], float(k["o"][i + 1]),
-                                     {key: v for key, v in found.items() if key not in ("side", "price", "priority")},
-                                     int(found.get("priority", 0))))
-        if wave_cfg is not None:    # Ana kuralın sinyal vermediği mumlarda dalga eşikleri (genişlik sonra süzülür)
-            wl, ws = futures_candidates(f, wave_cfg, up, down)
-            for i in np.flatnonzero((wl | ws) & active & ~both):
-                found = pick_signal(f, i, wave_cfg, wl, ws)
-                if found is None:
-                    continue
-                found["btc_trend"] = 0.0
-                found["wave_rule"] = 1.0
-                wave_sigs.append(FutSignal(int(close[i]), symbol, found["side"], found["score"], float(k["o"][i + 1]),
-                                           {key: v for key, v in found.items()
-                                            if key not in ("side", "price", "priority")},
-                                           int(found.get("priority", 0))))
+            found["btc_trend"] = 0.0
+            found["wave_rule"] = 1.0
+            wave_sigs.append(FutSignal(int(close[i]), symbol, found["side"], found["score"], float(k["o"][i + 1]),
+                                       {key: v for key, v in found.items()
+                                        if key not in ("side", "price", "priority")},
+                                       int(found.get("priority", 0))))
+
+
+def find_signals(cfg, data: FutData,
+                 progress: Optional[Callable[[str], None]] = None) -> Tuple[List[FutSignal], Funnel]:
+    """Canlı botun her 5 dk kapanışında yaptığı değerlendirmenin tüm geçmişe uygulanışı. Dakikalık taramada
+    (FUTURES_MINUTE_SCAN; config.futures_scan_shifts) ara dakikalar da değerlendirilir: coinin 1 dk mumlarından o
+    dakikada kapanan (kaydırılmış) 5 dk mumlar üretilir ve aynı fonksiyonlardan geçirilir (canlı bot aynısını yapar).
+    5 dk sınırlarındaki sinyaller iki modda da birebir aynıdır."""
+    signals: List[FutSignal] = []
+    wave_sigs: List[FutSignal] = []
+    funnel = Funnel()
+    breadth = BreadthCounter(data)
+    wave_cfg = futures_wave_cfg(cfg)            # Faz 6 dalga eşikleri (kapalıysa None)
+    for symbol, k in _series(data):
+        _coin_signals(cfg, wave_cfg, data, symbol, k, breadth, funnel, signals, wave_sigs)
     funnel.signals = len(signals)
+    shifts = futures_scan_shifts(cfg) if data.minute_loader is not None else ()
+    counters = {sh: BreadthCounter(data, sh) for sh in shifts}
+    if shifts:
+        symbols = list(data.lean_symbols) if data.loader is not None else list(data.k5)
+        if progress:
+            progress(f"⏱️ Her dakika tarama: {len(symbols)} coinin 1 dk mumları okunuyor (ilk seferde ~2 GB indirilir, "
+                     f"birkaç dakika sürer)...")
+        for n, symbol in enumerate(symbols):
+            if progress and n and n % 10 == 0:
+                progress(f"   1 dk mumlar: {n} / {len(symbols)} coin")
+            k1 = data.minute_loader(symbol)
+            if len(k1["t"]) < 500 * (FUT_BAR_MS // MIN_MS):
+                continue
+            for sh in shifts:
+                _coin_signals(cfg, wave_cfg, data, symbol, resample(k1, FUT_BAR_MS, shift_ms=sh), counters[sh], None,
+                              signals, wave_sigs)
+        data.monthly_windows = True             # Çıkış pencereleri de aylık 1 dk dosyalardan (zaten indirildi)
+    for counter in counters.values():
+        counter.finish(())
     breadth.finish(signals + wave_sigs)
     if wave_sigs:                   # Canlıdaki gibi: dalga eşikleri yalnızca genişlik ≥ FUTURES_WAVE_BREADTH iken
         need = int(getattr(cfg, "futures_wave_breadth", 12))
         kept = [s for s in wave_sigs if s.breadth >= need]
-        funnel.wave = len(kept)
+        funnel.wave = sum(1 for s in kept if not s.close_ms % FUT_BAR_MS)
         signals += kept
+    funnel.between = sum(1 for s in signals if s.close_ms % FUT_BAR_MS)
     signals.sort(key=signal_order)
     return signals, funnel
 
@@ -452,6 +501,9 @@ def load_windows(data: FutData, signals: Sequence[FutSignal], minutes: int = MAX
     return out
 
 
+MONTH_CACHE = 64        # Dakikalık taramada bellekte tutulan (parite, ay) 1 dk mum sayısı (≈ 2 MB / ay)
+
+
 class LazyWindows(dict):
     """(parite, giriş ms) → çıkış penceresi; günlük 1 dk (uzun pencerede 5 dk) dosyalardan gerektiğinde okunur.
     Simülasyon yalnızca gerçekten açılan işlemlerin penceresini ister: binlerce sinyalin hepsi belleğe alınmaz."""
@@ -463,6 +515,21 @@ class LazyWindows(dict):
         self.interval = "1m" if data.exit_interval == "1m" and minutes <= LONG_WINDOW_MIN else "5m"
         self.bar = MIN_MS if self.interval == "1m" else FUT_BAR_MS
         self.days: Dict[Tuple[str, int], tuple] = {}
+        self.months: Dict[Tuple[str, int, int], tuple] = {}     # Dakikalık tarama: (parite, yıl, ay) → 1 dk mumlar
+
+    def _month(self, symbol: str, year: int, month: int) -> tuple:
+        """Ayın 1 dk mumları (bitmemiş ayda günlük dosyalardan); en çok MONTH_CACHE ay bellekte tutulur."""
+        key = (symbol, year, month)
+        hit = self.months.pop(key, None)
+        if hit is None:
+            a = int(datetime(year, month, 1, tzinfo=timezone.utc).timestamp() * 1000)
+            b = int(datetime(year + (month == 12), month % 12 + 1, 1, tzinfo=timezone.utc).timestamp() * 1000)
+            arr = self.data.archive.klines(symbol, a, b, "1m")
+            hit = tuple(arr[k] for k in ("t", "o", "h", "l", "c"))
+            while len(self.months) >= MONTH_CACHE:
+                self.months.pop(next(iter(self.months)))
+        self.months[key] = hit                               # En son kullanılan sona (LRU)
+        return hit
 
     def _day(self, symbol: str, day_ms: int) -> tuple:
         key = (symbol, day_ms)
@@ -475,13 +542,20 @@ class LazyWindows(dict):
         if dict.__contains__(self, key):
             return dict.__getitem__(self, key)
         symbol, close_ms = key
-        first = close_ms // DAY_MS * DAY_MS
-        parts = [self._day(symbol, d) for d in range(first, close_ms + self.span, DAY_MS)]
-        cols = [np.concatenate([p[i] for p in parts]) for i in range(5)]
+        if self.interval == "1m" and getattr(self.data, "monthly_windows", False):
+            a = datetime.fromtimestamp(close_ms / 1000, tz=timezone.utc)
+            b = datetime.fromtimestamp((close_ms + self.span - 1) / 1000, tz=timezone.utc)
+            parts = [self._month(symbol, a.year, a.month)]
+            if (b.year, b.month) != (a.year, a.month):
+                parts.append(self._month(symbol, b.year, b.month))
+        else:
+            first = close_ms // DAY_MS * DAY_MS
+            parts = [self._day(symbol, d) for d in range(first, close_ms + self.span, DAY_MS)]
+        cols = list(parts[0]) if len(parts) == 1 else [np.concatenate([p[i] for p in parts]) for i in range(5)]
         t = cols[0]
         i, j = np.searchsorted(t, close_ms), np.searchsorted(t, close_ms + self.span)
-        win = (self.bar, t[i:j], cols[1][i:j], cols[2][i:j], cols[3][i:j], cols[4][i:j]) \
-            if j > i and int(t[i]) == close_ms else None
+        win = (self.bar, t[i:j].copy(), cols[1][i:j].copy(), cols[2][i:j].copy(), cols[3][i:j].copy(),
+               cols[4][i:j].copy()) if j > i and int(t[i]) == close_ms else None
         dict.__setitem__(self, key, win)
         return win if win is not None else default
 
@@ -1502,8 +1576,13 @@ def variant_rows(cfg, data: FutData, signals, windows) -> List[Tuple[str, Evalua
     def ev(sigs=signals, **over):
         return evaluate(params_from_cfg(cfg, **over), data, sigs, windows)
     if cfg.futures_tactic == "crash":
+        # Dakikalık taramada yeni sinyal gerektiren satırlar 5 dk taramayla hesaplanır (her biri için tüm 1 dk geçmişi
+        # yeniden taramak raporu çok uzatırdı); etiketleri bunu söyler, "5 dk'da bir tarama" satırıyla karşılaştırılır
+        minute = bool(futures_scan_shifts(cfg)) and data.minute_loader is not None
+        tag = " · 5 dk taramayla" if minute else ""
+
         def other(**changes):
-            c2 = replace(cfg, **changes)
+            c2 = replace(cfg, **changes, **({"futures_minute_scan": False} if minute else {}))
             sigs, _f = find_signals(c2, data)
             load_windows(data, sigs, window_minutes(cfg), cache=windows)
             return evaluate(params_from_cfg(c2), data, sigs, windows)
@@ -1515,7 +1594,8 @@ def variant_rows(cfg, data: FutData, signals, windows) -> List[Tuple[str, Evalua
                         and int(getattr(cfg, "futures_wave_breadth", 12)) == PHASE6_WAVE["futures_wave_breadth"]):
                     wave_cache.append(list(signals))
                 else:
-                    sigs, _f = find_signals(replace(cfg, **PHASE6_WAVE), data)
+                    sigs, _f = find_signals(replace(cfg, **PHASE6_WAVE, **({"futures_minute_scan": False}
+                                                                           if minute else {})), data)
                     load_windows(data, sigs, window_minutes(cfg), cache=windows)
                     wave_cache.append(sigs)
             return evaluate(params_from_cfg(cfg, **over), data, wave_cache[0], windows)
@@ -1533,10 +1613,15 @@ def variant_rows(cfg, data: FutData, signals, windows) -> List[Tuple[str, Evalua
                                       maker_fee=params_from_cfg(cfg).maker_fee * 2)),
                 ("Kâr Al piyasa emriyle (taker)", ev(tp_limit=False)),
                 ("Kötümser stop dolumu (fitilin yarısı)", ev(harsh_stops=True)),
-                (f"Çöküş eşiği %{cfg.futures_crash_drop_pct - 2:g}", other(futures_crash_drop_pct=cfg.futures_crash_drop_pct - 2)),
-                (f"Çöküş eşiği %{cfg.futures_crash_drop_pct + 2:g}", other(futures_crash_drop_pct=cfg.futures_crash_drop_pct + 2)),
-                ("+likidasyon dalgası şartı" if not cfg.futures_crash_liq else "Likidasyon şartı kapalı",
-                 other(futures_crash_liq=not cfg.futures_crash_liq))] + long_window_rows(cfg, other)
+                (f"Çöküş eşiği %{cfg.futures_crash_drop_pct - 2:g}{tag}",
+                 other(futures_crash_drop_pct=cfg.futures_crash_drop_pct - 2)),
+                (f"Çöküş eşiği %{cfg.futures_crash_drop_pct + 2:g}{tag}",
+                 other(futures_crash_drop_pct=cfg.futures_crash_drop_pct + 2)),
+                (("+likidasyon dalgası şartı" if not cfg.futures_crash_liq else "Likidasyon şartı kapalı") + tag,
+                 other(futures_crash_liq=not cfg.futures_crash_liq))]
+                + ([("5 dk'da bir tarama (dakikalık tarama kapalı)",
+                     ev([s for s in signals if not s.close_ms % FUT_BAR_MS]))] if minute else [])
+                + [(name + tag, e) for name, e in long_window_rows(cfg, other)]
                 + cascade_rows(cfg, ev, signals) + phase6_rows(cfg, ev, signals, phase6) + phase8_rows(cfg, ev)
                 + phase9_rows(cfg, ev) + realism_rows(cfg, ev))
     out = [("Başabaş kalkanı kapalı", ev(be_enabled=False)),
@@ -2562,11 +2647,13 @@ def live_comparison(cfg, data: FutData, trades: Sequence[FutTrade], path: Option
         return [head, "  Bu backtest döneminde canlı tarama kaydı yok."]
     by_t = {int(r["t"]): r for r in journal}
     first, last = min(by_t), max(by_t)
-    expected = (last - first) // FUT_BAR_MS + 1
+    step = MIN_MS if any(t % FUT_BAR_MS for t in by_t) else FUT_BAR_MS      # Dakikalık taramada satırlar dakikada bir
+    expected = (last - first) // step + 1
     skips = Counter(str(r["skip"]).split(" (")[0] for r in journal if "skip" in r)
     scanned = sum(1 for r in journal if "skip" not in r)
     L = [f"🔍 CANLI BOT KARŞILAŞTIRMASI ({mode} bot kaydı: {when(first)} → {when(last)})",
-         f"  Kayıtlı 5 dk mum: {len(by_t)} / {expected} (bot kapalıyken kayıt olmaz) | taranan {scanned}"
+         f"  Kayıtlı {'tarama (dakikada bir)' if step == MIN_MS else '5 dk mum'}: {len(by_t)} / {expected} (bot "
+         f"kapalıyken kayıt olmaz) | taranan {scanned}"
          + (" | taranmayan: " + ", ".join(f"{k}: {v}" for k, v in skips.most_common(4)) if skips else "")]
     last_u = next((r["u"] for r in reversed(journal) if r.get("u") is not None), None)
     if last_u is not None:
@@ -2587,7 +2674,8 @@ def live_comparison(cfg, data: FutData, trades: Sequence[FutTrade], path: Option
     rows = []
     for tr in inside:
         # Sinyal mumunun kapanışı: piyasa girişinde giriş anının kendisi, limit girişte (dolum birkaç dk sonra) o mum
-        key, text = live_status(tr.symbol, by_t.get(int(tr.entry_ms) // FUT_BAR_MS * FUT_BAR_MS))
+        row = by_t.get(int(tr.entry_ms) // MIN_MS * MIN_MS) if int(tr.entry_ms) % FUT_BAR_MS else None
+        key, text = live_status(tr.symbol, row if row is not None else by_t.get(int(tr.entry_ms) // FUT_BAR_MS * FUT_BAR_MS))
         counts[key] += 1
         rows.append(f"  {when(tr.entry_ms)} {tr.symbol[:-4]}: {text}")
     L.append(f"  Backtest işlemleri bu aralıkta: {len(inside)} | canlı da açtı: {counts.get('açtı', 0)}")
@@ -2643,6 +2731,11 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
                                                                      if cfg.futures_crash_liq else "")
                  + f"; aynı coine işlemden sonra {p.symbol_cooldown_min} dk, zarardan sonra "
                  f"{max(p.symbol_cooldown_min, p.loss_cooldown_min)} dk girilmez")
+        if funnel.between:
+            L.append("⏱️ Her dakika tarama (FUTURES_MINUTE_SCAN): kural 5 dk kapanışlarının yanında aradaki dakikalarda da "
+                     "değerlendirilir (1 dk mumlardan üretilen, o dakikada kapanan 5 dk mumlarla; eşikler aynı)")
+        elif getattr(cfg, "futures_minute_scan", False):
+            L.append("⏱️ FUTURES_MINUTE_SCAN açık ama bu ayarlarla / bu veriyle kullanılamadı: 5 dk'da bir tarandı")
         mods = futures_modules(cfg)
         if mods:
             parts = {"pump": f"pompa short ({cfg.futures_pump_rules})", "breakout": "hacimli kırılım long",
@@ -2665,6 +2758,7 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
         L.append(f"  {_num(funnel.candles, 0)} mum → {cfg.futures_crash_hours} saatte ≥%{cfg.futures_crash_drop_pct:g} "
                  f"düşüş {_num(funnel.liq, 0)} (likidasyon dalgalı: {_num(funnel.liq_vol, 0)}) → {_num(funnel.signals, 0)} "
                  f"sinyal mumu" + (f" + {_num(funnel.wave, 0)} dalga eşiği sinyali" if funnel.wave else "")
+                 + (f" + {_num(funnel.between, 0)} ara dakika sinyali" if funnel.between else "")
                  + f" ({'tek pozisyon' if p.max_positions <= 1 else 'pozisyon sınırı'} ve bekleme "
                  f"kurallarıyla işleme dönüşen {len(fixed)})")
     else:
@@ -2904,7 +2998,8 @@ def run_cli(cfg, days: Optional[int], end_ms: Optional[int], out_dir: Path, char
     data = prepare(cfg, start, end, segments, exit_interval=exit_interval, progress=progress)
     progress("🔎 Sinyaller aranıyor ("
              + ("çöküş dönüşü" if cfg.futures_tactic == "crash" else "4'lü onay") + ")...")
-    signals, funnel = find_signals(cfg, data)
+    # İlerleme yalnızca dakikalık taramada gerekir (1 dk mumların indirilmesi uzun sürer)
+    signals, funnel = find_signals(cfg, data, progress) if futures_scan_shifts(cfg) else find_signals(cfg, data)
     progress(f"   {len(signals)} sinyal; çıkışlar için mumlar okunuyor...")
     windows = load_windows(data, signals, window_minutes(cfg), progress)
     ev = evaluate(params_from_cfg(cfg), data, signals, windows)

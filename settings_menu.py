@@ -23,7 +23,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Tuple
 
-from config import (DEFAULT_FUTURES_COINS, FUTURES_BB_MODES, FUTURES_CASCADE_PRESET, FUTURES_CONFIRMS,
+from config import (futures_scan_shifts, DEFAULT_FUTURES_COINS, FUTURES_BB_MODES, FUTURES_CASCADE_PRESET, FUTURES_CONFIRMS,
                     FUTURES_ENTRY_ORDERS, FUTURES_PHASE6_OFF, FUTURES_PHASE6_PRESET, FUTURES_PHASE6_SINGLE_PRESET,
                     FUTURES_PHASE8_OFF, FUTURES_PHASE9_OFF, FUTURES_GRID_PRESETS, FUTURES_LIQ_SOURCES, FUTURES_RECOMMENDED, FUTURES_SIDES,
                     FUTURES_TACTIC_EXITS, FUTURES_TACTICS, FUTURES_TP_ORDERS, FUTURES_UNIVERSE_MODES, futures_be_trigger,
@@ -84,6 +84,10 @@ PHASE8_HINT = ("Faz 8 (ek pozisyonlarda başabaş +%0.5): küçük pozisyon kâr
                "→ +%82 / +%53. İşlem sayısı artar, kâr artmaz, maliyete dayanıklılık azalır. Çok çekilişli testte kapatmak "
                "işlem sayısını %15-20 düşürdü ve getiriyi artırmadı (Faz 9 setinde +%379 / +%236 → +%376 / +%226, son 12 ay "
                "+%152 → +%36): daha çok işlem için açık (0.4), maliyete dayanıklılık için kapalı.")
+MINUTE_SCAN_HINT = ("Her dakika tarama: çöküş kuralı yalnızca 5 dk kapanışlarında değil her dakika değerlendirilir. "
+                    "Testte (Faz 9 seti, 10 çekiliş) yılda 929 → 1.662 işlem, yıllık getiri +%391 / +%235 → +%536 / "
+                    "+%278; ama doğrulamada düşüş %68 → %77, 3 kat kaymada +%144 → +%56, 2022 ve 2024'te geride. "
+                    "Backtest ilk seferde ~2 GB 1 dk veri indirir ve birkaç kat uzun sürer.")
 FAST_ENTRY_HINT = ("Hızlı giriş: saniyelik veride çöküş mumunun kapanışından sonra fiyat ortalama 1 sn'de %0.015, 3 sn'de "
                    "%0.04, 5 sn'de %0.05, 10 sn'de %0.08 yükseliyor; backtest 5 sn (%0.05) varsayar. Kurallar ve "
                    "pozisyon boyları değişmez, yalnızca emir daha erken gider. Açıkken taranan coinlerin hepsinde "
@@ -406,6 +410,7 @@ PAGES: Dict[str, Page] = {
         Row("FUTURES_LIMIT_TTL_MIN", icon="⏳", values=(1, 3, 5), fmt=lambda v: f"{v} dk bekle",
             show=lambda cfg: cfg.futures_entry_order == "limit", per_row=3),
         Row("FUTURES_FAST_ENTRY", name="⚡ Hızlı giriş (mum kapanışından 1 sn sonra tara)"),
+        Row("FUTURES_MINUTE_SCAN", name="⏱️ Her dakika tara (5 dk kapanışını bekleme)"),
     ), back=(("⬅️ Vadeli ayarlar", "cfg"), ("🏠 Menü", "menu")), futures=True),
     "fb": Page("🔒 Başabaş ve İzleyen Stop", rows=(
         Row("BREAKEVEN_ENABLED", name="🔒 Başabaş kalkanı"),
@@ -1015,6 +1020,12 @@ class SettingsMenu:
                 "(her taramadan önce Binance'ten doğrulanır)" if cfg.futures_fast_entry else
                 "kapalı: tarama mum kapanışından 3 sn sonra, teminat modu + kaldıraç her girişte ayarlanır")
         timing = self._timing_line()
+        if futures_scan_shifts(cfg):
+            minute = "açık: 5 dk kapanışlarının yanında aradaki dakikalarda da (1 dk mumlarla, aynı kural)"
+        elif cfg.futures_minute_scan:
+            minute = "açık ama bu ayarlarla kullanılamıyor (sade çöküş taktiği + piyasa emriyle giriş gerekir)"
+        else:
+            minute = "kapalı: yalnızca 5 dk mum kapanışlarında"
         return (f"🎯 <b>Vadeli Çıkışlar ve Emirler</b>\n{LINE}\n"
                 f"🎯 Kâr Al: fiyat +%{cfg.take_profit_pct:g} → ROE ~+%{cfg.take_profit_pct * lev:.0f}\n"
                 f"🛑 Zarar Kes: fiyat -%{cfg.stop_loss_pct:g} → ROE ~-%{cfg.stop_loss_pct * lev:.0f} | likidasyon "
@@ -1024,10 +1035,11 @@ class SettingsMenu:
                 f"📌 Kâr Al emri: {tp_order}\n"
                 f"🚪 Giriş emri: {entry}\n"
                 f"⚡ Hızlı giriş: {fast}\n"
+                f"⏱️ Her dakika tarama: {minute}\n"
                 f"🛡️ Zarar kes emri Binance'e konamazsa: {stop}\n{timing}{LINE}\n"
                 "<i>Kâr Al / Zarar Kes değişikliği SONRAKİ işlemde geçerli (açık pozisyonun Binance emirleri "
                 "değişmez); zaman stopu ve başabaş açık pozisyona da uygulanır. Testte seçilen (çöküş dönüşü): Kâr Al "
-                f"%6, Zarar Kes %4, başabaş 1.5 → 0.3, 30 dk.\n{esc(FAST_ENTRY_HINT)}</i>")
+                f"%6, Zarar Kes %4, başabaş 1.5 → 0.3, 30 dk.\n{esc(FAST_ENTRY_HINT)}\n{esc(MINUTE_SCAN_HINT)}</i>")
 
     def _timing_line(self) -> str:
         """Son taramanın ölçülen zamanlaması (FuturesBot.last_timing); ölçüm yoksa boş."""

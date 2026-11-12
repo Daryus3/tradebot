@@ -80,17 +80,20 @@ def slice_range(arrs: Dict[str, np.ndarray], start_ms: int, end_ms: int) -> Dict
     return {k: v[i:j] for k, v in arrs.items()}
 
 
-def resample(arrs: Dict[str, np.ndarray], interval_ms: int) -> Dict[str, np.ndarray]:
+def resample(arrs: Dict[str, np.ndarray], interval_ms: int, shift_ms: int = 0) -> Dict[str, np.ndarray]:
     """Küçük mumları büyük muma çevirir (örn. 5 dk → 1 saat). Yalnızca TAMAMLANMIŞ büyük mumlar döner:
-    son grup eksikse atılır (canlıda henüz kapanmamış mum kullanılmasın)."""
+    son grup eksikse atılır (canlıda henüz kapanmamış mum kullanılmasın). `shift_ms` > 0: büyük mumlar saat
+    başına göre o kadar kaydırılır (ör. 1 dk → 5 dk, shift 2 dk: ...:02-:07, :07-:12 mumları); dakikalık taramada
+    ara dakikalarda "o dakikada kapanan 5 dk mumlar" böyle üretilir (canlı bot ve backtest ortak)."""
     t = arrs["t"]
     if not len(t):
         return empty()
     step = int(t[1] - t[0]) if len(t) > 1 else interval_ms
-    bucket = t // interval_ms
+    shift_ms = int(shift_ms) % interval_ms
+    bucket = (t - shift_ms) // interval_ms
     starts = np.flatnonzero(np.r_[True, bucket[1:] != bucket[:-1]])
     ends = np.r_[starts[1:], len(t)]
-    out = {"t": bucket[starts] * interval_ms,
+    out = {"t": bucket[starts] * interval_ms + shift_ms,
            "o": arrs["o"][starts],
            "h": np.maximum.reduceat(arrs["h"], starts),
            "l": np.minimum.reduceat(arrs["l"], starts),

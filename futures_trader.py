@@ -34,10 +34,12 @@ from typing import Dict, List, Optional, Set, Tuple
 
 import requests
 
-from config import (futures_be_trigger, futures_breadth_on, futures_coin_list, futures_hold_minutes, scan_log_path,
+from config import (MINUTE_SCAN_STEP_MS, futures_be_trigger, futures_breadth_on, futures_close_only, futures_coin_list,
+                    futures_hold_minutes, scan_log_path,
                     futures_crash_rules, futures_funding_rules,
-                    futures_liq_distance_pct, futures_modules, futures_pump_rules, futures_slot_share,
-                    futures_wave_cfg, futures_wave_rules)
+                    futures_liq_distance_pct, futures_minute_limit, futures_modules, futures_pump_rules, futures_scan_shifts,
+                    futures_slot_share, futures_wave_cfg, futures_wave_rules)
+from futures_data import resample
 from futures_exchange import FFill, FuturesError, MinNotionalError, describe_error
 from logger import get_logger
 from risk import ExitReason, Position, cooldown_minutes, kill_switch_hit
@@ -216,9 +218,12 @@ class FuturesBot(TradingBot):
         else:
             state.wave_reentry.pop(symbol, None)
 
-    @staticmethod
-    def _next_close(now: float) -> float:
-        bar = FUT_BAR_MS // 1000
+    def _scan_step_ms(self) -> int:
+        """Taramalar arası adım (ms): 5 dk mum; dakikalık taramada (FUTURES_MINUTE_SCAN, destekleniyorsa) 1 dk."""
+        return MINUTE_SCAN_STEP_MS if futures_scan_shifts(self.cfg) else FUT_BAR_MS
+
+    def _next_close(self, now: float) -> float:
+        bar = self._scan_step_ms() // 1000
         return (int(now) // bar + 1) * bar
 
     def _fast(self) -> bool:
@@ -312,11 +317,14 @@ class FuturesBot(TradingBot):
 
     def apply_config(self, cfg) -> None:
         """Telegram'dan değişen ayarlar: borsa katmanı da (komisyon / kayma varsayımları) yeni ayarları kullanır."""
-        old_delay = self._scan_delay()
+        old_delay, old_step = self._scan_delay(), self._scan_step_ms()
         super().apply_config(cfg)
         self.exchange.cfg = cfg
         new_delay = self._scan_delay()
-        if new_delay != old_delay:                 # Hızlı giriş açıldı / kapandı: sıradaki tarama yeni gecikmeyle
+        if self._scan_step_ms() != old_step:       # Dakikalık tarama açıldı / kapandı: sıradaki tarama yeni adımla
+            self.next_scan_at = self._next_close(self.time_fn()) + new_delay
+            self._warm_for = 0.0
+        elif new_delay != old_delay:               # Hızlı giriş açıldı / kapandı: sıradaki tarama yeni gecikmeyle
             self.next_scan_at += new_delay - old_delay
             self._prepared, self._verified_at, self._prepare_todo, self._warm_for = set(), 0.0, 0, 0.0
             self._prepare_retry, self._self_prepared = {}, set()
@@ -362,7 +370,8 @@ class FuturesBot(TradingBot):
         if now >= self.next_scan_at:
             self.next_scan_at = self._next_close(now) + self._scan_delay()
             blocked = self._scan_block_reason(now)
-            bar_ms = int(now * 1000) // FUT_BAR_MS * FUT_BAR_MS
+            step = self._scan_step_ms()
+            bar_ms = int(now * 1000) // step * step
             if blocked is None:
                 try:
                     self.scan_and_enter(now)
@@ -494,7 +503,11 @@ class FuturesBot(TradingBot):
     def scan_and_enter(self, now: float) -> None:
         ex = self.exchange
         now_ms = int(now * 1000)
-        closed_ms = now_ms // FUT_BAR_MS * FUT_BAR_MS          # Az önce kapanan mumun kapanış zamanı
+        step = self._scan_step_ms()
+        closed_ms = now_ms // step * step                      # Az önce kapanan mumun kapanış zamanı
+        # Dakikalık tarama: 5 dk sınırı dışındaki dakikada, o dakikada kapanan (kaydırılmış) 5 dk mumlar 1 dk mumlardan
+        # üretilir ve aynı kural uygulanır (backtest: find_signals). 5 dk sınırında her şey eskisi gibidir.
+        shift = closed_ms % FUT_BAR_MS
         if now_ms - closed_ms > MAX_SCAN_LAG_SEC * 1000:
             lag = (now_ms - closed_ms) / 1000
             self._journal({"t": closed_ms, "skip": f"gecikme (mum kapanışından {lag:.0f} sn sonra)"})
@@ -512,7 +525,7 @@ class FuturesBot(TradingBot):
         # Dalga modu: genişlik tüm taranan coinlerden ölçülür (backtestteki evrenle aynı); beklemedeki / açık
         # pozisyondaki coinlerin mumları da istenir ama onlarda sinyal aranmaz
         targets = [s for s in symbols if ex.has_market(s) and (cascade or s not in excluded)]
-        klines, errors, tries = self._fetch_klines(targets, limit, closed_ms, fast)
+        klines, errors, tries = self._fetch_klines(targets, limit, closed_ms, fast, shift)
         timing["ms"].append(self._since_ms(closed_ms))         # ...mumlar alındı
         if tries > 1:
             timing["kt"] = tries
@@ -596,7 +609,7 @@ class FuturesBot(TradingBot):
                            sorted(s for s in excluded if s in set(full)), timing)
 
     def _fetch_klines(self, targets: List[str], limit: int, closed_ms: int,
-                      fast: bool) -> Tuple[Dict[str, dict], List[str], int]:
+                      fast: bool, shift: int = 0) -> Tuple[Dict[str, dict], List[str], int]:
         """Taranan coinlerin 5 dk mumları: (parite → mumlar; yalnızca son mumu az önce kapanan olanlar, hata metinleri,
         deneme sayısı).
 
@@ -618,13 +631,18 @@ class FuturesBot(TradingBot):
         ex = self.exchange
         quiet_rules = self._quiet_rules() if fast else None
         quiet: Set[str] = set()
+        # Dakikalık taramanın ara dakikası (shift > 0): 1 dk mumlar istenir; az önce kapanan 1 dk mum yanıttaysa
+        # o dakikada kapanan 5 dk mumlar üretilir (futures_data.resample, backtestle aynı fonksiyon)
+        interval, bar_ms = ("1m", MINUTE_SCAN_STEP_MS) if shift else ("5m", FUT_BAR_MS)
+        if shift:
+            limit = futures_minute_limit(self.cfg)
 
         def fetch(symbol: str):
             try:
                 if fast:
-                    k, open_ms = ex.klines_state(symbol, "5m", limit)
+                    k, open_ms = ex.klines_state(symbol, interval, limit)
                     return symbol, k, open_ms, None
-                return symbol, ex.klines(symbol, "5m", limit), 0, None
+                return symbol, ex.klines(symbol, interval, limit), 0, None
             except FuturesError as exc:
                 return symbol, None, 0, exc
 
@@ -654,7 +672,10 @@ class FuturesBot(TradingBot):
                         failed[symbol] = f"{symbol}: {exc}"
                     continue
                 failed.pop(symbol, None)
-                fresh = bool(len(k["t"])) and int(k["t"][-1]) + FUT_BAR_MS == closed_ms
+                fresh = bool(len(k["t"])) and int(k["t"][-1]) + bar_ms == closed_ms
+                if fresh and shift:                   # 1 dk mumlar → bu dakikada kapanan 5 dk mumlar
+                    k = resample(k, FUT_BAR_MS, shift_ms=shift)
+                    fresh = bool(len(k["t"])) and int(k["t"][-1]) + FUT_BAR_MS == closed_ms
                 if fresh:                             # Yalnızca az önce kapanan mum
                     klines[symbol] = k
                 if fresh and open_ms >= closed_ms:
@@ -684,9 +705,7 @@ class FuturesBot(TradingBot):
         if self._quiet_for is cfg:
             return self._quiet_val
         rules = None
-        if (getattr(cfg, "futures_tactic", "crash") == "crash" and not futures_modules(cfg)
-                and not float(getattr(cfg, "futures_crash_z", 0.0) or 0.0)
-                and getattr(cfg, "futures_confirm", "close") == "close" and not getattr(cfg, "futures_crash_liq", False)):
+        if futures_close_only(cfg):
             merged: Dict[int, float] = {}
             for c in (cfg, futures_wave_cfg(cfg)):
                 for hours, pct in (futures_crash_rules(c) if c is not None else ()):
@@ -1022,12 +1041,17 @@ class FuturesBot(TradingBot):
             log.debug("Giriş gecikmesi ölçülemedi: %s", exc)
         return self._open_from_fill(sig, fill, lev, now)
 
+    def _closed_ms(self, now: float) -> int:
+        """`now` anında en son kapanan tarama mumunun kapanışı (ms): 5 dk; dakikalık taramada 1 dk adımıyla."""
+        step = self._scan_step_ms()
+        return int(now * 1000) // step * step
+
     def _note_entry_lag(self, sig: FuturesSignal, fill: FFill, now: float, sent: float, done: float) -> None:
         """Giriş gecikmesi ölçümü (piyasa emriyle giriş): emrin mum kapanışından kaç ms sonra gönderildiği, yanıtın ne
         zaman geldiği, Binance'in işlem zamanı (borsa saati; sunucu saatinden bağımsız) ve dolum fiyatının sinyal
         mumunun kapanışına göre farkı (%; + = daha pahalıya). Tarama kaydına ve pozisyona yazılır (backtest girişte
         +%0.05 gecikme payı + kayma varsayar: futures_backtest.ENTRY_LAG_PCT)."""
-        closed_ms = int(now * 1000) // FUT_BAR_MS * FUT_BAR_MS
+        closed_ms = self._closed_ms(now)
         lag: Dict[str, float] = {"o": int(round(sent * 1000 - closed_ms)), "r": int(round(done * 1000 - closed_ms))}
         exch = int(fill.ts_ms) - closed_ms if fill.ts_ms else None
         if exch is not None and 0 <= exch <= MAX_LAG_MS:
@@ -1707,6 +1731,11 @@ class FuturesBot(TradingBot):
                  f"Coin: {r.candidates} | Analiz: {r.analyzed} | Sinyal: {len(r.signals)}"]
         if self.account_block:
             lines.append(f"⛔ {esc(self.account_block[:600])}")
+        if futures_scan_shifts(self.cfg):
+            lines.append("⏱️ Her dakika tarama açık: 5 dk kapanışlarının yanında aradaki dakikalarda da taranır "
+                         "(1 dk mumlarla, aynı kural)")
+        elif getattr(self.cfg, "futures_minute_scan", False):
+            lines.append("⏱️ Her dakika tarama açık ama bu ayarlarla kullanılamıyor (5 dk'da bir taranıyor)")
         names = [s[:-4] for s in (self._universe_symbols() if self.cfg.futures_universe > 0
                                   else [c + "USDT" for c in futures_coin_list(self.cfg)])]
         lines.append(f"🪙 Evren: {esc(self.universe_label())}: {esc(', '.join(names[:30]))}"

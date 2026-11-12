@@ -1164,7 +1164,108 @@ açık (0.4), maliyete dayanıklılık için kapalı.
 **Sonuç.** Backtestte bu stratejinin ayar ve kural uzayı büyük ölçüde tüketildi: işlem sayısını artıran her şey ya kârı
 düşürüyor ya da sıfır kazançlı işlem ekliyor (komisyon ve risk artar, kâr artmaz). ~690 denemeden sonra aynı 7 yıllık
 veride bulunacak yeni bir "iyileşme" büyük olasılıkla rastlantı olur. Kalan gerçek kazanç ayarlarda değil girişin
-hızında: bu yüzden hızlı girişe sakin coin kuralı eklendi (bkz. "Canlı giriş gecikmesi").
+hızında: bu yüzden hızlı girişe sakin coin kuralı eklendi (bkz. "Canlı giriş gecikmesi"). (Güncelleme: bir sonraki tur
+ayarların dışında kalan bir boyut buldu, tarama sıklığı; bkz. "Rapor 19 araştırması".)
+
+#### Rapor 19 araştırması: her dakika tarama ve ızgara testi (Kasım 2026)
+Beşinci turda ~100 kural / ölçüm daha denendi (toplam ~790) ve iki önemli sonuç çıktı: (1) giriş anı her şeydir, (2) şimdiki
+raporlar ayarların denendiği 5 dakikalık ızgaraya göre iyimserdir. Bunlardan **`FUTURES_MINUTE_SCAN`** (her dakika
+tarama; varsayılan kapalı) doğdu. Rakamlar sabit boy (bileşiksiz) yıllık getiri, seçim / doğrulama dönemi.
+
+**1) Giriş anı.** Girişi yalnızca 1 dakika geciktirmek getiriyi +%379 / +%236'dan +%101 / +%50'ye indiriyor (2 dk:
++%108 / +%68). "Teyit bekle" türü her kural kötü: ilk yükselen 1 dk mumu beklemek +%103-144 / +%57-61, bir önceki 1 dk
+mumun tepesi aşılınca girmek +%41-134 / +%32-68, yeni dip yapmayan ilk 1 dk mumda girmek +%63-70 / +%72-77. Toparlanma
+çöküş mumunun kapanışını izleyen ilk dakikada başlıyor; bot ne kadar erken girerse o kadar iyi.
+
+**2) Izgara testi: aynı strateji, 1-4 dakika kaydırılmış 5 dk mumlarla.** Bot kuralı :00, :05, :10... kapanışlarında
+değerlendirir ve bütün ayarlar bu ızgaranın ürettiği işlem dizisi üstünde seçildi. Kural kapanıştan kapanışa düşüş
+olduğu için 1 dk mumlarla başka bir ızgarada (:01, :06, :11...) da birebir uygulanabilir; piyasa aynı, işlem dizisi
+farklıdır. F setiyle (5x; kaydırılmışlar 6, bugünkü 10 çekilişin ortancası):
+
+| 5 dk ızgarası | İşlem / yıl | İşlem başı net | Sabit boy | Bileşik | En büyük düşüş | Son 12 ay | Kayma 3 kat (bileşik) |
+|---|---|---|---|---|---|---|---|
+| Saatle hizalı (bugünkü bot) | 929 | +%0.144 | +%391 / +%235 | +%939 / +%409 | %88 / %68 | +%147 | +%243 / +%144 |
+| 1 dk kaydırılmış | 896 | +%0.021 | +%205 / +%63 | +%72 / eridi | %96 / %95 | −%9 | −%26 / eridi |
+| 2 dk kaydırılmış | 913 | +%0.101 | +%343 / +%89 | +%657 / +%3 | %83 / %93 | +%21 | +%194 / eridi |
+| 3 dk kaydırılmış | 908 | +%0.097 | +%322 / +%128 | +%429 / +%70 | %77 / %93 | −%4 | +%154 / −%20 |
+| 4 dk kaydırılmış | 914 | +%0.116 | +%325 / +%140 | +%470 / +%110 | %78 / %88 | −%14 | +%117 / +%8 |
+
+Farkın iki kaynağı var. Küçük olanı gerçek: sinyaller tek tek (yuva etkisi olmadan) ölçüldüğünde saatle hizalı
+kapanışlardaki sinyal biraz daha iyi (işlem başı +%0.096 / +%0.177; diğer dakikalarda +%0.054 / +%0.141), çünkü piyasanın
+geri kalanı da 5 dk kapanışlarında işlem yapıyor. Büyük olanı ise **seçim yanlılığı**: ~790 deneme ve önceki fazların
+hepsi aynı işlem dizisine bakılarak seçildi; kaydırılmış ızgaralar ayarların hiç görmediği dizilerdir. **Sonuç: rapordaki
+rakamlar iyimser uçtur.** Gerçekte beklenmesi gereken, bugünkü ızgara ile kaydırılmışlar arasında bir yerdir (kabaca
+yarısı) ve 5x kaldıraçta görülmemiş dizilerde hesabın erime riski gerçektir (dört kaydırılmış ızgaranın birinde
+doğrulama döneminde eridi; 3 kat kaymada ikisinde). Dalga eşiği sinyalleri (`FUTURES_WAVE_RULES`) kaydırılmış
+ızgaralarda işlem başı −%0.05 ile −%0.12: bu ızgaraya uydurulmuş görünüyor.
+
+**3) Tarama sıklığı.** Aynı kural 1 dk mumlarla farklı aralıklarda değerlendirildi; her aralık tüm faz kaymalarıyla
+ölçülüp ortancası alındı (3 çekiliş):
+
+| Tarama aralığı | 1 dk | 2 dk | 3 dk | 4 dk | 5 dk | 7 dk | 10 dk | 15 dk |
+|---|---|---|---|---|---|---|---|---|
+| İşlem / yıl (seçim / doğrulama) | 2.015 / 1.227 | 1.604 / 1.012 | 1.358 / 885 | 1.188 / 790 | 1.070 / 707 | 881 / 610 | 716 / 496 | 555 / 401 |
+| Sabit boy yıllık getiri | +%526 / +%276 | +%433 / +%171 | +%397 / +%139 | +%354 / +%113 | +%319 / +%122 | +%253 / +%94 | +%182 / +%86 | +%91 / +%69 |
+
+İlişki düzgün: ne kadar sık tarama, o kadar çok işlem ve o kadar çok kâr. Her dakika taramanın faz seçeneği olmadığı
+için sonucu ızgara şansına bağlı değildir.
+
+**4) Her dakika tarama, tam protokol** (10 çekilişin ortancası; "iyi" = bugünkü 5 dk botundan iyi çıkan çekiliş):
+
+| | F, 5 dk (bugünkü) | F, her dakika | Baz (rapor 17), 5 dk | Baz, her dakika |
+|---|---|---|---|---|
+| İşlem / yıl | 929 | 1.662 (+%79) | 889 | 1.474 (+%66) |
+| İşlem başı net | +%0.144 | +%0.149 | +%0.167 | +%0.201 |
+| Sabit boy yıllık getiri | +%391 / +%235 | +%536 / +%278 (iyi 10 / 9) | +%344 / +%211 | +%452 / +%272 |
+| Bileşik yıllık getiri | +%939 / +%409 | +%1.954 / +%423 (iyi 10 / 5) | +%569 / +%297 | +%1.475 / +%442 |
+| En büyük düşüş | %88 / %68 | %87 / %77 | %86 / %67 | %85 / %73 |
+| En kötü gün | −%72 | −%56 | −%71 | −%60 |
+| Kayma 3 kat (bileşik) | +%243 / +%144 | +%526 / +%56 | +%139 / +%74 | +%248 / +%102 |
+| Kayma 5 kat (bileşik) | +%63 / −%10 | +%90 / −%22 | %0 / −%29 | +%19 / −%15 |
+| Kötümser stop (5x) | eridi | eridi | eridi | eridi |
+| Son 12 ay | +%147 | +%112 (iyi 4) | +%75 | +%166 |
+| Son 24 ay | +%6.130 | +%3.467 (iyi 2) | +%3.981 | +%3.710 |
+| 2020 … 2026 | +781 +46.958 +84 +40 +1.093 +568 +102 | +6.829 +134.192 +46 +477 +265 +998 +79 | +732 +9.710 +39 +33 +576 +942 +33 | +2.852 +92.866 −25 +308 +352 +1.369 +91 |
+| Tek rapor (kendi çekilişi) | 3.871.663 | 7.530.160 | 1.234.022 | - |
+
+Önyükleme (haftalık blok), F her dakika − F 5 dk: farkın artı olma olasılığı seçimde 0.89, doğrulamada 0.74, tüm dönemde
+0.92. **Değerlendirme:** işlem sayısı %66-79 artıyor, işlem başı net aynı kalıyor, sabit boy getiri iki dönemde de
+artıyor; kaydırılmış ızgaralara (gerçekçi beklenti) göre fark çok büyük. Zayıf yanları: doğrulamada bileşik getiri eşit
+(çekilişlerin yarısında iyi), en büyük düşüş %68 → %77, işlem çok olduğu için maliyete daha duyarlı (3 kat kaymada
+doğrulama +%144 → +%56), 2022 ve 2024'te geride, son 12 ve 24 ayda geride. Yani bugünkü (iyimser) rapora göre "her
+testi geçen" bir iyileşme değil; ızgara şansından bağımsız ve iki kat işlem yapan sağlam bir seçenek.
+
+**Melezler ve uyarlamalar** (6 çekiliş): büyük pozisyonu yalnızca 5 dk kapanışına bırakıp ekleri her dakika taramak
+kötü (+%286 / +%144). Her dakika taramada ek başabaşı 0.5 (`FUTURES_EXTRA_BE_TRIGGER_PCT=0.5`): işlem +%66 / +%45,
++%530 / +%278, düşüş %80 / %70, 3 kat kaymada doğrulama +%148 (5 dk ile eşit), son 12 ay +%164; dalga eşikleri kapalı
+(`FUTURES_WAVE_RULES=`): +%550 / +%305, 3 kat kaymada +%168, işlem +%71 / +%26. İkisi de bu yolda seçildiği için aynı
+yanlılığı taşır; karar verirken tabloya değil yöne bakın.
+
+**Bu turda elenenler.** Süreye bağlı zarar kesme (girişten 10-40 dk sonra stopu −%1 / −%2 / −%3 / −%4'e çekmek): −%1 ve
+−%2 doğrulamada kötü, 30 dk'da −%3 etkisiz (+%380 / +%238). Oynaklığa (ATR) göre zarar kes: seçimde +%412-419,
+doğrulamada +%182-211 (kötü); Kâr Al = 4-5×ATR karışık; başabaş tetiği = 0.6×ATR [1.1-2.0]: +%453 / +%245, son 12 ayda
+kararsız (ilk başabaşı yükseltmenin başka bir biçimi). Eş zamanlı sinyalleri oynaklığa, son 5 dk düşüşüne ya da 24 saatlik
+tepeye uzaklığa göre sıralamak: hepsi kötü. Ana yuvayı yalnızca yeniden giriş sinyaliyle doldurmak: +%404-415 / +%219-231.
+
+**`FUTURES_MINUTE_SCAN=true` nasıl çalışır** (Telegram → 🎯 Çıkışlar ve Emirler → ⏱️ Her dakika tara). 5 dk kapanışlarında
+hiçbir şey değişmez. Aradaki dakikalarda bot coin başına 485 adet 1 dk mum ister (istek ağırlığı 5 dk taramayla aynı),
+bunlardan "o dakikada kapanan" 5 dk mumları üretir (`futures_data.resample`, kaydırmalı) ve **aynı** strateji
+fonksiyonlarından geçirir; genişlik de o dakika için sayılır. Backtest aynı fonksiyonu tüm geçmişe uygular
+(`find_signals`), 5 dk sınırındaki sinyaller iki modda birebir aynıdır. Hızlı girişle birlikte çalışır (ara dakikada yeni
+1 dk mum kontrolü ve sakin coin kuralı aynen). Yalnızca sinyal kapanışlara bağlıyken (sade çöküş taktiği: ek modül,
+likidasyon şartı, oynaklık eşiği ve onay modu kapalı), piyasa emriyle girişte ve en uzun pencere 24 saati aşmıyorken
+etkindir; değilse bot 5 dk'da bir taramaya devam eder ve bunu `/tarama`'da söyler.
+
+**Backtestte.** İlk çalıştırma evrenin 1 dk mumlarını indirir (~2 GB disk) ve rapor birkaç kat uzun sürer (4 çekirdekli
+makinede ~7 dk); en yüksek bellek ~2 GB. Küçük sunucuda backtest yerine yukarıdaki rakamlara bakın; canlı botun bellek
+ve istek yükü artmaz. Raporda başlıkta "⏱️ Her dakika tarama", sinyal hunisinde "ara dakika sinyali", 🧪 tabloda "5 dk'da
+bir tarama (dakikalık tarama kapalı)" satırı yer alır; yeni sinyal gerektiren satırlar (çöküş eşiği vb.) süre kısalsın
+diye 5 dk taramayla hesaplanır ve "· 5 dk taramayla" diye işaretlenir.
+
+**Sınırlar.** Giriş gecikmesi payı ara dakikalarda da 5 sn (%0.05) varsayıldı; ara dakikalar için ayrıca ölçülmedi.
+Canlı yol sahte borsayla test edildi (`tests/test_futures_minute_scan.py`: ara dakikada dip, backtestle aynı sinyal,
+sınırda eski davranış, hızlı giriş); gerçek Binance'te ilk kez sizin sunucunuzda çalışacak. İşlem sayısı iki katına
+çıktığı için komisyon da iki katına çıkar: kayma varsayımı tutmazsa kazanç daha çabuk erir. Önce test modunda deneyin.
 
 ### 🏆 Strateji turnuvası (`--turnuva`)
 Hangi strateji türünün sizin dönemde işe yaradığını **tek komutla** görmek için:

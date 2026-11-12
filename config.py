@@ -559,6 +559,48 @@ def futures_slot_share(cfg, n_open: int) -> float:
     return (1.0 if n_open <= 0 else x) / total
 
 
+MINUTE_SCAN_BAR_MS = 300_000            # Sinyal mumu (5 dk); dakikalık taramada ara dakikalar bunun kaydırılmışı
+MINUTE_SCAN_STEP_MS = 60_000
+MINUTE_SCAN_MAX_1M = 1500               # Binance tek istekte en fazla bu kadar 1 dk mum verir
+
+
+def futures_close_only(cfg) -> bool:
+    """Sinyal yalnızca mum KAPANIŞLARINA mı bağlı: sade çöküş taktiği (ek modül, likidasyon şartı, oynaklık eşiği ve
+    hacim / dönüş onayı yok). Yalnızca bu durumda kesinleşmemiş bir mumun hacmi / ucu ya da kaydırılmış mumlar sonucu
+    değiştiremez (hızlı girişteki sakin coin kuralı ve dakikalık tarama buna dayanır)."""
+    return (getattr(cfg, "futures_tactic", "crash") == "crash" and not futures_modules(cfg)
+            and not float(getattr(cfg, "futures_crash_z", 0.0) or 0.0)
+            and getattr(cfg, "futures_confirm", "close") == "close" and not getattr(cfg, "futures_crash_liq", False))
+
+
+MINUTE_SCAN_PAD_BARS = 40               # 5 dk mum: hacim ortalaması + pay (strategy.FUT_AVG_BARS + 20)
+MINUTE_SCAN_MIN_BARS = 96               # Strateji en az 80 mum ister (strategy.FUT_MIN_BARS); pay ile
+
+
+def futures_minute_limit(cfg) -> int:
+    """Dakikalık taramada ara dakikalar için coin başına istenecek 1 dk mum sayısı: en uzun çöküş / dalga penceresini
+    kapsayan kaydırılmış 5 dk mumlar × 5 (+ pay), Binance sınırı 1.500. 4 saatlik pencerede 485: istek ağırlığı 5 dk
+    taramayla aynı (2)."""
+    hours = [h for h, _p in futures_crash_rules(cfg)] + [h for h, _p in futures_wave_rules(cfg)]
+    bars = max(max(hours) * 12 + MINUTE_SCAN_PAD_BARS, MINUTE_SCAN_MIN_BARS)
+    return min(MINUTE_SCAN_MAX_1M, bars * 5 + 5)
+
+
+def futures_scan_shifts(cfg) -> Tuple[int, ...]:
+    """Dakikalık taramada (FUTURES_MINUTE_SCAN) 5 dk mum kapanışları DIŞINDA taranan dakikalar, ms olarak mum içi
+    kayma: (60000, 120000, 180000, 240000). Kapalıysa ya da bu ayarla desteklenmiyorsa (). Destek şartları: sinyal
+    yalnızca kapanışlara bağlı (futures_close_only), piyasa emriyle giriş ve en uzun çöküş penceresi 1.500 adet 1 dk
+    muma sığıyor (≈ 24 saat). Canlı bot ve backtest aynı listeyi kullanır."""
+    if not getattr(cfg, "futures_minute_scan", False) or not futures_close_only(cfg):
+        return ()
+    if getattr(cfg, "futures_entry_order", "market") != "market":
+        return ()
+    hours = [h for h, _p in futures_crash_rules(cfg)] + [h for h, _p in futures_wave_rules(cfg)]
+    if (max(hours) * 12 + 1) * 5 + 5 > MINUTE_SCAN_MAX_1M:
+        return ()
+    return tuple(range(MINUTE_SCAN_STEP_MS, MINUTE_SCAN_BAR_MS, MINUTE_SCAN_STEP_MS))
+
+
 def futures_modules(cfg) -> Tuple[str, ...]:
     """Çöküş taktiğinde açık olan ek giriş modülleri (öncelik sırasıyla): funding, pump, pullback, breakout, bb."""
     if getattr(cfg, "futures_tactic", "crash") != "crash":
@@ -870,6 +912,7 @@ class Config:
     # istenir; teminat modu ve kaldıraç evrendeki coinlerde ÖNCEDEN ayarlanıp her taramadan hemen önce doğrulanır
     # (girişte 2 istek eksilir). Strateji kuralları ve pozisyon boyları değişmez. Ayrıntı: README "Canlı giriş gecikmesi".
     futures_fast_entry: bool = False
+    futures_minute_scan: bool = False   # Her dakika tarama (ara dakikalarda 1 dk mumlardan kaydırılmış 5 dk mumlar)
     # 0 = yalnızca FUTURES_COINS listesi; N = "en hacimli N köklü coin": en az FUTURES_UNIVERSE_MIN_AGE_DAYS gündür
     # listelenen kripto USDT süresiz paritelerinden son FUTURES_UNIVERSE_AVG_DAYS günün ortalama USDT hacmine göre ilk N
     # (stabil coin, endeks, hisse / emtia ve kaldırılması planlanan pariteler hariç; sıralama günde bir yenilenir).
@@ -1497,6 +1540,7 @@ def load_config(env_file: Optional[str] = None, mode_override: Optional[str] = N
         futures_mmr_pct=_env_float("FUTURES_MMR_PCT", 0.5),
         futures_exchange_stop=_env_bool("FUTURES_EXCHANGE_STOP", True),
         futures_fast_entry=_env_bool("FUTURES_FAST_ENTRY", False),
+        futures_minute_scan=_env_bool("FUTURES_MINUTE_SCAN", False),
         futures_universe=_env_int("FUTURES_UNIVERSE", 0),
         futures_universe_with_list=_env_bool("FUTURES_UNIVERSE_WITH_LIST", True),
         futures_universe_min_age_days=_env_int("FUTURES_UNIVERSE_MIN_AGE_DAYS", 1095),
@@ -1840,6 +1884,22 @@ def _setting_notes(cfg: Config) -> List[str]:
                          "hemen önce Binance'ten doğrulanır (bu coinlerde elle farklı kaldıraçla işlem yapıyorsanız "
                          "ayarınız değişir). Kurallar ve pozisyon boyları aynıdır; ölçülen giriş gecikmesi pozisyon "
                          "mesajında ve backtest raporunun canlı karşılaştırma bölümünde görünür.")
+        if getattr(cfg, "futures_minute_scan", False):
+            if futures_scan_shifts(cfg):
+                notes.append("FUTURES_MINUTE_SCAN=true (her dakika tarama): çöküş kuralı yalnızca 5 dk mum kapanışlarında "
+                             "değil her dakika değerlendirilir (ara dakikalarda 1 dk mumlardan, o dakikada kapanan 5 dk "
+                             "mumlar üretilerek; kural ve eşikler aynı). Kasım 2026 testinde (2020-2026, 10 çekilişin "
+                             "ortancası, Faz 9 seti): yılda 929 → 1.662 işlem, bileşiksiz yıllık getiri +%391 / +%235 → "
+                             "+%536 / +%278, bileşik +%939 / +%409 → +%1.954 / +%423; işlem başı net aynı (+%0.15). "
+                             "Zayıf yanları: doğrulama döneminde en büyük düşüş %68 → %77, 3 kat kaymada doğrulama "
+                             "getirisi +%144 → +%56 (işlem çok, maliyete daha duyarlı), 2022 ve 2024'te geride, son 12 "
+                             "ay +%147 → +%112. Backtest ilk çalıştırmada evrenin 1 dk mumlarını indirir (~2 GB). "
+                             "Önce test modunda deneyin.")
+            else:
+                notes.append("FUTURES_MINUTE_SCAN=true ama bu ayarlarla kullanılamıyor, 5 dk'da bir taranır: dakikalık "
+                             "tarama yalnızca sade çöküş taktiğinde (ek modül, likidasyon şartı, oynaklık eşiği ve onay "
+                             "modu kapalı), piyasa emriyle girişte ve en uzun çöküş penceresi 24 saati aşmıyorken "
+                             "çalışır.")
         if cfg.futures_universe > 0 and cfg.futures_universe_mode == "daily":
             notes.append("FUTURES_UNIVERSE_MODE=daily (dünün en hacimli coinleri): Faz 4 testinde günlük en hacimli 30 "
                          "coin, en az 3 yıllık olanlarla bile 2024-2026'da her yıl -%66 ile -%91 arası zarar etti; "

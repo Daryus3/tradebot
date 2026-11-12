@@ -201,6 +201,8 @@ EDITABLE: Dict[str, Setting] = {
                                      "Vadeli: zarar kes Binance'e konamazsa pozisyonu hemen kapat"),
     "FUTURES_FAST_ENTRY": Setting("futures_fast_entry", "bool",
                                   "Vadeli: hızlı giriş (mum kapanışından 1 sn sonra tara, kaldıracı önceden ayarla)"),
+    "FUTURES_MINUTE_SCAN": Setting("futures_minute_scan", "bool",
+                                   "Vadeli: her dakika tarama (5 dk kapanışını beklemeden, 1 dk mumlarla)"),
     "FUTURES_UNIVERSE": Setting("futures_universe", "int", "Vadeli: en hacimli N köklü coin (0 = FUTURES_COINS listesi)"),
     "FUTURES_UNIVERSE_WITH_LIST": Setting("futures_universe_with_list", "bool",
                                           "Vadeli: en hacimli N'e FUTURES_COINS listesini de ekle"),
