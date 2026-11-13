@@ -684,3 +684,36 @@ def test_report_lines_for_snapshot_scans(fcfg):
     # Anlık tarama hiç kullanılmadıysa eski satırlar aynen
     old = fb.live_timing(fcfg, [{"t": t0, "ms": [3000, 3100, 3100]}])
     assert len(old) == 1 and old[0].startswith("  Tarama zamanlaması (mum kapanışından sonra, ortanca): başlangıç 3.0 sn")
+
+
+def test_report_timing_lines_cover_the_journal_after_the_backtest_data_ends(fcfg, tmp_path):
+    """Backtest verisi bitmiş günde kalır; bot kaydı ise şu ana kadar sürer. Güncellemeden sonraki saatlerin zamanlaması
+    ve anlık tarama doğrulaması, işlem karşılaştırması o saatleri kapsamasa da aynı gün raporda görünür."""
+    import json
+    t0 = BASE_MS
+    end = t0 + 10 * FUT_BAR_MS                                             # Backtest verisinin bittiği an
+    rows = [{"t": t0, "u": ["SOL", "ADA"], "a": ["ADA", "SOL"], "ms": [1000, 2000, 2010], "fast": 1},
+            {"t": t0 + FUT_BAR_MS, "a": ["ADA", "SOL"], "ms": [1000, 2100, 2110], "fast": 1},
+            # Veri bittikten sonra (bot güncellendi, anlık tarama açıldı)
+            {"t": end + 60 * MIN, "a": ["ADA", "SOL"], "ms": [150, 410, 420], "fast": 1, "sn": [400, 170]},
+            {"t": end + 61 * MIN, "a": ["ADA", "SOL"], "ms": [150, 390, 400], "fast": 1, "sn": [380, 150],
+             "sv": [{"t": end + 60 * MIN, "n": 2, "av": 0.002, "mx": 0.004, "ok": 1}],
+             "s": {"SOL": "açıldı"}, "f": {"SOL": {"o": 400, "r": 660, "x": 530, "p": 0.011}}}]
+    path = tmp_path / "futures_scans_paper.jsonl"
+    path.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
+    data = fb.FutData(t0, end, [fb.Segment(t0 - 1, end, ("SOL", "ADA"))], {}, ((), (), ()), (None, None), {}, None, "5m")
+    text = "\n".join(fb.live_comparison(fcfg, data, [], path=path))
+    assert "Kayıtlı 5 dk mum: 2 / 2" in text                              # İşlem karşılaştırması: veri aralığındaki satırlar
+    assert "Tarama zamanlaması (hızlı giriş açık: mum kapanışından sonra, ortanca): başlangıç 1.0 sn" in text
+    assert "Tarama zamanlaması (anlık tarama: mum kapanışından sonra, ortanca): başlangıç 0.15 sn" in text
+    assert "Giriş gecikmesi (anlık tarama: mum kapanışı → dolum): ortalama 0.5 sn" in text and "+0.011%" in text
+    assert "Anlık tarama doğrulaması (1 tarama" in text and "aynı sinyaller: 1 / 1 tarama" in text
+    assert "(Zamanlama ve doğrulama satırları kaydın tamamından," in text and "backtest verisinin bittiği" in text
+    # Kayıt veri aralığını aşmıyorsa not yok
+    path.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows[:2]), encoding="utf-8")
+    assert "kaydın tamamından" not in "\n".join(fb.live_comparison(fcfg, data, [], path=path))
+    # Kayıt tümüyle veri bittikten sonra başlıyorsa: karşılaştırma yarın, zamanlama bugün
+    path.write_text("".join(json.dumps(dict(r, u=["SOL", "ADA"]), ensure_ascii=False) + "\n" for r in rows[2:]),
+                    encoding="utf-8")
+    late = "\n".join(fb.live_comparison(fcfg, data, [], path=path))
+    assert "yarınki backtestte görünür" in late and "Tarama zamanlaması (anlık tarama:" in late

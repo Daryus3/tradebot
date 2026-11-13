@@ -1434,6 +1434,86 @@ sn sonraki fiyatla değerlendirilir: eşiği kıl payı geçen / geçemeyen siny
 canlı "Giriş gecikmesi" ölçümleri birikince yeniden ayarlanır, o zamana kadar rapordaki ana rakamlar anlık taramaya göre
 kötümser kalır. (d) Hız kazancı, emir defteri derinliğini değiştirmez: büyük bakiyede kayma modellenmiyor.
 
+#### Rapor 21 araştırması (Kasım 2026): Kâr Al %6 doğrulandı, dakikadan sık tarama elendi, giriş anının saniyelik ölçümü
+Taban: rapor 21'in ayarı (F seti + dakikalık tarama + dalga eşikleri kapalı + Kâr Al %6 piyasa emriyle): yılda seçimde
+1.882 / doğrulamada 960 işlem, bileşiksiz yıllık getiri +%553 / +%304, bileşik +%2.158 / +%704, en büyük düşüş %83 / %71,
+3 kat kaymada +%811 / +%141, son 12 ay +%83 (3 çekilişin ortancası). ~35 komşu ayar ve üç saniyelik-veri çalışması.
+
+**1) Komşu ayarlar** (seçim / doğrulama; "ızgara" = 1 dk, 2 dk × 2 faz, 3 dk × 3 faz tarama ızgaralarının kaçında tabandan
+iyi: bileşiksiz seçim / doğrulama, bileşik seçim / doğrulama):
+
+| Ayar | İşlem / yıl | Bileşiksiz | Bileşik | 3 kat kayma | Son 12 ay | Izgara (6 üzerinden) |
+|---|---|---|---|---|---|---|
+| Taban (Kâr Al %6 piyasa) | 1.882 / 960 | +%553 / +%304 | +%2.158 / +%704 | +%811 / +%141 | +%83 | - |
+| Kâr Al %8 (önceki ayar) | 1.829 / 945 | +%558 / +%305 | +%2.126 / +%687 | +%645 / +%173 | +%81 | 4 / 2, 3 / 0 |
+| Kâr Al %5 | 1.912 / 990 | +%542 / +%310 | +%2.065 / +%785 | +%523 / +%143 | +%136 | 1 / 4, 2 / 4 |
+| Kâr Al %3 | 2.035 / 1.038 | +%462 / +%286 | +%1.669 / +%660 | +%316 / +%164 | +%251 | - |
+| Kâr Al %6 limit emirle | 1.882 / 960 | +%561 / +%307 | +%2.194 / +%727 | +%918 / +%153 | +%84 | 6 / 6, 6 / 6 |
+| Başabaş tabanı 0.25 | 1.801 / 944 | +%572 / +%325 | +%2.242 / +%875 | +%866 / +%211 | +%105 | 4 / 5, 3 / 5 |
+| Başabaş tabanı 0.2 | 1.738 / 916 | +%581 / +%327 | +%2.431 / +%888 | +%1.055 / +%169 | +%117 | 5 / 4, 5 / 3 |
+| Ek kapısı 12 | 1.637 / 940 | +%586 / +%312 | +%2.151 / +%767 | +%934 / +%156 | +%75 | 5 / 5, 4 / 4 |
+| Ek kapısı 8 | 1.997 / 973 | +%533 / +%307 | +%2.063 / +%738 | +%726 / +%152 | +%84 | 0 / 2, 1 / 2 |
+| Ek kapısı 5 | 2.104 / 1.014 | +%516 / +%303 | +%1.876 / +%725 | +%555 / +%166 | +%54 | - |
+| Giriş payı %0.02 (anlık tarama hedefi) | 1.918 / 980 | +%609 / +%360 | +%2.353 / +%1.274 | +%1.477 / +%345 | +%96 | 6 / 6, 6 / 6 |
+
+- **Kâr Al %6 (kullanıcının seçimi) %8'den kötü değil:** aradaki fark çekiliş gürültüsü içinde; işlem sayısı %2-3 fazla,
+  doğrulamada bileşik getiri altı ızgaranın altısında %6 lehine. Kâr Al %5-10 arası birbirinden ayırt edilemiyor; daha
+  düşük Kâr Al (3-4) işlem sayısını %5-8 artırıp son 12 ayı iyileştiriyor ama tüm dönemde getiriyi düşürüyor.
+- **Kâr Al'ı limit emirle koymak** (`FUTURES_TP_ORDER=limit`) her ızgarada biraz iyi (+%1-3): Kâr Al ile kapanan işlemlerde
+  (%6) komisyon %0.045 yerine %0.018 ve kayma yok. Modelin iyimserliği: fiyat hedefe değdiği an doldu sayılır; gerçekte
+  tam değip dönen fiyatta limit dolmayabilir, piyasa emri ise sıçramada hedefin üstünden de dolabilir. Küçük, isteğe bağlı.
+- Başabaş tabanı 0.2-0.25 ve ek kapısı 12 önceki turlardaki gibi: kâr ve dayanıklılık biraz artıyor, işlem %2-13 azalıyor,
+  ızgaralarda çoğunlukla ama her zaman değil. İşlem sayısını artıran ayarlar (ek kapısı 3-8, Zarar Kes 4, ek başabaş 0.35)
+  yine kârı düşürdü.
+- **Giriş hızı ızgaradan bağımsız:** giriş payı %0.05 → %0.02 altı ızgaranın altısında, her ölçüde iyi.
+
+**2) Dakikadan sık tarama: elendi (saniyelik veri).** Tarama aralığı kısaldıkça işlem ve kâr artıyordu (15 dk → 1 dk);
+aynı yön 1 dakikanın altında sürüyor mu? Kural (1 saatte %6 / 4 saatte %10) saniyelik işlem kayıtlarıyla Δ saniyede bir
+değerlendirildi; 300 coin-gün (150 seçim + 150 doğrulama), giriş tarama anından 0.6 sn sonra, çıkış canlı botun mantığıyla
+saniyelik oynatıldı. Tek coin görünümü (yuva rekabeti ve pozisyon boyu yok; coin boşaldıkça yeniden girer, bu yüzden
+mutlak düzeyler portföyle karşılaştırılamaz, **farklara** bakılır). İlk pozisyon kurallarıyla:
+
+| Tarama aralığı | 60 sn | 30 sn | 20 sn | 15 sn | 10 sn | 5 sn | 2 sn |
+|---|---|---|---|---|---|---|---|
+| İşlem | 1.918 | 2.135 | 2.265 | 2.322 | 2.450 | 2.670 | 2.914 |
+| İşlem başı net | +%0.030 | −%0.026 | −%0.050 | −%0.076 | −%0.090 | −%0.129 | −%0.092 |
+| Coin-gün toplamı, 60 sn'ye göre | - | −0.38 ± 0.21 | −0.57 ± 0.30 | −0.78 ± 0.26 | −0.93 ± 0.39 | −1.34 ± 0.36 | −1.08 ± 0.48 |
+| Dakika sınırı dışındaki girişlerin ortalaması | - | −%0.174 | −%0.134 | −%0.126 | −%0.154 | −%0.198 | −%0.137 |
+
+Ek pozisyon kurallarıyla da aynı (30 sn: −1.15 ± 0.26; 10 sn: −1.65 ± 0.38), iki dönemde de. İşlem sayısı %11-52 artıyor
+ama eklenen (dakika sınırı dışındaki) girişler zarar ediyor. "Eşik aşıldıktan k saniye sonra, kural hâlâ sağlanıyorsa
+gir" de denendi (k = 0-120): dokuz gecikmenin dokuzu dakika sınırında girmekten kötü (ilk pozisyon kurallarında −0.27 ile
+−0.96, ek kurallarında −0.19 ile −1.32). **Kazanç dakika kapanışına bağlı** (piyasanın geri kalanı da mum kapanışlarında
+işlem yapıyor); kapanışlar arasında "düşen bıçağı" yakalamak kârlı değil.
+
+**3) Dakika kapanışına göre giriş anı (aynı veri).** Kural kapanıştan φ saniye önce / sonra değerlendirilip emir L ms
+sonra dolduruldu; fark, anlık taramaya (φ = 0, L = 600 ms) göre coin-gün toplamı:
+
+| Giriş | İlk pozisyon kuralları | Ek pozisyon kuralları |
+|---|---|---|
+| Kapanıştan 5 / 3 / 2 / 1 sn önce | +0.22 ± 0.26 / −0.05 ± 0.27 / −0.13 ± 0.25 / +0.10 ± 0.16 | +0.29 ± 0.32 / +0.20 ± 0.25 / −0.16 ± 0.30 / +0.24 ± 0.20 |
+| Kapanışta, emir 0.1 sn'de | +0.07 ± 0.12 | +0.13 ± 0.21 |
+| Kapanışta, emir 0.6 sn'de (anlık tarama) | 0 | 0 |
+| Kapanışta, emir 1.5 sn'de | −0.01 ± 0.15 | +0.15 ± 0.20 |
+| Kapanışta, emir 2.5 sn'de (eski hızlı yol) | −0.18 ± 0.21 | −0.23 ± 0.28 |
+| Kapanışta, emir 4 sn'de | −0.16 ± 0.22 | −0.36 ± 0.26 |
+| Kapanıştan 5 / 10 sn sonra tarama | −0.50 ± 0.23 / −0.68 ± 0.29 | −0.32 ± 0.28 / −0.42 ± 0.29 |
+| Kapanıştan 20 / 30 / 45 sn sonra tarama | −0.67 ± 0.28 / −1.00 ± 0.36 / −0.48 ± 0.31 | −0.74 ± 0.28 / −1.35 ± 0.36 / −0.67 ± 0.30 |
+
+Kapanışı izleyen ilk ~1.5 saniye içindeki girişler birbirine denk; 2.5-4 sn'de işlem başı ~%0.03 (doğrulama örneğinde
+%0.08-0.11) kaybediliyor, 5 sn ve sonrası belirgin kötü. Kapanıştan birkaç saniye önce girmenin ölçülebilir bir farkı
+yok. Anlık taramanın (emir ~0.6 sn'de) eski hızlı yola (~2.5 sn + istekler) göre kazancı bu ölçümle de uyumlu; daha da
+hızlanmanın (ör. 0.1 sn) ek kazancı ölçüm gürültüsü içinde.
+
+**4) Rapor.** Canlı bot karşılaştırmasındaki zamanlama, giriş gecikmesi ve "Anlık tarama doğrulaması" satırları artık
+tarama kaydının tamamından hesaplanır. Backtest verisi bitmiş günde kalır (işlem karşılaştırması oraya kadar), kayıt ise
+şu ana kadar sürer; önceden güncellemeden / ayar değişikliğinden sonraki saatler ancak ertesi günün raporunda
+görünüyordu (rapor 21'de anlık tarama açıktı ama satırları yoktu).
+
+**Sonuç.** İşlem sayısını kârla birlikte artıran yeni bir kural / ayar yok; tarama sıklığının sınırı 1 dakika (mum
+kapanışı). Şimdiki ayar (rapor 21) yerinde. Sıradaki bilgi canlıdan gelecek: anlık taramanın ölçülen giriş gecikmesi ve
+doğrulaması; ona göre backtestin gecikme payı (%0.05) yeniden ayarlanacak.
+
 ### 🏆 Strateji turnuvası (`--turnuva`)
 Hangi strateji türünün sizin dönemde işe yaradığını **tek komutla** görmek için:
 ```bash

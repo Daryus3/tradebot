@@ -2684,7 +2684,7 @@ def live_comparison(cfg, data: FutData, trades: Sequence[FutTrade], path: Option
         first = min(int(r["t"]) for r in every)
         if first >= data.end_ms:
             return [head, f"  Kayıt {when(first)}'de başladı ama backtest dönemi {when(data.end_ms)}'de bitiyor (arşivde "
-                          f"bitmiş günler var): karşılaştırma yarınki backtestte görünür."]
+                          f"bitmiş günler var): karşılaştırma yarınki backtestte görünür."] + live_timing(cfg, every)
         return [head, "  Bu backtest döneminde canlı tarama kaydı yok."]
     by_t = {int(r["t"]): r for r in journal}
     first, last = min(by_t), max(by_t)
@@ -2703,8 +2703,16 @@ def live_comparison(cfg, data: FutData, trades: Sequence[FutTrade], path: Option
         L.append(f"  Canlı evren (son kayıt): {len(last_u)} coin | backtest evreni: {len(bt)} coin"
                  + (f" | backtestte olup canlıda olmayan: {', '.join(missing[:12])}" + (" …" if len(missing) > 12 else "")
                     if missing else ""))
-    L.extend(live_timing(cfg, journal))
-    block = live_account_block(journal)
+    # Zamanlama, anlık tarama doğrulaması ve hesap modu satırları kaydın TAMAMINDAN: backtest verisi bitmiş günde kalır,
+    # kayıt ise şu ana kadar sürer; güncellemeden / ayar değişikliğinden sonraki saatler de aynı gün raporda görünür
+    full = read_scan_log(path, data.start_ms, 2 ** 62)
+    timing = live_timing(cfg, full)
+    L.extend(timing)
+    newest = max(int(r["t"]) for r in full)
+    if timing and newest > last:
+        L.append(f"  (Zamanlama ve doğrulama satırları kaydın tamamından, {when(newest)}'e kadar; işlem karşılaştırması "
+                 f"backtest verisinin bittiği {when(last)}'e kadar)")
+    block = live_account_block(full)
     if block:
         L.append(block)
     inside = [tr for tr in trades if first <= tr.entry_ms <= last]
