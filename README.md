@@ -1575,6 +1575,38 @@ geniş son fiyat stopu (−%6-8) seçimde iyi, doğrulamada kötü. **Sonuç: za
 (Uyarı: tabanın kendi stop dolumu da iyimser; rapordaki "Kötümser stop dolumu" satırında 5x hesap erir. Bu risk iki
 tetiklemede de var ve bu karşılaştırmayla çözülmüyor.)
 
+#### Sakin günler için ayrı strateji var mı? (Kasım 2026)
+Ana bot yalnızca çöküşlerde işlem açar; son ana çöküşten 24 saatten uzun süre geçmiş "sakin" zaman yıllara göre %62-83
+(2026: %78). Bu sürede açılabilecek stratejiler botun kendi modül fonksiyonlarıyla ve **yalnızca sakin dönemde** (son 24
+saatte evrenin hiçbir coininde 1 sa %6 / 4 sa %10 düşüş yok; nedensel) sınandı: Bollinger + RSI (2 / 2.5σ, RSI 25/75 ve
+20/80, iki yön ve yalnız long), hacimli kırılım (3x / 5x hacim, 4 / 12 saat zirve), trend içi düzeltme (EMA200, RSI 25 /
+20), pompa short (1 sa %3 / %4, 4 sa %6) ve ana kuralın küçük eşikli türevi "mini çöküş" (1 sa %2.5 / 3 / 4, 4 sa %5 / 7).
+21 küme × 18 çıkış (Kâr Al 0.8 / 1.5 / 3, Zarar Kes 0.8 / 1.5 / 3, 60 / 240 dk) = 378 deneme; 3 yuva, her biri bakiyenin
+1/3'ü × 3x, sabit boy; 1 dk çıkışlar, komisyon %0.045, kayma %0.02, giriş gecikmesi payı %0.05.
+
+**Sonuç: 378 denemenin hiçbiri hem seçim hem doğrulama döneminde kârlı değil**; her kümenin en iyi çıkışı da 2026'da ve son
+6 ayda zararda. Her kümenin en iyi çıkışı (doğrulama dönemine göre; yıllık getiri bileşiksiz, seçim / doğrulama):
+
+| Strateji | En iyi çıkış | İşlem / yıl | İşlem başı net | Yıllık getiri | 2026 | Kârlı ay (doğrulama) |
+|---|---|---|---|---|---|---|
+| Mini çöküş 4 sa %7 (long) | KA 3, ZK 3, 60 dk | 81 | +%0.04 (seçim +%0.23, doğr. −%0.16) | +%17 / −%15 | −%23 | 15 / 36 |
+| Mini çöküş 1 sa %4 (long) | KA 1.5, ZK 3, 60 dk | 254 | −%0.09 | −%21 / −%23 | −%22 | 13 / 36 |
+| Mini çöküş 4 sa %5 (long) | KA 3, ZK 3, 240 dk | 365 | −%0.07 | −%17 / −%40 | −%84 | 15 / 36 |
+| Mini çöküş 1 sa %3 (long) | KA 3, ZK 3, 60 dk | 732 | −%0.11 | −%77 / −%76 | −%99 | 15 / 36 |
+| Düzeltme EMA200, RSI 20 | KA 0.8, ZK 3, 60 dk | 456 | −%0.18 | −%57 / −%108 | −%132 | 8 / 36 |
+| Pompa short 1 sa %4 | KA 1.5, ZK 3, 240 dk | 758 | −%0.19 | −%153 / −%124 | −%134 | 9 / 36 |
+| Bollinger 2.5σ RSI 20/80 (yalnız long) | KA 1.5, ZK 3, 60 dk | 691 | −%0.21 | −%126 / −%173 | −%286 | 6 / 36 |
+| Hacimli kırılım 5x, 4 sa | KA 3, ZK 3, 240 dk | 2.062 | −%0.17 | −%347 / −%334 | −%285 | 6 / 36 |
+| Bollinger 2σ RSI 25/75 (iki yön) | KA 1.5, ZK 3, 240 dk | 3.820 | −%0.19 | −%709 / −%753 | −%772 | 1 / 36 |
+
+(−%100'ün altı: hesap o süre dolmadan erir.) Denetimler: sakinlik 6 saate indirildiğinde, başabaş kalkanı eklendiğinde ve
+mini çöküş ana botun çıkışlarıyla (KA 6, ZK 5, başabaş 1.1 → 0.25, 45 dk) denendiğinde de hepsi zararda. **İdeal uygulamada**
+(her emir maker komisyonuyla %0.018, kayma ve gecikme sıfır; gerçekte ulaşılamaz) Bollinger, kırılım, düzeltme ve pompa
+short yine zararda (işlem başı −%0.01 ile −%0.10: brüt avantaj yok); yalnızca mini çöküş küçük bir artıya geçiyor (+%0.02 ile
++%0.06; yıllık +%11 ile +%39), bu da gerçekçi maliyetin (~%0.18) çok altında. Sakin piyasada fiyat hareketleri gürültü;
+ana stratejinin kazancı likidasyon zincirlerinden geliyor ve sakin dönemde o yok. **Öneri: sakin günlerde işlem açmamak**
+(sermaye korunur); bot çöküş geldiğinde zaten kendiliğinden girer.
+
 ### 🏆 Strateji turnuvası (`--turnuva`)
 Hangi strateji türünün sizin dönemde işe yaradığını **tek komutla** görmek için:
 ```bash
