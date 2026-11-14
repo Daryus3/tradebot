@@ -1547,6 +1547,34 @@ kurmuyordu. İki düzeltme:
 `/tarama` ve 🎯 Çıkışlar ve Emirler sayfası anlık taramada "mumlar" yerine "anlık fiyatlar … sn'de alındı" der; raporda
 kullanılamama nedenleri sayılardan arındırılıp gruplanır.
 
+#### Zarar kesin mark fiyatıyla tetiklenmesi: elendi (rapor 22 araştırması, Kasım 2026)
+Zarar kes emri bugün **son işlem fiyatıyla** tetiklenir (`workingType=CONTRACT_PRICE`). Rapor 22'de zarar kesle kapanan
+işlemler (%8.3, ortalama −%5.0) toplam net kârın yaklaşık iki katı kadar kaybettiriyor ve bir kısmı vadeli piyasaya özgü
+likidasyon fitilleri: 19 Mayıs 2021'de SOL'un dakika dibi son fiyatta 34.00, **mark fiyatında** (borsalar arası endeks +
+fonlama payı) 38.96. Binance stop emirlerini mark fiyatıyla da tetikleyebilir (`MARK_PRICE`); fitiller stopu vurmaz.
+Evrenin tüm coinleri için 2020-2026 mark fiyatı 1 dk mumları indirildi (64 coin, kapsama %99.8) ve motor mark
+tetiklemesiyle yeniden çalıştırıldı. Tetiklenen emir piyasa emri olduğu için dolum son işlem fiyatındandır; dakikanın
+hangi anında olduğu bilinmediğinden dört varsayım denendi. Rapor 22 ayarı, 3 çekilişin ortancası, seçim / doğrulama:
+
+| Zarar kes tetiklemesi | İşlem / yıl | Bileşiksiz | Bileşik | En büyük düşüş | Zarar kesle kapanan |
+|---|---|---|---|---|---|
+| Son fiyat (bugünkü; dolum stop fiyatından) | 1.801 / 944 | +%572 / +%325 | +%2.242 / +%875 | %77 / %71 | 811 işlem, ort. −%5.0 |
+| Mark; dolum stop fiyatından (aynı iyimser varsayım) | 1.721 / 926 | +%833 / +%378 | +%2.883 / +%1.710 | %66 / %66 | 652 |
+| Mark; dolum dakika kapanışından | 1.721 / 926 | +%695 / +%232 | +%2.504 / **eridi** | %74 / %100 | 652, ort. −%6.2 |
+| Mark; dolum kapanış ile dip arası | 1.721 / 926 | +%638 / +%186 | +%2.204 / eridi | %84 / %100 | 652 |
+| Mark; dolum dakikanın dibinden | 1.721 / 926 | +%577 / +%140 | +%1.764 / eridi | %91 / %100 | 652, ort. −%7.1 |
+| Mark −%5 + son fiyatla emniyet stopu −%6 / −%8 / −%12 | 1.747-1.721 / 930-927 | +%597 / +%294 … +%632 / +%256 | +%2.244 / +%575 … +%2.295 / +%266 | %81-84 / %77-90 | - |
+| Yalnız son fiyat, stop −%6 / −%7 / −%8 | 1.698-1.586 / 920-873 | +%590 / +%294 … +%614 / +%319 | +%2.205 / +%573 … +%2.408 / +%779 | %73-80 / %77-84 | - |
+
+Mark tetiklemesi zarar kesle kapanan işlemlerin ~%20'sini (fitilde vurulup sonra dönenler) kurtarıyor; iyimser dolum
+varsayımıyla kâr çok artıyor. Ama **gerçek, piyasa geneli çöküşlerde mark fiyatı geride kalıyor**: vadeli fiyat önden
+düşerken endeks (spot) sonra geliyor, stop geç tetikleniyor ve dolum son fiyattan çok aşağıda oluyor. 10 Ekim 2025
+21:18-21:20 UTC'de CRV, DOT, ADA, OP işlemleri −%18 ile −%35 arasında kapandı; gerçekçi her dolum varsayımında doğrulama
+döneminde hesap eridi. Son fiyatla emniyet stopu eklemek (−%6-12) erimeyi önlüyor ama doğrulamada tabandan kötü; daha
+geniş son fiyat stopu (−%6-8) seçimde iyi, doğrulamada kötü. **Sonuç: zarar kes son fiyatla tetiklenmeye devam eder.**
+(Uyarı: tabanın kendi stop dolumu da iyimser; rapordaki "Kötümser stop dolumu" satırında 5x hesap erir. Bu risk iki
+tetiklemede de var ve bu karşılaştırmayla çözülmüyor.)
+
 ### 🏆 Strateji turnuvası (`--turnuva`)
 Hangi strateji türünün sizin dönemde işe yaradığını **tek komutla** görmek için:
 ```bash
