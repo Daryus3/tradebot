@@ -1063,6 +1063,8 @@ class SettingsMenu:
         if not tm or len(tm.get("ms") or []) < 3:
             return ""
         st, kl, _sg = (v / 1000 for v in tm["ms"][:3])
+        if tm.get("sn"):                               # Anlık tarama: mum değil, son işlem fiyatları
+            return f"⏱️ Son tarama: mum kapanışından {st:.2f} sn sonra başladı, anlık fiyatlar {kl:.2f} sn'de alındı\n"
         return f"⏱️ Son tarama: mum kapanışından {st:.1f} sn sonra başladı, mumlar {kl:.1f} sn'de alındı\n"
 
     def _text_fb(self) -> str:

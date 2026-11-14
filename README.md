@@ -1514,6 +1514,39 @@ görünüyordu (rapor 21'de anlık tarama açıktı ama satırları yoktu).
 kapanışı). Şimdiki ayar (rapor 21) yerinde. Sıradaki bilgi canlıdan gelecek: anlık taramanın ölçülen giriş gecikmesi ve
 doğrulaması; ona göre backtestin gecikme payı (%0.05) yeniden ayarlanacak.
 
+#### Anlık tarama: ilk canlı ölçüm ve geçmiş mum belleği (rapor 22, Kasım 2026)
+**Canlı ölçüm (gerçek vadeli hesap, 13 Kasım 2026).** Anlık tarama açıkken 852 tarama (ortanca, mum kapanışından sonra):
+
+| Yol | Tarama başladı | Veri alındı | Sinyaller hazır |
+|---|---|---|---|
+| Hızlı giriş kapalı (eski yol) | 3.0 sn | 6.1 sn | 6.1 sn |
+| Hızlı giriş açık (sakin coin kuralıyla; 1.478 tarama) | 1.0 sn | 2.0 sn | 2.0 sn |
+| **Anlık tarama (852 tarama)** | 0.15 sn | 0.41 sn | **0.42 sn** |
+
+Botun kendi doğrulaması (850 tarama, sonradan kesinleşen mumlarla): anlık fiyat ile mum kapanışı arasındaki fark ortalama
+%0.006, en çok %0.300; kesinleşmiş mumlarla aynı sinyaller 850 / 850. **Sınırı:** bu aralıkta piyasa sakindi, hiç sinyal
+çıkmadı; yani anlık taramanın yanlış sinyal üretmediği görüldü, sinyal çıkan taramalardaki uyum ve gerçek dolum gecikmesi
+("Giriş gecikmesi (anlık tarama …)" satırı) ilk çöküşte ölçülecek. Rapor artık doğrulama satırında sinyal çıkan tarama
+sayısını ayrıca yazar. Backtestin giriş varsayımı (5 sn = %0.05) o ölçüme kadar değiştirilmedi; emir sinyalden sonra tek
+istekle gittiği için dolumun ~0.6 sn olması beklenir (rapordaki "Giriş 1 sn'de dolsaydı" satırı).
+
+**46 taramada (%5) anlık fiyat kullanılamadı** ("geçmiş mumlar N / 24 coinde hazır"; o taramalar olağan hızlı yoldan
+yapıldı, yanlış işlem riski yoktu). Neden: ön hazırlık her dakika coin başına 485 mum (24 coinde sıkıştırılmamış
+~1.5 MB; ölçülen süre ~1 sn) istiyordu; bu, mum kapanışına sarkınca (sunucu meşgulken, ör. aynı makinede backtest çalışırken) yanıtlar kapanıştan sonra
+okunuyor, az önce kapanan mum "kapanmış" satırlar arasında geliyor ve bot temkinli davranıp anlık taramayı o mum için
+kurmuyordu. İki düzeltme:
+- **Geç okunan yanıt anlık taramayı düşürmez.** Kapanıştan önceki mumlar ne zaman okunursa okunsun kesindir; az önce
+  kapanan mum geçmişe alınmaz, "süren mum" sayılır (kapanışı zaten anlık fiyatla değiştirilir).
+- **Geçmiş mumlar bellekte tutulur.** Her ön hazırlıkta coin başına yalnızca son 6 mum istenir ve belleğe eklenir (485
+  yerine: istek başına ~80 kat, 30 dakikalık tam yenilemelerle birlikte toplamda ~20 kat az veri; tek gidiş-dönüş). Ekleme ancak yeni mumlar belleğin kesintisiz devamıysa ve ortak mumlar
+  aynıysa yapılır; değilse (bot bir süre taramadıysa, ayar değiştiyse) o coinin tam geçmişi yeniden istenir. Her coinin
+  tam geçmişi ayrıca 30 dakikada bir yeniden istenip bellekle karşılaştırılır (coinler zamana yayılır); fark çıkarsa
+  bellek yenilenir ve Telegram'a uyarı gelir (kesinleşmiş mumlar değişmediği için çıkmaması gerekir). Asıl önemi: çöküş
+  anlarında Binance yavaşlar; hafif ön hazırlık, anlık taramanın tam o anlarda devrede kalmasını sağlar.
+
+`/tarama` ve 🎯 Çıkışlar ve Emirler sayfası anlık taramada "mumlar" yerine "anlık fiyatlar … sn'de alındı" der; raporda
+kullanılamama nedenleri sayılardan arındırılıp gruplanır.
+
 ### 🏆 Strateji turnuvası (`--turnuva`)
 Hangi strateji türünün sizin dönemde işe yaradığını **tek komutla** görmek için:
 ```bash

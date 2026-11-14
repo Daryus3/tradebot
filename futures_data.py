@@ -124,6 +124,52 @@ def with_bar(arrs: Dict[str, np.ndarray], t_open: int, close: float,
     return out
 
 
+def split_history(arrs: Dict[str, np.ndarray], forming: Optional[Dict[str, float]], closed_ms: int,
+                  bar_ms: int) -> Tuple[Dict[str, np.ndarray], Optional[Dict[str, float]]]:
+    """Bir mum yanıtını, `closed_ms` anında kapanacak mumdan ÖNCEKİ (çoktan kesinleşmiş) mumlar ve o mumun o ana kadarki
+    değerleri diye ayırır: (kesin mumlar, süren mum ya da None). Yanıt kapanıştan sonra okunduysa o mum (ve varsa
+    yenisi) "kapanmış" satırlar arasında gelir; henüz kesinleşmemiş olabileceği için geçmişe alınmaz, süren mum olarak
+    döner (anlık taramada kapanışı zaten o andaki son işlem fiyatıyla değiştirilir: with_bar)."""
+    t = arrs["t"]
+    n = int(np.searchsorted(t, closed_ms - 2 * bar_ms, side="right"))
+    row = None
+    if n < len(t) and int(t[n]) == closed_ms - bar_ms:
+        row = {k: float(arrs[k][n]) for k in FIELDS if k != "t"}
+        row["t"] = int(t[n])
+    elif forming and int(forming.get("t", -1)) == closed_ms - bar_ms:
+        row = forming
+    return ({k: v[:n] for k, v in arrs.items()} if n < len(t) else arrs), row
+
+
+def merge_tail(hist: Dict[str, np.ndarray], tail: Dict[str, np.ndarray], bar_ms: int,
+               keep: int) -> Optional[Dict[str, np.ndarray]]:
+    """Bellekteki kesinleşmiş mumlara yeni yanıtın (son birkaç mum) kesinleşmiş satırlarını ekler; en yeni `keep` mum
+    döner. Ortak satırların kapanışı bellektekiyle aynı, yeni satırlar belleğin devamı ve kendi içinde kesintisiz
+    olmalıdır; değilse None (tam geçmiş yeniden istenir)."""
+    th, tn = hist["t"], tail["t"]
+    if not len(th) or not len(tn):
+        return None
+    if (len(tn) > 1 and not np.all(np.diff(tn) == bar_ms)) or int(tn[0]) > int(th[-1]) + bar_ms:
+        return None                                       # Yanıtta ya da bellek ile yanıt arasında eksik mum
+    old = tn <= th[-1]
+    if old.any():
+        idx = np.searchsorted(th, tn[old])
+        if np.any(idx >= len(th)) or np.any(th[np.minimum(idx, len(th) - 1)] != tn[old]) \
+                or not np.allclose(hist["c"][idx], tail["c"][old], rtol=1e-9, atol=0.0):
+            return None                                   # Aynı mum farklı görünüyor: belleğe güvenilmez
+    if old.all():
+        return {k: v[-keep:] for k, v in hist.items()}
+    return {k: np.concatenate([hist[k], tail[k][~old]])[-keep:] for k in hist}
+
+
+def history_mismatch(old: Dict[str, np.ndarray], new: Dict[str, np.ndarray]) -> int:
+    """İki mum dizisinin ortak mumlarından kaçının kapanışı farklı (bellek, tam yenilemeyle karşılaştırılır)."""
+    common, i_old, i_new = np.intersect1d(old["t"], new["t"], return_indices=True)
+    if not len(common):
+        return 0
+    return int(np.sum(~np.isclose(old["c"][i_old], new["c"][i_new], rtol=1e-9, atol=0.0)))
+
+
 class FuturesArchive:
     """data.binance.vision'dan vadeli mum indirir ve önbelleğe yazar."""
 

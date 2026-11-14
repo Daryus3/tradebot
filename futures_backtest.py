@@ -25,6 +25,7 @@ import csv
 import heapq
 import json
 import math
+import re
 import zlib
 from collections import Counter
 from dataclasses import dataclass, field, replace
@@ -2623,11 +2624,15 @@ def live_snapshot_check(journal: Sequence[dict]) -> List[str]:
         text = (f"  Anlık tarama doğrulaması ({len(checks)} tarama, sonradan kesinleşen mumlarla): anlık fiyat ile mum "
                 f"kapanışı arasındaki fark ortalama %{av:.3f}, en çok %{mx:.3f}")
         if same:
-            text += f" | kesinleşmiş mumlarla aynı sinyaller: {sum(same)} / {len(same)} tarama"
+            # Sinyalsiz taramada "aynı" olmak kolaydır; asıl sınav sinyal çıkan taramalardır: ayrıca sayılır
+            with_signal = sum(1 for c in checks if c.get("sg"))
+            text += (f" | kesinleşmiş mumlarla aynı sinyaller: {sum(same)} / {len(same)} tarama (sinyal çıkan tarama: "
+                     f"{with_signal})")
             if sum(same) < len(same):
                 text += " (fark, eşiği kıl payı geçen / geçemeyen sinyallerdedir)"
         out.append(text)
-    missed = Counter(str(r["sx"]).split(":")[0].strip() for r in journal if r.get("sx"))
+    # Nedenler sayılardan arındırılıp gruplanır ("geçmiş mumlar 6 / 24 coinde hazır" ile "8 / 24" aynı neden)
+    missed = Counter(re.sub(r"\d+", "N", str(r["sx"]).split(":")[0].strip()) for r in journal if r.get("sx"))
     if missed:
         out.append(f"  Anlık fiyat {sum(missed.values())} taramada kullanılamadı (olağan hızlı yoldan tarandı): "
                    + "; ".join(f"{why}: {n}" for why, n in missed.most_common(3)))

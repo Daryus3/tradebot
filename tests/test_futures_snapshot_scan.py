@@ -13,8 +13,8 @@ import pytest
 import futures_backtest as fb
 import futures_trader as ft
 from commands import CALLBACK, Command
-from config import _setting_notes, futures_snapshot_on, load_config
-from futures_data import FIELDS, with_bar
+from config import _setting_notes, futures_minute_limit, futures_snapshot_on, load_config
+from futures_data import FIELDS, history_mismatch, merge_tail, split_history, with_bar
 from futures_exchange import FuturesError, FuturesExchange
 from runtime_settings import EDITABLE
 from strategy import FUT_BAR_MS, futures_kline_limit
@@ -240,6 +240,7 @@ def test_scan_runs_right_after_the_close_with_one_price_request_and_orders_at_on
     assert pos.metrics["drop_pct"] == pytest.approx(7.0, abs=0.05)         # Kural: 1 saatte %6 (aynı kural, aynı ölçü)
     report = bot.scan_report()
     assert "⚡ Anlık tarama: bu taramada kullanıldı (fiyatlar mum kapanışından 0.15 sn sonra alındı" in report
+    assert "tarama 0.15 sn'de başladı, anlık fiyatlar 0.15 sn'de alındı, sinyaller 0.15 sn'de hazırdı" in report
     assert bot._snap_live is False and bot._free_cache is None             # Kısa yol yalnızca o taramanın girişlerinde
 
 
@@ -593,7 +594,7 @@ def test_each_snapshot_scan_is_verified_against_the_settled_candles(fcfg, tmp_pa
     run_until_scan(bot, clock, clock.t)                                    # Sıradaki dakika: ön hazırlıkta doğrulanır
     row = journal(bot)[-1]
     assert row["t"] == DIP + MIN
-    assert row["sv"] == [{"t": DIP, "n": 4, "av": 0.01, "mx": 0.04, "ok": 1}]
+    assert row["sv"] == [{"t": DIP, "n": 4, "av": 0.01, "mx": 0.04, "sg": 1, "ok": 1}]     # "sg": o taramada 1 sinyal vardı
     # Ara dakikanın (T0 + 4 dk) kapanışı sıradaki sınır taramasının 5 dk mumlarıyla doğrulanamaz: bir sonraki 1 dk ön
     # hazırlığını bekler ve sınırdaki taramayla birlikte doğrulanır. Hiçbir anlık tarama doğrulamasız kalmaz
     run_until_scan(bot, clock, clock.t)
@@ -624,7 +625,8 @@ def test_verification_reports_a_signal_that_settled_candles_would_not_give(fcfg,
     check = journal(bot)[-1]["sv"][0]
     assert check["ok"] == 0 and check["mx"] == pytest.approx(0.06, abs=0.001) and check["t"] == DIP
     text = "\n".join(fb.live_snapshot_check(journal(bot)))
-    assert "aynı sinyaller: 0 / 1 tarama (fark, eşiği kıl payı geçen / geçemeyen sinyallerdedir)" in text
+    assert ("aynı sinyaller: 0 / 1 tarama (sinyal çıkan tarama: 1) (fark, eşiği kıl payı geçen / geçemeyen "
+            "sinyallerdedir)") in text
 
 
 def test_bad_snapshot_data_switches_back_to_the_settled_path(fcfg, tmp_path):
@@ -670,16 +672,21 @@ def test_report_lines_for_snapshot_scans(fcfg):
             {"t": t0 + 2 * MIN, "ms": [150, 380, 390], "fast": 1, "sn": [370, 160],
              "sv": [{"t": t0 + MIN, "n": 24, "av": 0.004, "mx": 0.031, "ok": 1}]},
             {"t": t0 + 3 * MIN, "ms": [150, 1900, 1950], "fast": 1, "sx": "anlık fiyatlar alınamadı: zaman aşımı",
-             "sv": [{"t": t0 + 2 * MIN, "n": 24, "av": 0.002, "mx": 0.011, "ok": 0}, {"t": 1, "n": 0}]}]
+             "sv": [{"t": t0 + 2 * MIN, "n": 24, "av": 0.002, "mx": 0.011, "sg": 2, "ok": 0}, {"t": 1, "n": 0}]},
+            {"t": t0 + 4 * MIN, "ms": [150, 2000, 2010], "fast": 1, "sx": "geçmiş mumlar 6 / 24 coinde hazır"},
+            {"t": t0 + 5 * MIN, "ms": [150, 2000, 2010], "fast": 1, "sx": "geçmiş mumlar 0 / 24 coinde hazır"}]
     text = "\n".join(fb.live_timing(fcfg, rows))
-    assert ("Tarama zamanlaması (hızlı giriş açık: mum kapanışından sonra, ortanca): başlangıç 0.6 sn → mumlar alındı "
-            "2.1 sn → sinyaller hazır 2.2 sn (2 tarama)") in text
+    assert ("Tarama zamanlaması (hızlı giriş açık: mum kapanışından sonra, ortanca): başlangıç 0.1 sn → mumlar alındı "
+            "2.0 sn → sinyaller hazır 2.0 sn (4 tarama)") in text
     assert ("Tarama zamanlaması (anlık tarama: mum kapanışından sonra, ortanca): başlangıç 0.15 sn → anlık fiyatlar "
             "alındı 0.40 sn → sinyaller hazır 0.41 sn (2 tarama; Binance ile saat farkı ortanca 12 ms)") in text
     assert "Giriş gecikmesi (anlık tarama: mum kapanışı → dolum): ortalama 0.6 sn" in text and "+0.012%" in text
     assert ("Anlık tarama doğrulaması (2 tarama, sonradan kesinleşen mumlarla): anlık fiyat ile mum kapanışı arasındaki "
-            "fark ortalama %0.003, en çok %0.031 | kesinleşmiş mumlarla aynı sinyaller: 1 / 2 tarama") in text
-    assert "Anlık fiyat 1 taramada kullanılamadı (olağan hızlı yoldan tarandı): anlık fiyatlar alınamadı: 1" in text
+            "fark ortalama %0.003, en çok %0.031 | kesinleşmiş mumlarla aynı sinyaller: 1 / 2 tarama (sinyal çıkan "
+            "tarama: 1)") in text
+    # Kullanılamama nedenleri sayılardan arındırılıp gruplanır (6 / 24 ile 0 / 24 aynı neden)
+    assert ("Anlık fiyat 3 taramada kullanılamadı (olağan hızlı yoldan tarandı): geçmiş mumlar N / N coinde hazır: 2; "
+            "anlık fiyatlar alınamadı: 1") in text
     assert fb.live_snapshot_check([{"t": t0, "ms": [3000, 3100, 3100]}]) == []
     # Anlık tarama hiç kullanılmadıysa eski satırlar aynen
     old = fb.live_timing(fcfg, [{"t": t0, "ms": [3000, 3100, 3100]}])
@@ -717,3 +724,141 @@ def test_report_timing_lines_cover_the_journal_after_the_backtest_data_ends(fcfg
                     encoding="utf-8")
     late = "\n".join(fb.live_comparison(fcfg, data, [], path=path))
     assert "yarınki backtestte görünür" in late and "Tarama zamanlaması (anlık tarama:" in late
+
+
+# ====================================================================== geçmiş mum belleği
+def test_history_helpers_split_merge_and_compare():
+    k = k1_of(np.arange(1.0, 21.0), start=BASE_MS)                        # 20 adet 1 dk mum (kapanışlar 1..20)
+    close = BASE_MS + 20 * MIN                                             # 20. mumun kapanışı
+    row = dict({f: float(k[f][19]) for f in FIELDS if f != "t"}, t=int(k["t"][19]))
+    # Yanıt kapanıştan ÖNCE okundu: 20. mum süren mum olarak ayrı gelir; geçmiş olduğu gibi
+    hist, forming = split_history({f: v[:19] for f, v in k.items()}, row, close, MIN)
+    assert len(hist["t"]) == 19 and forming is row
+    # Yanıt kapanıştan SONRA okundu (rapor 22: 46 taramada): 20. mum "kapanmış" satırlar arasında gelir ama henüz
+    # kesinleşmemiş olabilir → geçmişe alınmaz, süren mum olarak döner
+    late, forming = split_history(k, None, close, MIN)
+    assert len(late["t"]) == 19 and int(late["t"][-1]) + 2 * MIN == close
+    assert forming["t"] == close - MIN and forming["c"] == 20.0 and set(forming) == set(FIELDS)
+    # Daha da geç (bir sonraki mum da kapanmış görünüyor): yine yalnızca o kapanıştan önceki mumlar
+    later, forming = split_history(k, None, close - MIN, MIN)
+    assert len(later["t"]) == 18 and forming["c"] == 19.0
+    assert split_history({f: v[:19] for f, v in k.items()}, None, close, MIN)[1] is None      # Süren mum yanıtta yok
+    # Bellek + son mumlar: ortak mumlar aynı, yeniler kesintisiz devam → eklenir; en yeni `keep` mum kalır
+    base = {f: v[:15] for f, v in k.items()}
+    merged = merge_tail(base, {f: v[12:19] for f, v in k.items()}, MIN, 485)
+    assert np.array_equal(merged["t"], k["t"][:19]) and np.array_equal(merged["c"], k["c"][:19])
+    assert merged["t"].dtype == np.int64 and set(merged) == set(FIELDS)
+    assert np.array_equal(merge_tail(base, {f: v[12:19] for f, v in k.items()}, MIN, 10)["t"], k["t"][9:19])
+    assert np.array_equal(merge_tail(base, {f: v[10:15] for f, v in k.items()}, MIN, 485)["t"], base["t"])   # Yeni mum yok
+    assert np.array_equal(merge_tail(base, {f: v[15:19] for f, v in k.items()}, MIN, 485)["t"], k["t"][:19])  # Tam devamı
+    # Güvenilmez durumlar: tam geçmiş yeniden istenir (None)
+    assert merge_tail(base, {f: v[16:19] for f, v in k.items()}, MIN, 485) is None          # Arada eksik mum
+    assert merge_tail(base, {f: np.concatenate([v[12:14], v[15:19]]) for f, v in k.items()}, MIN, 485) is None
+    changed = {f: v[12:19].copy() for f, v in k.items()}
+    changed["c"][0] += 0.5                                                 # Ortak mum farklı görünüyor
+    assert merge_tail(base, changed, MIN, 485) is None
+    assert merge_tail(base, {f: v[:0] for f, v in k.items()}, MIN, 485) is None
+    assert merge_tail({f: v[:0] for f, v in k.items()}, base, MIN, 485) is None
+    # Bellek ile tam yenilemenin karşılaştırması
+    other = {f: v.copy() for f, v in k.items()}
+    other["c"][3] *= 1.01
+    assert history_mismatch(k, k) == 0 and history_mismatch(k, other) == 1
+    assert history_mismatch(k, {f: v[:0] for f, v in k.items()}) == 0
+
+
+def test_history_is_kept_in_memory_and_only_the_last_candles_are_requested(fcfg, tmp_path):
+    bot, fake, _notes, clock = two_slot(fcfg, tmp_path, at=DIP - 3 * MIN + 10_000)
+    limit = futures_minute_limit(bot.cfg)
+    fake.asked.clear()
+    run_until_scan(bot, clock, clock.t)                                    # İlk tarama: tam geçmiş (coin başına 485 mum)
+    assert {(i, n) for _s, i, n in fake.asked} == {("1m", limit)} and len(fake.asked) == 4
+    assert set(bot._hist) == {(s, "1m") for s in CLOSES}
+    # Tam yenilemeler zamana yayılır: coinlerin hepsi aynı dakikada yeniden istenmez
+    due = sorted(v["full_at"] for v in bot._hist.values())
+    assert due[0] < due[-1] and due[-1] - due[0] < ft.SNAP_FULL_REFRESH_SEC and len(set(due)) == 4
+    for _ in range(2):                                                     # Sonraki taramalar: coin başına yalnızca son 6 mum
+        fake.asked.clear()
+        run_until_scan(bot, clock, clock.t)
+        assert {(i, n) for _s, i, n in fake.asked} == {("1m", ft.SNAP_TAIL_BARS)} and len(fake.asked) == 4
+    row = journal(bot)[-1]
+    assert row["t"] == DIP and row["s"] == {"SOL": "açıldı"} and row["sn"][0] == 150      # Sinyal bellekteki geçmişle bulundu
+    assert bot.state.positions["SOLUSDT"].metrics["drop_pct"] == pytest.approx(7.0, abs=0.05)
+    # Bellek, borsanın tam geçmişiyle birebir aynı (aynı mumlar, aynı sayıda)
+    for symbol in CLOSES:
+        mem, full = bot._hist[(symbol, "1m")]["k"], fake.k1[symbol]
+        assert len(mem["t"]) == limit - 1 and int(mem["t"][-1]) == DIP - 2 * MIN
+        keep = (full["t"] >= mem["t"][0]) & (full["t"] <= mem["t"][-1])
+        assert np.array_equal(mem["t"], full["t"][keep]) and np.array_equal(mem["c"], full["c"][keep])
+    # Ayar değişince bellek atılır (pencere / mum sayısı değişmiş olabilir)
+    bot.apply_config(replace(bot.cfg, futures_extra_breadth=3))
+    assert bot._hist == {} and bot._snap is None
+
+
+def test_prefetch_that_overruns_the_close_still_arms_the_snapshot(fcfg, tmp_path):
+    """Rapor 22: 898 taramanın 46'sında ön hazırlık mum kapanışına sarktı (yanıtlar kapanıştan sonra okundu) ve anlık
+    tarama o mum için düşürüldü ("geçmiş mumlar 0 / 24 coinde hazır"). Kapanıştan önceki mumlar ne zaman okunursa
+    okunsun kesindir: geç okunan yanıt artık anlık taramayı düşürmez."""
+    for cached in (False, True):                                           # Tam geçmiş yoluyla ve bellek yoluyla
+        folder = tmp_path / str(cached)
+        folder.mkdir()
+        bot, fake, _notes, clock = start(fcfg, folder)
+        run_until_prepared(bot, clock)
+        if not cached:
+            bot._hist = {}
+        fake.asked.clear()
+        clock.t = DIP / 1000 + 0.05                                        # Yanıtlar kapanıştan 0.05 sn sonra okunuyor
+        bot._prefetch()
+        assert {n for _s, _i, n in fake.asked} == {ft.SNAP_TAIL_BARS if cached else futures_minute_limit(bot.cfg)}
+        assert bot._snap is not None and bot._snap_miss == "" and len(bot._snap["k"]) == 4
+        k, forming = bot._snap["k"]["SOLUSDT"]
+        assert int(k["t"][-1]) + 2 * MIN == DIP                            # Az önce kapanan mum geçmişe alınmadı...
+        assert forming["t"] == DIP - MIN and forming["c"] == pytest.approx(93.0)      # ...süren mum sayıldı
+        clock.t = bot.next_scan_at
+        bot.tick()
+        row = journal(bot)[-1]
+        assert row["s"] == {"SOL": "açıldı"} and "sx" not in row and row["sn"][0] == 150
+
+
+def test_gap_in_memory_falls_back_to_the_full_history(fcfg, tmp_path):
+    bot, fake, _notes, clock = start(fcfg, tmp_path, at=DIP - 23 * MIN + 10_000)        # Taramalar ara dakikalarda
+    limit = futures_minute_limit(bot.cfg)
+    run_until_scan(bot, clock, clock.t)
+    assert len(bot._hist) == 4
+    # Bot 11 dakika tarama yapamadı (ör. boş yer yoktu): son 6 mum belleğin devamı değil → tam geçmiş yeniden istenir
+    clock.t += 11 * 60
+    bot.next_scan_at, bot._warm_for = bot._next_close(clock.t) + bot._scan_delay(), 0.0
+    fake.asked.clear()
+    run_until_scan(bot, clock, clock.t)
+    asked = [(i, n) for _s, i, n in fake.asked]
+    # Önce son mumlar denenir, belleğe eklenemeyince tam geçmiş istenir (dördüncü coinin dönemsel yenilemesi zaten gelmişti)
+    assert asked.count(("1m", ft.SNAP_TAIL_BARS)) == 3 and asked.count(("1m", limit)) == 4
+    assert journal(bot)[-1]["sn"][0] == 150
+    for symbol in CLOSES:                                                  # Bellek yine kesintisiz ve güncel
+        t = bot._hist[(symbol, "1m")]["k"]["t"]
+        assert np.all(np.diff(t) == MIN) and int(t[-1]) + 2 * MIN == journal(bot)[-1]["t"]
+
+
+def test_memory_is_refreshed_periodically_and_checked_against_the_exchange(fcfg, tmp_path):
+    bot, fake, notes, clock = start(fcfg, tmp_path, at=DIP - 23 * MIN + 10_000)         # Taramalar ara dakikalarda
+    limit = futures_minute_limit(bot.cfg)
+    run_until_scan(bot, clock, clock.t)
+    key = ("XRPUSDT", "1m")
+    good = bot._hist[key]["k"]["c"].copy()
+    # Süresi dolan coinin tam geçmişi yeniden istenir; bellekle aynıysa uyarı yok
+    bot._hist[key]["full_at"] = clock.t - ft.SNAP_FULL_REFRESH_SEC - 1
+    notes.messages.clear()
+    fake.asked.clear()
+    run_until_scan(bot, clock, clock.t)
+    assert sorted((s, n) for s, _i, n in fake.asked) == sorted(
+        [("XRPUSDT", limit)] + [(s, ft.SNAP_TAIL_BARS) for s in CLOSES if s != "XRPUSDT"])
+    assert not [m for m in notes.messages if "bellekte tutulan" in m]
+    assert bot._hist[key]["full_at"] == pytest.approx(clock.t, abs=5)
+    # Bellekteki bir mum bozulmuşsa (olmamalı) tam yenilemede fark edilir: bellek yenilenir, bir kez uyarı gelir
+    for n in range(2):
+        bot._hist[key]["k"]["c"][-10] *= 1.01
+        bot._hist[key]["full_at"] = clock.t - ft.SNAP_FULL_REFRESH_SEC - 1
+        run_until_scan(bot, clock, clock.t)
+        assert history_mismatch(bot._hist[key]["k"], {"t": fake.k1["XRPUSDT"]["t"], "c": fake.k1["XRPUSDT"]["c"]}) == 0
+    warned = [m for m in notes.messages if "bellekte tutulan geçmiş mumlar" in m]
+    assert len(warned) == 1 and "XRPUSDT" in warned[0] and "1 mumda farklı" in warned[0]     # Saatte en çok bir uyarı
+    assert good[-1] in bot._hist[key]["k"]["c"]
