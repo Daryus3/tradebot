@@ -625,9 +625,12 @@ class Messages:
             if lag_ms > 0:
                 lag_line = f"⚡ Giriş gecikmesi: mum kapanışından {lag_ms / 1000:.1f} sn sonra doldu"
                 if slip is not None:                                # + = aleyhte (long: pahalıya alış, short: ucuza satış)
-                    dear = (float(slip) > 0) == (pos.side == "long")
-                    lag_line += (f"; kapanış fiyatından %{abs(float(slip)):.3f} {'pahalıya' if dear else 'ucuza'} "
-                                 f"{'alındı' if pos.side == 'long' else 'satıldı'}")
+                    verb = "alındı" if pos.side == "long" else "satıldı"
+                    if abs(float(slip)) < 0.0005:                   # Fark yok: "%0.000 ucuza" yazılmasın
+                        lag_line += f"; kapanış fiyatından {verb}"
+                    else:
+                        dear = (float(slip) > 0) == (pos.side == "long")
+                        lag_line += f"; kapanış fiyatından %{abs(float(slip)):.3f} {'pahalıya' if dear else 'ucuza'} {verb}"
                 lag_line += "\n"
         except (TypeError, ValueError):
             lag_line = ""

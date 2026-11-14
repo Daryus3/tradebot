@@ -235,6 +235,9 @@ def test_scan_runs_right_after_the_close_with_one_price_request_and_orders_at_on
     assert row["t"] == DIP and row["s"] == {"SOL": "açıldı"} and sorted(row["a"]) == ["ADA", "DOGE", "SOL", "XRP"]
     assert row["ms"] == [150, 150, 150] and row["sn"] == [150, 130] and row["fast"] == 1 and "sx" not in row
     assert row["f"]["SOL"]["o"] == 150 and row["f"]["SOL"]["p"] == 0.0     # Emir kapanıştan 0.15 sn sonra, kapanış fiyatından
+    opened = [m for m in notes.messages if "POZİSYON AÇILDI" in m][-1]
+    assert "Giriş gecikmesi: mum kapanışından 0.1 sn sonra doldu; kapanış fiyatından alındı" in opened
+    assert "ucuza" not in opened and "%0.000" not in opened                 # Fark sıfırken "%0.000 ucuza" yazılmaz
     pos = bot.state.positions["SOLUSDT"]
     assert pos.entry_price == pytest.approx(93.0) and pos.stop_order_id and pos.leverage == LEV
     assert pos.metrics["drop_pct"] == pytest.approx(7.0, abs=0.05)         # Kural: 1 saatte %6 (aynı kural, aynı ölçü)
