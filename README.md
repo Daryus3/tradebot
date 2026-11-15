@@ -1624,6 +1624,45 @@ short yine zararda (işlem başı −%0.01 ile −%0.10: brüt avantaj yok); yal
 ana stratejinin kazancı likidasyon zincirlerinden geliyor ve sakin dönemde o yok. **Öneri: sakin günlerde işlem açmamak**
 (sermaye korunur); bot çöküş geldiğinde zaten kendiliğinden girer.
 
+#### Rapor 23 araştırması: kaldıraç 10x ve ölçülen giriş maliyetiyle yeniden sınanan ayarlar (Kasım 2026)
+Taban: rapor 23 ayarı 5x'te (dakikalık tarama, dalga eşikleri kapalı, KA 6 piyasa, başabaş tabanı 0.25), giriş gecikmesi
+payı canlı ölçümle %0.02. 3 çekilişin ortancası, seçim / doğrulama.
+
+**1) Kaldıraç 10x önerilmez.** Kaldıraç işlem sayısını değiştirmez; yalnızca kazancı ve kaybı büyütür:
+
+| Kaldıraç | Bileşik yıllık getiri | En büyük düşüş | Kayma 3 kat (bileşik) | Son 12 ay |
+|---|---|---|---|---|
+| 3x | +%1.936 / +%497 | %60 / %51 | +%834 / +%270 | +%71 |
+| **5x** | +%2.470 / +%1.234 | %72 / %71 | +%1.672 / +%505 | +%116 |
+| 7x | +%2.594 / +%2.480 | %87 / %84 | +%1.782 / +%614 | +%133 |
+| 10x | +%2.560 / +%3.009 | **%96 / %96** | +%690 / +%370 | +%102 |
+
+10x'te doğrulama döneminin bileşik getirisi büyüyor ama hesap iki dönemde de zirvesinin %96'sını kaybediyor, 3 kat
+kaymada 5x'ten kötü. Rapor 23 (10x) bunu doğruluyor: 2021 başında başlayan hesap 23 Şubat'ta eriyor (yıllar kârlı 6/7;
+5x'te 7/7), yıllık en büyük düşüşler %77-96, kayma 5 kat ve kötümser stop satırlarında hesap 13 Mart 2020'de eriyor,
+son bakiye 5x'e göre yalnızca %18 fazla. 10x'te likidasyon fiyatı girişin %9.5 altında: zarar kes stopu çöküşte 4.5
+puandan fazla kayarsa pozisyonun teminatının tamamı gider.
+
+**2) Ucuzlayan girişle kıl payı elenen ayarlar yeniden denendi** (27 aday). Çoğu yine elendi: ek kapısı 5-8, ek başabaş
+0.3-0.35, KA 4-5, zarar beklemesi 0-120 dk, 5-6 yuva, dalga eşikleri, 1 sa %5.5, +5 / +15 dk pencereleri işlem sayısını
+%1-30 artırıyor ama doğrulama kârını ya da maliyete dayanıklılığı düşürüyor. Öne çıkan: **zarar kesi %5'ten %4.5-4.75'e
+çekmek**. Altı tarama ızgarasında (1 dk, 2 dk × 2 faz, 3 dk × 3 faz), kaç ızgarada tabandan iyi (bileşiksiz seçim /
+doğrulama, bileşik seçim / doğrulama, kayma 3 kat doğrulama, son 12 ay):
+
+| Zarar kes | Bileşiksiz (1 dk ızgarası) | Bileşik (1 dk ızgarası) | İşlem / yıl (ızgaraların ortancası) | İyi ızgara |
+|---|---|---|---|---|
+| %5 (bugünkü) | +%615 / +%356 | +%2.470 / +%1.234 | 1.356 / 717 | - |
+| %4.75 | +%639 / +%381 | +%2.489 / +%1.677 | 1.371 / 721 | 4/6, 6/6, 4/6, 6/6, 5/6, 3/6 |
+| %4.5 | +%632 / +%382 | +%2.451 / +%1.728 | 1.383 / 729 | 3/6, 6/6, 2/6, 6/6, 5/6, 4/6 |
+| %4.25 | +%616 / +%375 | +%2.397 / +%1.673 | 1.399 / 733 | 4/6, 5/6, 3/6, 5/6, 4/6, 5/6 |
+| %4 | +%581 / +%348 | +%2.268 / +%1.281 | - | (1 dk ızgarasında kötü) |
+
+%4.25-4.75 arası doğrulamada her ızgarada iyi, seçimde eşit ya da biraz iyi; işlem %1-3 artıyor. En tutarlısı %4.75
+(seçimde 6 ızgaranın 4'ünde iyi, kalan ikisinde fark %0.5'ten az). Kazanç küçük ama komşu değerler aynı yönde. Zarar
+kesle kapanan bir işlem, %4.75'e geldiğinde çoğunlukla %5'e de gidiyor; erken çıkmak kaybı küçültüp yuvayı da erken
+boşaltıyor. Ayrıca 4 sa %9.5 eşiğiyle birleşimi (işlem +%4-6, doğrulamada en yüksek) seçimde 6 ızgaranın 5-6'sında kötü:
+önerilmez. **Öneri: `STOP_LOSS_PCT=4.75`, `FUTURES_LEVERAGE=5`.** (Seçim yanlılığı uyarısı: ~1.500 deneme aynı veride.)
+
 ### 🏆 Strateji turnuvası (`--turnuva`)
 Hangi strateji türünün sizin dönemde işe yaradığını **tek komutla** görmek için:
 ```bash
