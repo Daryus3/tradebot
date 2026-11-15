@@ -1928,9 +1928,10 @@ def _setting_notes(cfg: Config) -> List[str]:
                              "beklemeden gider (bakiye taramadan hemen önce okunur) ve açık pozisyon varken tarama "
                              "pozisyon kontrolünü beklemez. Kural, eşikler, pozisyon boyları ve çıkışlar aynıdır. "
                              "Saniyelik veride fiyat mum kapanışından sonra 1 sn'de +%0.02, 3 sn'de +%0.04, 5 sn'de "
-                             "+%0.05-0.07 yukarıda (backtest 5 sn varsayar); backtestte gecikme payı %0.05 → %0.02 "
-                             "olunca (dakikalık tarama, dalga eşikleri kapalı; 3 çekiliş) bileşiksiz yıllık getiri "
-                             "+%558 / +%305 → +%598 / +%345. Bot her anlık taramayı "
+                             "+%0.05-0.07 yukarıda. Canlıda dolum 0.6 sn'de (ilk 3 gerçek giriş, kapanış fiyatına göre "
+                             "ortalama +%0.023); backtest bu ayar açıkken giriş gecikmesi payını %0.02 alır (hızlı "
+                             "girişte %0.04, ikisi kapalıyken %0.05). Dakikalık tarama ve dalga eşikleri kapalıyken "
+                             "(3 çekiliş) bileşiksiz yıllık getiri +%558 / +%305 → +%598 / +%345. Bot her anlık taramayı "
                              "sonradan kesinleşmiş mumlarla kendisi doğrular (rapor: 'Anlık tarama doğrulaması'); fiyat "
                              "alınamazsa ya da doğrulama bozuk veri gösterirse olağan hızlı yola döner. Vadeli API'de "
                              "yalnızca sunucunuzda ölçülebilir: önce test modunda deneyin.")

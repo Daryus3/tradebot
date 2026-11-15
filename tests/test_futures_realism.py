@@ -15,6 +15,13 @@ MIN = 60_000
 # ====================================================================== giriş gecikmesi
 def test_entry_lag_applies_to_market_entries_only(fcfg):
     assert fb.ENTRY_LAG_PCT == 0.05 and fb.params_from_cfg(fcfg).entry_lag_pct == 0.05   # Varsayılan: açık
+    # Giriş yoluna göre: hızlı giriş ~2.5 sn (%0.04), anlık tarama ~0.6 sn (%0.02; canlıda ölçüldü)
+    fast = replace(fcfg, futures_fast_entry=True)
+    snap = replace(fast, futures_snapshot_scan=True)
+    assert fb.params_from_cfg(fast).entry_lag_pct == fb.ENTRY_LAG_FAST_PCT == 0.04
+    assert fb.params_from_cfg(snap).entry_lag_pct == fb.FAST_ENTRY_LAG_PCT == 0.02
+    assert fb.params_from_cfg(replace(snap, futures_crash_liq=True)).entry_lag_pct == 0.04   # Anlık tarama çalışamıyor
+    assert fb.params_from_cfg(replace(fcfg, futures_snapshot_scan=True)).entry_lag_pct == 0.05   # Hızlı giriş gerekir
     rows = [(100, 100.2, 99.9, 100.1)] * 5
     off = fb.run_trade(params(hold_min=3), sig(), window(rows), margin=10.0, notional=100.0)
     on = fb.run_trade(params(hold_min=3, entry_lag_pct=0.05), sig(), window(rows), margin=10.0, notional=100.0)
@@ -178,3 +185,12 @@ def test_realism_label_and_comparison_row(fcfg):
     seen.clear()                                 # Limit girişte gecikme payı yok: hız satırı da yok
     rows = fb.realism_rows(replace(fcfg, futures_entry_order="limit"), ev)
     assert len(rows) == 1 and "Eski (iyimser) hesap" in rows[0][0]
+    # Anlık taramada taban zaten %0.02: "1 sn'de dolsaydı" yerine eski 5 sn varsayımıyla kıyas
+    seen.clear()
+    snap = replace(fcfg, futures_fast_entry=True, futures_snapshot_scan=True)
+    rows = fb.realism_rows(snap, ev)
+    assert [r[0][:28] for r in rows] == ["Eski giriş varsayımıyla (~5 ", "Eski (iyimser) hesap: giriş "]
+    assert "%0.02 → %0.05" in rows[0][0] and seen[0] == {"entry_lag_pct": 0.05}
+    label = fb.realism_label(fb.params_from_cfg(snap))
+    assert "~0.6 sn sonra (anlık tarama; canlıda ölçüldü)" in label and "%0.02" in label
+    assert "~2.5 sn sonra (hızlı giriş)" in fb.realism_label(fb.params_from_cfg(replace(fcfg, futures_fast_entry=True)))

@@ -89,7 +89,7 @@ MINUTE_SCAN_HINT = ("Her dakika tarama: çöküş kuralı yalnızca 5 dk kapanı
                     "+%278; ama doğrulamada düşüş %68 → %77, 3 kat kaymada +%144 → +%56, 2022 ve 2024'te geride. "
                     "Backtest ilk seferde ~2 GB 1 dk veri indirir ve birkaç kat uzun sürer.")
 FAST_ENTRY_HINT = ("Hızlı giriş: saniyelik veride çöküş mumunun kapanışından sonra fiyat ortalama 1 sn'de %0.015, 3 sn'de "
-                   "%0.04, 5 sn'de %0.05, 10 sn'de %0.08 yükseliyor; backtest 5 sn (%0.05) varsayar. Kurallar ve "
+                   "%0.04, 5 sn'de %0.05, 10 sn'de %0.08 yükseliyor; backtest açıkken ~2.5 sn (%0.04), kapalıyken 5 sn (%0.05) varsayar. Kurallar ve "
                    "pozisyon boyları değişmez, yalnızca emir daha erken gider. Açıkken taranan coinlerin hepsinde "
                    "teminat modu ve kaldıraç önceden ayarlanır. Ölçülen gecikme her pozisyon mesajında ve backtest "
                    "raporunda (canlı bot karşılaştırması) görünür: önce kapalıyken ölçüp sonra açarak karşılaştırın.")
@@ -97,8 +97,9 @@ SNAPSHOT_HINT = ("Anlık tarama (hızlı giriş açıkken): Binance az önce kap
                  "bunu beklemek yerine geçmiş mumları kapanıştan hemen önce alır, kapanıştan ~0.15 sn sonra tek istekle "
                  "son işlem fiyatlarını okur ve kapanış olarak onu kullanır. Emir de bakiye / emir defteri isteği "
                  "beklemeden gider, açık pozisyon varken tarama pozisyon kontrolünü beklemez. Kural ve eşikler aynıdır. "
-                 "Backtestte giriş payı %0.05 → %0.02 olunca bileşiksiz yıllık getiri +%558 / +%305 → +%598 / +%345 "
-                 "(rapordaki 'Giriş 1 sn'de dolsaydı' satırı). Bot her anlık taramayı sonradan kesinleşen mumlarla "
+                 "Canlıda dolum 0.6 sn'de; backtest bu ayar açıkken giriş payını %0.02 alır (bileşiksiz yıllık getiri "
+                 "+%558 / +%305 → +%598 / +%345; raporda 'Eski giriş varsayımıyla' satırı kıyas). Bot her anlık taramayı "
+                 "sonradan kesinleşen mumlarla "
                  "kendisi doğrular; sonuç raporda 'Anlık tarama doğrulaması' satırındadır.")
 PHASE6_HINT = ("Faz 6 testi (2020-2026, 1 dk, liste + en hacimli 20 köklü coin, 🥈 #2 giriş / çıkışları, 30 USDT): "
                "dalgada zarar kesen coin genelde düşmeye devam edip daha derinden dönüyor; zarar sonrası 240 dk "

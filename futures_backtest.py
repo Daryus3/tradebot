@@ -37,7 +37,7 @@ import numpy as np
 
 from config import (DATA_DIR, format_crash_rules, futures_coin_list, futures_crash_rules, futures_funding_rules,
                     futures_liq_distance_pct, futures_long_windows, futures_modules, futures_scan_shifts,
-                    futures_wave_cfg, futures_wave_rules, parse_crash_rules, scan_log_path)
+                    futures_snapshot_on, futures_wave_cfg, futures_wave_rules, parse_crash_rules, scan_log_path)
 from futures_data import FuturesArchive, concat, resample, slice_range
 from strategy import (FUT_BAR_MS, FUT_HOUR_MS, breadth_flags, btc_trend_1h, crash_state, funding_per_bar,
                       futures_candidates, futures_entries, futures_features, isolated_factor, pick_signal, trend_at)
@@ -567,10 +567,31 @@ class LazyWindows(dict):
 # fiyat ortalama 3 sn'de %0.04, 5 sn'de %0.05, 10 sn'de %0.08 yükseliyor (2.563 işlem; ± %0.01): piyasa emriyle
 # girişlerde bu kadar daha pahalıya alınmış sayılır (limit girişte uygulanmaz).
 ENTRY_LAG_PCT = 0.05
-# Aynı ölçümlerde 1 sn'de +%0.015 (2.563 işlem) ve +%0.023 (2.001 giriş): giriş ~1 sn'de dolsaydı (anlık tarama,
-# FUTURES_SNAPSHOT_SCAN'in hedefi) ödenecek pay. Yalnızca rapordaki kıyas satırında kullanılır; canlı ölçüm
-# ("Giriş gecikmesi" satırı) birikene kadar varsayılan hesap 5 sn'de kalır.
+# Pay, botun giriş yoluna göre (entry_lag_for): hızlı giriş açıkken sinyaller kapanıştan ~2.0 sn sonra hazır (rapor 22,
+# 1.478 canlı tarama), dolum ~2.5-3 sn → saniyelik veride 3 sn'de +%0.04. Anlık taramada (FUTURES_SNAPSHOT_SCAN) canlı
+# dolumlar 0.6 sn'de (Kasım 2026, ilk 3 gerçek giriş: kapanış fiyatına göre %0.000 / +%0.111 / −%0.043, ortalama +%0.023
+# kayma dahil) → saniyelik veride 1 sn'de +%0.015-0.023: pay %0.02. Bu pay kayma (futures_slippage_pct) üstüne eklenir.
+ENTRY_LAG_FAST_PCT = 0.04
 FAST_ENTRY_LAG_PCT = 0.02
+
+
+def entry_lag_for(cfg) -> Tuple[float, str]:
+    """Ayardaki giriş yoluna göre gecikme payı (fiyat %) ve açıklaması: anlık tarama ~0.6 sn (canlıda ölçüldü), hızlı
+    giriş ~2.5 sn, ikisi de kapalıyken ~5 sn."""
+    if futures_snapshot_on(cfg):
+        return FAST_ENTRY_LAG_PCT, "~0.6 sn sonra (anlık tarama; canlıda ölçüldü)"
+    if getattr(cfg, "futures_fast_entry", False):
+        return ENTRY_LAG_FAST_PCT, "~2.5 sn sonra (hızlı giriş)"
+    return ENTRY_LAG_PCT, "~5 sn sonra"
+
+
+def lag_text(lag: float) -> str:
+    """Gecikme payının rapordaki açıklaması."""
+    if lag <= FAST_ENTRY_LAG_PCT:
+        return "~0.6 sn sonra (anlık tarama; canlıda ölçüldü)"
+    if lag <= ENTRY_LAG_FAST_PCT:
+        return "~2.5 sn sonra (hızlı giriş)"
+    return "~5 sn sonra"
 
 
 @dataclass(frozen=True)
@@ -665,7 +686,8 @@ def params_from_cfg(cfg, **over) -> SimParams:
                   extra_be_trigger_pct=float(getattr(cfg, "futures_extra_be_trigger_pct", 0.0)),
                   extra_hold_min=int(getattr(cfg, "futures_extra_hold_minutes", 0)),
                   wave_hold_min=int(getattr(cfg, "futures_wave_hold_minutes", 0)),
-                  wave_hold_breadth=int(getattr(cfg, "futures_wave_hold_breadth", 8)))
+                  wave_hold_breadth=int(getattr(cfg, "futures_wave_hold_breadth", 8)),
+                  entry_lag_pct=entry_lag_for(cfg)[0])
     return replace(p, **over) if over else p
 
 
@@ -1503,7 +1525,7 @@ def realism_label(p: SimParams) -> str:
     """Rapor başlığı: saniyelik veriyle ayarlanan gerçekçilik payları (Kasım 2026). Kapalıysa boş."""
     parts = []
     if p.entry_lag_pct > 0 and not p.entry_limit:
-        parts.append(f"giriş mum kapanışından ~5 sn sonra (fiyat ort. %{p.entry_lag_pct:g} daha yukarıda)")
+        parts.append(f"giriş mum kapanışından {lag_text(p.entry_lag_pct)} (fiyat ort. %{p.entry_lag_pct:g} daha yukarıda)")
     if p.be_intrabar and p.be_enabled:
         parts.append("başabaşın tetiklendiği dakikada fiyatın tabana geri dönme olasılığı")
     if not parts:
@@ -1520,7 +1542,10 @@ def realism_rows(cfg, ev) -> List[Tuple[str, "Evaluation"]]:
     rows = []
     if base.entry_lag_pct > FAST_ENTRY_LAG_PCT and not base.entry_limit:
         rows.append((f"Giriş 1 sn'de dolsaydı (gecikme payı %{base.entry_lag_pct:g} → %{FAST_ENTRY_LAG_PCT:g}; anlık "
-                     f"taramanın hedefi)", ev(entry_lag_pct=FAST_ENTRY_LAG_PCT)))
+                     f"tarama)", ev(entry_lag_pct=FAST_ENTRY_LAG_PCT)))
+    if base.entry_lag_pct < ENTRY_LAG_PCT and not base.entry_limit:
+        rows.append((f"Eski giriş varsayımıyla (~5 sn, gecikme payı %{base.entry_lag_pct:g} → %{ENTRY_LAG_PCT:g})",
+                     ev(entry_lag_pct=ENTRY_LAG_PCT)))
     return rows + [("Eski (iyimser) hesap: giriş gecikmesi ve mum içi başabaş payı yok",
                     ev(be_intrabar=False, entry_lag_pct=0.0))]
 
@@ -2574,7 +2599,8 @@ def live_timing(cfg, journal: Sequence[dict]) -> List[str]:
     """Canlı botun ölçtüğü giriş gecikmesi (tarama kaydındaki "ms" ve "f" alanları): taramanın mum kapanışından kaç
     saniye sonra başladığı / mumların ne zaman alındığı ve açılan pozisyonların ne zaman, kapanış fiyatına göre kaça
     dolduğu. Hızlı giriş (FUTURES_FAST_ENTRY) açık ve kapalı dönemler ayrı satırlarda. Ölçüm yoksa boş liste."""
-    assumed = ENTRY_LAG_PCT + float(getattr(cfg, "futures_slippage_pct", 0.0))
+    slip = float(getattr(cfg, "futures_slippage_pct", 0.0))
+    lag_of = {0: ENTRY_LAG_PCT, 1: ENTRY_LAG_FAST_PCT, 2: FAST_ENTRY_LAG_PCT}     # Backtestin o giriş yolu için payı
     out: List[str] = []
 
     def mode_of(r: dict) -> int:                  # 2: anlık tarama (o taramada kullanıldı), 1: hızlı giriş, 0: eski yol
@@ -2605,7 +2631,7 @@ def live_timing(cfg, journal: Sequence[dict]) -> List[str]:
                     f"{np.median(lags):.1f} sn, en uzun {max(lags):.1f} sn ({len(lags)} giriş)")
             if slips:
                 text += (f" | dolum, kapanış fiyatına göre ortalama {np.mean(slips):+.3f}% (backtest varsayımı "
-                         f"+%{assumed:.2f}: gecikme %{ENTRY_LAG_PCT:g} + kayma)")
+                         f"+%{lag_of[fast] + slip:.2f}: gecikme %{lag_of[fast]:g} + kayma)")
             out.append(text)
     return out + live_snapshot_check(journal)
 

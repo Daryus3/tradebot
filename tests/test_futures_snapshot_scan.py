@@ -171,7 +171,7 @@ def test_telegram_row_and_page_text(fcfg, tmp_path):
     bot.commands.handle(Command(CALLBACK, ["pg", "fx"], kind="callback", message_id=7))
     text, keyboard, _mid = notes.menus[-1]
     assert "kv:fx:FUTURES_SNAPSHOT_SCAN:t" in [d for row in keyboard for _l, d in row]
-    assert "🚀 Anlık tarama: kapalı" in text and "Giriş 1 sn'de dolsaydı" in text
+    assert "🚀 Anlık tarama: kapalı" in text and "Eski giriş varsayımıyla" in text and "%0.02" in text
     bot.commands.handle(Command(CALLBACK, ["kv", "fx", "FUTURES_SNAPSHOT_SCAN", "t"], kind="callback", message_id=7))
     assert bot.cfg.futures_snapshot_scan and "FUTURES_SNAPSHOT_SCAN=true" in env.read_text(encoding="utf-8")
     assert "🚀 Anlık tarama: açık: tarama mum kapanışından ~0.15 sn sonra" in notes.menus[-1][0]
@@ -684,6 +684,7 @@ def test_report_lines_for_snapshot_scans(fcfg):
     assert ("Tarama zamanlaması (anlık tarama: mum kapanışından sonra, ortanca): başlangıç 0.15 sn → anlık fiyatlar "
             "alındı 0.40 sn → sinyaller hazır 0.41 sn (2 tarama; Binance ile saat farkı ortanca 12 ms)") in text
     assert "Giriş gecikmesi (anlık tarama: mum kapanışı → dolum): ortalama 0.6 sn" in text and "+0.012%" in text
+    assert "(backtest varsayımı +%0.04: gecikme %0.02 + kayma)" in text      # Anlık taramanın payı %0.02 + kayma %0.02
     assert ("Anlık tarama doğrulaması (2 tarama, sonradan kesinleşen mumlarla): anlık fiyat ile mum kapanışı arasındaki "
             "fark ortalama %0.003, en çok %0.031 | kesinleşmiş mumlarla aynı sinyaller: 1 / 2 tarama (sinyal çıkan "
             "tarama: 1)") in text

@@ -1547,6 +1547,23 @@ kurmuyordu. İki düzeltme:
 `/tarama` ve 🎯 Çıkışlar ve Emirler sayfası anlık taramada "mumlar" yerine "anlık fiyatlar … sn'de alındı" der; raporda
 kullanılamama nedenleri sayılardan arındırılıp gruplanır.
 
+#### Backtestin giriş varsayımı canlı ölçümle ayarlandı (Kasım 2026)
+Anlık taramayla açılan ilk 3 gerçek girişte dolum mum kapanışından **0.6 sn** sonra, kapanış fiyatına göre %0.000, +%0.111
+ve −%0.043 (ortalama +%0.023, kayma dahil). Saniyelik işlem verisinde fiyat kapanıştan 1 sn sonra ortalama +%0.015-0.023
+yukarıda; iki ölçüm uyumlu. Backtest artık giriş gecikmesi payını botun giriş yoluna göre alır (`entry_lag_for`):
+
+| Giriş yolu | Dolum (canlı ölçüm) | Gecikme payı | Kayma dahil toplam |
+|---|---|---|---|
+| Hızlı giriş kapalı | ~5-6 sn | %0.05 (değişmedi) | +%0.07 |
+| Hızlı giriş açık | ~2.5-3 sn (sinyaller 2.0 sn'de hazır) | %0.04 | +%0.06 |
+| Anlık tarama | 0.6 sn | %0.02 | +%0.04 |
+
+Üç giriş az (standart hata ~%0.05); pay ölçülen ortalamadan (%0.023) biraz kötümser seçildi ve saniyelik veriyle
+destekleniyor. Rapor 22 ayarında bunun etkisi rapordaki eski "Giriş 1 sn'de dolsaydı" satırıydı: son bakiye +%4.7e+07 →
++%5.5e+07, işlem 9.750 → 9.928, işlem başı +%0.222 → +%0.241. Anlık tarama açıkken rapor artık "Eski giriş varsayımıyla
+(~5 sn)" satırıyla eski hesabı gösterir; canlı karşılaştırmadaki "backtest varsayımı" da giriş yoluna göre yazılır.
+Girişler biriktikçe rapordaki "Giriş gecikmesi (anlık tarama: …)" ortalaması payı denetler.
+
 #### Zarar kesin mark fiyatıyla tetiklenmesi: elendi (rapor 22 araştırması, Kasım 2026)
 Zarar kes emri bugün **son işlem fiyatıyla** tetiklenir (`workingType=CONTRACT_PRICE`). Rapor 22'de zarar kesle kapanan
 işlemler (%8.3, ortalama −%5.0) toplam net kârın yaklaşık iki katı kadar kaybettiriyor ve bir kısmı vadeli piyasaya özgü
