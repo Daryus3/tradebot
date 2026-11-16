@@ -30,7 +30,8 @@ from config import (futures_scan_shifts, futures_snapshot_on, DEFAULT_FUTURES_CO
                     futures_hold_minutes,
                     futures_coin_list, futures_crash_rules,
                     futures_funding_rules, futures_liq_distance_pct, futures_modules, futures_pump_rules,
-                    futures_slot_share, futures_wave_rules, is_futures, is_rotation, parse_crash_rules)
+                    futures_dd_factor, futures_slot_share, futures_wave_rules, is_futures, is_rotation,
+                    parse_crash_rules)
 from runtime_settings import EDITABLE, format_value
 from telegram_bot import LINE, esc, fmt_duration, fmt_signed, fmt_usdt
 
@@ -71,6 +72,16 @@ EXTRA_BE_CHOICES = (0, 0.4, 0.5, 0.6, 0.75)
 # Faz 9: pozisyona göre zaman stopu (0 = ana ayar). Faz 5 / Faz 6 setleri ve "kapat" düğmesi bunları da kapatır.
 EXTRA_HOLD_CHOICES = (0, 30, 35)
 WAVE_HOLD_CHOICES = (0, 60, 70)
+# Düşüşte küçültme (rapor 24 araştırması; varsayılan kapalı): sermaye zirvesinden düşüş eşiği ve düşüşteki boy
+DD_SCALE_CHOICES = (0, 20, 30, 40)
+DD_SIZE_CHOICES = (40, 50, 60, 75)
+DD_SCALE_HINT = ("Düşüşte küçültme (rapor 24 araştırması; 2020-2026, 1 dk, rapor 24 ayarları 10x, 28.99 USDT, her ayın "
+                 "1'inde başlayan 71 hesabın ilk 12 ayı): sermaye ulaştığı en yüksek seviyenin %30 altındayken pozisyonu "
+                 "%60 boyla açmak ortanca 12 ay getirisini +%10.271'den +%9.976'ya indirdi; %90'ı aşan düşüş yaşayan "
+                 "hesap 49 → 0, bakiyesi 5 USDT altına inen 21 → 0, en kötü yıl içi düşüş %98 → %85 ve kayma 4 katında "
+                 "hesap ayakta kaldı (kapalıyken 2021'de eridi). %50 boy biraz daha temkinli (en kötü yıl %80) ama "
+                 "ortanca getiri +%7.638. Kaldıraç ve çıkışlar değişmez; zarar kes fitilin ortasından dolarsa yine "
+                 "eriyor, kill-switch yine sık devreye girebilir.")
 PHASE9_HINT = ("Faz 9 testi (rapor 17 araştırması; 2020-2026, 1 dk, 10 çekilişin ortancası): dalgada (≥8 coin düşerken) "
                "açılan ilk pozisyonu 45 yerine 60 dk tutmak, mevcut ayarın üstünde işlem sayısını değiştirmeden bileşiksiz "
                "getiriyi +%332 / +%212'den +%341 / +%222'ye, son 12 ayı +%81'den +%120'ye çıkardı ve hiçbir yılda geride "
@@ -454,6 +465,10 @@ PAGES: Dict[str, Page] = {
     ), back=(("🧯 Risk", "risk"), ("⬅️ Ayarlar", "cfg"), ("🏠 Menü", "menu"))),
     "risk": Page("🧯 Risk Sigortaları", rows=(
         Link(lambda m: m.kill_label(), "pg:ks"),
+        Row("FUTURES_DD_SCALE_PCT", icon="📉", values=DD_SCALE_CHOICES,
+            fmt=_off("Küçültme yok", lambda v: f"Zirve −%{v:g}"), show=lambda cfg: is_futures(cfg.strategy)),
+        Row("FUTURES_DD_SCALE_SIZE_PCT", icon="📏", values=DD_SIZE_CHOICES, fmt=lambda v: f"Boy %{v:g}",
+            show=lambda cfg: is_futures(cfg.strategy) and cfg.futures_dd_scale_pct > 0),
         Row("DAILY_LOSS_LIMIT_PCT", values=(0, 2, 3, 5), cb="dl", fmt=_off("Limit yok", lambda v: f"Gün -%{v:g}")),
         Row("DAILY_PROFIT_TARGET_PCT", icon="🎯", values=(0, 3, 5, 10), fmt=_off("Hedef yok", lambda v: f"+%{v:g}")),
         Row("LOSS_STREAK_LIMIT", values=(0, 2, 3, 4), cb="ls", fmt=_off("Seri yok", lambda v: f"{v} SL")),
@@ -1156,17 +1171,33 @@ class SettingsMenu:
         cool = (f"zararla kapanan coine {_mins(cfg.loss_cooldown_minutes)} girilmez"
                 if cfg.loss_cooldown_minutes > cfg.symbol_cooldown_minutes else "normal (her çıkıştaki bekleme)")
         frozen = bot.freeze_note()
+        futures = is_futures(cfg.strategy)
         return (f"🧯 <b>Risk Sigortaları</b>\n{LINE}\n"
-                f"{self.kill_line()}\n"
+                f"{self.kill_line()}\n" + (self.dd_line() if futures else "") +
                 f"📉 Günlük zarar limiti: {daily} | bugün: {fmt_signed(day_pnl)} {q}\n"
                 f"🎯 Günlük kâr hedefi: {target}\n🔁 Zarar serisi sigortası: {streak}\n"
                 f"⏳ Her çıkıştan sonra aynı coine bekleme: "
                 f"{_mins(cfg.symbol_cooldown_minutes) if cfg.symbol_cooldown_minutes else 'yok (hemen tekrar girilebilir)'}\n"
                 f"🚫 Zarardan sonra bekleme: {cool}\n"
-                f"📒 Coin karnesi: {karne}\n" + ("" if is_futures(cfg.strategy) else f"💧 Kayma alarmı: {slip}\n") +
+                f"📒 Coin karnesi: {karne}\n" + ("" if futures else f"💧 Kayma alarmı: {slip}\n") +
                 f"{frozen or '▶️ Alımlar dondurulmamış'}\n{LINE}\n"
                 "<i>Sigortalar yalnızca YENİ alımları durdurur; açık pozisyonların takibi sürer. Kill-switch ise "
-                "her şeyi kapatıp botu kilitler. Diğerleri: /ayar ANAHTAR DEĞER</i>")
+                "her şeyi kapatıp botu kilitler. Diğerleri: /ayar ANAHTAR DEĞER"
+                + (f"\n{esc(DD_SCALE_HINT)}" if futures else "") + "</i>")
+
+    def dd_line(self) -> str:
+        """Risk sayfasında düşüşte küçültme durumu: kayıtlı sermaye zirvesi, şu anki düşüş ve sıradaki pozisyonun boyu."""
+        bot, cfg = self.bot, self.cfg
+        st, q = bot.state, cfg.quote_asset
+        peak = max(st.peak_capital, st.capital)
+        down = max(0.0, (1 - st.capital / peak) * 100) if peak > 0 else 0.0
+        where = f"sermaye zirvesi {fmt_usdt(peak)} {q}, şu an %{down:.1f} aşağıda"
+        if cfg.futures_dd_scale_pct <= 0:
+            return f"📉 Düşüşte küçültme: kapalı ({where})\n"
+        small = futures_dd_factor(cfg, st.capital, peak) < 1
+        return (f"📉 Düşüşte küçültme: zirveden %{cfg.futures_dd_scale_pct:g} düşünce pozisyon "
+                f"%{cfg.futures_dd_scale_size_pct:g} boy | {where} → sıradaki pozisyon "
+                + (f"<b>%{cfg.futures_dd_scale_size_pct:g} boy</b>" if small else "tam boy") + "\n")
 
     def _text_ntf(self) -> str:
         cfg = self.cfg

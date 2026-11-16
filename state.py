@@ -73,11 +73,19 @@ class BotState:
     # Vadeli en hacimli N sıralaması (FUTURES_UNIVERSE): {"key": [yaş, gün], "at": zaman, "symbols": [...]}. Yeniden
     # başlatmada sıralama hemen hazır olsun, Binance'e ulaşılamazsa son iyi sıralama kullanılsın diye saklanır.
     futures_ranking: Dict[str, object] = field(default_factory=dict)
+    # Sermayenin (başlangıç + gerçekleşen K/Z) ulaştığı en yüksek değer: düşüşte küçültme (FUTURES_DD_SCALE_PCT) bununla
+    # ölçülür. 0 = henüz kaydedilmedi (ilk kayıtta o anki sermaye); /sermayeekle ile eklenen para buna da eklenir.
+    peak_capital: float = 0.0
 
     @property
     def capital(self) -> float:
         """Botun yönettiği güncel sermaye (başlangıç + gerçekleşen K/Z)."""
         return self.start_capital + self.realized_pnl
+
+    def note_peak(self) -> float:
+        """Sermaye zirvesini günceller ve döndürür (ilk çağrıda o anki sermaye, sonra görülen en yüksek değer)."""
+        self.peak_capital = round(max(self.peak_capital, self.capital), 8)
+        return self.peak_capital
 
     @property
     def committed(self) -> float:

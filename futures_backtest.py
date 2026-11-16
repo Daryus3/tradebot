@@ -35,7 +35,7 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from config import (DATA_DIR, format_crash_rules, futures_coin_list, futures_crash_rules, futures_funding_rules,
+from config import (DATA_DIR, dd_scale_factor, format_crash_rules, futures_coin_list, futures_crash_rules, futures_funding_rules,
                     futures_liq_distance_pct, futures_long_windows, futures_modules, futures_scan_shifts,
                     futures_snapshot_on, futures_wave_cfg, futures_wave_rules, parse_crash_rules, scan_log_path)
 from futures_data import FuturesArchive, concat, resample, slice_range
@@ -652,6 +652,11 @@ class SimParams:
     extra_hold_min: int = 0
     wave_hold_min: int = 0
     wave_hold_breadth: int = 8
+    # Düşüşte küçültme (FUTURES_DD_SCALE_PCT; canlı: FuturesBot._entry_margin): gerçekleşen bakiye o ana kadarki
+    # zirvesinin dd_scale_pct (%) ya da daha fazla altındayken yeni pozisyonun teminatı × dd_scale_size_pct / 100
+    # (0 = kapalı; sabit tutarlı C senaryosunda uygulanmaz)
+    dd_scale_pct: float = 0.0
+    dd_scale_size_pct: float = 60.0
     # Mum içi başabaş gerçekçiliği (bkz. be_retouch_prob): başabaşın tetiklendiği 1 dk mumda fiyat tabana geri dönmüş
     # olabilir. False = eski iyimser varsayım (yükselen mumda yalnızca kapanış tabanın altındaysa çıkılır).
     be_intrabar: bool = True
@@ -687,6 +692,8 @@ def params_from_cfg(cfg, **over) -> SimParams:
                   extra_hold_min=int(getattr(cfg, "futures_extra_hold_minutes", 0)),
                   wave_hold_min=int(getattr(cfg, "futures_wave_hold_minutes", 0)),
                   wave_hold_breadth=int(getattr(cfg, "futures_wave_hold_breadth", 8)),
+                  dd_scale_pct=float(getattr(cfg, "futures_dd_scale_pct", 0.0) or 0.0),
+                  dd_scale_size_pct=float(getattr(cfg, "futures_dd_scale_size_pct", 60.0)),
                   entry_lag_pct=entry_lag_for(cfg)[0])
     return replace(p, **over) if over else p
 
@@ -744,6 +751,7 @@ class FutTrade:
     wave_rule: bool = False  # Faz 6: dalga eşiğiyle (FUTURES_WAVE_RULES) gelen sinyal
     be_bar: tuple = ()      # Başabaşın tetiklendiği mumda taban da görüldüyse o mum (açılış, lehte uç, ters uç, kapanış)
     be_q: float = -1.0      # O mumda tabana geri dönüş olasılığı (be_retouch_prob; -1 = böyle bir mum olmadı)
+    dd_scaled: bool = False  # Düşüşte küçültmeyle (FUTURES_DD_SCALE_PCT) küçük boyla açıldı
 
 
 @dataclass
@@ -1064,6 +1072,7 @@ def simulate(p: SimParams, data: FutData, signals: Sequence[FutSignal], windows:
     ruined = kill_ms = None
     usage = p.margin_usage_pct / 100
     kill_level = p.start_capital * (1 - p.kill_pct / 100) if p.kill_pct else -1.0
+    peak = p.start_capital                  # Düşüşte küçültme: gerçekleşen bakiyenin zirvesi
     for s in signals:
         if s.close_ms < busy_until:
             skipped["açık pozisyon vardı"] += 1
@@ -1080,16 +1089,17 @@ def simulate(p: SimParams, data: FutData, signals: Sequence[FutSignal], windows:
             skipped["risk sigortası (zarar serisi / günlük limit)"] += 1
             continue
         factor = isolated_factor(p.isolated_size_pct, p.isolated_breadth, s.breadth)   # Yalnız çöküş: küçük
+        ddf = 1.0 if fixed_notional else dd_scale_factor(p.dd_scale_pct, p.dd_scale_size_pct, equity, peak)
         if fixed_notional:
             notional = fixed_notional * factor
             margin = notional / p.leverage
         else:
-            margin = equity * usage * factor
+            margin = equity * usage * factor * ddf
             notional = min(margin * p.leverage, p.max_notional)
             margin = notional / p.leverage
         if not fixed_notional and notional < min_notional(s.symbol):
             skipped["minimum emir tutarının altında"] += 1
-            if equity * usage * p.leverage < DEFAULT_MIN_NOTIONAL:
+            if equity * usage * p.leverage * ddf < DEFAULT_MIN_NOTIONAL:
                 ruined = s.close_ms
                 break
             continue
@@ -1108,6 +1118,8 @@ def simulate(p: SimParams, data: FutData, signals: Sequence[FutSignal], windows:
         tr.equity_after = equity
         tr.reentry = reentry
         tr.wave_rule = bool(s.metrics.get("wave_rule"))
+        tr.dd_scaled = ddf < 1
+        peak = max(peak, equity)
         trades.append(tr)
         curve.append((tr.exit_ms, equity))
         # Mum içinde kapanan işlem o mum bitene kadar "açık" sayılır (canlıda çıkış dakikanın içinde olur); zaman
@@ -1135,7 +1147,9 @@ def simulate(p: SimParams, data: FutData, signals: Sequence[FutSignal], windows:
             kill_ms = tr.exit_ms
             if kill_switch:
                 break
-        if equity * usage * p.leverage < DEFAULT_MIN_NOTIONAL:
+        # Erime: en küçük emir bile açılamıyor (düşüşte küçültme açıksa küçültülmüş boyla; bakiye artık büyüyemez)
+        if equity * usage * p.leverage * dd_scale_factor(p.dd_scale_pct, p.dd_scale_size_pct, equity, peak) \
+                < DEFAULT_MIN_NOTIONAL:
             ruined = tr.exit_ms
             break
     return FutResult(p, trades, curve, skipped, start_ms, end_ms, ruined, kill_ms)
@@ -1170,6 +1184,7 @@ def simulate_slots(p: SimParams, data: FutData, signals: Sequence[FutSignal], wi
     usage = p.margin_usage_pct / 100
     kill_level = p.start_capital * (1 - p.kill_pct / 100) if p.kill_pct else -1.0
     first_share = slot_share(p, 0)          # Faz 6: ilk pozisyon büyük, ek pozisyonlar küçük (100% = eşit, 1/N)
+    peak = p.start_capital                  # Düşüşte küçültme: gerçekleşen bakiyenin zirvesi
     # Faz 8: ek pozisyonlar (başka pozisyon açıkken açılanlar) kendi başabaş tetiğiyle (config.futures_be_trigger).
     # Tetik stopun taşınacağı yerin (be_floor_pct) üstünde olmalı: duyarlılık satırı tabanı yükseltirse (ör. "Başabaş
     # +%5 → +%2") ek tetik (+%0.5) geçersiz kalır ve ana tetik kullanılır (yoksa stop fiyatın üstüne konmuş sayılır).
@@ -1177,13 +1192,14 @@ def simulate_slots(p: SimParams, data: FutData, signals: Sequence[FutSignal], wi
     hold_cache: Dict[tuple, SimParams] = {}
 
     def realize(until: int) -> None:
-        nonlocal equity, used, freeze_until, sl_streak, day_key, day_pnl, kill_ms, ruined, stop
+        nonlocal equity, used, freeze_until, sl_streak, day_key, day_pnl, kill_ms, ruined, stop, peak
         while heap and heap[0][0] <= until and not stop:
             _free, _q, tr, margin = heapq.heappop(heap)
             used -= margin
             open_syms.pop(tr.symbol, None)
             equity = equity + tr.pnl if fixed_notional else max(0.0, equity + tr.pnl)
             tr.equity_after = equity
+            peak = max(peak, equity)
             curve.append((tr.exit_ms, equity))
             day = tr.exit_ms // DAY_MS
             if day != day_key:
@@ -1204,7 +1220,8 @@ def simulate_slots(p: SimParams, data: FutData, signals: Sequence[FutSignal], wi
                 kill_ms = tr.exit_ms
                 if kill_switch:
                     stop = True
-            if not heap and equity * usage * p.leverage * first_share < DEFAULT_MIN_NOTIONAL:
+            if not heap and equity * usage * p.leverage * first_share * dd_scale_factor(
+                    p.dd_scale_pct, p.dd_scale_size_pct, equity, peak) < DEFAULT_MIN_NOTIONAL:
                 ruined, stop = tr.exit_ms, True
 
     for s in signals:
@@ -1233,16 +1250,17 @@ def simulate_slots(p: SimParams, data: FutData, signals: Sequence[FutSignal], wi
             continue
         factor = isolated_factor(p.isolated_size_pct, p.isolated_breadth, s.breadth)
         share = slot_share(p, len(heap))
+        ddf = 1.0 if fixed_notional else dd_scale_factor(p.dd_scale_pct, p.dd_scale_size_pct, equity, peak)
         if fixed_notional:                  # fixed_notional = toplam / N (evaluate): eşit büyüklükte değişmez
             notional = fixed_notional * slots * share * factor
             margin = notional / p.leverage
         else:
-            margin = min(equity * usage * share * factor, max(0.0, equity * usage - used))
+            margin = min(equity * usage * share * factor, max(0.0, equity * usage - used)) * ddf
             notional = min(margin * p.leverage, p.max_notional)
             margin = notional / p.leverage
             if notional < min_notional(s.symbol):
                 skipped["minimum emir tutarının altında"] += 1
-                if not heap and equity * usage * p.leverage * first_share < DEFAULT_MIN_NOTIONAL:
+                if not heap and equity * usage * p.leverage * first_share * ddf < DEFAULT_MIN_NOTIONAL:
                     ruined = s.close_ms
                     break
                 continue
@@ -1266,6 +1284,7 @@ def simulate_slots(p: SimParams, data: FutData, signals: Sequence[FutSignal], wi
         tr.slot = len(heap) + 1
         tr.reentry = reentry
         tr.wave_rule = bool(s.metrics.get("wave_rule"))
+        tr.dd_scaled = ddf < 1
         trades.append(tr)
         free_at = tr.exit_ms if tr.reason == "TIME" else tr.exit_ms + tr.bar_ms
         seq += 1
@@ -3004,6 +3023,11 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
                    f"ilk pozisyon bakiyenin %{p.margin_usage_pct * slot_share(p, 0):.1f}'i, ek pozisyonlar "
                    f"%{p.margin_usage_pct * slot_share(p, 1):.1f}'i (en fazla {p.max_positions} pozisyon, bileşik)")
     L.append(f"Kaldıraç {p.leverage}x isolated | teminat: {margin_text} | başlangıç {p.start_capital:g} USDT")
+    if p.dd_scale_pct > 0:
+        small = sum(1 for tr in res.trades if tr.dd_scaled)
+        L.append(f"📉 Düşüşte küçültme: bakiye zirvesinin %{p.dd_scale_pct:g} altındayken yeni pozisyonlar "
+                 f"%{p.dd_scale_size_pct:g} boy (A ve B'de; C sabit tutarla). A'da {small} / {len(res.trades)} işlem "
+                 f"küçük boyla açıldı")
     L.append(f"Kâr Al +%{p.tp_pct:g} ({'limit, maker' if p.tp_limit else 'piyasa'}) | Zarar Kes -%{p.sl_pct:g} | "
              + (f"başabaş +%{p.be_trigger_pct:g} → stop +%{p.be_floor_pct:g}" if p.be_enabled else "başabaş kapalı")
              + (f" | izleyen stop +%{p.trail_act_pct:g}'de, tepenin %{p.trail_gap_pct:g} gerisinden"

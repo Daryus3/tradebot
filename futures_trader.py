@@ -39,7 +39,7 @@ from typing import Dict, List, Optional, Set, Tuple
 import requests
 
 from config import (MINUTE_SCAN_STEP_MS, futures_be_trigger, futures_breadth_on, futures_close_only, futures_coin_list,
-                    futures_hold_minutes, scan_log_path,
+                    futures_dd_factor, futures_hold_minutes, scan_log_path,
                     futures_crash_rules, futures_funding_rules,
                     futures_liq_distance_pct, futures_minute_limit, futures_modules, futures_pump_rules, futures_scan_shifts,
                     futures_slot_share, futures_snapshot_on, futures_wave_cfg, futures_wave_rules)
@@ -357,6 +357,7 @@ class FuturesBot(TradingBot):
             log.info("Bekleyen limit giriş emri: %s", self.state.pending_entry.get("symbol"))
             self._check_pending_entry(now)
         self._init_report_markers(now)
+        self.state.note_peak()                  # Düşüşte küçültme: zirve ilk kez kaydediliyorsa o anki sermaye
         self.state.last_alive = now
         self.store.save(self.state)
         if self.command_listener is not None:
@@ -1543,23 +1544,36 @@ class FuturesBot(TradingBot):
     def _entry_margin(self, sig: FuturesSignal, free: float) -> float:
         """Girişin teminatı (USDT). Tek pozisyonda serbest bakiye × FUTURES_MARGIN_USAGE_PCT (eskisi gibi); dalga
         modunda (serbest + açık pozisyon teminatları) × kullanım / FUTURES_MAX_POSITIONS, serbest bakiyeyi aşmadan.
-        Yalnız çöküşte (genişlik < FUTURES_ISOLATED_BREADTH) × FUTURES_ISOLATED_SIZE_PCT (backtest: simulate)."""
+        Yalnız çöküşte (genişlik < FUTURES_ISOLATED_BREADTH) × FUTURES_ISOLATED_SIZE_PCT; sermaye zirvesinin
+        FUTURES_DD_SCALE_PCT altındayken × FUTURES_DD_SCALE_SIZE_PCT (backtest: simulate / simulate_slots)."""
         cfg = self.cfg
         usage = cfg.futures_margin_usage_pct / 100
         factor = isolated_factor(cfg.futures_isolated_size_pct, cfg.futures_isolated_breadth,
                                  int(sig.metrics.get("breadth", cfg.futures_isolated_breadth)))
         if factor < 1:
             sig.metrics["size_pct"] = round(factor * 100, 1)
+        dd = self._dd_factor(sig)
         slots = self.slots()
         if slots <= 1:
-            return free * usage * factor
+            return free * usage * factor * dd
         opened = [p for p in self.state.positions.values() if p.futures]
         used = sum(p.margin_usdt for p in opened)
         share = futures_slot_share(cfg, len(opened))        # Faz 5: 1/N; Faz 6: ilk büyük, ekler küçük
         if opened and cfg.futures_extra_size_pct < 100:
             sig.metrics["size_pct"] = round(cfg.futures_extra_size_pct * factor, 1)
             sig.metrics["size_kind"] = "ek pozisyon, ilkinin yüzdesi"
-        return min((free + used) * usage * share * factor, free * usage)
+        return min((free + used) * usage * share * factor, free * usage) * dd
+
+    def _dd_factor(self, sig: Optional[FuturesSignal] = None) -> float:
+        """Düşüşte küçültme çarpanı (FUTURES_DD_SCALE_PCT; kapalıysa 1): sermaye (başlangıç + gerçekleşen K/Z) kayıtlı
+        zirvenin eşik kadar altındaysa FUTURES_DD_SCALE_SIZE_PCT / 100. Uygulanınca sinyale yazılır (pozisyon mesajı)."""
+        state = self.state
+        peak = state.note_peak()
+        factor = futures_dd_factor(self.cfg, state.capital, peak)
+        if factor < 1 and sig is not None:
+            sig.metrics["dd_size_pct"] = round(factor * 100, 1)
+            sig.metrics["dd_pct"] = round((1 - state.capital / peak) * 100, 1)
+        return factor
 
     def _place_limit_entry(self, sig: FuturesSignal, now: float, lev: int, margin: float, bid: float,
                            ask: float) -> None:
@@ -2018,7 +2032,9 @@ class FuturesBot(TradingBot):
         if self.exchange.is_paper:
             self.exchange.close_paper(pos.symbol, exit_price, pos.qty, exit_fee)
         state = self.state
+        state.note_peak()                       # Düşüşte küçültme: zirve kaydı yoksa bu zarardan önceki sermaye
         state.realized_pnl += pnl
+        state.note_peak()
         state.trades += 1
         if pnl >= 0:
             state.wins += 1

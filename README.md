@@ -126,7 +126,7 @@ kilitli kalır (`--reset-state` ile açılır).
 | 🪙 BNB komisyon takibi | Gerçek komisyon oranını ve BNB bakiyesini izler, `FEE_RATE` yanlışsa uyarır (BNB almaz) |
 | 🔐 Gizli bilgi koruması | Token ve API anahtarları loglara ve mesajlara açık yazılmaz |
 | 🌐 IP alarmı | Sunucunun dış IP'sini 10 dk'da bir kontrol eder (api.ipify.org); değişirse uyarır (Binance IP kısıtlaması) |
-| 🧯 Risk sigortaları | Üst üste 3 zarar keste 4 saat, günlük zarar limitinde gün sonuna kadar yeni alım yapmaz; aynı coinde 3 zarar keste kara liste önerir; ortalama kayma artarsa uyarır; isterseniz zararla kapanan coine bir süre (`LOSS_COOLDOWN_MINUTES`) tekrar girmez |
+| 🧯 Risk sigortaları | Üst üste 3 zarar keste 4 saat, günlük zarar limitinde gün sonuna kadar yeni alım yapmaz; aynı coinde 3 zarar keste kara liste önerir; ortalama kayma artarsa uyarır; isterseniz zararla kapanan coine bir süre (`LOSS_COOLDOWN_MINUTES`) tekrar girmez; vadelide isterseniz sermaye zirvesinden %30 düşünce pozisyonları küçültür (`FUTURES_DD_SCALE_PCT`, düşüşte küçültme) |
 | 🛡️ Ek giriş filtreleri | Sahte yükseliş (üst fitil), VWAP, aşırı ısınma, RSI uyumsuzluğu teyidi, önceki trend (düşüşten önce de düşen coini almaz); canlıda satış duvarı, emir defteri dengesizliği, tape teyidi (varsayılan kapalı, `/menu` → Filtreler) |
 | 🧠 Akıllı yönetim | ATR'ye göre hedefler, Kâr Al'da hedef uzatma, DCA / piramit (yedek akçeyle), süre sorusu, erken kaçış, kademeli alım, sinyal onayı (varsayılan kapalı, `/menu` → Akıllı Yönetim) |
 
@@ -1707,6 +1707,71 @@ Rapor 24 ayarı (ZK 4.75, giriş payı %0.02), 28.99 USDT, aynı sinyal ve çık
 Sonuç: 10x backtestin bileşik getirisini büyütür ama yıl içinde %82-98.5 düşüşleri, kill-switch'le kalıcı durmaları ve
 küçük uygulama sürtünmelerinde erimeyi neredeyse kesinleştirir. Öneri 5x (daha güvenlisi 3x).
 
+#### Düşüşte küçültme: 10x'te hesabın hızla sıfırlanmasını önlemek (Kasım 2026)
+Rapor 24 ayarı (10x, ZK 4.75, giriş payı %0.02), 28.99 USDT, aynı sinyal ve çıkışlar; 26 yöntem tek koşuda. Her ayın
+1'inde başlayan 71 hesabın ilk 12 ayı (365 gün; önceki bölümdeki +%9.346 360. günde ölçülmüştü) ve tek hesabın seçim
+(2020-01 → 2023-10) / doğrulama (2023-11 → 2026-11) dönemlerindeki yıllık bileşik getirisi. Sıra ortanca 12 ay getirisine
+göre; ⚠️ = en az bir hesapta %90'ı aşan düşüş ya da kayma 4 katında erime. Sütunlardaki sayılar 71 hesaptan kaçında
+yaşandığı.
+
+| # | Seçenek | Ortanca 12 ay | Yıllık (seçim / doğr.) | %90+ düşüş | 5 USDT altı | Kill-switch | 12 ay sonunda zararda | En kötü yıl içi düşüş | Kayma ×4 |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | ⚠️ 10x (eski ayar) | +%10.271 | +%2.815 / +%4.029 | 49 | 21 | 47 | 3 | %98 (2021) | eridi 23.02.2021 |
+| 2 | **zirveden %30 düşünce %60 boy** | +%9.976 | +%2.644 / +%4.012 | 0 | 0 | 34 | 6 | %85 (2021) | 3,5 milyon |
+| 3 | ⚠️ en fazla 2 pozisyon | +%9.004 | +%2.315 / +%3.710 | 66 | 32 | 54 | 12 | %99 (2020) | eridi 13.03.2020 |
+| 4 | zirveden %30 düşünce yarı boy | +%7.638 | +%2.615 / +%4.027 | 0 | 0 | 32 | 6 | %80 (2021) | 3,4 milyon |
+| 5 | zirveden %35 düşünce yarı boy | +%7.325 | +%2.635 / +%3.900 | 0 | 0 | 33 | 4 | %82 (2021) | 908.358 |
+| 6 | teminat %75 (`FUTURES_MARGIN_USAGE_PCT=71`) | +%6.954 | +%2.742 / +%3.800 | 0 | 2 | 38 | 3 | %88 (2021) | 3,1 milyon |
+| 7 | ⚠️ zarar kes %3.5 | +%6.536 | +%2.679 / +%3.932 | 22 | 11 | 50 | 12 | %93 (2021) | 5.558 |
+| 8 | zirveden %25 düşünce yarı boy | +%5.460 | +%2.633 / +%3.673 | 0 | 0 | 35 | 5 | %78 (2021) | 1,5 milyon |
+| 9 | ⚠️ ek pozisyon boyu %8 | +%5.384 | +%2.827 / +%3.724 | 50 | 29 | 46 | 8 | %99 (2021) | eridi 22.02.2021 |
+| 10 | %50'de yarı, %75'te çeyrek boy | +%4.897 | +%2.640 / +%3.506 | 0 | 0 | 39 | 8 | %85 (2021) | 712.871 |
+| 11 | %30'da yarı, %60'ta çeyrek boy | +%4.814 | +%2.624 / +%3.357 | 0 | 0 | 29 | 5 | %75 (2021) | 260.236 |
+| 12 | zirveden %20 düşünce yarı boy | +%4.652 | +%2.623 / +%2.946 | 0 | 0 | 34 | 4 | %78 (2025) | 3,4 milyon |
+| 13 | zirveden %30 düşünce %40 boy | +%4.435 | +%2.340 / +%3.657 | 0 | 0 | 30 | 6 | %77 (2021) | 2,8 milyon |
+| 14 | ⚠️ bakiye 3 katına çıkınca kârın yarısı kenara | +%4.124 | +%2.454 / +%1.885 | 52 | 28 | 39 | 3 | %98 (2021) | eridi 23.02.2021 |
+| 15 | ⚠️ zarar kes %4 | +%4.044 | +%2.672 / +%3.608 | 39 | 15 | 49 | 8 | %94 (2021) | 1.141 |
+| 16 | teminat %60 (`FUTURES_MARGIN_USAGE_PCT=57`) | +%4.011 | +%2.672 / +%3.048 | 0 | 0 | 32 | 3 | %76 (2021) | 3,8 milyon |
+| 17 | 7x + zirveden %30 düşünce yarı boy | +%3.993 | +%2.402 / +%2.928 | 0 | 0 | 14 | 3 | %68 (2021) | 2,2 milyon |
+| 18 | zirveden %40 düşünce yarı boy | +%3.939 | +%2.658 / +%3.609 | 0 | 0 | 37 | 4 | %82 (2021) | 1,9 milyon |
+| 19 | ⚠️ bakiye 2 katına çıkınca kârın yarısı kenara | +%3.290 | +%2.364 / +%1.497 | 52 | 28 | 32 | 3 | %98 (2021) | eridi 01.02.2021 |
+| 20 | ⚠️ günlük zarar %50'de o gün dur | +%2.646 | +%2.151 / +%1.666 | 34 | 13 | 39 | 9 | %95 (2021) | 55 |
+| 21 | 5x (kıyas) | +%2.482 | +%2.620 / +%1.939 | 0 | 0 | 20 | 2 | %69 (2025) | 3,5 milyon |
+| 22 | %30'da yarı boy + 2 katında kârın yarısı kenara | +%2.480 | +%1.964 / +%1.398 | 0 | 0 | 30 | 5 | %83 (2021) | 122.454 |
+| 23 | ⚠️ günlük zarar %30'da o gün dur | +%1.747 | +%741 / +%2.312 | 11 | 2 | 32 | 4 | %93 (2020) | eridi 24.05.2021 |
+| 24 | ⚠️ zirveden %50 düşünce 24 saat mola | +%1.241 | +%2.120 / +%861 | 31 | 11 | 34 | 7 | %96 (2021) | 173 |
+| 25 | ⚠️ 3 zarar kes üst üste → 24 saat mola | +%676 | +%1.539 / +%322 | 38 | 15 | 42 | 16 | %95 (2021) | 8 |
+| 26 | ⚠️ 2 zarar kes üst üste → 6 saat mola | +%574 | +%492 / +%664 | 33 | 24 | 40 | 8 | %99 (2021) | eridi 20.05.2021 |
+
+Kayma ×4 sütunu tek hesabın 2020'den bugüne son bakiyesi (USDT). "Kârın yarısı kenara" satırlarında getiri kenara alınan
+parayla birlikte. Teminatı yarıya indirmek 5x ile birebir aynı sonucu verdi.
+
+- **Eklenen kural (2. sıra): `FUTURES_DD_SCALE_PCT=30`, `FUTURES_DD_SCALE_SIZE_PCT=60`** (varsayılan kapalı; Telegram →
+  🧯 Risk sigortaları → 📉 Zirve −%30, 📏 Boy %60). Botun sermayesi (başlangıç + gerçekleşen K/Z) ulaştığı en yüksek
+  seviyenin %30 ya da daha fazla altındayken yeni pozisyonların teminatı %60'a iner; sermaye eşiğin üstüne dönünce tam
+  boy. Kaldıraç, zarar kes ve diğer çıkışlar değişmez. Eski ayarın kârının %97'sini koruyor, doğrulama döneminde
+  neredeyse aynı (+%4.012 / +%4.029); 71 hesabın hiçbirinde %90'ı aşan düşüş ya da 5 USDT altı yok, kayma 4 katında hesap
+  ayakta. Bedeli: 12 ay sonunda zararda biten hesap 3 → 6, seçim döneminde yıllık +%2.815 → +%2.644. Tek hesapta
+  (2020 → bugün) 10.053 işlemin 2.461'i küçük boyla açıldı.
+- **Zirve:** yalnızca kapanan işlemlerle güncellenir (açık pozisyonun anlık K/Z'si sayılmaz), durum dosyasında saklanır
+  (yeniden başlatmada kalır) ve ilk kurulumda o anki sermayeyle başlar (kurulumdan önceki zirve bilinmez). `/sermayeekle`
+  ile eklenen para zirveye de eklenir: yatırılan para düşüşü gizlemez. Risk sigortaları sayfası kayıtlı zirveyi, şu anki
+  düşüşü ve sıradaki pozisyonun boyunu gösterir; pozisyon mesajında "Düşüşte küçültme" notu çıkar.
+- **Backtest aynı kuralı kullanır** (`simulate` / `simulate_slots`): rapor başlığında "📉 Düşüşte küçültme" satırı ve A'da
+  küçük boyla açılan işlem sayısı. Sabit tutarlı C senaryosunda uygulanmaz. Küçültülmüş boy bile Binance'in en küçük
+  emrinin (5 USDT) altına inerse hesap erimiş sayılır (bakiye artık büyüyemez). Depodaki motor araştırmanın sonuçlarını
+  birebir verdi (ortanca 12 ay, iki dönemin yıllık getirisi, 71 hesabın sayıları, kayma ×4).
+- **Okurken dikkat:** ortanca 12 ay getirisi gürültülü bir ölçü (komşular: %35'te yarı boy +%7.325, %40'ta +%3.939);
+  2. ile 4. sıra arasındaki fark kesin değil ve 26 seçeneğin en iyisini aynı geçmişte seçmek sonucu olduğundan iyi
+  gösterir. Sağlam olan: düşüşte küçültmenin denenen bütün türleri (eşik %20-40, boy %40-60) %90'ı aşan düşüşü ve 5 USDT
+  altını sıfırladı, kayma 4 katında ayakta kaldı.
+- **Sınırlar:** zarar kes çöküşte fitilin ortasından dolarsa (kötümser stop) hepsi eriyor (küçültme açıkken hesap
+  13.03.2020'de 1-2 USDT'ye iniyor, ayakta kalan yalnızca 3x ve altı). Kill-switch (`MAX_TOTAL_LOSS_PCT`) 71 hesabın
+  34'ünde ilk 12 ayda botu durduruyor (eski ayarda 47); bot durursa backtestteki toparlanma yaşanmaz.
+- **İşe yaramayanlar:** günlük zarar limiti, zarar serisi molası ve zirveden düşüşte mola getiriyi çok düşürüp büyük
+  düşüşleri önlemedi; kâr çekme kenara alınan parayı korur ama bottaki bakiye yine %90'ın üstünde düşer; en fazla 2
+  pozisyon ve küçük ek pozisyonlar riski artırdı.
+
 ### 🏆 Strateji turnuvası (`--turnuva`)
 Hangi strateji türünün sizin dönemde işe yaradığını **tek komutla** görmek için:
 ```bash
@@ -1762,6 +1827,9 @@ karar için ortancaya ve en kötüye bakın. Çıkış taraması her gün dengel
   dakikasında fiyatın girişin likidasyon mesafesinden fazla altına indiği işlemler ve tarihleri); kayma 2-5 katına çıkınca
   son bakiye ya da erime tarihi. A / B tabloları stopun tam stop fiyatından dolduğunu varsayar ve kill-switch'i
   uygulamaz; bu bölüm ikisini de gösterir. Raporu ~20 sn uzatır.
+- **📉 Düşüşte küçültme satırı** (rapor başlığında, `FUTURES_DD_SCALE_PCT` açıkken): bakiye zirvesinin eşik kadar
+  altındayken açılan pozisyonların küçük boyla açıldığını ve A'daki (tek hesap) kaç işlemin küçük boyla açıldığını
+  gösterir. A ve B aynı kuralı kullanır; C (sabit tutar) kullanmaz.
 - **Teşhis bölümü:** işlem başına fiyat hareketiyle komisyon + spread maliyetini ayırır, işlemlerin ne kadarının
   hedefe ulaştığını ve dönemin iki yarısının ayrı sonuçlarını gösterir.
 - **K/Z dağılım grafiği:** normal backtest her işlemin net K/Z'sini nokta grafiği olarak `data/backtest_grafik_*.png`

@@ -559,6 +559,30 @@ def futures_slot_share(cfg, n_open: int) -> float:
     return (1.0 if n_open <= 0 else x) / total
 
 
+# Düşüşte küçültme (Kasım 2026, rapor 24 araştırması; varsayılan kapalı):
+#   FUTURES_DD_SCALE_PCT = botun sermayesi (başlangıç + gerçekleşen K/Z) ulaştığı en yüksek seviyenin bu kadar % (ya da
+#       daha fazla) altındayken yeni pozisyonlar FUTURES_DD_SCALE_SIZE_PCT büyüklükte açılır; sermaye eşiğin üstüne
+#       dönünce yine tam boy. 0 = kapalı. Kaldıraç, zarar kes ve diğer çıkışlar değişmez; yalnızca teminat küçülür.
+#       Zirve yalnızca kapanan işlemlerle güncellenir (açık pozisyonun anlık K/Z'si sayılmaz); /sermayeekle ile eklenen
+#       para zirveye de eklenir (yatırılan para düşüşü gizlemez). Canlı bot zirveyi durum dosyasında saklar.
+#   Test (2020-2026, 1 dk, rapor 24 ayarları 10x, 28.99 USDT; her ayın 1'inde başlayan 71 hesabın ilk 12 ayı): %30 / %60
+#       ortanca 12 ay getirisini +%10.271'den +%9.976'ya indirdi; %90'ı aşan düşüş yaşayan hesap 49 → 0, bakiyesi 5 USDT
+#       altına inen 21 → 0, en kötü yıl içi düşüş %98 → %85, kayma 4 katında hesap ayakta (kapalıyken 2021'de eridi).
+#       Kötümser stop dolumunda (fitilin ortası) yine 1-2 USDT'ye iniyor. Ayrıntı: README "Düşüşte küçültme".
+def dd_scale_factor(threshold_pct: float, size_pct: float, capital: float, peak: float) -> float:
+    """Düşüşte küçültme çarpanı (canlı bot ve backtest aynı kural): sermaye zirvenin threshold_pct (%) ya da daha
+    fazla altındaysa size_pct / 100, değilse 1. threshold_pct ≤ 0 (kapalı) ya da zirve bilinmiyorsa 1."""
+    if threshold_pct <= 0 or peak <= 0:
+        return 1.0
+    return size_pct / 100 if (1 - capital / peak) * 100 >= threshold_pct - 1e-9 else 1.0
+
+
+def futures_dd_factor(cfg, capital: float, peak: float) -> float:
+    """dd_scale_factor, ayarlardaki FUTURES_DD_SCALE_PCT / FUTURES_DD_SCALE_SIZE_PCT ile."""
+    return dd_scale_factor(float(getattr(cfg, "futures_dd_scale_pct", 0.0) or 0.0),
+                           float(getattr(cfg, "futures_dd_scale_size_pct", 60.0)), capital, peak)
+
+
 MINUTE_SCAN_BAR_MS = 300_000            # Sinyal mumu (5 dk); dakikalık taramada ara dakikalar bunun kaydırılmışı
 MINUTE_SCAN_STEP_MS = 60_000
 MINUTE_SCAN_MAX_1M = 1500               # Binance tek istekte en fazla bu kadar 1 dk mum verir
@@ -900,6 +924,9 @@ class Config:
     futures_extra_hold_minutes: int = 0
     futures_wave_hold_minutes: int = 0
     futures_wave_hold_breadth: int = 8
+    # Düşüşte küçültme (bkz. dd_scale_factor üstündeki açıklama): sermaye zirvenin %X altındayken pozisyon boyu %Y
+    futures_dd_scale_pct: float = 0.0      # Zirveden düşüş eşiği (%; 0 = kapalı)
+    futures_dd_scale_size_pct: float = 60.0   # Eşik aşılınca yeni pozisyonların büyüklüğü (%)
     futures_leverage: int = 2             # Kaldıraç 1-20; her girişten hemen önce Binance'te ayarlanır
     futures_margin_usage_pct: float = 95.0  # Serbest bakiyenin teminata giden yüzdesi (bileşik; kalan pay komisyon için)
     futures_volume_ratio: float = 2.5      # Hacim onayı: sinyal mumu hacmi önceki 20 mumun ortalamasının en az bu katı
@@ -1256,6 +1283,10 @@ class Config:
             errors.append("FUTURES_WAVE_HOLD_MINUTES 0 (kapalı) ya da 5-1440 dakika olmalı")
         if not 1 <= self.futures_wave_hold_breadth <= 200:
             errors.append("FUTURES_WAVE_HOLD_BREADTH 1-200 arasında olmalı (son 1 saatte %3+ düşen coin sayısı)")
+        if not 0 <= self.futures_dd_scale_pct <= 90:
+            errors.append("FUTURES_DD_SCALE_PCT 0-90 arasında olmalı (sermayenin zirveden düşüşü %; 0 = kapalı)")
+        if not 5 <= self.futures_dd_scale_size_pct <= 100:
+            errors.append("FUTURES_DD_SCALE_SIZE_PCT 5-100 arasında olmalı (düşüşteki pozisyon büyüklüğü %; 100 = tam)")
         if self.futures_universe_mode not in FUTURES_UNIVERSE_MODES:
             errors.append("FUTURES_UNIVERSE_MODE şunlardan biri olmalı: " + ", ".join(FUTURES_UNIVERSE_MODES))
         if self.futures_confirm not in FUTURES_CONFIRMS:
@@ -1532,6 +1563,8 @@ def load_config(env_file: Optional[str] = None, mode_override: Optional[str] = N
         futures_extra_hold_minutes=_env_int("FUTURES_EXTRA_HOLD_MINUTES", 0),
         futures_wave_hold_minutes=_env_int("FUTURES_WAVE_HOLD_MINUTES", 0),
         futures_wave_hold_breadth=_env_int("FUTURES_WAVE_HOLD_BREADTH", 8),
+        futures_dd_scale_pct=_env_float("FUTURES_DD_SCALE_PCT", 0.0),
+        futures_dd_scale_size_pct=_env_float("FUTURES_DD_SCALE_SIZE_PCT", 60.0),
         futures_leverage=_env_int("FUTURES_LEVERAGE", 2),
         futures_margin_usage_pct=_env_float("FUTURES_MARGIN_USAGE_PCT", 95.0),
         futures_volume_ratio=_env_float("FUTURES_VOLUME_RATIO", 2.5),
@@ -1950,6 +1983,15 @@ def _setting_notes(cfg: Config) -> List[str]:
         if cfg.futures_liq_source != "proxy":
             notes.append(f"FUTURES_LIQ_SOURCE={cfg.futures_liq_source}: canlı likidasyon akışı kullanılır; bu ölçüm "
                          f"backtest edilemez (backtest mumlardan ölçer), sonuçlar backtestten farklı olabilir.")
+        if cfg.futures_dd_scale_pct > 0:
+            notes.append(f"FUTURES_DD_SCALE_PCT={cfg.futures_dd_scale_pct:g}, FUTURES_DD_SCALE_SIZE_PCT="
+                         f"{cfg.futures_dd_scale_size_pct:g} (düşüşte küçültme): botun sermayesi ulaştığı en yüksek "
+                         f"seviyenin %{cfg.futures_dd_scale_pct:g} altındayken yeni pozisyonlar "
+                         f"%{cfg.futures_dd_scale_size_pct:g} büyüklükte açılır, eşiğin üstüne dönünce tam boy. Testte "
+                         f"(2020-2026, rapor 24 ayarları 10x, 28.99 USDT, her ayın 1'inde başlayan 71 hesap) %30 / %60: "
+                         f"ortanca 12 ay getirisi +%10.271 → +%9.976, %90'ı aşan düşüş yaşayan hesap 49 → 0, kayma 4 "
+                         f"katında hesap ayakta kaldı. Kötümser stop dolumunda yine eriyor, kill-switch sık devreye "
+                         f"girebilir (71 hesabın 34'ü).")
         if cfg.futures_leverage > 10:
             notes.append(f"FUTURES_LEVERAGE={cfg.futures_leverage}: likidasyon ~%{futures_liq_distance_pct(cfg.futures_leverage, cfg.futures_mmr_pct):.1f} "
                          f"fiyat hareketinde; ani fitillerde zarar kes kayabilir. Backtestte kaldıraç arttıkça hesap daha "

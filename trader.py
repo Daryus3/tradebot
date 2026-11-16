@@ -441,6 +441,8 @@ class TradingBot:
         state = self.state
         state.start_capital = round(state.start_capital + amount, 8)
         state.capital_added = round(state.capital_added + amount, 8)
+        if state.peak_capital > 0:         # Düşüşte küçültme: zirve de aynı tutar kadar büyür (para düşüşü gizlemez)
+            state.peak_capital = round(state.peak_capital + amount, 8)
         if self.exchange.is_paper:
             q = self.cfg.quote_asset
             state.paper_balances[q] = round(state.paper_balances.get(q, 0.0) + amount, 8)
