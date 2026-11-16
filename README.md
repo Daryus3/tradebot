@@ -1753,6 +1753,15 @@ karar için ortancaya ve en kötüye bakın. Çıkış taraması her gün dengel
 
 ## 📊 Backtest nasıl okunur?
 
+- **Vadeli raporda 🧯 KALDIRAÇ RİSKİ bölümü** (Kaldıraç duyarlılığı tablosunun hemen altında; ayardaki kaldıraç ve bir
+  alt kıyas kaldıracı, 10x için 5x, aynı sinyaller ve çıkışlarla): her yıl 1 Ocak'tan başlayan hesabın yıl içindeki en
+  büyük düşüşü (dip tarihiyle) ve en düşük bakiyesi; kill-switch (`MAX_TOTAL_LOSS_PCT`) uygulansaydı hangi yıllarda botu
+  hangi gün durduracağı; en kötü günler (gün içi en düşük bakiye); her ayın 1'inde başlayan hesapların ilk 12 ayı
+  (%80 / %90'ı aşan düşüş, bakiyenin 5 USDT altına inmesi, 3 ve 12 ay sonra zararda kalma, kill-switch, ortanca getiri,
+  ayardaki kaldıracın kıyastan kötü bittiği başlangıçlar); zarar kes kayarsa likidasyon bölgesine giren işlemler (stop
+  dakikasında fiyatın girişin likidasyon mesafesinden fazla altına indiği işlemler ve tarihleri); kayma 2-5 katına çıkınca
+  son bakiye ya da erime tarihi. A / B tabloları stopun tam stop fiyatından dolduğunu varsayar ve kill-switch'i
+  uygulamaz; bu bölüm ikisini de gösterir. Raporu ~20 sn uzatır.
 - **Teşhis bölümü:** işlem başına fiyat hareketiyle komisyon + spread maliyetini ayırır, işlemlerin ne kadarının
   hedefe ulaştığını ve dönemin iki yarısının ayrı sonuçlarını gösterir.
 - **K/Z dağılım grafiği:** normal backtest her işlemin net K/Z'sini nokta grafiği olarak `data/backtest_grafik_*.png`

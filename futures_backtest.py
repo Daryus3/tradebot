@@ -2779,8 +2779,210 @@ def live_comparison(cfg, data: FutData, trades: Sequence[FutTrade], path: Option
     return L
 
 
+# ===================================================================== kaldıraç riski
+RISK_START_MONTHS = 12          # "Her ayın 1'inde başlayan hesap" penceresi (ay)
+RISK_WORST_DAYS = 6             # Raporda gösterilen en kötü gün sayısı
+RISK_DEEP_TRADES = 5            # Zarar kes kayarsa: gösterilen en derin işlem sayısı
+RISK_SLIPPAGE_MULTS = (2, 3, 4, 5)
+
+
+def risk_ref_leverage(lev: int) -> Optional[int]:
+    """Kaldıraç riski bölümündeki kıyas kaldıracı: 5x'in üstünde 5x, 4-5x'te 3x, 2-3x'te bir alt kaldıraç; 1x'te yok."""
+    lev = int(lev)
+    if lev > 5:
+        return 5
+    if lev >= 4:
+        return 3
+    if lev >= 2:
+        return lev - 1
+    return None
+
+
+def curve_stats(curve: Sequence[Tuple[int, float]], start_capital: float, kill_pct: float = 0.0) -> dict:
+    """Bakiye eğrisinin risk ölçüleri: en büyük düşüş (%, zirve / dip zamanı ve bakiyeleri), en düşük bakiye ve zamanı,
+    kill-switch'in (toplam zarar başlangıç sermayesinin kill_pct %'si; simulate ile aynı kural) tetiklendiği an, son bakiye."""
+    peak, peak_t = -1.0, None
+    dd, at = 0.0, (None, None, None, None)
+    low_t, low = None, float("inf")
+    kill_level = start_capital * (1 - kill_pct / 100) if kill_pct else -1.0
+    kill_ms = None
+    for t, e in curve:
+        if e > peak:
+            peak, peak_t = e, t
+        elif peak > 0 and (peak - e) / peak * 100 > dd:
+            dd, at = (peak - e) / peak * 100, (peak_t, peak, t, e)
+        if e < low:
+            low_t, low = t, e
+        if kill_ms is None and e <= kill_level:
+            kill_ms = t
+    return {"dd": dd, "peak_ms": at[0], "peak": at[1], "trough_ms": at[2], "trough": at[3], "low_ms": low_t,
+            "low": low if curve else start_capital, "kill_ms": kill_ms, "final": curve[-1][1] if curve else start_capital}
+
+
+def day_lows(curve: Sequence[Tuple[int, float]], start_capital: float) -> Dict[int, Tuple[float, float]]:
+    """Gün (UTC, gün sayısı) → (gün içi en düşük bakiye %, gün sonu %), bir önceki günün son bakiyesine göre."""
+    by_day: Dict[int, List[float]] = {}
+    for t, e in curve:
+        by_day.setdefault(int(t) // DAY_MS, []).append(e)
+    out, prev = {}, start_capital
+    for day in sorted(by_day):
+        vals = by_day[day]
+        if prev > 0:
+            out[day] = ((min(vals) / prev - 1) * 100, (vals[-1] / prev - 1) * 100)
+        prev = vals[-1]
+    return out
+
+
+def _month_starts(start_ms: int, end_ms: int, months: int) -> List[int]:
+    """start_ms'ten sonraki her ayın 1'i (UTC); `months` ay sonrası end_ms'i aşmayanlar."""
+    d = datetime.fromtimestamp(start_ms / 1000, tz=timezone.utc)
+    y, m = d.year, d.month
+    if d != datetime(y, m, 1, tzinfo=timezone.utc):
+        y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+    out = []
+    while True:
+        s = int(datetime(y, m, 1, tzinfo=timezone.utc).timestamp() * 1000)
+        if s + months * 30 * DAY_MS + 5 * DAY_MS > end_ms:
+            break
+        out.append(s)
+        y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+    return out
+
+
+def _equity_at(curve: Sequence[Tuple[int, float]], t: int) -> float:
+    ts = [c[0] for c in curve]
+    i = int(np.searchsorted(ts, t, side="right")) - 1
+    return curve[max(i, 0)][1]
+
+
+def leverage_risk(cfg, data: FutData, signals, windows, fixed_trades: Sequence[FutTrade]) -> Optional[dict]:
+    """Kaldıraç riski bölümünün ölçüleri (ayardaki kaldıraç ve risk_ref_leverage kıyası; aynı sinyaller ve çıkışlar):
+    her yıl 1 Ocak'tan başlayan hesabın düşüşleri ve kill-switch'i, en kötü günler, her ayın 1'inde başlayan hesapların
+    ilk 12 ayı, zarar kes kayarsa likidasyon bölgesine giren işlemler (sabit boy işlemlerin stop dakikasındaki dibi) ve
+    kayma stresi. Rapordaki A / B tabloları stopun tam stop fiyatından dolduğunu varsayar ve kill-switch'i uygulamaz."""
+    base = params_from_cfg(cfg)
+    lev = int(base.leverage)
+    ref = risk_ref_leverage(lev)
+    levs = [lev] + ([ref] if ref else [])
+    kill = float(base.kill_pct or 0.0)
+    cap = float(base.start_capital)
+    out = {"lev": lev, "ref": ref, "levs": levs, "kill": kill, "start": cap, "yearly": {L: [] for L in levs},
+           "daily": {L: {} for L in levs}, "roll": {L: [] for L in levs}, "stress": {L: [] for L in levs}}
+    for y in range(_year(data.start_ms), _year(data.end_ms - 1) + 1):
+        a, b = max(data.start_ms, _ms(f"{y}-01-01")), min(data.end_ms, _ms(f"{y + 1}-01-01"))
+        if b - a < 30 * DAY_MS:
+            continue
+        for L in levs:
+            res = simulate(replace(base, leverage=L), data, signals, windows, False, a, b)
+            out["yearly"][L].append((y, curve_stats(res.curve, cap, kill), res.ruined_ms))
+            out["daily"][L].update(day_lows(res.curve, cap))
+    for s in _month_starts(data.start_ms, data.end_ms, RISK_START_MONTHS):
+        e = s + RISK_START_MONTHS * 30 * DAY_MS + 5 * DAY_MS
+        for L in levs:
+            res = simulate(replace(base, leverage=L), data, signals, windows, False, s, e)
+            out["roll"][L].append((s, curve_stats(res.curve, cap, kill), _equity_at(res.curve, s + 91 * DAY_MS),
+                                   res.curve[-1][1] if res.curve else cap, res.ruined_ms))
+    sl = [t for t in fixed_trades if t.reason == "SL"]
+    out["sl"] = len(sl)
+    out["liq"] = {L: futures_liq_distance_pct(L, base.mmr_pct) for L in levs}
+    out["beyond"] = {L: sorted((t for t in sl if t.mae_pct >= out["liq"][L]), key=lambda t: -t.mae_pct) for L in levs}
+    for k in RISK_SLIPPAGE_MULTS:
+        for L in levs:
+            res = simulate(replace(base, leverage=L, slippage_pct=base.slippage_pct * k), data, signals, windows)
+            out["stress"][L].append((k, res.ruined_ms, res.final_equity))
+    return out
+
+
+def _usdt(v: float) -> str:
+    return f"{v:,.2f}" if v < 1000 else f"{v:,.0f}"
+
+
+def leverage_risk_lines(risk: Optional[dict]) -> List[str]:
+    """Kaldıraç riski bölümünün rapor satırları (leverage_risk sonucu); sonuç yoksa boş."""
+    if not risk:
+        return []
+    lev, ref, levs, kill, cap = risk["lev"], risk["ref"], risk["levs"], risk["kill"], risk["start"]
+    tag = f"{lev}x" + (f", kıyas {ref}x" if ref else "")
+    L = [f"🧯 KALDIRAÇ RİSKİ ({tag}; aynı sinyaller ve çıkışlar, {_usdt(cap)} USDT ile)",
+         "  A / B tabloları zarar kes emrinin tam stop fiyatından dolduğunu varsayar ve kill-switch'i uygulamaz; bu bölüm "
+         "yıl içindeki dipleri, kill-switch'i ve stop kaymasını gösterir."]
+    if risk["yearly"].get(lev):
+        L.append("  Her yıl 1 Ocak'tan başlayan hesap: yıl sonu | yıl içindeki en büyük düşüş (dip tarihi) | en düşük bakiye")
+        by_year = {L2: {y: (st, ruined) for y, st, ruined in risk["yearly"][L2]} for L2 in levs}
+        for y in sorted(by_year[lev]):
+            cells = []
+            for L2 in levs:
+                st, ruined = by_year[L2].get(y, (None, None))
+                if st is None:
+                    continue
+                ret = (st["final"] / cap - 1) * 100
+                cells.append(f"{L2}x {_pct(ret)} | −%{st['dd']:.1f}" + (f" ({_date(st['trough_ms'])})" if st["trough_ms"] else "")
+                             + f" | {_usdt(st['low'])} USDT" + (f" | ERİDİ {_date(ruined)}" if ruined else ""))
+            L.append(f"    {y}: " + "   ·   ".join(cells))
+        if kill:
+            parts = []
+            for L2 in levs:
+                stops = [f"{y} ({_date(st['kill_ms'])})" for y, st, _r in risk["yearly"][L2] if st["kill_ms"]]
+                parts.append(f"{L2}x: " + (", ".join(stops) if stops else "hiçbir yılda"))
+            L.append(f"  Kill-switch (toplam zarar sermayenin %{kill:g}'i) uygulansaydı 1 Ocak başlangıçlı hesabı durdururdu: "
+                     + " | ".join(parts))
+    daily = {day: v for day, v in (risk["daily"].get(lev) or {}).items() if v[0] < 0}      # Yalnızca kayıplı günler
+    if daily:
+        worst = sorted(daily.items(), key=lambda kv: kv[1][0])[:RISK_WORST_DAYS]
+        cells = []
+        for day, (low, _close) in sorted(worst):
+            other = risk["daily"].get(ref, {}).get(day) if ref else None
+            cells.append(f"{_date(day * DAY_MS)} −%{-low:.0f}"
+                         + ((f" / −%{-other[0]:.0f}" if other[0] < 0 else " / %0") if other else ""))
+        L.append(f"  En kötü günler (gün içi en düşük bakiye, bir önceki günün sonuna göre; {lev}x"
+                 + (f" / {ref}x" if ref else "") + "): " + ", ".join(cells))
+    roll = risk["roll"].get(lev) or []
+    if roll:
+        n = len(roll)
+        L.append(f"  Her ayın 1'inde başlayan {n} hesap ({_date(roll[0][0])} → {_date(roll[-1][0])}), ilk 12 ayda:")
+        for L2 in levs:
+            rows = risk["roll"][L2]
+            dds = [st["dd"] for _s, st, _v3, _v12, _r in rows]
+            kills = [(st["kill_ms"] - s) / DAY_MS for s, st, _v3, _v12, _r in rows if st["kill_ms"]]
+            ret12 = [(v12 / cap - 1) * 100 for _s, _st, _v3, v12, _r in rows]
+            text = (f"    {L2}x: %80'i aşan düşüş {sum(d > 80 for d in dds)}, %90'ı aşan {sum(d > 90 for d in dds)}, bakiye 5 "
+                    f"USDT'nin altına inen {sum(st['low'] < 5 for _s, st, _v3, _v12, _r in rows)}, eriyen "
+                    f"{sum(1 for row in rows if row[4])}, 3 ay sonra zararda {sum(v3 < cap for _s, _st, v3, _v12, _r in rows)}, "
+                    f"12 ay sonra zararda {sum(r < 0 for r in ret12)}, ortanca 12 ay getirisi {_pct(float(np.median(ret12)))}")
+            if kill:
+                text += (f", kill-switch {len(kills)}" + (f" (ortanca {np.median(kills):.0f}. gün)" if kills else ""))
+            L.append(text)
+        if ref:
+            other = {s: v12 for s, _st, _v3, v12, _r in risk["roll"][ref]}
+            behind = [(s, v12, other[s]) for s, _st, _v3, v12, _r in roll if s in other and v12 < other[s]]
+            line = f"    12 ay sonunda {lev}x'in {ref}x'ten az bakiyeyle bittiği başlangıç: {len(behind)} / {n}"
+            if behind:
+                s, a, b = min(behind, key=lambda x: x[1] / max(x[2], 1e-9))
+                line += f" (en kötüsü {_date(s)}: {lev}x {_usdt(a)}, {ref}x {_usdt(b)} USDT)"
+            L.append(line)
+    if risk.get("sl"):
+        cur = risk["beyond"][lev]
+        line = (f"  Zarar kes kayarsa: {risk['sl']} zarar kes işleminin {len(cur)}'inde stop dakikasında fiyat girişin "
+                f"%{risk['liq'][lev]:.1f}'inden fazla altına indi ({lev}x'te stop o dibe kayarsa likidasyon")
+        if ref:
+            line += f"; {ref}x için %{risk['liq'][ref]:.1f}: {len(risk['beyond'][ref])} işlem"
+        line += ")"
+        if cur:
+            line += ". En derinleri: " + ", ".join(f"{_date(t.entry_ms)} {t.symbol[:-4] if t.symbol.endswith('USDT') else t.symbol} "
+                                                    f"−%{t.mae_pct:.1f}" for t in cur[:RISK_DEEP_TRADES])
+        L.append(line)
+    if risk["stress"].get(lev):
+        parts = []
+        for L2 in levs:
+            cells = [f"×{k}: " + (f"ERİDİ {_date(r)}" if r else f"{_usdt(e)}") for k, r, e in risk["stress"][L2]]
+            parts.append(f"{L2}x " + ", ".join(cells))
+        L.append("  Kayma katlanırsa (tek hesap, son bakiye USDT): " + " | ".join(parts))
+    return L
+
+
 def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None, grid=None, variants=None,
-                  live: Optional[List[str]] = None, draws: Optional[Sequence[float]] = None) -> str:
+                  live: Optional[List[str]] = None, draws: Optional[Sequence[float]] = None,
+                  risk: Optional[dict] = None) -> str:
     res = ev.chained
     p = res.params
     st = stats_of(res)
@@ -2963,6 +3165,9 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
         L.append(head_row)
         for lev, ev2, note in levs:
             L.append(f"  {f'{lev}x':26s} " + (_eval_line(ev2) if ev2 is not None else f"— ({note})"))
+    if risk:
+        L.append("")
+        L.extend(leverage_risk_lines(risk))
     if grid:
         L.append("")
         L.append(f"🎯 KÂR AL / ZARAR KES DUYARLILIĞI ({p.leverage}x)")
@@ -3104,9 +3309,13 @@ def run_cli(cfg, days: Optional[int], end_ms: Optional[int], out_dir: Path, char
         levs = leverage_table(cfg, data, signals, windows)
         grid = exit_grid(cfg, data, signals, windows)
         variants = variant_rows(cfg, data, signals, windows)
+    risk = None
+    if sensitivity:
+        progress("🧯 Kaldıraç riski hesaplanıyor (yıl içi dipler, her ay başlayan hesaplar, kill-switch, stop kayması)...")
+        risk = leverage_risk(cfg, data, signals, windows, ev.trades)
     draws = draw_spread(params_from_cfg(cfg), data, signals, windows) if sensitivity else []
     report = format_report(cfg, data, ev, funnel, levs, grid, variants, live=live_comparison(cfg, data, ev.chained.trades),
-                           **({"draws": draws} if draws else {}))
+                           **({"draws": draws} if draws else {}), **({"risk": risk} if risk else {}))
     stamp = datetime.now().strftime("%Y%m%d-%H%M")
     try:
         csv_path = save_trades_csv(ev.trades, out_dir / f"vadeli_islemler_{stamp}.csv")
