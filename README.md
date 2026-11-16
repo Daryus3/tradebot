@@ -1680,6 +1680,33 @@ Sonuç: bu kural ailesinde işlem sayısı piyasadaki çöküş sayısıyla sın
 geniş kapı, daha çok yuva, beklemesiz yeniden giriş) ortalamanın altında kalıyor. Canlı denetim: anlık taramanın sinyalli
 taramaları da (4 yuva, ek kapısı 10 ayarında) sonradan doğrulanır ve sayılır (`tests/test_futures_snapshot_scan.py`).
 
+#### 10x kaldıraç: tarihli derin analiz (Kasım 2026)
+Rapor 24 ayarı (ZK 4.75, giriş payı %0.02), 28.99 USDT, aynı sinyal ve çıkışlar; yalnız kaldıraç değişir.
+
+- **Her yıl 1 Ocak'ta başlayan hesabın yıl içindeki en büyük düşüşü** (5x / 10x): 2020 %55 / %82 (10 Mayıs), 2021 %67 /
+  **%98.5** (23 Şubat: 67 → 1.01 USDT), 2022 %56 / %84 (8 Kasım), 2023 %67 / %92 (10 Haziran), 2024 %67 / %95 (12 Kasım),
+  2025 %69 / %93 (10 Ekim), 2026 %64 / %90 (5 Haziran). 2026 yıl sonu: 5x +%41, 10x +%24. 2021'de 10x hesabın 1.01
+  USDT'den dönebilmesi, Binance'in 5 USDT'lik en küçük emri 10x'te 1 USDT bakiyeyle de açılabildiği (1.01 × %63.3 × 10
+  = 6.4 USDT) ve hemen ardından Mayıs 2021'in gelmesi sayesinde.
+- **En kötü günler** (10x / 5x gün içi en dip): 11.01.2021 −%92 / −%63, 10.10.2025 −%93 / −%69, 19.05.2021 −%91 / −%63,
+  23.02.2021 −%84 / −%46, 05.06.2026 −%82 / −%54, 10.05.2020 −%82 / −%52, 05.03.2024 −%81 / −%50.
+- **Her ayın 1'inde başlayan 71 hesap, 12 ay içinde:** %80'i aşan düşüş 5x'te 0, 10x'te 71; %90'ı aşan 0 / 49; bakiye 5
+  USDT'nin altına inen 0 / 21. 12 ay sonunda 10x'in 5x'ten az bakiyeyle bittiği başlangıç 14 / 71 (Ekim 2021-Kasım 2022
+  ve Mart-Haziran 2024). Ortanca 12 ay getirisi +%2.482 / +%9.346.
+- **Canlı botun kill-switch'i** (toplam zarar başlangıç sermayesinin %45'i; ayarlar.env'de %40) uygulanınca bot 12 ay
+  içinde 3x'te 2, 5x'te 20, 10x'te **47** başlangıçta (ortanca 39. gün) durur; 1 Ocak başlangıçlı yıllarda 10x 2021 (4
+  Ocak), 2023 (22 Mart), 2025 (3 Şubat), 2026 (5 Haziran) yıllarında durur, 5x 2023 ve 2026'da, 3x hiç. Rapordaki yıl
+  tabloları kill-switch'i uygulamaz.
+- **Zarar kes kayarsa:** 847 zarar kes işleminin 70'inde stop dakikasında fiyat girişin %9.5'ten fazla altına sarktı
+  (10x'te stop o dibe kayarsa likidasyon), %19.5'ten fazla (5x likidasyonu) 7'sinde: 10.10.2025 (DOT −%37, CRV −%36),
+  19.05.2021 (XLM −%25, BCH −%22), 05.03.2024 (TRB −%18), 03.01.2024 (STORJ −%17), 12.04.2024 (FIL −%16), 22.08.2026 (WLD
+  −%16), 07.09.2021 (ETC −%16).
+- **Stres:** kayma %0.08'de 10x hesap 23.02.2021'de, %0.10'da 01.02.2021'de erir; 5x %0.10'da da ayakta. Kötümser stop
+  dolumunda 10x 12.03.2020'de, 5x 20.05.2021'de erir; 3x ayakta (15 USDT).
+
+Sonuç: 10x backtestin bileşik getirisini büyütür ama yıl içinde %82-98.5 düşüşleri, kill-switch'le kalıcı durmaları ve
+küçük uygulama sürtünmelerinde erimeyi neredeyse kesinleştirir. Öneri 5x (daha güvenlisi 3x).
+
 ### 🏆 Strateji turnuvası (`--turnuva`)
 Hangi strateji türünün sizin dönemde işe yaradığını **tek komutla** görmek için:
 ```bash
