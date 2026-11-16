@@ -1663,6 +1663,23 @@ kesle kapanan bir işlem, %4.75'e geldiğinde çoğunlukla %5'e de gidiyor; erke
 boşaltıyor. Ayrıca 4 sa %9.5 eşiğiyle birleşimi (işlem +%4-6, doğrulamada en yüksek) seçimde 6 ızgaranın 5-6'sında kötü:
 önerilmez. **Öneri: `STOP_LOSS_PCT=4.75`, `FUTURES_LEVERAGE=5`.** (Seçim yanlılığı uyarısı: ~1.500 deneme aynı veride.)
 
+#### Rapor 24 araştırması: yeni tabanın (Zarar Kes %4.75) çevresi (Kasım 2026)
+Taban: rapor 24 ayarı 5x'te (ZK 4.75, giriş payı %0.02, KA 6 piyasa, başabaş tabanı 0.25): yılda 1.875 / 963 işlem,
+bileşiksiz +%639 / +%381, bileşik +%2.489 / +%1.677, düşüş %74 / %69. Rapor 24'te ZK 4.75 beklendiği gibi çıktı: işlem
+9.932 → 10.065, çekiliş ortancası son bakiye 15.2 → 16.4 milyon USDT (10x). 30 komşu ayar (3 çekiliş):
+- **Kâr Al limit emirle** (`FUTURES_TP_ORDER=limit`): +%648 / +%385, bileşik +%2.511 / +%1.735, 3 kat kaymada
+  +%1.743 / +%691; 3 çekilişin 3'ünde her ölçüde iyi (önceki turda 6 ızgaranın 6'sında). İşlem sayısı aynı; kazanç
+  yalnızca komisyondan (Kâr Al'la kapanan %6.5 işlemde %0.045 yerine %0.018, kaymasız).
+- İşlem sayısını artıranlar yine iki dönemde birden iyi değil: başabaş tabanı 0.3 (işlem +%4 / +%2; seçimde kötü,
+  doğrulamada iyi), ek başabaş 0.35 (+%6; bileşik getiri düşük), ek kapısı 8 (+%7 / +%1; nötr), KA 5 (+%2; kötü),
+  zarar beklemesi yok (+%6 / +%15; doğrulamada kötü), 4 sa %9.5 (+%3; seçimde kötü).
+- Nötr / tutarsız: ilk başabaş 1.0 / 1.25, zaman stopu 40 / 50, ek zaman stopu 30 / 40, dalgada ilk 50 / 70 dk, KA 7 / 8,
+  yalnız çöküş %10 / %50, yeniden giriş ≥2 / ≥5. Ek boyu %12.5 (ilk pozisyon büyür) bileşiksizde iyi, son 12 ayda geride.
+
+Sonuç: bu kural ailesinde işlem sayısı piyasadaki çöküş sayısıyla sınırlı; eklenen her işlem türü (daha düşük eşik, daha
+geniş kapı, daha çok yuva, beklemesiz yeniden giriş) ortalamanın altında kalıyor. Canlı denetim: anlık taramanın sinyalli
+taramaları da (4 yuva, ek kapısı 10 ayarında) sonradan doğrulanır ve sayılır (`tests/test_futures_snapshot_scan.py`).
+
 ### 🏆 Strateji turnuvası (`--turnuva`)
 Hangi strateji türünün sizin dönemde işe yaradığını **tek komutla** görmek için:
 ```bash

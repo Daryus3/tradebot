@@ -866,3 +866,17 @@ def test_memory_is_refreshed_periodically_and_checked_against_the_exchange(fcfg,
     warned = [m for m in notes.messages if "bellekte tutulan geçmiş mumlar" in m]
     assert len(warned) == 1 and "XRPUSDT" in warned[0] and "1 mumda farklı" in warned[0]     # Saatte en çok bir uyarı
     assert good[-1] in bot._hist[key]["k"]["c"]
+
+
+def test_signal_scan_is_verified_with_the_users_wave_settings(fcfg, tmp_path):
+    """Rapor 22-24'teki ayar (4 yuva, ek pozisyon ≥10 coin düşerken, yalnız çöküş %25, dalgada yeniden giriş ≥3): dalga
+    yokken tek coinlik çöküşte açılan pozisyonun taraması da sonradan doğrulanır ve "sinyal çıkan tarama" sayılır."""
+    bot, fake, _notes, clock = start(fcfg, tmp_path, futures_max_positions=4, futures_extra_breadth=10,
+                                     futures_isolated_size_pct=25.0, futures_isolated_breadth=2, futures_reentry_breadth=3)
+    run_until_scan(bot, clock, clock.t)
+    assert journal(bot)[-1]["s"] == {"SOL": "açıldı"} and journal(bot)[-1]["sn"][0] == 150
+    run_until_scan(bot, clock, clock.t)                                    # Sıradaki dakika (pozisyon açıkken)
+    row = journal(bot)[-1]
+    assert row["sv"] == [{"t": DIP, "n": 4, "av": 0.0, "mx": 0.0, "sg": 1, "ok": 1}]
+    text = "\n".join(fb.live_snapshot_check(journal(bot)))
+    assert "aynı sinyaller: 1 / 1 tarama (sinyal çıkan tarama: 1)" in text
