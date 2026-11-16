@@ -70,6 +70,8 @@ FULL_HISTORY_DAYS = 9999      # Vadeli: "tüm dönem" (Ocak 2020 → bugün, dö
 END_CHOICES = ("today", "prev", "prev2", "30", "60", "90", "180", "365")
 END_LABELS = {"prev": "önceki dönem", "prev2": "iki dönem önce"}   # Seçilen süre kadar (×2) daha eski dönem
 CAPITAL_CHOICES = ("cfg", "bot", "11", "20", "32", "50", "100", "250", "500", "1000")
+CAPITAL_STEPS = ("-100", "-10", "+10", "+100")    # Sermaye seçicide: mevcut değerin üstüne ekle / çıkar
+CAPITAL_MIN = 1.0
 COIN_CHOICES = (10, 20, 30, 40, 60, 80, 100)
 # Çıkış taraması (--tara) değerleri; "" = botun kendi tarama ızgarası
 GRIDS: Dict[str, Tuple[str, str, Tuple[str, ...]]] = {
@@ -670,12 +672,15 @@ class BacktestMenu:
             if arg in CAPITAL_CHOICES:
                 draft.capital = arg
                 self.save(draft)
+            elif arg in CAPITAL_STEPS:                  # −100 / −10 / +10 / +100: seçicide kalınır
+                current = capital_of(draft, self.bot)
+                value = float(self.bot.cfg.start_capital) if current is None else float(current)
+                new = max(CAPITAL_MIN, round(value + float(arg), 2))
+                draft.capital = f"{new:.2f}".rstrip("0").rstrip(".")
+                self.save(draft)
+                return self.show_capital(mid, draft)
             else:
-                cfg, state = self.bot.cfg, self.bot.state
-                labels = {"cfg": f"Ayardaki ({cfg.start_capital:g})", "bot": f"Botun güncel ({state.capital:.2f})"}
-                options = [(("✅ " if draft.capital == c else "") + labels.get(c, f"{c} {cfg.quote_asset}"),
-                            f"bt:cap:{c}") for c in CAPITAL_CHOICES]
-                return self._pick(mid, "💼 Başlangıç sermayesi", options, per_row=2)
+                return self.show_capital(mid, draft)
         elif sub == "coin":
             if arg is not None and arg.isdigit() and int(arg) in COIN_CHOICES:
                 draft.coins = int(arg)
@@ -782,6 +787,21 @@ class BacktestMenu:
             [("⬅️ Menü", "menu")],
         ]
         self.proc.reply_menu("\n".join(lines), keyboard, mid)
+
+    def show_capital(self, mid: Optional[int], draft: BacktestDraft) -> None:
+        """Başlangıç sermayesi seçici: −100 / −10 / +10 / +100 düğmeleri (mevcut değerin üstüne) ve hazır değerler."""
+        cfg, state = self.bot.cfg, self.bot.state
+        current = capital_of(draft, self.bot)
+        value = cfg.start_capital if current is None else current
+        q = cfg.quote_asset
+        labels = {"cfg": f"Ayardaki ({cfg.start_capital:g})", "bot": f"Botun güncel ({state.capital:.2f})"}
+        steps = [(step.replace("-", "−") + f" {q}", f"bt:cap:{step}") for step in CAPITAL_STEPS]
+        options = [(("✅ " if draft.capital == c else "") + labels.get(c, f"{c} {q}"), f"bt:cap:{c}")
+                   for c in CAPITAL_CHOICES]
+        rows = [steps] + [options[i:i + 2] for i in range(0, len(options), 2)] + [[("⬅️ Geri", "bt")]]
+        self.proc.reply_menu(f"<b>💼 Başlangıç sermayesi</b>\nŞu an: <b>{value:g} {q}</b>\n<i>−100 / −10 / +10 / +100 "
+                             f"mevcut değere ekler ya da çıkarır (en az {CAPITAL_MIN:g} {q}); hazır değerlerden de "
+                             f"seçebilirsiniz.</i>", rows, mid)
 
     def show_grids(self, mid: Optional[int]) -> None:
         draft = self.draft()

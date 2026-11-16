@@ -134,6 +134,30 @@ def test_menu_choices_persist(bt_bot):
     assert bot.store.load().backtest_draft["kind"] == "ab"           # Yeniden başlayınca kaybolmaz
 
 
+def test_capital_steps_add_and_subtract(bt_bot):
+    """Sermaye seçicide −100 / −10 / +10 / +100: mevcut değerin üstüne eklenir, seçicide kalınır, en az 1."""
+    bot, notes, _ = bt_bot
+    press(bot, "bt:cap")
+    assert {"bt:cap:-100", "bt:cap:-10", "bt:cap:+10", "bt:cap:+100", "bt:cap:250"} <= set(buttons(notes))
+    assert f"Şu an: <b>{bot.cfg.start_capital:g} USDT</b>" in notes.menus[-1][0]
+    press(bot, "bt:cap:250")
+    press(bot, "bt:cap:+100")
+    assert BacktestDraft.from_dict(bot.state.backtest_draft).capital == "350"
+    assert "Şu an: <b>350 USDT</b>" in notes.menus[-1][0] and "bt:cap:+100" in buttons(notes)   # Seçicide kalındı
+    press(bot, "bt:cap:-10")
+    press(bot, "bt:cap:+10")
+    press(bot, "bt:cap:-100")
+    assert BacktestDraft.from_dict(bot.state.backtest_draft).capital == "250"
+    for _ in range(3):
+        press(bot, "bt:cap:-100")
+    assert BacktestDraft.from_dict(bot.state.backtest_draft).capital == "1"                     # En az 1 USDT
+    press(bot, "bt:cap:bot")                                                                     # Botun sermayesinden
+    press(bot, "bt:cap:+10")
+    assert float(BacktestDraft.from_dict(bot.state.backtest_draft).capital) == pytest.approx(round(bot.state.capital + 10, 2))
+    press(bot, "bt")
+    assert f"💼 Sermaye: {float(BacktestDraft.from_dict(bot.state.backtest_draft).capital):g} USDT" in notes.menus[-1][0]
+
+
 def test_overrides_toggle_validate_and_reset(bt_bot):
     bot, notes, _ = bt_bot
     press(bot, "bt:ov")
