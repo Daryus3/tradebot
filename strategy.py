@@ -2471,6 +2471,9 @@ class FuturesSignal:
             parts.append("Dalgada yeniden giriş (zarar sonrası bekleme atlandı)")
         if m.get("size_pct") and m["size_pct"] < 100:
             parts.append(f"Pozisyon %{m['size_pct']:g} ({m.get('size_kind', 'yalnız çöküş')})")
+        if m.get("depth_cap"):
+            parts.append((f"Derinliğe göre boy: pozisyon {m['depth_cap']:,.0f} USDT ile sınırlı (±%1 içinde alış "
+                          f"{m.get('depth_bid', 0):,.0f} / satış {m.get('depth_ask', 0):,.0f} USDT)").replace(",", "."))
         if m.get("dd_size_pct") and m["dd_size_pct"] < 100:
             parts.append(f"Düşüşte küçültme: sermaye zirvenin %{m.get('dd_pct', 0):g} altında, pozisyon "
                          f"%{m['dd_size_pct']:g} boy")

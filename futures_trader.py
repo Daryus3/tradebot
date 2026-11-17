@@ -36,6 +36,8 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Set, Tuple
 
+import math
+
 import requests
 
 from config import (MINUTE_SCAN_STEP_MS, futures_be_trigger, futures_breadth_on, futures_close_only, futures_coin_list,
@@ -44,6 +46,7 @@ from config import (MINUTE_SCAN_STEP_MS, futures_be_trigger, futures_breadth_on,
                     futures_liq_distance_pct, futures_minute_limit, futures_modules, futures_pump_rules, futures_scan_shifts,
                     futures_slot_share, futures_snapshot_on, futures_wave_cfg, futures_wave_rules)
 from futures_data import history_mismatch, merge_tail, resample, split_history, with_bar
+from futures_depth import DEPTH_CHECK_MIN_NOTIONAL
 from futures_exchange import FFill, FuturesError, MinNotionalError, describe_error
 from logger import get_logger
 from risk import ExitReason, Position, cooldown_minutes, kill_switch_hit
@@ -56,6 +59,7 @@ from trader import ALIVE_SAVE_SEC, POSITION_LOG_SEC, RULES_REFRESH_SEC, Mark, Tr
 log = get_logger()
 
 SCAN_DELAY_SEC = 3            # 5 dk mum kapandıktan bu kadar sonra taranır (Binance'te yerleşsin)
+DEPTH_CACHE_SEC = 10.0        # Derinliğe göre boy: aynı taramada emir defteri bir kez okunur
 POSITION_POLL_SEC = 2.0       # Açık pozisyon kontrol aralığı
 MAX_SCAN_LAG_SEC = 90         # Mum kapanışından bu kadar sonra (kesinti / yavaşlık) o mumun sinyali alınmaz
 MARGIN_RETRY_FACTOR = 0.9     # "Margin is insufficient" (-2019): miktar %10 küçültülüp bir kez daha denenir
@@ -211,6 +215,8 @@ class FuturesBot(TradingBot):
         self._hist_warned_at = 0.0
         self._manage_sec = 0.0                     # Son pozisyon kontrolünün süresi (ön hazırlığa sarkmasın diye)
         self._prep_sec = 0.0                       # Son ön hazırlığın süresi (sıradaki ona göre erken başlar)
+        # Derinliğe göre boy (FUTURES_DEPTH_CAP_PCT): parite → (okunduğu an, (alış, satış, +%1 satış USDT, -%1 alış USDT))
+        self._depth_cache: Dict[str, Tuple[float, Tuple[float, float, float, float]]] = {}
 
     # ================================================================ kapasite
     def slots(self) -> int:
@@ -691,7 +697,10 @@ class FuturesBot(TradingBot):
         self.last_signals = list(signals)
         outcome: Dict[str, str] = {}
         stop = "boş yer yok"
-        for sig in signals:              # En güçlüden: boş yer oldukça (dalga modunda ek pozisyon yalnızca dalgada)
+        pending = list(signals)
+        while pending:                   # En güçlüden: boş yer oldukça (dalga modunda ek pozisyon yalnızca dalgada)
+            sig = self._next_signal(pending)       # Derinliğe göre boy açıksa kapasite önceliği
+            pending.remove(sig)
             if self.free_slots() <= 0 or self.state.pending_entry:
                 stop = "boş yer yok" if self.free_slots() <= 0 else "limit giriş emri bekliyor"
                 break
@@ -1391,7 +1400,7 @@ class FuturesBot(TradingBot):
         #    bakiyenin (serbest + açık pozisyon teminatları) 1/N'i, yalnız çöküşte × FUTURES_ISOLATED_SIZE_PCT
         with (ex.unthrottled() if fast else nullcontext()):     # Hızlı giriş: istekler arası CCXT beklemesi yok
             free = self._available_margin()
-            margin = self._entry_margin(sig, free)
+            margin = self._apply_depth_cap(sig, self._entry_margin(sig, free), lev)
             # Anlık tarama: sinyal fiyatı zaten az önce okunan son işlem fiyatıdır; emir defteri ayrıca istenmez (fiyat
             # yalnızca miktarı hesaplamak için gerekir, emir piyasa emridir)
             quick = sig.price if self._snap_live and cfg.futures_entry_order == "market" and sig.price > 0 else 0.0
@@ -1540,6 +1549,59 @@ class FuturesBot(TradingBot):
                     f"({fmt_usdt(capital)} {q}) az: pozisyonlar cüzdandaki serbest bakiyeyle (daha küçük) açılır. "
                     f"Para çektiyseniz ya da başka işlem açtıysanız normal; değilse Spot'tan vadeli cüzdana aktarın.")
         return None
+
+    # ================================================================ derinliğe göre boy
+    def _book_depth(self, symbol: str) -> Optional[Tuple[float, float, float, float]]:
+        """Emir defteri derinliği (DEPTH_CACHE_SEC önbellekli); okunamazsa None (sınır uygulanmaz, eski davranış)."""
+        now = self.time_fn()
+        hit = self._depth_cache.get(symbol)
+        if hit is not None and 0 <= now - hit[0] <= DEPTH_CACHE_SEC:
+            return hit[1]
+        try:
+            depth = self.exchange.book_depth(symbol)
+        except (FuturesError, requests.RequestException) as exc:
+            log.warning("%s emir defteri okunamadı (derinliğe göre boy uygulanmadı): %s", symbol, exc)
+            return None
+        self._depth_cache[symbol] = (now, depth)
+        return depth
+
+    def _depth_cap(self, symbol: str) -> float:
+        """İzin verilen en büyük pozisyon tutarı (USDT): ±%1 içindeki alış ve satış emirlerinden küçüğünün
+        FUTURES_DEPTH_CAP_PCT'si; kapalıysa ya da defter okunamazsa sonsuz."""
+        pct = self.cfg.futures_depth_cap_pct
+        if pct <= 0:
+            return math.inf
+        depth = self._book_depth(symbol)
+        return math.inf if depth is None else pct / 100 * min(depth[2], depth[3])
+
+    def _apply_depth_cap(self, sig: FuturesSignal, margin: float, lev: int) -> float:
+        """Derinliğe göre boy: pozisyon (teminat × kaldıraç) sınırı aşıyorsa teminat sınıra indirilir ve sinyale yazılır
+        (pozisyon mesajı). Pozisyon DEPTH_CHECK_MIN_NOTIONAL'ın altındaysa defter okunmaz (backtest: apply_depth)."""
+        want = margin * lev
+        if self.cfg.futures_depth_cap_pct <= 0 or want < DEPTH_CHECK_MIN_NOTIONAL:
+            return margin
+        cap = self._depth_cap(sig.symbol)
+        if cap >= want:
+            return margin
+        depth = self._depth_cache[sig.symbol][1]
+        sig.metrics["depth_cap"] = round(cap, 2)
+        sig.metrics["depth_ask"] = round(depth[2], 0)
+        sig.metrics["depth_bid"] = round(depth[3], 0)
+        log.info("%s derinliğe göre boy: pozisyon %.2f → %.2f USDT (±%%1: alış %.0f, satış %.0f)", sig.symbol, want, cap,
+                 depth[3], depth[2])
+        return cap / lev
+
+    def _next_signal(self, pending: List[FuturesSignal]) -> FuturesSignal:
+        """Kapasite önceliği (FUTURES_DEPTH_CAP_PCT): sıradaki pozisyon en güçlü sinyalin coininde derinlik sınırına
+        takılıyorsa kapasitesi (sınır ile istenen tutarın küçüğü) en büyük sinyal; takılmıyorsa, tek aday varsa ya da
+        pozisyon DEPTH_CHECK_MIN_NOTIONAL'ın altındaysa en güçlü sinyal (backtest: capacity_order)."""
+        first = pending[0]
+        if self.cfg.futures_depth_cap_pct <= 0 or len(pending) < 2:
+            return first
+        want = self._entry_margin(first, self._available_margin()) * int(self.cfg.futures_leverage)
+        if want < DEPTH_CHECK_MIN_NOTIONAL or self._depth_cap(first.symbol) >= want:
+            return first
+        return max(pending, key=lambda s: min(self._depth_cap(s.symbol), want))
 
     def _entry_margin(self, sig: FuturesSignal, free: float) -> float:
         """Girişin teminatı (USDT). Tek pozisyonda serbest bakiye × FUTURES_MARGIN_USAGE_PCT (eskisi gibi); dalga

@@ -30,6 +30,7 @@ try:
 except ImportError:  # pragma: no cover - kurulum durumuna bağlı
     ccxt = None
 
+from futures_depth import DEPTH_BOOK_LIMIT, depth_within
 from logger import get_logger
 
 log = get_logger()
@@ -659,6 +660,13 @@ class FuturesExchange:
             last = self.last_price(symbol)
             return last, last
         return bid, ask
+
+    def book_depth(self, symbol: str, pct: float = 1.0) -> Tuple[float, float, float, float]:
+        """Emir defteri derinliği (derinliğe göre boy): (en iyi alış, en iyi satış, orta fiyatın +pct% içindeki satış
+        emirleri USDT, -pct% içindeki alış emirleri USDT). DEPTH_BOOK_LIMIT seviye istenir (çok derin defterde alt sınır)."""
+        book = self._call(f"{symbol} emir defteri alınamadı", self.ex.fetch_order_book, ccxt_symbol(symbol),
+                          DEPTH_BOOK_LIMIT)
+        return depth_within(book, pct)
 
     def last_price(self, symbol: str) -> float:
         ticker = self._call(f"{symbol} fiyat alınamadı", self.ex.fetch_ticker, ccxt_symbol(symbol))

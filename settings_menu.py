@@ -82,6 +82,14 @@ DD_SCALE_HINT = ("Düşüşte küçültme (rapor 24 araştırması; 2020-2026, 1
                  "hesap ayakta kaldı (kapalıyken 2021'de eridi). %50 boy biraz daha temkinli (en kötü yıl %80) ama "
                  "ortanca getiri +%7.638. Kaldıraç ve çıkışlar değişmez; zarar kes fitilin ortasından dolarsa yine "
                  "eriyor, kill-switch yine sık devreye girebilir.")
+# Derinliğe göre boy (likidite araştırması; varsayılan kapalı) ve backtestte emir defteri kayması
+DEPTH_CAP_CHOICES = (0, 7.5, 10, 12.5)
+DEPTH_HINT = ("Derinliğe göre boy (likidite araştırması, Binance'in ölçülen emir defteri derinliğiyle 2023-2026): "
+              "stratejinin işlem başı kazancı küçük (~%0.27); pozisyon onlarca bin USDT'yi geçince piyasa emri defteri "
+              "tüketip bu kazancı yiyor. Şimdiki boyutlama hesap büyüyünce kayma yüzünden eriyor; pozisyonu ±%1 içindeki "
+              "küçük tarafın %10'uyla sınırlamak + aynı anda düşen coinlerden kapasitesi büyük olanı seçmek 1 milyon "
+              "USDT'lik hesapta +1,06 milyon kazandı (yıllık ~275 bin; kayma iki katı olsa da kârlı). Hesap küçükken "
+              "etkisi yok (pozisyon 1.000 USDT altındaysa defter okunmaz).")
 PHASE9_HINT = ("Faz 9 testi (rapor 17 araştırması; 2020-2026, 1 dk, 10 çekilişin ortancası): dalgada (≥8 coin düşerken) "
                "açılan ilk pozisyonu 45 yerine 60 dk tutmak, mevcut ayarın üstünde işlem sayısını değiştirmeden bileşiksiz "
                "getiriyi +%332 / +%212'den +%341 / +%222'ye, son 12 ayı +%81'den +%120'ye çıkardı ve hiçbir yılda geride "
@@ -469,6 +477,9 @@ PAGES: Dict[str, Page] = {
             fmt=_off("Küçültme yok", lambda v: f"Zirve −%{v:g}"), show=lambda cfg: is_futures(cfg.strategy)),
         Row("FUTURES_DD_SCALE_SIZE_PCT", icon="📏", values=DD_SIZE_CHOICES, fmt=lambda v: f"Boy %{v:g}",
             show=lambda cfg: is_futures(cfg.strategy) and cfg.futures_dd_scale_pct > 0),
+        Row("FUTURES_DEPTH_CAP_PCT", icon="🧱", values=DEPTH_CAP_CHOICES,
+            fmt=_off("Defter sınırı yok", lambda v: f"Defter %{v:g}"), show=lambda cfg: is_futures(cfg.strategy)),
+        Row("FUTURES_BACKTEST_DEPTH", name="📚 Backtestte emir defteri kayması", show=lambda cfg: is_futures(cfg.strategy)),
         Row("DAILY_LOSS_LIMIT_PCT", values=(0, 2, 3, 5), cb="dl", fmt=_off("Limit yok", lambda v: f"Gün -%{v:g}")),
         Row("DAILY_PROFIT_TARGET_PCT", icon="🎯", values=(0, 3, 5, 10), fmt=_off("Hedef yok", lambda v: f"+%{v:g}")),
         Row("LOSS_STREAK_LIMIT", values=(0, 2, 3, 4), cb="ls", fmt=_off("Seri yok", lambda v: f"{v} SL")),
@@ -1173,7 +1184,7 @@ class SettingsMenu:
         frozen = bot.freeze_note()
         futures = is_futures(cfg.strategy)
         return (f"🧯 <b>Risk Sigortaları</b>\n{LINE}\n"
-                f"{self.kill_line()}\n" + (self.dd_line() if futures else "") +
+                f"{self.kill_line()}\n" + (self.dd_line() + self.depth_line() if futures else "") +
                 f"📉 Günlük zarar limiti: {daily} | bugün: {fmt_signed(day_pnl)} {q}\n"
                 f"🎯 Günlük kâr hedefi: {target}\n🔁 Zarar serisi sigortası: {streak}\n"
                 f"⏳ Her çıkıştan sonra aynı coine bekleme: "
@@ -1183,7 +1194,16 @@ class SettingsMenu:
                 f"{frozen or '▶️ Alımlar dondurulmamış'}\n{LINE}\n"
                 "<i>Sigortalar yalnızca YENİ alımları durdurur; açık pozisyonların takibi sürer. Kill-switch ise "
                 "her şeyi kapatıp botu kilitler. Diğerleri: /ayar ANAHTAR DEĞER"
-                + (f"\n{esc(DD_SCALE_HINT)}" if futures else "") + "</i>")
+                + (f"\n{esc(DD_SCALE_HINT)}\n{esc(DEPTH_HINT)}" if futures else "") + "</i>")
+
+    def depth_line(self) -> str:
+        """Risk sayfasında derinliğe göre boy ve backtestteki emir defteri kayması durumu."""
+        cfg = self.cfg
+        cap = (f"pozisyon, girişten önce fiyatın ±%1 içindeki alış ve satış emirlerinden küçük olanın "
+               f"%{cfg.futures_depth_cap_pct:g}'iyle sınırlı (1.000 USDT altında bakılmaz); aynı anda birden çok "
+               f"sinyalde kapasitesi büyük olan önce" if cfg.futures_depth_cap_pct > 0 else "kapalı")
+        bt = "açık (ölçülen derinlik)" if cfg.futures_backtest_depth else "kapalı (kayma büyüklükten bağımsız)"
+        return f"🧱 Derinliğe göre boy: {cap}\n📚 Backtestte emir defteri kayması: {bt}\n"
 
     def dd_line(self) -> str:
         """Risk sayfasında düşüşte küçültme durumu: kayıtlı sermaye zirvesi, şu anki düşüş ve sıradaki pozisyonun boyu."""

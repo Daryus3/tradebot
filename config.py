@@ -577,6 +577,14 @@ def dd_scale_factor(threshold_pct: float, size_pct: float, capital: float, peak:
     return size_pct / 100 if (1 - capital / peak) * 100 >= threshold_pct - 1e-9 else 1.0
 
 
+# Derinliğe göre boy (Kasım 2026, likidite araştırması; varsayılan kapalı; README "Likidite tavanı"):
+#   FUTURES_DEPTH_CAP_PCT = pozisyon tutarı, girişten hemen önce emir defterinde fiyatın ±%1 içindeki alış ve satış
+#       emirlerinden küçük olanın bu yüzdesiyle sınırlı (0 = kapalı). Aynı anda birden çok coin sinyal verdiğinde,
+#       pozisyon bu sınıra takılıyorsa sıra kapasitesi büyük olan coine geçer (takılmıyorsa eski sıra). Pozisyon 1.000
+#       USDT'nin altındaysa defter okunmaz (gecikme eklenmez). Ölçülen derinlikle (2023-2026) şimdiki boyutlama hesap
+#       büyüyünce kayma yüzünden eriyor; %10 + öncelik 1 milyon USDT'lik hesapta +1,06 milyon (yıllık ~275 bin).
+#   FUTURES_BACKTEST_DEPTH = backtestte büyük pozisyonların emir defteri kayması (2023'ten itibaren Binance'in ölçülen
+#       derinliği, öncesi hacimden tahmin; ilk çalıştırmada ~1 GB indirilir). false = eski hesap (kayma büyüklükten bağımsız).
 def futures_dd_factor(cfg, capital: float, peak: float) -> float:
     """dd_scale_factor, ayarlardaki FUTURES_DD_SCALE_PCT / FUTURES_DD_SCALE_SIZE_PCT ile."""
     return dd_scale_factor(float(getattr(cfg, "futures_dd_scale_pct", 0.0) or 0.0),
@@ -927,6 +935,9 @@ class Config:
     # Düşüşte küçültme (bkz. dd_scale_factor üstündeki açıklama): sermaye zirvenin %X altındayken pozisyon boyu %Y
     futures_dd_scale_pct: float = 0.0      # Zirveden düşüş eşiği (%; 0 = kapalı)
     futures_dd_scale_size_pct: float = 60.0   # Eşik aşılınca yeni pozisyonların büyüklüğü (%)
+    # Derinliğe göre boy (bkz. futures_dd_factor üstündeki açıklama): ±%1 içindeki küçük tarafın yüzdesi (0 = kapalı)
+    futures_depth_cap_pct: float = 0.0
+    futures_backtest_depth: bool = True    # Backtest: büyük pozisyonların emir defteri kayması (ölçülen derinlik)
     futures_leverage: int = 2             # Kaldıraç 1-20; her girişten hemen önce Binance'te ayarlanır
     futures_margin_usage_pct: float = 95.0  # Serbest bakiyenin teminata giden yüzdesi (bileşik; kalan pay komisyon için)
     futures_volume_ratio: float = 2.5      # Hacim onayı: sinyal mumu hacmi önceki 20 mumun ortalamasının en az bu katı
@@ -1287,6 +1298,8 @@ class Config:
             errors.append("FUTURES_DD_SCALE_PCT 0-90 arasında olmalı (sermayenin zirveden düşüşü %; 0 = kapalı)")
         if not 5 <= self.futures_dd_scale_size_pct <= 100:
             errors.append("FUTURES_DD_SCALE_SIZE_PCT 5-100 arasında olmalı (düşüşteki pozisyon büyüklüğü %; 100 = tam)")
+        if not (self.futures_depth_cap_pct == 0 or 1 <= self.futures_depth_cap_pct <= 50):
+            errors.append("FUTURES_DEPTH_CAP_PCT 0 (kapalı) ya da 1-50 olmalı (emir defterinde ±%1 içindeki küçük tarafın %'si)")
         if self.futures_universe_mode not in FUTURES_UNIVERSE_MODES:
             errors.append("FUTURES_UNIVERSE_MODE şunlardan biri olmalı: " + ", ".join(FUTURES_UNIVERSE_MODES))
         if self.futures_confirm not in FUTURES_CONFIRMS:
@@ -1565,6 +1578,8 @@ def load_config(env_file: Optional[str] = None, mode_override: Optional[str] = N
         futures_wave_hold_breadth=_env_int("FUTURES_WAVE_HOLD_BREADTH", 8),
         futures_dd_scale_pct=_env_float("FUTURES_DD_SCALE_PCT", 0.0),
         futures_dd_scale_size_pct=_env_float("FUTURES_DD_SCALE_SIZE_PCT", 60.0),
+        futures_depth_cap_pct=_env_float("FUTURES_DEPTH_CAP_PCT", 0.0),
+        futures_backtest_depth=_env_bool("FUTURES_BACKTEST_DEPTH", True),
         futures_leverage=_env_int("FUTURES_LEVERAGE", 2),
         futures_margin_usage_pct=_env_float("FUTURES_MARGIN_USAGE_PCT", 95.0),
         futures_volume_ratio=_env_float("FUTURES_VOLUME_RATIO", 2.5),
@@ -1992,6 +2007,13 @@ def _setting_notes(cfg: Config) -> List[str]:
                          f"ortanca 12 ay getirisi +%10.271 → +%9.976, %90'ı aşan düşüş yaşayan hesap 49 → 0, kayma 4 "
                          f"katında hesap ayakta kaldı. Kötümser stop dolumunda yine eriyor, kill-switch sık devreye "
                          f"girebilir (71 hesabın 34'ü).")
+        if cfg.futures_depth_cap_pct > 0:
+            notes.append(f"FUTURES_DEPTH_CAP_PCT={cfg.futures_depth_cap_pct:g} (derinliğe göre boy): pozisyon 1.000 USDT'yi "
+                         f"geçecekse girişten hemen önce emir defteri okunur (~0.1 sn) ve tutar, fiyatın ±%1 içindeki alış "
+                         f"ve satış emirlerinden küçük olanın %{cfg.futures_depth_cap_pct:g}'iyle sınırlanır; aynı anda "
+                         f"birden çok sinyalde sınıra takılınca kapasitesi büyük olan coin önce. Ölçülen derinlikle "
+                         f"(2023-2026) %10 + öncelik, 1 milyon USDT'lik hesapta +1,06 milyon (yıllık ~275 bin) kazandı; "
+                         f"şimdiki boyutlama aynı hesabı eritti. Hesap küçükken etkisi yok.")
         if cfg.futures_leverage > 10:
             notes.append(f"FUTURES_LEVERAGE={cfg.futures_leverage}: likidasyon ~%{futures_liq_distance_pct(cfg.futures_leverage, cfg.futures_mmr_pct):.1f} "
                          f"fiyat hareketinde; ani fitillerde zarar kes kayabilir. Backtestte kaldıraç arttıkça hesap daha "

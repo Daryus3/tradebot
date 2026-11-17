@@ -1816,8 +1816,19 @@ bağımsız (%0.02) sayar. Gerçekte büyük bir piyasa emri emir defterini tük
   Bu noktada kaldıraç 3x'e indirilirse kâr aynı kalır, düşüş %22'den %13'e iner.
 - Sınanamayanlar: emri saniyelere bölmek (tik verisi yok), büyük boyda limit (maker) giriş (Faz 4'te dolmayan emirler en
   kârlı işlemlerdi), evrene daha derin coinler eklemek (veri gerekir).
-- Bu kurallar henüz botta yok. Hesap küçükken (pozisyon birkaç bin USDT'nin altında) hiçbir şey değiştirmezler: sınır
-  tipik olarak 10-70 bin USDT pozisyonda başlar.
+- **Botta (Kasım 2026):** `FUTURES_DEPTH_CAP_PCT` (varsayılan 0 = kapalı, önerilen 10; Telegram → 🧯 Risk sigortaları →
+  🧱 Defter %10). Canlı bot, pozisyon 1.000 USDT'yi geçecekse girişten hemen önce emir defterini okur (500 seviye, ~0.1
+  sn) ve tutarı ±%1 içindeki küçük tarafın %10'uyla sınırlar. Aynı taramada birden çok sinyal varsa ve sıradaki pozisyon
+  sınıra takılıyorsa kapasitesi büyük olan coini seçer. Defter okunamazsa sınır uygulanmaz (eski davranış). Hesap
+  küçükken hiçbir şey değişmez: sınır tipik olarak 10-70 bin USDT'lik pozisyonda başlar.
+- **Backtestte:** `FUTURES_BACKTEST_DEPTH=true` (varsayılan; Telegram → 📚 Backtestte emir defteri kayması) büyük
+  pozisyonların kaymasını hesaba katar. 2023'ten itibaren Binance'in ölçülen derinliğini kullanır (günlük bookDepth
+  dosyaları, sinyal günleri için; ilk çalıştırmada ~1 GB indirilir, sonra `data/futures_cache/<COİN>/bookDepth`
+  önbelleğinden okunur). 2023 öncesinde ve eksik günlerde derinlik coinin 7 günlük ortalama günlük hacminden tahmin
+  edilir (yıllara göre ölçülen derinlik / hacim oranları, %1..5 ortanca şekli). Derinliğe göre boy açıkken aynı kural
+  ve kapasite önceliği backtestte de uygulanır. Rapor başlığında 📚 (toplam kayma) ve 📏 (sınıra takılan işlem) satırları
+  çıkar. "Tek kural değişince" bölümünde derinliğe göre boyun %7,5 / %10 / %12,5 çevresi ve "emir defteri kayması yok
+  (eski hesap)" kıyası vardır.
 
 ### 🏆 Strateji turnuvası (`--turnuva`)
 Hangi strateji türünün sizin dönemde işe yaradığını **tek komutla** görmek için:
@@ -1895,6 +1906,10 @@ karar için ortancaya ve en kötüye bakın. Çıkış taraması her gün dengel
   payı; ay ay işlem başı sonuç, kazanma, C toplamı, B hesabının o aydaki getirisi ve ay içindeki en büyük düşüşü; yığılma
   ayları olmadan C'nin toplamı ve B'nin "bu aylar yatay geçseydi" sonucu. Yığılma yoksa yılın en yoğun ayı yazılır. Son
   satır tüm yılların özeti (yığılma aylarında ve diğer aylarda işlem başı sonuç).
+- **📚 Emir defteri kayması / 📏 Derinliğe göre boy satırları** (rapor başlığında): 📚, büyük pozisyonların defteri
+  tüketmesinden gelen kaymanın A'daki toplamını (USDT) ve 2023 öncesinde derinliği hacimden tahmin edilen işlem sayısını
+  gösterir; 📏, derinliğe göre boy açıksa sınıra takılan işlem sayısını. `FUTURES_BACKTEST_DEPTH=false` ise ⚠️ satırı
+  büyük bakiyedeki sonuçların gerçekçi olmadığını hatırlatır (bkz. "Likidite tavanı").
 - **📉 Düşüşte küçültme satırı** (rapor başlığında, `FUTURES_DD_SCALE_PCT` açıkken): bakiye zirvesinin eşik kadar
   altındayken açılan pozisyonların küçük boyla açıldığını ve A'daki (tek hesap) kaç işlemin küçük boyla açıldığını
   gösterir. A ve B aynı kuralı kullanır; C (sabit tutar) kullanmaz.

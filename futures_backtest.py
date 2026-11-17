@@ -31,7 +31,7 @@ from collections import Counter
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -39,6 +39,7 @@ from config import (DATA_DIR, dd_scale_factor, format_crash_rules, futures_coin_
                     futures_liq_distance_pct, futures_long_windows, futures_modules, futures_scan_shifts,
                     futures_snapshot_on, futures_wave_cfg, futures_wave_rules, parse_crash_rules, scan_log_path)
 from futures_data import FuturesArchive, concat, resample, slice_range
+from futures_depth import DEPTH_CHECK_MIN_NOTIONAL, DepthBook, daily_volume_fn
 from strategy import (FUT_BAR_MS, FUT_HOUR_MS, breadth_flags, btc_trend_1h, crash_state, funding_per_bar,
                       futures_candidates, futures_entries, futures_features, isolated_factor, pick_signal, trend_at)
 
@@ -120,6 +121,8 @@ class FutData:
     minute_loader: Optional[Callable[[str], Dict[str, np.ndarray]]] = None
     breadth_shift: Dict[int, Tuple[int, np.ndarray]] = field(default_factory=dict)
     monthly_windows: bool = False
+    # Emir defteri derinliği (futures_depth.DepthBook): derinliğe göre boy ve kayma; run_cli gerektiğinde kurar
+    depth: Optional[DepthBook] = None
 
 
 def history_segments(end_ms: int, start_ms: Optional[int] = None) -> List[Segment]:
@@ -659,6 +662,12 @@ class SimParams:
     # (0 = kapalı; sabit tutarlı C senaryosunda uygulanmaz)
     dd_scale_pct: float = 0.0
     dd_scale_size_pct: float = 60.0
+    # Emir defteri derinliği (futures_depth; veri FutData.depth'te, yoksa ikisi de uygulanmaz): depth_cap_pct > 0 ise giriş
+    # tutarı girişten önceki 2 dk'da ±%1 içindeki alış / satış emirlerinin küçüğünün bu yüzdesiyle sınırlı ve aynı mumdaki
+    # sinyallerde sınıra takılınca kapasitesi büyük olan önce (FUTURES_DEPTH_CAP_PCT); depth_impact: piyasa emrinin defteri
+    # tüketmesinden gelen kayma giriş ve çıkışta kârdan düşülür (FUTURES_BACKTEST_DEPTH)
+    depth_cap_pct: float = 0.0
+    depth_impact: bool = False
     # Mum içi başabaş gerçekçiliği (bkz. be_retouch_prob): başabaşın tetiklendiği 1 dk mumda fiyat tabana geri dönmüş
     # olabilir. False = eski iyimser varsayım (yükselen mumda yalnızca kapanış tabanın altındaysa çıkılır).
     be_intrabar: bool = True
@@ -696,6 +705,8 @@ def params_from_cfg(cfg, **over) -> SimParams:
                   wave_hold_breadth=int(getattr(cfg, "futures_wave_hold_breadth", 8)),
                   dd_scale_pct=float(getattr(cfg, "futures_dd_scale_pct", 0.0) or 0.0),
                   dd_scale_size_pct=float(getattr(cfg, "futures_dd_scale_size_pct", 60.0)),
+                  depth_cap_pct=float(getattr(cfg, "futures_depth_cap_pct", 0.0) or 0.0),
+                  depth_impact=bool(getattr(cfg, "futures_backtest_depth", False)),
                   entry_lag_pct=entry_lag_for(cfg)[0])
     return replace(p, **over) if over else p
 
@@ -754,6 +765,8 @@ class FutTrade:
     be_bar: tuple = ()      # Başabaşın tetiklendiği mumda taban da görüldüyse o mum (açılış, lehte uç, ters uç, kapanış)
     be_q: float = -1.0      # O mumda tabana geri dönüş olasılığı (be_retouch_prob; -1 = böyle bir mum olmadı)
     dd_scaled: bool = False  # Düşüşte küçültmeyle (FUTURES_DD_SCALE_PCT) küçük boyla açıldı
+    depth_capped: bool = False  # Derinliğe göre boy sınırına takıldı (FUTURES_DEPTH_CAP_PCT)
+    impact_pct: float = 0.0  # Emir defteri kayması, giriş + çıkış (fiyat %; FUTURES_BACKTEST_DEPTH)
 
 
 @dataclass
@@ -1001,6 +1014,65 @@ def run_trade(p: SimParams, s: FutSignal, window: tuple, margin: float, notional
                     int(getattr(s, "breadth", 0)), be_bar=be_bar, be_q=be_q)
 
 
+def depth_cap_notional(p: SimParams, data: "FutData", s: "FutSignal") -> float:
+    """Derinliğe göre boy: girişte izin verilen en büyük pozisyon tutarı (kapalıysa / veri yoksa sonsuz)."""
+    if p.depth_cap_pct <= 0 or data.depth is None:
+        return math.inf
+    return p.depth_cap_pct / 100 * data.depth.cap_depth(s.symbol, s.close_ms)
+
+
+def apply_depth(p: SimParams, data: "FutData", s: "FutSignal", notional: float) -> Tuple[float, bool]:
+    """(tutar, sınıra takıldı mı). Canlıyla aynı: pozisyon DEPTH_CHECK_MIN_NOTIONAL'ın altındaysa defter okunmaz."""
+    if p.depth_cap_pct <= 0 or data.depth is None or notional < DEPTH_CHECK_MIN_NOTIONAL:
+        return notional, False
+    cap = depth_cap_notional(p, data, s)
+    return (cap, True) if cap < notional else (notional, False)
+
+
+def charge_impact(p: SimParams, data: "FutData", s: "FutSignal", tr: "FutTrade") -> None:
+    """Ölçülen (ya da tahmin edilen) emir defteri kayması: giriş ve çıkış kayması işlemin kârından düşülür; yalıtılmış
+    teminatta zarar teminatı aşamaz (likidasyon)."""
+    if not p.depth_impact or data.depth is None or tr.notional <= 0:
+        return
+    entry_side, exit_side = ("ask", "bid") if tr.side == "long" else ("bid", "ask")
+    imp = (data.depth.impact(tr.symbol, s.close_ms, entry_side, tr.notional)
+           + data.depth.impact(tr.symbol, tr.exit_ms, exit_side, tr.notional))
+    if imp <= 0:
+        return
+    cost = tr.notional * imp / 100
+    pnl = max(tr.pnl - cost, -tr.margin) if tr.margin > 0 else tr.pnl - cost
+    tr.fees += tr.pnl - pnl
+    tr.pnl = pnl
+    if tr.margin > 0:
+        tr.roe_pct = pnl / tr.margin * 100
+    tr.impact_pct = imp
+
+
+def capacity_order(signals: Sequence["FutSignal"], p: SimParams, data: "FutData",
+                   want: Callable[[int], float]) -> Iterable["FutSignal"]:
+    """Kapasite önceliği (derinliğe göre boy açıkken): aynı mumdaki sinyallerden sıradaki, pozisyon derinlik sınırına
+    takılıyorsa kapasitesi (sınır ile istenen tutarın küçüğü) en büyük olandır; takılmıyorsa eski sıra (puan) korunur.
+    `want(mum ms)` sıradaki pozisyonun istenen tutarı (o andaki bakiyeyle; canlı: FuturesBot._next_signal)."""
+    if p.depth_cap_pct <= 0 or data.depth is None:
+        yield from signals
+        return
+    i, n = 0, len(signals)
+    while i < n:
+        j = i
+        while j < n and signals[j].close_ms == signals[i].close_ms:
+            j += 1
+        group = list(signals[i:j])
+        while group:
+            pick = 0
+            if len(group) > 1:
+                need = want(group[0].close_ms)
+                if need >= DEPTH_CHECK_MIN_NOTIONAL and depth_cap_notional(p, data, group[0]) < need:
+                    caps = [min(depth_cap_notional(p, data, x), need) for x in group]
+                    pick = int(np.argmax(caps))
+            yield group.pop(pick)
+        i = j
+
+
 def slot_share(p: SimParams, n_open: int) -> float:
     """Yeni pozisyonun teminatı, kullanılabilir bakiyenin kaçta kaçı (config.futures_slot_share ile aynı kural): tek
     pozisyonda 1; dalga modunda ilk pozisyon 1, ek pozisyonlar x = extra_size_pct / 100 ağırlıkta, toplam 1 + (N-1)·x."""
@@ -1075,7 +1147,11 @@ def simulate(p: SimParams, data: FutData, signals: Sequence[FutSignal], windows:
     usage = p.margin_usage_pct / 100
     kill_level = p.start_capital * (1 - p.kill_pct / 100) if p.kill_pct else -1.0
     peak = p.start_capital                  # Düşüşte küçültme: gerçekleşen bakiyenin zirvesi
-    for s in signals:
+
+    def want(_t: int) -> float:             # Kapasite önceliği: sıradaki pozisyonun istenen tutarı
+        return min(equity * usage * p.leverage * dd_scale_factor(p.dd_scale_pct, p.dd_scale_size_pct, equity, peak),
+                   p.max_notional)
+    for s in capacity_order(signals, p, data, want):
         if s.close_ms < busy_until:
             skipped["açık pozisyon vardı"] += 1
             continue
@@ -1092,12 +1168,14 @@ def simulate(p: SimParams, data: FutData, signals: Sequence[FutSignal], windows:
             continue
         factor = isolated_factor(p.isolated_size_pct, p.isolated_breadth, s.breadth)   # Yalnız çöküş: küçük
         ddf = 1.0 if fixed_notional else dd_scale_factor(p.dd_scale_pct, p.dd_scale_size_pct, equity, peak)
+        capped = False
         if fixed_notional:
             notional = fixed_notional * factor
             margin = notional / p.leverage
         else:
             margin = equity * usage * factor * ddf
             notional = min(margin * p.leverage, p.max_notional)
+            notional, capped = apply_depth(p, data, s, notional)
             margin = notional / p.leverage
         if not fixed_notional and notional < min_notional(s.symbol):
             skipped["minimum emir tutarının altında"] += 1
@@ -1116,6 +1194,8 @@ def simulate(p: SimParams, data: FutData, signals: Sequence[FutSignal], windows:
             busy_until = s.close_ms + p.limit_ttl_min * MIN_MS
             last_entry = s.close_ms
             continue
+        charge_impact(p, data, s, tr)
+        tr.depth_capped = capped
         equity = equity + tr.pnl if fixed_notional else max(0.0, equity + tr.pnl)
         tr.equity_after = equity
         tr.reentry = reentry
@@ -1226,7 +1306,12 @@ def simulate_slots(p: SimParams, data: FutData, signals: Sequence[FutSignal], wi
                     p.dd_scale_pct, p.dd_scale_size_pct, equity, peak) < DEFAULT_MIN_NOTIONAL:
                 ruined, stop = tr.exit_ms, True
 
-    for s in signals:
+    def want(t: int) -> float:              # Kapasite önceliği: sıradaki pozisyonun istenen tutarı (o andaki bakiyeyle)
+        realize(t)
+        ddf_now = dd_scale_factor(p.dd_scale_pct, p.dd_scale_size_pct, equity, peak)
+        return min(equity * usage * p.leverage * slot_share(p, len(heap)) * ddf_now, p.max_notional)
+
+    for s in capacity_order(signals, p, data, want):
         realize(s.close_ms)
         if stop:
             break
@@ -1253,12 +1338,14 @@ def simulate_slots(p: SimParams, data: FutData, signals: Sequence[FutSignal], wi
         factor = isolated_factor(p.isolated_size_pct, p.isolated_breadth, s.breadth)
         share = slot_share(p, len(heap))
         ddf = 1.0 if fixed_notional else dd_scale_factor(p.dd_scale_pct, p.dd_scale_size_pct, equity, peak)
+        capped = False
         if fixed_notional:                  # fixed_notional = toplam / N (evaluate): eşit büyüklükte değişmez
             notional = fixed_notional * slots * share * factor
             margin = notional / p.leverage
         else:
             margin = min(equity * usage * share * factor, max(0.0, equity * usage - used)) * ddf
             notional = min(margin * p.leverage, p.max_notional)
+            notional, capped = apply_depth(p, data, s, notional)
             margin = notional / p.leverage
             if notional < min_notional(s.symbol):
                 skipped["minimum emir tutarının altında"] += 1
@@ -1283,6 +1370,8 @@ def simulate_slots(p: SimParams, data: FutData, signals: Sequence[FutSignal], wi
         if tr is None:
             skipped[f"limit emir {p.limit_ttl_min} dk içinde dolmadı"] += 1
             continue
+        charge_impact(p, data, s, tr)
+        tr.depth_capped = capped
         tr.slot = len(heap) + 1
         tr.reentry = reentry
         tr.wave_rule = bool(s.metrics.get("wave_rule"))
@@ -1673,6 +1762,7 @@ DD_SIZE_TRIES = (50.0, 75.0)                    # Düşüşte küçültme boyu (
 LOSS_COOLDOWN_TRIES = (120, 480)                # Zarardan sonra bekleme (dk)
 SYMBOL_COOLDOWN_TRIES = (15, 30)                # Her işlemden sonra aynı coine bekleme (dk)
 SLIPPAGE_TRIES = (2, 3, 5)                      # Kayma: mevcut değerin bu katı
+DEPTH_CAP_TRIES = (7.5, 10.0, 12.5)             # Derinliğe göre boy (±%1 içindeki küçük tarafın %'si)
 
 
 def _same(a: float, b: float) -> bool:
@@ -1714,11 +1804,18 @@ def exit_variant_rows(cfg, ev) -> List[Tuple[str, "Evaluation"]]:
     return rows
 
 
-def size_variant_rows(cfg, ev) -> List[Tuple[str, "Evaluation"]]:
+def size_variant_rows(cfg, ev, depth: bool = False) -> List[Tuple[str, "Evaluation"]]:
     """Pozisyon büyüklüğü ve dalga modu: teminat kullanımı, en fazla pozisyon, ek pozisyon boyu ve kapısı, yalnız çöküş
-    boyu, dalgada yeniden giriş eşiği, düşüşte küçültme (açıksa çevresi, kapalıysa %30 / %60)."""
+    boyu, dalgada yeniden giriş eşiği, düşüşte küçültme (açıksa çevresi, kapalıysa %30 / %60), derinlik verisi varsa
+    derinliğe göre boy (açıksa çevresi, kapalıysa %10 + kapasite önceliği)."""
     base = params_from_cfg(cfg)
     rows: List[Tuple[str, "Evaluation"]] = []
+    if depth and base.depth_cap_pct > 0:
+        rows.append(("Derinliğe göre boy kapalı", ev(depth_cap_pct=0.0)))
+        rows += [(f"Derinliğe göre boy %{x:g} (şimdi %{base.depth_cap_pct:g})", ev(depth_cap_pct=x))
+                 for x in DEPTH_CAP_TRIES if not _same(x, base.depth_cap_pct)]
+    elif depth:
+        rows.append(("Derinliğe göre boy %10 + kapasite önceliği", ev(depth_cap_pct=10.0)))
     for frac in MARGIN_TRIES:
         u = float(round(base.margin_usage_pct * frac))     # Canlıda yazılacak tam sayı (ör. 95 → 71, 57)
         rows.append((f"Teminat kullanımı %{u:g} (şimdi %{base.margin_usage_pct:g})", ev(margin_usage_pct=u)))
@@ -1799,17 +1896,21 @@ def window_variant_rows(cfg, other, tag: str = "") -> List[Tuple[str, "Evaluatio
     return rows
 
 
-def cost_variant_rows(cfg, ev) -> List[Tuple[str, "Evaluation"]]:
-    """Maliyet stresi: kayma 2 / 3 / 5 katı, komisyon 2 katı, kötümser stop dolumu."""
+def cost_variant_rows(cfg, ev, depth: bool = False) -> List[Tuple[str, "Evaluation"]]:
+    """Maliyet stresi: kayma 2 / 3 / 5 katı, komisyon 2 katı, kötümser stop dolumu; emir defteri kayması açıksa onsuz
+    (eski hesap) kıyas."""
     base = params_from_cfg(cfg)
+    pre = ([("Emir defteri kayması yok (eski hesap: kayma büyüklükten bağımsız)", ev(depth_impact=False))]
+           if depth and base.depth_impact else [])
     rows = [(f"Kayma {k} kat (%{base.slippage_pct * k:.2f})", ev(slippage_pct=base.slippage_pct * k))
             for k in SLIPPAGE_TRIES]
     rows.append(("Komisyon 2 kat", ev(taker_fee=base.taker_fee * 2, maker_fee=base.maker_fee * 2)))
     rows.append(("Kötümser stop dolumu (fitilin yarısı)", ev(harsh_stops=True)))
-    return rows
+    return pre + rows
 
 
-def _crash_variant_rows(cfg, signals, minute: bool, tag: str, ev, other, phase6) -> List[Tuple[str, object]]:
+def _crash_variant_rows(cfg, signals, minute: bool, tag: str, ev, other, phase6,
+                        depth: bool = False) -> List[Tuple[str, object]]:
     """Çöküş taktiğinin "tek kural değişince" satırları (gruplu; değeri None olan satır grup başlığı). `ev(sinyaller,
     **SimParams değişikliği)`, `other(**cfg değişikliği)` (yeni sinyallerle) ve `phase6(**over)` değerlendirir;
     variant_rows önce taslak fonksiyonlarla satırları sayar, sonra gerçek değerlendirmeyle çağırır."""
@@ -1825,7 +1926,7 @@ def _crash_variant_rows(cfg, signals, minute: bool, tag: str, ev, other, phase6)
              ("Başabaş +%5 → +%2", ev(be_enabled=True, be_trigger_pct=5.0, be_floor_pct=2.0))]
             + exit_variant_rows(cfg, ev) + [tp_order] + phase8_rows(cfg, ev) + phase9_rows(cfg, ev)
             + [("Pozisyon büyüklüğü ve dalga modu", None)]
-            + size_variant_rows(cfg, ev) + cascade_rows(cfg, ev, signals) + phase6_rows(cfg, ev, signals, phase6)
+            + size_variant_rows(cfg, ev, depth) + cascade_rows(cfg, ev, signals) + phase6_rows(cfg, ev, signals, phase6)
             + [("Giriş kuralı, tarama ve bekleme", None)]
             + [(f"Çöküş eşiği %{cfg.futures_crash_drop_pct - 2:g}{tag}",
                 other(futures_crash_drop_pct=cfg.futures_crash_drop_pct - 2)),
@@ -1838,7 +1939,7 @@ def _crash_variant_rows(cfg, signals, minute: bool, tag: str, ev, other, phase6)
             + ([("5 dk'da bir tarama (dakikalık tarama kapalı)",
                  ev([s for s in signals if not s.close_ms % FUT_BAR_MS]))] if minute else [])
             + wait_variant_rows(cfg, ev)
-            + [("Maliyet ve gerçekçilik", None)] + cost_variant_rows(cfg, ev) + realism_rows(cfg, ev))
+            + [("Maliyet ve gerçekçilik", None)] + cost_variant_rows(cfg, ev, depth) + realism_rows(cfg, ev))
 
 
 def variant_rows(cfg, data: FutData, signals, windows,
@@ -1857,6 +1958,8 @@ def variant_rows(cfg, data: FutData, signals, windows,
             c2 = replace(cfg, **changes, **({"futures_minute_scan": False} if minute else {}))
             sigs, _f = find_signals(c2, data)
             load_windows(data, sigs, window_minutes(cfg), cache=windows)
+            if data.depth is not None:
+                data.depth.prefetch([(x.symbol, x.close_ms) for x in sigs])
             return evaluate(params_from_cfg(c2), data, sigs, windows)
         wave_cache: List[List[FutSignal]] = []
 
@@ -1869,14 +1972,17 @@ def variant_rows(cfg, data: FutData, signals, windows,
                     sigs, _f = find_signals(replace(cfg, **PHASE6_WAVE, **({"futures_minute_scan": False}
                                                                            if minute else {})), data)
                     load_windows(data, sigs, window_minutes(cfg), cache=windows)
+                    if data.depth is not None:
+                        data.depth.prefetch([(x.symbol, x.close_ms) for x in sigs])
                     wave_cache.append(sigs)
             return evaluate(params_from_cfg(cfg, **over), data, wave_cache[0], windows)
 
         def stub(*_a, **_k):
             return 0
-        total = sum(1 for _n, e in _crash_variant_rows(cfg, signals, minute, tag, stub, stub, stub) if e is not None)
+        depth = data.depth is not None
+        total = sum(1 for _n, e in _crash_variant_rows(cfg, signals, minute, tag, stub, stub, stub, depth) if e is not None)
         bar = _RowProgress("Tek kural değişince", total, progress)
-        return _crash_variant_rows(cfg, signals, minute, tag, bar.wrap(ev), bar.wrap(other), bar.wrap(phase6))
+        return _crash_variant_rows(cfg, signals, minute, tag, bar.wrap(ev), bar.wrap(other), bar.wrap(phase6), depth)
     out = [("Başabaş kalkanı kapalı", ev(be_enabled=False)),
            ("Zaman stopu 30 dk", ev(hold_min=30)),
            ("Zaman stopu 120 dk", ev(hold_min=120)),
@@ -3346,6 +3452,31 @@ def monthly_cluster_lines(rows: Sequence[dict]) -> List[str]:
     return L
 
 
+DEPTH_MEASURED_FROM = _ms("2023-01-01")      # Arşivde bookDepth'in başladığı gün (öncesi hacimden tahmin)
+
+
+def depth_lines(p: SimParams, data: FutData, res: FutResult) -> List[str]:
+    """Rapor başlığı: emir defteri kayması ve derinliğe göre boy (açıksa); kapalıysa büyük bakiyede uyarı."""
+    out = []
+    if p.depth_cap_pct > 0 and data.depth is not None:
+        capped = sum(1 for tr in res.trades if tr.depth_capped)
+        out.append(f"📏 Derinliğe göre boy: pozisyon, girişten önceki 2 dk'da fiyatın ±%1 içindeki alış ve satış "
+                   f"emirlerinden küçük olanın %{p.depth_cap_pct:g}'iyle sınırlı (1.000 USDT altındaki pozisyonda "
+                   f"bakılmaz); aynı anda birden çok sinyalde sınıra takılınca kapasitesi büyük olan önce. A'da "
+                   f"{capped} / {len(res.trades)} işlem sınıra takıldı")
+    if p.depth_impact and data.depth is not None:
+        cost = sum(tr.notional * tr.impact_pct / 100 for tr in res.trades)
+        early = sum(1 for tr in res.trades if tr.entry_ms < DEPTH_MEASURED_FROM)
+        out.append("📚 Emir defteri kayması: büyük pozisyon defteri tüketir; giriş ve çıkışta pozisyon büyüklüğüne göre "
+                   "(2023'ten itibaren Binance'in ölçülen derinliği" + (f", öncesi 7 günlük hacimden tahmin: {early} "
+                                                                       f"işlem" if early else "")
+                   + f"). A'da toplam kayma {_num(cost, 0)} USDT")
+    elif not p.depth_impact:
+        out.append("⚠️ Kayma pozisyon büyüklüğünden bağımsız sayıldı (FUTURES_BACKTEST_DEPTH=false): büyük bakiyede A "
+                   "gerçekçi değil (ölçülen derinlikle pozisyon onlarca bin USDT'yi geçince kayma kârı yer)")
+    return out
+
+
 def _noise_band(draws: Optional[Sequence[float]]) -> Optional[Tuple[float, float]]:
     """Çekiliş duyarlılığından şans bandı: aynı ayarın farklı mum içi başabaş çekilişlerindeki son bakiyelerinin
     ortancaya oranı (en düşük, en yüksek). En az 3 çekiliş yoksa None."""
@@ -3392,6 +3523,7 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
                    f"ilk pozisyon bakiyenin %{p.margin_usage_pct * slot_share(p, 0):.1f}'i, ek pozisyonlar "
                    f"%{p.margin_usage_pct * slot_share(p, 1):.1f}'i (en fazla {p.max_positions} pozisyon, bileşik)")
     L.append(f"Kaldıraç {p.leverage}x isolated | teminat: {margin_text} | başlangıç {p.start_capital:g} USDT")
+    L.extend(depth_lines(p, data, res))
     if p.dd_scale_pct > 0:
         small = sum(1 for tr in res.trades if tr.dd_scaled)
         L.append(f"📉 Düşüşte küçültme: bakiye zirvesinin %{p.dd_scale_pct:g} altındayken yeni pozisyonlar "
@@ -3708,6 +3840,19 @@ def period(cfg, days: Optional[int], end_ms: Optional[int], full_history: bool) 
     return segments[0].start_ms, end, segments
 
 
+def attach_depth(cfg, data: FutData, signals: Sequence[FutSignal],
+                 progress: Optional[Callable[[str], None]] = None) -> Optional[DepthBook]:
+    """Derinliğe göre boy ya da emir defteri kayması açıksa (FUTURES_DEPTH_CAP_PCT / FUTURES_BACKTEST_DEPTH) derinlik
+    deposunu kurar ve sinyal günlerinin dosyalarını (2023'ten itibaren; ilk seferde arşivden) önceden okur."""
+    p = params_from_cfg(cfg)
+    if not (p.depth_impact or p.depth_cap_pct > 0) or data.archive is None:
+        return None
+    if data.depth is None:
+        data.depth = DepthBook(data.archive.book_depth, daily_volume_fn(data.archive))
+    data.depth.prefetch([(s.symbol, s.close_ms) for s in signals], progress=progress)
+    return data.depth
+
+
 def run_cli(cfg, days: Optional[int], end_ms: Optional[int], out_dir: Path, chart: bool = True,
             full_history: bool = False, exit_interval: str = "1m", sensitivity: bool = True,
             progress: Callable[[str], None] = print) -> Tuple[str, Optional[Path], Evaluation]:
@@ -3720,6 +3865,7 @@ def run_cli(cfg, days: Optional[int], end_ms: Optional[int], out_dir: Path, char
     signals, funnel = find_signals(cfg, data, progress) if futures_scan_shifts(cfg) else find_signals(cfg, data)
     progress(f"   {len(signals)} sinyal; çıkışlar için mumlar okunuyor...")
     windows = load_windows(data, signals, window_minutes(cfg), progress)
+    attach_depth(cfg, data, signals, progress)
     ev = evaluate(params_from_cfg(cfg), data, signals, windows)
     levs = grid = variants = None
     if sensitivity:

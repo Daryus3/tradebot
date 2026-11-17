@@ -62,6 +62,48 @@ def parse_csv(raw: bytes) -> Dict[str, np.ndarray]:
     return out
 
 
+DEPTH_LEVELS = 5                            # bookDepth: fiyatın ±%1 … ±%5 içindeki kümülatif emir tutarı
+
+
+def empty_depth() -> Dict[str, np.ndarray]:
+    return {"t": np.zeros(0, dtype=np.int64), "ask": np.zeros((0, DEPTH_LEVELS), dtype=np.float32),
+            "bid": np.zeros((0, DEPTH_LEVELS), dtype=np.float32)}
+
+
+def parse_book_depth(raw: bytes) -> Dict[str, np.ndarray]:
+    """Binance bookDepth CSV'si (timestamp, percentage, depth, notional; ~30 sn'de bir anlık görüntü) → t (ms), ask
+    (n×5: fiyatın +%1..5 içindeki kümülatif satış emirleri, USDT), bid (n×5: -%1..5 alış emirleri). Seviyesi eksik
+    görüntüler atılır."""
+    lines = raw.decode("utf-8", errors="replace").strip().splitlines()
+    if lines and not lines[0][:1].isdigit():         # Başlık satırı
+        lines = lines[1:]
+    ts, pct, notional = [], [], []
+    for line in lines:
+        parts = line.split(",")
+        if len(parts) >= 4:
+            ts.append(parts[0].strip())
+            pct.append(parts[1])
+            notional.append(parts[3])
+    if not ts:
+        return empty_depth()
+    try:
+        t = (np.array(ts, dtype=np.int64) if ts[0].isdigit()
+             else np.array(ts, dtype="datetime64[ms]").astype(np.int64))
+        p = np.rint(np.array(pct, dtype=np.float64)).astype(np.int64)
+        v = np.array(notional, dtype=np.float64)
+    except ValueError:
+        return empty_depth()
+    uniq, inv = np.unique(t, return_inverse=True)
+    ask = np.full((len(uniq), DEPTH_LEVELS), np.nan)
+    bid = np.full((len(uniq), DEPTH_LEVELS), np.nan)
+    for k in range(1, DEPTH_LEVELS + 1):
+        up, down = p == k, p == -k
+        ask[inv[up], k - 1] = v[up]
+        bid[inv[down], k - 1] = v[down]
+    ok = ~(np.isnan(ask).any(axis=1) | np.isnan(bid).any(axis=1))
+    return {"t": uniq[ok], "ask": ask[ok].astype(np.float32), "bid": bid[ok].astype(np.float32)}
+
+
 def concat(parts: List[Dict[str, np.ndarray]]) -> Dict[str, np.ndarray]:
     parts = [p for p in parts if len(p["t"])]
     if not parts:
@@ -263,6 +305,27 @@ class FuturesArchive:
                     d += timedelta(days=1)
             y, m = nxt.year, nxt.month
         return jobs
+
+    def book_depth(self, symbol: str, day: datetime) -> Dict[str, np.ndarray]:
+        """Günlük emir defteri derinliği (bookDepth, 2023'ten beri): parse_book_depth biçiminde; önbelleğe .npz yazılır.
+        Dosya yoksa boş (yayımlanması gereken bir günse bir daha sorulmaz)."""
+        name = f"{symbol}-bookDepth-{day:%Y-%m-%d}"
+        path = self.cache_dir / symbol / "bookDepth" / f"{name}.npz"
+        if path.exists():
+            with np.load(path) as data:
+                return {k: data[k] for k in ("t", "ask", "bid")}
+        content = self._get(f"{self.base_url}/data/futures/um/daily/bookDepth/{symbol}/{name}.zip")
+        if content is None:
+            arrs = empty_depth()
+            if self.now_fn() - (day.timestamp() + 86400) > MISSING_GRACE_DAYS * 86400:
+                self._save(path, arrs)
+            return arrs
+        try:
+            arrs = parse_book_depth(self._unzip(content))
+        except (zipfile.BadZipFile, IndexError):
+            arrs = empty_depth()
+        self._save(path, arrs)
+        return arrs
 
     def funding(self, symbol: str, start_ms: int, end_ms: int) -> Tuple[np.ndarray, np.ndarray]:
         """Fonlama oranları (8 saatte bir; long'lar pozitif oranda öder): (zaman ms, oran). Aylık dosyalardan; bitmemiş
