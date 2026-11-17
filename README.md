@@ -1835,6 +1835,26 @@ bağımsız (%0.02) sayar. Gerçekte büyük bir piyasa emri emir defterini tük
   çıkar. "Tek kural değişince" bölümünde derinliğe göre boyun %7,5 / %10 / %12,5 çevresi ve "emir defteri kayması yok
   (eski hesap)" kıyası vardır.
 
+#### Gerçekçi modelde kaldıraç: düşüşü azaltıp kârı korumak (rapor 10, Kasım 2026)
+Rapor 10 ayarı (başabaş tabanı +%0.15, derinliğe göre boy %10, düşüşte küçültme 30 / 60, emir defteri kayması açık,
+kill-switch %60), 2020-2026. Raporun A sütunu kill-switch'i uygulamaz; aşağıda kill-switch botu gerçekten durdurur.
+
+| Kaldıraç | 4.000 USDT'den A (kill-switch'le) | A'da en büyük düşüş | 71 başlangıç, 12 ay sonra ortanca | Zararda biten başlangıç | 28,99 USDT'den ortanca (zararda) |
+|---|---|---|---|---|---|
+| 10x | 1.569 (12.03.2020'de durur; durmasa 4,08 milyon) | %75 | +%420 | 23 | +%643 (24) |
+| 8x | 2,68 milyon | %76 | +%679 | 14 | +%1.092 (18) |
+| **6x** | **3,39 milyon** | %66 | **+%823** | 5 | +%1.035 (9) |
+| **5x** | 2,97 milyon | %58 | +%660 | 4 | **+%1.043** (5) |
+| 4x | 3,04 milyon | %46 | +%558 | 3 | +%695 (4) |
+| 3x | 2,39 milyon | %46 | +%343 | 2 | +%441 (3) |
+
+- Kayma ve derinlik sınırı hesaba katılınca, kaldıraç 5-6x'in üstünde kârı artırmıyor. Yalnızca düşüşü ve kill-switch
+  riskini artırıyor. 10x'te A'nın 4,08 milyonu gerçekleşmez: bot 12 Mart 2020'de durur. 71 başlangıcın 23'ünde de
+  durur. Öneri 5-6x: 10x'e göre hem daha çok gerçekleşebilir kâr hem daha az düşüş.
+- Başabaş tabanı +%0.15, +%0.25'ten iyi çıktı (6x: 3,39 / 2,84 milyon; 4x: 3,04 / 1,96 milyon; 4.000 USDT).
+- Eski hesap (kayma ve derinlik sınırı yok) aynı ayarla 24,2 milyon gösteriyordu: ulaşılamaz bir rakam.
+- Raporun kaldıraç tablosu artık kill-switch'in A'yı hangi gün durduracağını ("kill-switch yok" ya da tarih) gösterir.
+
 ### 🏆 Strateji turnuvası (`--turnuva`)
 Hangi strateji türünün sizin dönemde işe yaradığını **tek komutla** görmek için:
 ```bash

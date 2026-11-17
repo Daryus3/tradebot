@@ -2834,7 +2834,8 @@ def _lev_line(ev: Evaluation) -> str:
     worst = max(((max_drawdown(r.curve)[0], y) for y, r in ev.years), default=(0.0, None))
     return (f"{ruined:>16s} | {ev.profitable_years}/{len(ev.years)} | düşüş %{max_drawdown(ch.curve)[0]:4.1f} | "
             f"en kötü yıl %{worst[0]:4.1f}" + (f" ({worst[1]})" if worst[1] else "")
-            + f" | likidasyon {sum(tr.liquidated for tr in ev.trades)}")
+            + f" | likidasyon {sum(tr.liquidated for tr in ev.trades)}"
+            + (f" | kill-switch {_date(ch.kill_ms)}" if ch.kill_ms else " | kill-switch yok"))
 
 
 def cascade_label(p: SimParams) -> str:
@@ -3696,7 +3697,7 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
         L.append("")
         L.append("🎚️ KALDIRAÇ DUYARLILIĞI (aynı sinyaller ve çıkışlar)")
         L.append("  Kaldıraç                    A) tek hesap | B) kârlı yıl | A'da en büyük düşüş | B'de en kötü yıl içi "
-                 "düşüş | C'de likidasyon")
+                 f"düşüş | C'de likidasyon | kill-switch (%{p.kill_pct:g}) A'yı durdururdu")
         for lev, ev2, note in levs:
             label = f"{lev}x" + (" ◀ şimdiki" if lev == p.leverage else "")
             if ev2 is None:
@@ -3710,7 +3711,8 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
                      f"yüksek kaldıraçlarda son bakiyeler birbirine yaklaşır")
             L.append("  (C'nin işlem başı sonucu her kaldıraçta aynıdır; kaldıraç yalnızca bileşik büyümeyi, düşüşü ve "
                      f"erime riskini değiştirir. {limit[0].upper() + limit[1:]}; kaldıraç seçerken düşüş sütunlarına da "
-                     f"bakın. Yıl içi dipler ve kill-switch: 🧯 KALDIRAÇ RİSKİ)")
+                     f"bakın. A kill-switch'i uygulamaz: tarih yazan satırlarda bot o gün durur ve A'nın sonucu "
+                     f"gerçekleşmez. Yıl içi dipler, her ay başlayan hesaplar ve kill-switch: 🧯 KALDIRAÇ RİSKİ)")
     if risk:
         L.append("")
         L.extend(leverage_risk_lines(risk))

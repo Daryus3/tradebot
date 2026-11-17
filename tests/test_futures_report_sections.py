@@ -48,10 +48,13 @@ def test_leverage_rows_show_drawdowns_current_marker_and_notes(fcfg):
     levs = [(1, ev, ""), (on.futures_leverage, ev, ""), (19, ev, "⛔ canlı bot açmaz: deneme"),
             (20, None, "zarar kes deneme")]
     lines = fb.format_report(on, data, ev, funnel, levs=levs).splitlines()
-    assert any("A) tek hesap | B) kârlı yıl | A'da en büyük düşüş | B'de en kötü yıl içi düşüş | C'de likidasyon" in x
-               for x in lines)
+    assert any("A) tek hesap | B) kârlı yıl | A'da en büyük düşüş | B'de en kötü yıl içi düşüş | C'de likidasyon | "
+               "kill-switch (%" in x for x in lines)
     cur = next(x for x in lines if x.strip().startswith(f"{on.futures_leverage}x"))
-    assert "◀ şimdiki" in cur and "düşüş %" in cur and "en kötü yıl %" in cur and cur.endswith("likidasyon 0")
+    assert "◀ şimdiki" in cur and "düşüş %" in cur and "en kötü yıl %" in cur
+    assert cur.endswith("likidasyon 0 | kill-switch yok") or "| kill-switch 20" in cur
+    stopped = fb.Evaluation(replace(ev.chained, kill_ms=fb._ms("2020-03-12")), ev.years, ev.fixed)
+    assert fb._lev_line(stopped).endswith("| kill-switch 2020-03-12")
     assert any(x.strip().startswith("19x") and x.endswith("| ⛔ canlı bot açmaz: deneme") for x in lines)
     assert any(x.strip().startswith("20x") and x.endswith("— (zarar kes deneme)") for x in lines)
     assert any("C'nin işlem başı sonucu her kaldıraçta aynıdır" in x and "en fazla 1.000.000 USDT kabul edildiği" in x
