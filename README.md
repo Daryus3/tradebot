@@ -1772,6 +1772,53 @@ parayla birlikte. Teminatı yarıya indirmek 5x ile birebir aynı sonucu verdi.
   düşüşleri önlemedi; kâr çekme kenara alınan parayı korur ama bottaki bakiye yine %90'ın üstünde düşer; en fazla 2
   pozisyon ve küçük ek pozisyonlar riski artırdı.
 
+#### Likidite tavanı: ölçülen emir defteri derinliğiyle kapasite (Kasım 2026)
+Backtest, bileşik büyümeyi pozisyon başına sabit 1.000.000 USDT tavanla sınırlar ve kaymayı pozisyon büyüklüğünden
+bağımsız (%0.02) sayar. Gerçekte büyük bir piyasa emri emir defterini tüketir. Bu bölüm, rapor 6 ayarıyla (10x, ZK
+%4.75, düşüşte küçültme 30 / 60) 2023-2026 işlemlerinde bunun etkisini ölçülen veriyle sınar.
+
+- **Veri:** Binance'in herkese açık arşivindeki emir defteri derinliği (bookDepth; ~30 sn'de bir, fiyatın ±%1 … ±%5
+  içindeki toplam emir tutarı, 2023-01-02'den beri), sinyal olan 1.477 coin-gün.
+- **Kayma modeli:** piyasa emri, defterdeki emirleri sırayla tüketir. Emirler %0 → %1 arasında düzgün dağılmış, sonraki
+  seviyeler arasında doğrusal kabul edilir; %5'in ötesine taşan kısım %5'ten dolar. Giriş (satış emirleri) ve çıkış
+  (alış emirleri) ayrı ölçülür; anlık görüntülerin ±2 dk ortancası alınır. Boy ve öncelik kararları yalnızca girişten
+  önceki 2 dk'nın defteriyle verilir (sızıntı yok). Modelin belirsizliği için kayma ×0.5 ve ×2 ile de denendi.
+- **Girişteki derinlik** (fiyatın %1 yukarısına kadar satış emirleri): ortanca 694 bin USDT, işlemlerin %25'inde 287
+  binin, %10'unda 108 binin altında. ETH ~20 milyon, SOL ~7 milyon, XRP / DOGE ~5 milyon; çoğu altcoin 0.1-1 milyon.
+- **Stratejinin işlem başı neti** küçük boyda +%0.27. Her işlem sabit büyüklükte açılsaydı: 10 bin USDT'de +%0.07,
+  25 binde başa baş, 50 binde zarar. Kapasite sorunu "birkaç milyon dolarda" değil, pozisyon onlarca bin USDT'yi
+  geçince başlıyor.
+- **Şimdiki boyutlama** (bakiyenin %95'i, 10x, tavan 1 milyon) ölçülen kaymayla ölçeklenmiyor: 1.000 USDT'den
+  başlayan hesap 2023-2026'yı 1.768 USDT ile bitiriyor, 1 milyon USDT'lik hesap ~4 bin USDT'ye iniyor. Kaymanın %38'i tek
+  günde (10 Ekim 2025 çöküşü; CRV'de alış tarafı %5 içinde boştu), kalanı sığ coinlerde (REEF, TRB, STORJ). Kayma
+  modelin yarısı olsa bile hesap 20-40 bin USDT'de takılıyor.
+
+Çözüm adayları (2023-01-02 → 2026-11-11, ölçülen kaymayla; son bakiye, USDT):
+
+| Boyutlama | 28,99'dan | 10 bin'den | 1 milyondan: kâr | 1 milyon: yıllık kâr (2023 / 24 / 25 / 26) | 1 milyon: düşüş | Kayma ×2'de 1 milyondan kâr |
+|---|---|---|---|---|---|---|
+| Şimdiki backtest (1 milyon tavan, kaymasız; gerçekçi değil) | 2,13 milyon | 5,83 milyon | +8,98 milyon | +1,61 / +2,58 / +3,79 / +0,99 milyon | %31 | — |
+| Şimdiki boyutlama, ölçülen kaymayla | 1.612 | 1.968 | −996 bin (4.200 kaldı) | −952 / −24 / −21 / +1 bin | %100 | −1 milyon (45 kaldı) |
+| Küçük tarafın %10'u (öncelik yok) | 77 bin | 135 bin | +612 bin | +34 / +155 / +373 / +51 bin | %17 | — |
+| **Küçük tarafın %10'u + kapasite önceliği** | 216 bin | 881 bin | +1,06 milyon | +91 / +300 / +427 / +241 bin | %22 | +457 bin |
+| Küçük tarafın %7,5'i + kapasite önceliği | 186 bin | 787 bin | +974 bin | +74 / +283 / +391 / +226 bin | %18 | +571 bin |
+| Getiriye göre en iyi boy + kapasite önceliği | 203 bin | 880 bin | +1,14 milyon | +119 / +307 / +450 / +267 bin | %30 | +155 bin |
+| %10 + öncelik, 3x kaldıraç | 6 bin | 256 bin | +1,06 milyon | +106 / +228 / +512 / +215 bin | %13 | — |
+
+- **"Küçük tarafın %X'i":** pozisyon tutarı, girişten önceki 2 dk'da fiyatın ±%1 içindeki alış ve satış emirlerinden
+  küçük olanın %X'iyle sınırlı. **Kapasite önceliği:** aynı anda birden çok coin sinyal verdiğinde, pozisyon bu sınıra
+  takılıyorsa sıra kapasitesi büyük olan coine geçer; takılmıyorsa eski sıra (puan) korunur.
+- Komşu oranlar tutarlı: %5-12,5 her kayma varsayımında kârlı; %15-20 kötümser kaymada bozuluyor. Doğrulama döneminde
+  (2023-11 →) 1 milyondan %10 + öncelik +1,06 milyon (düşüş %21).
+- **8 ya da 12 pozisyon** (ek pozisyon ≥5 coin) kârı artırmadı: sermayeyi bölüp sığ coinlere işlem ekliyor.
+- **Tavan:** bu coin evreni ve stratejiyle kapasite ~250-300 bin USDT/yıl. 1 milyon ile 10 milyon USDT'lik hesap aynı
+  kârı yapıyor (+1,06 milyon). Bu düzeyin üstündeki sermaye kâr getirmez (çekilebilir ya da başka yerde kullanılabilir).
+  Bu noktada kaldıraç 3x'e indirilirse kâr aynı kalır, düşüş %22'den %13'e iner.
+- Sınanamayanlar: emri saniyelere bölmek (tik verisi yok), büyük boyda limit (maker) giriş (Faz 4'te dolmayan emirler en
+  kârlı işlemlerdi), evrene daha derin coinler eklemek (veri gerekir).
+- Bu kurallar henüz botta yok. Hesap küçükken (pozisyon birkaç bin USDT'nin altında) hiçbir şey değiştirmezler: sınır
+  tipik olarak 10-70 bin USDT pozisyonda başlar.
+
 ### 🏆 Strateji turnuvası (`--turnuva`)
 Hangi strateji türünün sizin dönemde işe yaradığını **tek komutla** görmek için:
 ```bash
