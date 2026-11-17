@@ -1827,6 +1827,27 @@ karar için ortancaya ve en kötüye bakın. Çıkış taraması her gün dengel
   dakikasında fiyatın girişin likidasyon mesafesinden fazla altına indiği işlemler ve tarihleri); kayma 2-5 katına çıkınca
   son bakiye ya da erime tarihi. A / B tabloları stopun tam stop fiyatından dolduğunu varsayar ve kill-switch'i
   uygulamaz; bu bölüm ikisini de gösterir. Raporu ~20 sn uzatır.
+- **🎚️ KALDIRAÇ DUYARLILIĞI: 1x-20x hepsi** (aynı sinyaller ve çıkışlar). Sütunlar: A'nın sonucu, B'de kârlı yıl, A'daki
+  en büyük düşüş, B'de en kötü yıl içi düşüş (yılıyla) ve C'deki likidasyon sayısı; C'nin işlem başı sonucu kaldıraçtan
+  bağımsız olduğu için satır satır tekrarlanmaz. Şimdiki kaldıraç "◀ şimdiki" ile işaretli. Zarar kes likidasyona 0.5
+  puandan yakınsa satır hesaplanır ama "⛔ canlı bot açmaz" yazar (bot o kaldıraçla işlem açmaz); zarar kes likidasyonun
+  ötesindeyse satır hesaplanmaz.
+- **🧪 TEK KURAL DEĞİŞİNCE** (diğer her şey aynı; dört grup): ▸ çıkışlar ve başabaş (başabaş tetiği 0.8 / 1.5 / 2, tabanı
+  0.15 / 0.35 / 0.5, Kâr Al ±1, Zarar Kes ±0.5, zaman stopu 30 / 60 / 120 dk, ek pozisyon başabaşı ve Faz 9 zaman
+  stopları, Kâr Al emri), ▸ pozisyon büyüklüğü ve dalga modu (teminat kullanımı ×0.75 / ×0.6, en fazla 2 / 3 / 5
+  pozisyon, ek pozisyon boyu ve kapısı, yalnız çöküş boyu, dalgada yeniden giriş eşiği, düşüşte küçültme, Faz 5 / 6
+  setleri), ▸ giriş kuralı, tarama ve bekleme (çöküş eşiği ±2, ek pencere ±1 puan / kapalı, likidasyon şartı, 5 dk
+  tarama, zarardan sonra ve aynı coine bekleme, zarar serisi molası), ▸ maliyet ve gerçekçilik (kayma 2 / 3 / 5 kat,
+  komisyon 2 kat, kötümser stop, giriş varsayımları). Denenen değerler mevcut ayarınızın çevresindedir; mevcut değere
+  eşit olan satır yazılmaz. Dakikalık taramada yeni sinyal gerektiren satırlar "· 5 dk taramayla" hesaplanır ve "5 dk'da
+  bir tarama" satırıyla karşılaştırılmalıdır. **▲ / ▼**: A'daki son bakiye mevcut ayarınkinden çekiliş aralığından
+  (aynı ayarın 10 farklı mum içi başabaş çekilişi) fazla yüksek / düşük; işaretsiz satırlardaki fark şans olabilir. C
+  (sabit pozisyon) sütunu bileşik büyümeden bağımsızdır, karşılaştırmada önce ona bakın.
+- **📆 AYLIK İŞLEM YIĞILMASI** (yıl yıl): ayın günlük işlem hızı o yılın ortalamasının en az 1.5 katıysa o ay yığılma
+  sayılır. Her yıl için yığılma ayları (işlem sayısı ve kaç kat), bu ayların yılın işlemlerinden ve C'deki net kârından
+  payı; ay ay işlem başı sonuç, kazanma, C toplamı, B hesabının o aydaki getirisi ve ay içindeki en büyük düşüşü; yığılma
+  ayları olmadan C'nin toplamı ve B'nin "bu aylar yatay geçseydi" sonucu. Yığılma yoksa yılın en yoğun ayı yazılır. Son
+  satır tüm yılların özeti (yığılma aylarında ve diğer aylarda işlem başı sonuç).
 - **📉 Düşüşte küçültme satırı** (rapor başlığında, `FUTURES_DD_SCALE_PCT` açıkken): bakiye zirvesinin eşik kadar
   altındayken açılan pozisyonların küçük boyla açıldığını ve A'daki (tek hesap) kaç işlemin küçük boyla açıldığını
   gösterir. A ve B aynı kuralı kullanır; C (sabit tutar) kullanmaz.
