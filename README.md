@@ -1855,6 +1855,40 @@ kill-switch %60), 2020-2026. Raporun A sütunu kill-switch'i uygulamaz; aşağı
 - Eski hesap (kayma ve derinlik sınırı yok) aynı ayarla 24,2 milyon gösteriyordu: ulaşılamaz bir rakam.
 - Raporun kaldıraç tablosu artık kill-switch'in A'yı hangi gün durduracağını ("kill-switch yok" ya da tarih) gösterir.
 
+#### Rapor 11: kârı artıran birleşim (4.000 USDT, 5x, Kasım 2026)
+Rapor 11 ayarı: 5x, Faz 9, başabaş tabanı +%0.15, derinliğe göre boy %10, düşüşte küçültme 30 / 60, emir defteri kayması
+açık. Raporun tek kural tablosunda şans payını aşan tek iyileşme "ek pozisyon zaman stopu 45 dk" (▲) idi; öteki artılar
+çekiliş aralığındaydı. Tek tek iyi görünen ayarlar birleşince toplanmayabilir, bu yüzden birleşimler ayrıca ölçüldü.
+Ölçüm: mum içi başabaşın 10 çekilişinin ortancası; seçim 2020-01 → 2023-10, doğrulama 2023-11 → 2026-11; her ayın 1'inde
+başlayan 71 hesapta kill-switch uygulanır.
+
+| Ayar | A son bakiye | A düşüş | Yıllık seçim / doğrulama | Doğrulamada kayma ×3 | Son 12 ay | 71 hesap, 12 ay sonra ortanca (zararda) | Şimdikinden iyi çekiliş (seçim / doğr. / 71 hesap) |
+|---|---|---|---|---|---|---|---|
+| Şimdiki (rapor 11) | 2,76 milyon | %56 | +%363 / +%214 | +%82 | +%172 | +%524 (3) | — |
+| Ek pozisyon 45 dk + küçültme boyu %75 | 2,98 milyon | %57 | +%380 / +%286 | +%88 | +%240 | +%670 (2) | 8 / 10 / 10 |
+| **+ Kâr Al limit (önerilen)** | 2,95 milyon | %56 | +%381 / +%298 | +%98 | +%267 | +%714 (2) | 8 / 9 / 10 |
+| + küçültme eşiği %40 | 3,14 milyon | %58 | +%391 / +%313 | +%104 | +%239 | +%760 (2) | 10 / 10 / 10 |
+| Ek pozisyon 45 dk + Kâr Al limit + küçültme boyu %90 (neredeyse kapalı) | 3,33 milyon | %58 | +%401 / +%338 | +%116 | +%270 | +%738 (3) | 10 / 10 / 10 |
+
+- Önerilen birleşim: `FUTURES_EXTRA_HOLD_MINUTES=45`, `FUTURES_DD_SCALE_SIZE_PCT=75`, `FUTURES_TP_ORDER=limit`. Düşüş
+  aynı, her ölçü iyi. Stres testleri 3 çekilişin ortancası. Tüm dönemde kayma ×3: 733 bin → 1,51 milyon. Komisyon ×2:
+  1,20 → 1,47 milyon. B'de her yıl şimdikinden iyi (2023: +%96 → +%184; 2026: +%72 → +%172). Kötümser stop dolumunda
+  (fitilin yarısı) şimdiki ayar da birleşimler de eriyor; bu risk değişmiyor.
+- Eşik %40 biraz daha kâr verir; düşüş yaklaşık 2 puan artar, son 12 ay biraz düşük. Küçültme boyu %90 maliyete
+  dayanıksız: kayma ×3'te 956 bin (düşüş %80), komisyon ×2'de 810 bin. 71 hesabın biri de yarıdan fazlasını kaybetti.
+- Komşular tutarlı (birleşim içinde, 5 çekiliş): ek pozisyon 40 / 55 dk ve küçültme eşiği 35 / 45 / 50 de şimdikinden
+  iyi.
+- Kâr Al limit'in katkısı küçük. Modelin bu varsayımı iyimser: hedefe değen fiyat doldu sayılır.
+- Denenip eklenmeyenler (5 çekiliş; şimdiki: +%368 / +%234, son 12 ay +%168, 71 hesap +%561):
+  - Zaman stopu 60 / 120 dk: son 12 ay kötü.
+  - Zarar Kes %5.25: doğrulamada +%153.
+  - Kâr Al %7, ek pozisyon boyu %25: 71 hesapta kötü (+%551 / +%517).
+  - Zarar sonrası 8 saat bekleme: son 12 ay +%92, 71 hesap +%515.
+  - Yeniden giriş ≥5 ve derinlik %7.5: son 12 ay +%68 / +%115.
+  - En fazla 3 / 2 pozisyon: düşüş %63 / %68.
+  - 6x: düşüş %62; 71 hesabın 3'ü yarıdan fazlasını kaybetti.
+  - Düşüşte küçültme tamamen kapalı: düşüş %64; 71 hesabın 6'sı yarıdan fazlasını kaybetti.
+
 ### 🏆 Strateji turnuvası (`--turnuva`)
 Hangi strateji türünün sizin dönemde işe yaradığını **tek komutla** görmek için:
 ```bash
