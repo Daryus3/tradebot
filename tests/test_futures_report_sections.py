@@ -30,8 +30,10 @@ def small_inputs(fcfg, **over):
 def test_leverage_table_covers_every_leverage_from_1_to_20(fcfg, monkeypatch):
     cfg = replace(fcfg, stop_loss_pct=4.75, futures_leverage=10, futures_mmr_pct=0.5)
     monkeypatch.setattr(fb, "evaluate", lambda p, *a, **k: p.leverage)
-    rows = fb.leverage_table(cfg, None, [], {})
+    said = []
+    rows = fb.leverage_table(cfg, None, [], {}, progress=said.append)
     assert [r[0] for r in rows] == list(range(1, 21))
+    assert said == [f"⏳ Kaldıraç 1x-20x: {k} / 19 ayar hesaplandı" for k in (5, 10, 15, 19)]   # 20x hesaplanmaz
     assert all(ev == lev and note == "" for lev, ev, note in rows[:17])
     # 18x / 19x: zarar kes likidasyona 0.5 puandan yakın: hesaplanır, canlı bot açmaz
     assert [ev for _l, ev, _n in rows[17:19]] == [18, 19]
@@ -52,7 +54,8 @@ def test_leverage_rows_show_drawdowns_current_marker_and_notes(fcfg):
     assert "◀ şimdiki" in cur and "düşüş %" in cur and "en kötü yıl %" in cur and cur.endswith("likidasyon 0")
     assert any(x.strip().startswith("19x") and x.endswith("| ⛔ canlı bot açmaz: deneme") for x in lines)
     assert any(x.strip().startswith("20x") and x.endswith("— (zarar kes deneme)") for x in lines)
-    assert any("C'nin işlem başı sonucu her kaldıraçta aynıdır" in x for x in lines)
+    assert any("C'nin işlem başı sonucu her kaldıraçta aynıdır" in x and "en fazla 1.000.000 USDT kabul edildiği" in x
+               for x in lines)
 
 
 # ====================================================================== tek kural değişince
@@ -70,7 +73,11 @@ def rich_cfg(fcfg, **over):
 def test_variant_rows_are_grouped_and_cover_settings_around_the_current_ones(fcfg, monkeypatch):
     on, data, sigs, _funnel, windows = rich_cfg(fcfg)
     monkeypatch.setattr(fb, "evaluate", lambda p, *a, **k: p)             # Satır → o satırın SimParams'ı
-    rows = fb.variant_rows(on, data, sigs, windows)
+    said = []
+    rows = fb.variant_rows(on, data, sigs, windows, progress=said.append)
+    n = sum(1 for _n, e in rows if e is not None)
+    assert said[0] == f"⏳ Tek kural değişince: 10 / {n} ayar hesaplandı" and said[-1].endswith(f"{n} / {n} ayar hesaplandı")
+    assert len(said) == n // 10 + (1 if n % 10 else 0)
     assert [n for n, e in rows if e is None] == ["Çıkışlar ve başabaş", "Pozisyon büyüklüğü ve dalga modu",
                                                  "Giriş kuralı, tarama ve bekleme", "Maliyet ve gerçekçilik"]
     got = {n: e for n, e in rows if e is not None}

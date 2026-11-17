@@ -1451,13 +1451,35 @@ def btc_hold_pct(data: FutData, start_ms: Optional[int] = None, end_ms: Optional
 
 
 # ===================================================================== duyarlılık
-def leverage_table(cfg, data: FutData, signals, windows) -> List[Tuple[int, Optional[Evaluation], str]]:
+class _RowProgress:
+    """Uzun duyarlılık hesaplarında ilerleme satırı ("⏳ ...: k / toplam"); Telegram backtest durumunda görünür, son
+    rapordan atılır. Her `every` hesapta ve sonda bir satır."""
+
+    def __init__(self, label: str, total: int, progress: Optional[Callable[[str], None]], every: int = 10):
+        self.label, self.total, self.progress, self.every, self.done = label, total, progress, every, 0
+
+    def step(self) -> None:
+        self.done += 1
+        if self.progress and self.total and (self.done % self.every == 0 or self.done == self.total):
+            self.progress(f"⏳ {self.label}: {self.done} / {self.total} ayar hesaplandı")
+
+    def wrap(self, fn: Callable) -> Callable:
+        def run(*a, **k):
+            out = fn(*a, **k)
+            self.step()
+            return out
+        return run
+
+
+def leverage_table(cfg, data: FutData, signals, windows,
+                   progress: Optional[Callable[[str], None]] = None) -> List[Tuple[int, Optional[Evaluation], str]]:
     """Kaldıraç duyarlılığı: 1x-20x hepsi, aynı sinyaller ve çıkışlarla. Zarar kes likidasyonun ötesindeyse (her zarar
     kes likidasyon olurdu) hesaplanmaz; likidasyona LIVE_SL_MARGIN puandan yakınsa hesaplanır ama canlı bot bu
     kaldıraçla işlem açmaz (satırda not)."""
+    rooms = {lev: futures_liq_distance_pct(lev, cfg.futures_mmr_pct) for lev in LEVERAGE_TABLE}
+    bar = _RowProgress("Kaldıraç 1x-20x", sum(1 for r in rooms.values() if cfg.stop_loss_pct < r), progress, every=5)
     rows = []
-    for lev in LEVERAGE_TABLE:
-        room = futures_liq_distance_pct(lev, cfg.futures_mmr_pct)
+    for lev, room in rooms.items():
         if cfg.stop_loss_pct >= room:
             rows.append((lev, None, f"zarar kes (%{cfg.stop_loss_pct:g}) likidasyonun (%{room:.1f}) ötesinde: her zarar "
                                     f"kes likidasyon olurdu"))
@@ -1465,6 +1487,7 @@ def leverage_table(cfg, data: FutData, signals, windows) -> List[Tuple[int, Opti
         note = (f"⛔ canlı bot açmaz: zarar kes likidasyona (%{room:.1f}) {LIVE_SL_MARGIN:g} puandan yakın"
                 if cfg.stop_loss_pct >= room - LIVE_SL_MARGIN else "")
         rows.append((lev, evaluate(params_from_cfg(cfg, leverage=lev), data, signals, windows), note))
+        bar.step()
     return rows
 
 
@@ -1786,9 +1809,42 @@ def cost_variant_rows(cfg, ev) -> List[Tuple[str, "Evaluation"]]:
     return rows
 
 
-def variant_rows(cfg, data: FutData, signals, windows) -> List[Tuple[str, Evaluation]]:
+def _crash_variant_rows(cfg, signals, minute: bool, tag: str, ev, other, phase6) -> List[Tuple[str, object]]:
+    """Çöküş taktiğinin "tek kural değişince" satırları (gruplu; değeri None olan satır grup başlığı). `ev(sinyaller,
+    **SimParams değişikliği)`, `other(**cfg değişikliği)` (yeni sinyallerle) ve `phase6(**over)` değerlendirir;
+    variant_rows önce taslak fonksiyonlarla satırları sayar, sonra gerçek değerlendirmeyle çağırır."""
+    base = params_from_cfg(cfg)
+    trail = (("İzleyen stop kapalı", ev(trail_enabled=False)) if base.trail_enabled else
+             ("İzleyen stop +%3 / %1.5 (iyimser: saniyelik veride işlem başı %0.06-0.09 daha kötü)",
+              ev(trail_enabled=True, trail_act_pct=3.0, trail_gap_pct=1.5)))
+    shield = (("Başabaş kalkanı kapalı", ev(be_enabled=False)) if base.be_enabled else
+              ("Başabaş kalkanı açık (+%1 → +%0.3)", ev(be_enabled=True, be_trigger_pct=1.0, be_floor_pct=0.3)))
+    tp_order = (("Kâr Al piyasa emriyle (taker)", ev(tp_limit=False)) if base.tp_limit else
+                ("Kâr Al limit emirle (maker)", ev(tp_limit=True)))
+    return ([("Çıkışlar ve başabaş", None), shield, trail,
+             ("Başabaş +%5 → +%2", ev(be_enabled=True, be_trigger_pct=5.0, be_floor_pct=2.0))]
+            + exit_variant_rows(cfg, ev) + [tp_order] + phase8_rows(cfg, ev) + phase9_rows(cfg, ev)
+            + [("Pozisyon büyüklüğü ve dalga modu", None)]
+            + size_variant_rows(cfg, ev) + cascade_rows(cfg, ev, signals) + phase6_rows(cfg, ev, signals, phase6)
+            + [("Giriş kuralı, tarama ve bekleme", None)]
+            + [(f"Çöküş eşiği %{cfg.futures_crash_drop_pct - 2:g}{tag}",
+                other(futures_crash_drop_pct=cfg.futures_crash_drop_pct - 2)),
+               (f"Çöküş eşiği %{cfg.futures_crash_drop_pct + 2:g}{tag}",
+                other(futures_crash_drop_pct=cfg.futures_crash_drop_pct + 2)),
+               (("+likidasyon dalgası şartı" if not cfg.futures_crash_liq else "Likidasyon şartı kapalı") + tag,
+                other(futures_crash_liq=not cfg.futures_crash_liq))]
+            + window_variant_rows(cfg, other, tag)
+            + [(name + tag, e) for name, e in long_window_rows(cfg, other)]
+            + ([("5 dk'da bir tarama (dakikalık tarama kapalı)",
+                 ev([s for s in signals if not s.close_ms % FUT_BAR_MS]))] if minute else [])
+            + wait_variant_rows(cfg, ev)
+            + [("Maliyet ve gerçekçilik", None)] + cost_variant_rows(cfg, ev) + realism_rows(cfg, ev))
+
+
+def variant_rows(cfg, data: FutData, signals, windows,
+                 progress: Optional[Callable[[str], None]] = None) -> List[Tuple[str, Evaluation]]:
     """Tek bir kuralı değiştirmenin etkisi (diğer her şey aynı). Çöküş taktiğinde satırlar gruplanır: değeri None olan
-    satır grup başlığıdır (rapor "▸ başlık" yazar)."""
+    satır grup başlığıdır (rapor "▸ başlık" yazar). `progress` verilirse 10 ayarda bir "⏳ ..." satırı."""
     def ev(sigs=signals, **over):
         return evaluate(params_from_cfg(cfg, **over), data, sigs, windows)
     if cfg.futures_tactic == "crash":
@@ -1815,32 +1871,12 @@ def variant_rows(cfg, data: FutData, signals, windows) -> List[Tuple[str, Evalua
                     load_windows(data, sigs, window_minutes(cfg), cache=windows)
                     wave_cache.append(sigs)
             return evaluate(params_from_cfg(cfg, **over), data, wave_cache[0], windows)
-        base = params_from_cfg(cfg)
-        trail = (("İzleyen stop kapalı", ev(trail_enabled=False)) if base.trail_enabled else
-                 ("İzleyen stop +%3 / %1.5 (iyimser: saniyelik veride işlem başı %0.06-0.09 daha kötü)",
-                  ev(trail_enabled=True, trail_act_pct=3.0, trail_gap_pct=1.5)))
-        shield = (("Başabaş kalkanı kapalı", ev(be_enabled=False)) if base.be_enabled else
-                  ("Başabaş kalkanı açık (+%1 → +%0.3)", ev(be_enabled=True, be_trigger_pct=1.0, be_floor_pct=0.3)))
-        tp_order = (("Kâr Al piyasa emriyle (taker)", ev(tp_limit=False)) if base.tp_limit else
-                    ("Kâr Al limit emirle (maker)", ev(tp_limit=True)))
-        return ([("Çıkışlar ve başabaş", None), shield, trail,
-                 ("Başabaş +%5 → +%2", ev(be_enabled=True, be_trigger_pct=5.0, be_floor_pct=2.0))]
-                + exit_variant_rows(cfg, ev) + [tp_order] + phase8_rows(cfg, ev) + phase9_rows(cfg, ev)
-                + [("Pozisyon büyüklüğü ve dalga modu", None)]
-                + size_variant_rows(cfg, ev) + cascade_rows(cfg, ev, signals) + phase6_rows(cfg, ev, signals, phase6)
-                + [("Giriş kuralı, tarama ve bekleme", None)]
-                + [(f"Çöküş eşiği %{cfg.futures_crash_drop_pct - 2:g}{tag}",
-                    other(futures_crash_drop_pct=cfg.futures_crash_drop_pct - 2)),
-                   (f"Çöküş eşiği %{cfg.futures_crash_drop_pct + 2:g}{tag}",
-                    other(futures_crash_drop_pct=cfg.futures_crash_drop_pct + 2)),
-                   (("+likidasyon dalgası şartı" if not cfg.futures_crash_liq else "Likidasyon şartı kapalı") + tag,
-                    other(futures_crash_liq=not cfg.futures_crash_liq))]
-                + window_variant_rows(cfg, other, tag)
-                + [(name + tag, e) for name, e in long_window_rows(cfg, other)]
-                + ([("5 dk'da bir tarama (dakikalık tarama kapalı)",
-                     ev([s for s in signals if not s.close_ms % FUT_BAR_MS]))] if minute else [])
-                + wait_variant_rows(cfg, ev)
-                + [("Maliyet ve gerçekçilik", None)] + cost_variant_rows(cfg, ev) + realism_rows(cfg, ev))
+
+        def stub(*_a, **_k):
+            return 0
+        total = sum(1 for _n, e in _crash_variant_rows(cfg, signals, minute, tag, stub, stub, stub) if e is not None)
+        bar = _RowProgress("Tek kural değişince", total, progress)
+        return _crash_variant_rows(cfg, signals, minute, tag, bar.wrap(ev), bar.wrap(other), bar.wrap(phase6))
     out = [("Başabaş kalkanı kapalı", ev(be_enabled=False)),
            ("Zaman stopu 30 dk", ev(hold_min=30)),
            ("Zaman stopu 120 dk", ev(hold_min=120)),
@@ -3537,7 +3573,9 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
                 L.append(f"  {label:26s} " + _lev_line(ev2) + (f" | {note}" if note else ""))
         if any(ev2 is not None for _lev, ev2, _n in levs):
             L.append("  (C'nin işlem başı sonucu her kaldıraçta aynıdır; kaldıraç yalnızca bileşik büyümeyi, düşüşü ve "
-                     "erime riskini değiştirir. Yıl içi dipler ve kill-switch: 🧯 KALDIRAÇ RİSKİ)")
+                     f"erime riskini değiştirir. A'da pozisyon tutarı en fazla {_num(p.max_notional, 0)} USDT kabul "
+                     f"edildiği için (likidite sınırı) yüksek kaldıraçlarda son bakiyeler birbirine yaklaşır; kaldıraç "
+                     f"seçerken düşüş sütunlarına bakın. Yıl içi dipler ve kill-switch: 🧯 KALDIRAÇ RİSKİ)")
     if risk:
         L.append("")
         L.extend(leverage_risk_lines(risk))
@@ -3685,10 +3723,11 @@ def run_cli(cfg, days: Optional[int], end_ms: Optional[int], out_dir: Path, char
     ev = evaluate(params_from_cfg(cfg), data, signals, windows)
     levs = grid = variants = None
     if sensitivity:
-        progress("🎚️ Kaldıraç, Kâr Al / Zarar Kes ve kural duyarlılığı hesaplanıyor...")
-        levs = leverage_table(cfg, data, signals, windows)
+        progress("🎚️ Kaldıraç, Kâr Al / Zarar Kes ve kural duyarlılığı hesaplanıyor (uzun sürer)...")
+        levs = leverage_table(cfg, data, signals, windows, progress=progress)
+        progress("⏳ Kâr Al / Zarar Kes ızgarası hesaplanıyor...")
         grid = exit_grid(cfg, data, signals, windows)
-        variants = variant_rows(cfg, data, signals, windows)
+        variants = variant_rows(cfg, data, signals, windows, progress=progress)
     risk = None
     if sensitivity:
         progress("🧯 Kaldıraç riski hesaplanıyor (yıl içi dipler, her ay başlayan hesaplar, kill-switch, stop kayması)...")
