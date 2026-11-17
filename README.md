@@ -1821,6 +1821,11 @@ bağımsız (%0.02) sayar. Gerçekte büyük bir piyasa emri emir defterini tük
   sn) ve tutarı ±%1 içindeki küçük tarafın %10'uyla sınırlar. Aynı taramada birden çok sinyal varsa ve sıradaki pozisyon
   sınıra takılıyorsa kapasitesi büyük olan coini seçer. Defter okunamazsa sınır uygulanmaz (eski davranış). Hesap
   küçükken hiçbir şey değişmez: sınır tipik olarak 10-70 bin USDT'lik pozisyonda başlar.
+- **Tam rapor** (2020-2026, rapor 6 ayarı, 2023 öncesinde derinlik hacimden tahmin): kayma hesaba katılınca 28,99 USDT
+  17,5 milyon değil 4.281 USDT'de bitiyor (A'da toplam kayma 3,67 milyon USDT, en büyük düşüş %99,9). Derinliğe göre boy
+  %10 + kapasite önceliğiyle ~1,9 milyon USDT (+%6,6 milyon, 7/7 kârlı yıl). Şimdiki boyutlamada kayma hesaba katılınca
+  en iyi kaldıraç 2x (A +%220 bin, en büyük düşüş %70); 10x +%14.669. Rapor (1 dk tarama, 68 tek kural satırı) ilk
+  seferde derinlik dosyalarıyla ~12,5 dk sürdü (1.603 coin-gün, ~1,5 dk indirme, önbellek ~170 MB).
 - **Backtestte:** `FUTURES_BACKTEST_DEPTH=true` (varsayılan; Telegram → 📚 Backtestte emir defteri kayması) büyük
   pozisyonların kaymasını hesaba katar. 2023'ten itibaren Binance'in ölçülen derinliğini kullanır (günlük bookDepth
   dosyaları, sinyal günleri için; ilk çalıştırmada ~1 GB indirilir, sonra `data/futures_cache/<COİN>/bookDepth`

@@ -3704,10 +3704,13 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
             else:
                 L.append(f"  {label:26s} " + _lev_line(ev2) + (f" | {note}" if note else ""))
         if any(ev2 is not None for _lev, ev2, _n in levs):
+            limit = ("emir defteri kayması açık: kaldıraç büyüdükçe pozisyonlar büyür ve daha çok kayma öder, A düşebilir"
+                     if p.depth_impact and data.depth is not None else
+                     f"A'da pozisyon tutarı en fazla {_num(p.max_notional, 0)} USDT kabul edildiği için (likidite sınırı) "
+                     f"yüksek kaldıraçlarda son bakiyeler birbirine yaklaşır")
             L.append("  (C'nin işlem başı sonucu her kaldıraçta aynıdır; kaldıraç yalnızca bileşik büyümeyi, düşüşü ve "
-                     f"erime riskini değiştirir. A'da pozisyon tutarı en fazla {_num(p.max_notional, 0)} USDT kabul "
-                     f"edildiği için (likidite sınırı) yüksek kaldıraçlarda son bakiyeler birbirine yaklaşır; kaldıraç "
-                     f"seçerken düşüş sütunlarına bakın. Yıl içi dipler ve kill-switch: 🧯 KALDIRAÇ RİSKİ)")
+                     f"erime riskini değiştirir. {limit[0].upper() + limit[1:]}; kaldıraç seçerken düşüş sütunlarına da "
+                     f"bakın. Yıl içi dipler ve kill-switch: 🧯 KALDIRAÇ RİSKİ)")
     if risk:
         L.append("")
         L.extend(leverage_risk_lines(risk))

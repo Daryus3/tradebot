@@ -233,6 +233,13 @@ def test_params_report_lines_variant_rows_and_attach(fcfg, monkeypatch, tmp_path
     warn = fb.depth_lines(replace(res.params, depth_impact=False, depth_cap_pct=0.0), bt_data(None), res)
     assert warn and warn[0].startswith("⚠️ Kayma pozisyon büyüklüğünden bağımsız sayıldı (FUTURES_BACKTEST_DEPTH=false)")
     assert fb.depth_lines(replace(res.params, depth_cap_pct=0.0), bt_data(None), res) == []
+    # Kaldıraç tablosu dipnotu: kayma açıkken tavan değil kayma anlatılır
+    from test_futures_report_sections import small_inputs
+    on2, data2, sigs2, funnel2, windows2 = small_inputs(fcfg)
+    ev2 = fb.evaluate(fb.params_from_cfg(on2), data2, sigs2, windows2)
+    data2.depth = FakeDepth({})
+    text = fb.format_report(on2, data2, ev2, funnel2, levs=[(1, ev2, "")])
+    assert "Emir defteri kayması açık: kaldıraç büyüdükçe pozisyonlar büyür" in text and "1.000.000 USDT" not in text
     # Tek kural satırları: derinlik verisi varsa
     monkeypatch.setattr(fb, "evaluate", lambda p, *a, **k: p)
     got = dict(fb.size_variant_rows(on, lambda **o: fb.params_from_cfg(on, **o), depth=True))
