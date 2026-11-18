@@ -213,6 +213,46 @@ def test_breadth_lines_follow_the_isolated_threshold_and_split_first_positions(f
     assert "yalnız çöküş (0-1 coin): 1 işlem" in old and "2-7 coin: 3 işlem" in old
 
 
+def test_half_year_periods_split_on_january_and_july():
+    ms = fb._ms
+    assert fb.half_year_periods(ms("2020-01-01"), ms("2021-03-15")) == [
+        (ms("2020-01-01"), ms("2020-07-01")), (ms("2020-07-01"), ms("2021-01-01")), (ms("2021-01-01"), ms("2021-03-15"))]
+    assert fb.half_year_periods(ms("2020-03-10"), ms("2020-12-01")) == [                  # Kısmi ilk ve son dönem
+        (ms("2020-03-10"), ms("2020-07-01")), (ms("2020-07-01"), ms("2020-12-01"))]
+    assert fb.half_year_periods(ms("2020-07-01"), ms("2021-01-01")) == [(ms("2020-07-01"), ms("2021-01-01"))]
+
+
+def test_half_year_lines_show_balance_change_low_drawdown_and_markers(fcfg):
+    ms = fb._ms
+    p = replace(fb.params_from_cfg(fcfg), start_capital=100.0)
+    curve = [(ms("2020-01-01"), 100.0), (ms("2020-03-01"), 150.0), (ms("2020-05-01"), 90.0), (ms("2020-06-15"), 120.0),
+             (ms("2020-09-01"), 60.0), (ms("2021-02-01"), 2000.0)]
+    trades = [fb.FutTrade("A", "long", ms(d), ms(d) + MIN, 1, 1, "TP", 2, 1, 2, 0, 0, 0.0, 0, 0, 0, 0, False, False, MIN)
+              for d in ("2020-02-01", "2020-04-01", "2020-08-01", "2021-02-01")]
+    res = fb.FutResult(p, trades, curve, Counter(), ms("2020-01-01"), ms("2021-03-15"), None, ms("2020-09-01"))
+    lines = fb.half_year_lines(res, 100.0, ms("2020-01-01"), ms("2021-03-15"), 60.0)
+    assert lines[0].startswith("📒 A'NIN 6 AYLIK BAKİYESİ (100,00 USDT ile başlayan tek hesap")
+    h1, h2, h3 = lines[2:]
+    assert h1.startswith("  2020-01-01 → 2020-06-30") and "120,00 USDT" in h1 and "+20.0%" in h1
+    assert "90,00 USDT" in h1 and "% 40.0" in h1 and h1.endswith("    2")       # Dip 90, zirve 150'den %40 düşüş
+    assert h2.startswith("  2020-07-01 → 2020-12-31") and "60,00 USDT" in h2 and "-50.0%" in h2 and "% 50.0" in h2
+    assert h2.endswith("⚠️ kill-switch (-%60) botu burada durdururdu")
+    assert h3.startswith("  2021-01-01 → 2021-03-15") and "2.000 USDT" in h3 and "+3233.3%" in h3   # Son dönem kısmi
+    assert "% " in h3 and "kill-switch" not in h3
+    ruined = replace(res, kill_ms=None, ruined_ms=ms("2021-02-01"))
+    assert fb.half_year_lines(ruined, 100.0, ms("2020-01-01"), ms("2021-03-15"))[-1].endswith("🛑 hesap eridi")
+
+
+def test_report_shows_half_year_balances_between_a_and_b(fcfg):
+    on, data, sigs, funnel, windows = small_inputs(fcfg)
+    ev = fb.evaluate(fb.params_from_cfg(on), data, sigs, windows)
+    lines = fb.format_report(on, data, ev, funnel).splitlines()
+    a = next(i for i, x in enumerate(lines) if x.startswith("💰 A)"))
+    half = next(i for i, x in enumerate(lines) if x.startswith("📒 A'NIN 6 AYLIK BAKİYESİ"))
+    b = next(i for i, x in enumerate(lines) if x.startswith("📅 B)"))
+    assert a < half < b and lines[half + 1].strip().startswith("Dönem")
+
+
 def test_turkish_ablative_suffix_for_numbers():
     from config import tr_from
     assert [tr_from(n) for n in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15, 20, 30, 40, 50, 60, 70, 80, 90, 100, 1000,

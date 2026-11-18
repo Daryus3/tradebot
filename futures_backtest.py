@@ -3531,6 +3531,57 @@ def _mark(ev: Evaluation, base_final: float, band: Optional[Tuple[float, float]]
     return "▲ " if r > band[1] else "▼ " if r < band[0] else "  "
 
 
+def half_year_periods(start_ms: int, end_ms: int) -> List[Tuple[int, int]]:
+    """[start_ms, end_ms) aralığı 1 Ocak / 1 Temmuz (UTC) sınırlarından 6 aylık dönemlere bölünür; ilk ve son dönem
+    kısmi olabilir."""
+    d = datetime.fromtimestamp(start_ms / 1000, tz=timezone.utc)
+    y, m = (d.year, 7) if d.month < 7 else (d.year + 1, 1)
+    edges = [start_ms]
+    while True:
+        b = int(datetime(y, m, 1, tzinfo=timezone.utc).timestamp() * 1000)
+        if b >= end_ms:
+            break
+        edges.append(b)
+        y, m = (y, 7) if m == 1 else (y + 1, 1)
+    edges.append(end_ms)
+    return list(zip(edges[:-1], edges[1:]))
+
+
+def half_year_lines(res: FutResult, start_capital: float, start_ms: int, end_ms: int,
+                    kill_pct: float = 0.0) -> List[str]:
+    """A'nın 6 aylık bakiyesi: her dönemin sonundaki bakiye (kapanan işlemlerle; açık pozisyonun anlık K/Z'si sayılmaz),
+    dönemdeki değişim, dönem içindeki en düşük bakiye ve en büyük düşüş, dönemde açılan işlem sayısı. Kill-switch'in
+    botu durduracağı ve hesabın eridiği dönem işaretlenir."""
+    curve = sorted(res.curve, key=lambda x: x[0])
+    entries = np.sort(np.array([tr.entry_ms for tr in res.trades], dtype=np.int64))
+    money = lambda v: _num(v, 2 if abs(v) < 1000 else 0)       # noqa: E731
+    L = [f"📒 A'NIN 6 AYLIK BAKİYESİ ({money(start_capital)} USDT ile başlayan tek hesap; kapanan işlemlerle, açık "
+         f"pozisyonun anlık kârı / zararı sayılmaz)",
+         "  Dönem                      Dönem sonu bakiye    6 ayda    Dönem içi en düşük  Dönem içi düşüş  İşlem"]
+    i, bal = 0, start_capital
+    for a, b in half_year_periods(start_ms, end_ms):
+        start_bal = bal
+        pts = [(a, start_bal)]
+        while i < len(curve) and curve[i][0] < b:
+            if curve[i][0] >= a:
+                pts.append(curve[i])
+            bal = curve[i][1]
+            i += 1
+        change = (bal / start_bal - 1) * 100 if start_bal > 0 else None
+        low = min(e for _t, e in pts)
+        dd = max_drawdown(pts)[0]
+        n = int(np.searchsorted(entries, b, "left") - np.searchsorted(entries, a, "left"))
+        name = f"{_date(a)} → {_date(b) if b == end_ms else _date(b - 1)}"
+        mark = ""
+        if res.kill_ms is not None and a <= res.kill_ms < b:
+            mark += f"  ⚠️ kill-switch (-%{kill_pct:g}) botu burada durdururdu"
+        if res.ruined_ms is not None and a <= res.ruined_ms < b:
+            mark += "  🛑 hesap eridi"
+        L.append(f"  {name:25s}  {money(bal):>15s} USDT  {_pct(change):>9s}  {money(low):>14s} USDT  "
+                 f"%{dd:5.1f}        {n:5d}{mark}")
+    return L
+
+
 def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None, grid=None, variants=None,
                   live: Optional[List[str]] = None, draws: Optional[Sequence[float]] = None,
                   risk: Optional[dict] = None) -> str:
@@ -3649,6 +3700,8 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
     if res.ruined_ms:
         L.append(f"  🛑 HESAP ERİDİ: {_date(res.ruined_ms)} tarihinde bakiye en küçük emrin altına indi; sonrası bu "
                  f"senaryoda hiç işlem görmedi (B ve C'ye bakın)")
+    L.append("")
+    L.extend(half_year_lines(res, p.start_capital, data.start_ms, data.end_ms, p.kill_pct))
     L.append("")
     L.append(f"📅 B) Her yıl {p.start_capital:g} USDT ile yeniden başlasaydınız")
     L.append("  Yıl   İşlem  Kazanma  Getiri      Maks.düşüş  Kayıp serisi  Likid.  BTC al-tut")

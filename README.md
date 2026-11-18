@@ -2002,6 +2002,12 @@ karar için ortancaya ve en kötüye bakın. Çıkış taraması her gün dengel
   bir tarama" satırıyla karşılaştırılmalıdır. **▲ / ▼**: A'daki son bakiye mevcut ayarınkinden çekiliş aralığından
   (aynı ayarın 10 farklı mum içi başabaş çekilişi) fazla yüksek / düşük; işaretsiz satırlardaki fark şans olabilir. C
   (sabit pozisyon) sütunu bileşik büyümeden bağımsızdır, karşılaştırmada önce ona bakın.
+- **📒 A'NIN 6 AYLIK BAKİYESİ** (A'nın hemen altında): tek hesabın her 6 aylık dönemin (1 Ocak / 1 Temmuz) sonundaki
+  bakiyesi. Ayrıca dönemdeki değişim, dönem içindeki en düşük bakiye ve en büyük düşüş, dönemde açılan işlem sayısı
+  gösterilir. İlk ve son dönem kısmi olabilir. Bakiye kapanan işlemlerle hesaplanır; açık pozisyonun anlık kârı ya da
+  zararı sayılmaz. Kill-switch'in botu durduracağı ve hesabın eridiği dönem işaretlenir. Hesap büyüdükçe derinliğe göre
+  boy sınırı yüzde büyümeyi yavaşlatır: rapor 12 ayarıyla 2021 ortasında yaklaşık 2 milyon USDT'den sonra 6 aylık
+  büyüme %0-20'ye iner.
 - **📆 AYLIK İŞLEM YIĞILMASI** (yıl yıl): ayın günlük işlem hızı o yılın ortalamasının en az 1.5 katıysa o ay yığılma
   sayılır. Her yıl için yığılma ayları (işlem sayısı ve kaç kat), bu ayların yılın işlemlerinden ve C'deki net kârından
   payı; ay ay işlem başı sonuç, kazanma, C toplamı, B hesabının o aydaki getirisi ve ay içindeki en büyük düşüşü; yığılma
