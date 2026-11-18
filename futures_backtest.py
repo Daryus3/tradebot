@@ -37,7 +37,7 @@ import numpy as np
 
 from config import (DATA_DIR, dd_scale_factor, format_crash_rules, futures_coin_list, futures_crash_rules, futures_funding_rules,
                     futures_liq_distance_pct, futures_long_windows, futures_modules, futures_scan_shifts,
-                    futures_snapshot_on, futures_wave_cfg, futures_wave_rules, parse_crash_rules, scan_log_path)
+                    futures_snapshot_on, futures_wave_cfg, futures_wave_rules, parse_crash_rules, scan_log_path, tr_from)
 from futures_data import FuturesArchive, concat, resample, slice_range
 from futures_depth import DEPTH_CHECK_MIN_NOTIONAL, DepthBook, daily_volume_fn
 from strategy import (FUT_BAR_MS, FUT_HOUR_MS, breadth_flags, btc_trend_1h, crash_state, funding_per_bar,
@@ -1756,6 +1756,7 @@ MARGIN_TRIES = (0.75, 0.6)                      # Teminat kullanımı: mevcut de
 POSITION_TRIES = (2, 3, 5)                      # Dalga modu: en fazla pozisyon
 EXTRA_SIZE_TRIES = (8.0, 25.0, 33.3)            # Faz 6: ek pozisyon boyu (ilkinin %'si)
 ISOLATED_TRIES = (25.0, 50.0, 100.0)            # Yalnız çöküş boyu (%)
+ISOLATED_BREADTH_TRIES = (2, 3, 5)               # Yalnız çöküş eşiği: bundan az coin düşerken (rapor 12: 5)
 REENTRY_TRIES = (5, 8)                          # Faz 6: dalgada yeniden giriş eşiği (coin)
 DD_SCALE_TRIES = (20.0, 40.0)                   # Düşüşte küçültme eşiği (%)
 DD_SIZE_TRIES = (50.0, 75.0)                    # Düşüşte küçültme boyu (%)
@@ -1838,6 +1839,8 @@ def size_variant_rows(cfg, ev, depth: bool = False) -> List[Tuple[str, "Evaluati
             if not _same(v, base.isolated_size_pct):
                 name = "Yalnız çöküş tam boy" if v >= 100 else f"Yalnız çöküş boyu %{v:g}"
                 rows.append((f"{name} (şimdi %{base.isolated_size_pct:g})", ev(isolated_size_pct=v)))
+        rows += [(f"Yalnız çöküş eşiği <{b} coin (şimdi <{base.isolated_breadth})", ev(isolated_breadth=b))
+                 for b in ISOLATED_BREADTH_TRIES if b != base.isolated_breadth]
     if base.reentry_breadth > 0:
         rows += [(f"Dalgada yeniden giriş ≥{b} coin (şimdi ≥{base.reentry_breadth})", ev(reentry_breadth=b))
                  for b in REENTRY_TRIES if b != base.reentry_breadth]
@@ -2860,10 +2863,18 @@ def cascade_label(p: SimParams) -> str:
     return "; ".join(parts)
 
 
+FIRST_BREADTH_BUCKETS = ((0, 2), (2, 5), (5, 8), (8, None))   # İlk pozisyonlar: genişlik kovaları (alt, üst hariç)
+
+
 def breadth_breakdown(trades: Sequence[FutTrade], p: SimParams) -> str:
-    """Girişteki genişliğe göre işlem başı sonuç (sabit tutar): yalnız çöküş / ara / piyasa geneli dalga."""
-    groups = (("yalnız çöküş (0-1 coin)", lambda b: b < 2), ("2-7 coin", lambda b: 2 <= b < 8),
-              ("dalga (8+ coin)", lambda b: b >= 8))
+    """Girişteki genişliğe göre işlem başı sonuç (sabit tutar): yalnız çöküş (genişlik < FUTURES_ISOLATED_BREADTH) /
+    ara / piyasa geneli dalga (8+ coin)."""
+    lo = max(1, int(p.isolated_breadth))
+    wave = max(8, lo)
+    groups = [(f"yalnız çöküş (0-{lo - 1} coin)" if lo > 1 else "yalnız çöküş (0 coin)", lambda b: b < lo)]
+    if lo < 8:
+        groups.append((f"{lo}-7 coin", lambda b: lo <= b < 8))
+    groups.append((f"dalga ({wave}+ coin)", lambda b: b >= wave))
     out = []
     for name, ok in groups:
         mv = [net_move_pct(t) for t in trades if ok(t.breadth)]
@@ -2879,6 +2890,26 @@ def breadth_breakdown(trades: Sequence[FutTrade], p: SimParams) -> str:
         if group:
             text += f" | {name}: {len(group)} işlem, ort. {np.mean([net_move_pct(t) for t in group]):+.3f}%"
     return text
+
+
+def first_breadth_line(trades: Sequence[FutTrade], p: SimParams) -> Optional[str]:
+    """Dalga modunda ilk pozisyonların (hiç pozisyon yokken açılan, en büyük boy) girişteki genişliğe göre işlem başı
+    sonucu (sabit tutar). Rapor 12 araştırması: 2-4 coin düşerken açılan ilk pozisyonlar riskin büyüğünü taşıyıp az
+    kazandırıyordu (FUTURES_ISOLATED_BREADTH ile küçültülebilir)."""
+    if p.max_positions <= 1:
+        return None
+    first = [t for t in trades if t.slot == 1]
+    parts = []
+    for a, b in FIRST_BREADTH_BUCKETS:
+        mv = [net_move_pct(t) for t in first if t.breadth >= a and (b is None or t.breadth < b)]
+        if mv:
+            name = f"{a}+ coin" if b is None else f"{a}-{b - 1} coin"
+            parts.append(f"{name}: {len(mv)} işlem, ort. {np.mean(mv):+.3f}%")
+    if not parts:
+        return None
+    size = (f"{tr_from(p.isolated_breadth)} az coin düşerken boy %{p.isolated_size_pct:g}"
+            if p.isolated_size_pct < 100 else "hepsi tam boy")
+    return f"İlk pozisyonlar genişliğe göre (sabit tutar; {size}): " + " | ".join(parts)
 
 
 # ===================================================================== canlı bot karşılaştırması
@@ -3610,6 +3641,9 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
         L.append(f"  Atlanan sinyal: {skipped}")
     if crash and data.breadth is not None and fixed:
         L.append("  " + breadth_breakdown(fixed, p))
+        first_line = first_breadth_line(fixed, p)
+        if first_line:
+            L.append("  " + first_line)
     if res.kill_ms:
         L.append(f"  ⚠️ Kill-switch (-%{p.kill_pct:g}) canlıda {_date(res.kill_ms)} tarihinde botu durdururdu")
     if res.ruined_ms:

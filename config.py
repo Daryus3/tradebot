@@ -569,6 +569,23 @@ def futures_slot_share(cfg, n_open: int) -> float:
 #       ortanca 12 ay getirisini +%10.271'den +%9.976'ya indirdi; %90'ı aşan düşüş yaşayan hesap 49 → 0, bakiyesi 5 USDT
 #       altına inen 21 → 0, en kötü yıl içi düşüş %98 → %85, kayma 4 katında hesap ayakta (kapalıyken 2021'de eridi).
 #       Kötümser stop dolumunda (fitilin ortası) yine 1-2 USDT'ye iniyor. Ayrıntı: README "Düşüşte küçültme".
+_ABL_ONES = ("dan", "den", "den", "ten", "ten", "ten", "dan", "den", "den", "dan")
+_ABL_TENS = ("", "dan", "den", "dan", "tan", "den", "tan", "ten", "den", "dan")
+
+
+def tr_from(n: int) -> str:
+    """Sayıya Türkçe ayrılma eki (okunuşa göre -den / -dan / -ten / -tan): 2'den, 5'ten, 6'dan, 10'dan, 40'tan, 100'den."""
+    n = int(n)
+    m = abs(n)
+    if m % 10 or m == 0:
+        suffix = _ABL_ONES[m % 10]
+    elif m % 100:
+        suffix = _ABL_TENS[(m // 10) % 10]
+    else:
+        suffix = "dan" if m % 1_000_000 == 0 else "den"      # milyon / yüz, bin
+    return f"{n}'{suffix}"
+
+
 def dd_scale_factor(threshold_pct: float, size_pct: float, capital: float, peak: float) -> float:
     """Düşüşte küçültme çarpanı (canlı bot ve backtest aynı kural): sermaye zirvenin threshold_pct (%) ya da daha
     fazla altındaysa size_pct / 100, değilse 1. threshold_pct ≤ 0 (kapalı) ya da zirve bilinmiyorsa 1."""
@@ -1869,10 +1886,13 @@ def _setting_notes(cfg: Config) -> List[str]:
                              "20 köklü coin (~25 coin) için seçildi; 10 coinlik listede ek pozisyon çok seyrek açılır.")
         if cfg.futures_isolated_size_pct < 100:
             notes.append(f"FUTURES_ISOLATED_SIZE_PCT={cfg.futures_isolated_size_pct:g}: son 1 saatte "
-                         f"{cfg.futures_isolated_breadth}'den az coin %3+ düşerken açılan (yalnız çöküş) pozisyonlar "
+                         f"{tr_from(cfg.futures_isolated_breadth)} az coin %3+ düşerken açılan (yalnız çöküş) pozisyonlar "
                          f"%{cfg.futures_isolated_size_pct:g} büyüklükte. Düzeltilmiş testte (Kasım 2026) yalnız çöküşler "
                          f"işlem başı ~%0 getirdi; yarım büyüklük işlem sayısını değiştirmeden #2'de yıllık getiriyi "
-                         f"+%193 / +%90'dan +%228 / +%103'e çıkardı, doğrulama dönemi düşüşünü %60'tan %46'ya indirdi.")
+                         f"+%193 / +%90'dan +%228 / +%103'e çıkardı, doğrulama dönemi düşüşünü %60'tan %46'ya indirdi. "
+                         f"Rapor 12 araştırması (gerçekçi model, 4.000 USDT, 5x): 2-4 coin düşerken açılan ilk pozisyonlar "
+                         f"de zayıf (işlem başı +%0.2; 5+ coinde +%0.45-0.65); FUTURES_ISOLATED_BREADTH=5 ve %50 ile 10 "
+                         f"çekilişin 9'unda iki dönemde de kâr arttı, 71 hesapta %60'ı aşan düşüş 16 → 10.")
         if cfg.futures_reentry_breadth > 0:
             if cfg.loss_cooldown_minutes <= cfg.symbol_cooldown_minutes:
                 notes.append(f"FUTURES_REENTRY_BREADTH={cfg.futures_reentry_breadth}: LOSS_COOLDOWN_MINUTES="

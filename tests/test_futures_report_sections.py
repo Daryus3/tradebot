@@ -103,6 +103,9 @@ def test_variant_rows_are_grouped_and_cover_settings_around_the_current_ones(fcf
     assert any(n.startswith("Ek pozisyon boyu ilkinin %8'i") for n in got)
     assert got["Ek pozisyon: ≥6 coin düşerken (şimdi ≥8)"].extra_breadth == 6
     assert got["Yalnız çöküş tam boy (şimdi %25)"].isolated_size_pct == 100
+    assert got["Yalnız çöküş eşiği <5 coin (şimdi <2)"].isolated_breadth == 5
+    assert got["Yalnız çöküş eşiği <3 coin (şimdi <2)"].isolated_breadth == 3
+    assert not any(n.startswith("Yalnız çöküş eşiği <2 coin") for n in got)     # Şimdiki eşik denenmez
     assert got["Dalgada yeniden giriş ≥5 coin (şimdi ≥3)"].reentry_breadth == 5
     assert got["Düşüşte küçültme kapalı"].dd_scale_pct == 0
     assert got["Düşüşte küçültme boyu %50 (şimdi %60)"].dd_scale_size_pct == 50
@@ -190,6 +193,33 @@ def test_monthly_clusters_measure_share_profit_and_b_month():
     jan, feb = (next(mo for mo in y24["months"] if mo["m"] == m) for m in (1, 2))
     assert jan["ret"] == pytest.approx(0.0) and feb["ret"] == pytest.approx(10.0) and not feb["cluster"]
     assert y25["clusters"] == [] and len(y25["months"]) == 2                     # Veri 1 Mart'ta bitiyor
+
+
+def test_breadth_lines_follow_the_isolated_threshold_and_split_first_positions(fcfg):
+    p = replace(fb.params_from_cfg(fcfg), max_positions=4, isolated_breadth=5, isolated_size_pct=50.0)
+    trades = [fb.FutTrade("A", "long", 0, 1, 1, 1, "TP", 2, 1, 2, 0, 0, pnl, 1, 0, 0, 0, False, False, MIN,
+                          breadth=b, slot=s)
+              for b, s, pnl in ((1, 1, -0.01), (3, 1, 0.002), (4, 1, 0.004), (6, 1, 0.01), (9, 1, 0.02), (12, 2, 0.01))]
+    text = fb.breadth_breakdown(trades, p)
+    assert "yalnız çöküş (0-4 coin): 3 işlem" in text and "5-7 coin: 1 işlem" in text
+    assert "dalga (8+ coin): 2 işlem" in text and "ek pozisyonlar: 1 işlem" in text
+    line = fb.first_breadth_line(trades, p)
+    assert line == ("İlk pozisyonlar genişliğe göre (sabit tutar; 5'ten az coin düşerken boy %50): "
+                    "0-1 coin: 1 işlem, ort. -0.500% | 2-4 coin: 2 işlem, ort. +0.150% | 5-7 coin: 1 işlem, ort. "
+                    "+0.500% | 8+ coin: 1 işlem, ort. +1.000%")                   # Ek pozisyon (yuva 2) sayılmaz
+    assert "hepsi tam boy" in fb.first_breadth_line(trades, replace(p, isolated_size_pct=100.0))
+    assert fb.first_breadth_line(trades, replace(p, max_positions=1)) is None        # Tek pozisyonda satır yok
+    old = fb.breadth_breakdown(trades, replace(p, isolated_breadth=2))
+    assert "yalnız çöküş (0-1 coin): 1 işlem" in old and "2-7 coin: 3 işlem" in old
+
+
+def test_turkish_ablative_suffix_for_numbers():
+    from config import tr_from
+    assert [tr_from(n) for n in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15, 20, 30, 40, 50, 60, 70, 80, 90, 100, 1000,
+                                 1_000_000)] == [
+        "0'dan", "1'den", "2'den", "3'ten", "4'ten", "5'ten", "6'dan", "7'den", "8'den", "9'dan", "10'dan", "12'den",
+        "15'ten", "20'den", "30'dan", "40'tan", "50'den", "60'tan", "70'ten", "80'den", "90'dan", "100'den", "1000'den",
+        "1000000'dan"]
 
 
 def test_turkish_percent_suffixes():

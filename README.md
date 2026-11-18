@@ -1889,6 +1889,48 @@ başlayan 71 hesapta kill-switch uygulanır.
   - 6x: düşüş %62; 71 hesabın 3'ü yarıdan fazlasını kaybetti.
   - Düşüşte küçültme tamamen kapalı: düşüş %64; 71 hesabın 6'sı yarıdan fazlasını kaybetti.
 
+#### Rapor 12: düşüşü artırmadan kâr (4.000 USDT, 5x, Kasım 2026)
+Rapor 12 ayarı: rapor 11 + ek pozisyon 45 dk, Kâr Al limit, düşüşte küçültme 40 / 75. Raporun tek kural tablosunda şans
+payını aşan iyileşme yoktu. 38 komşu ayar 5 çekilişle ölçüldü; hiçbiri düşüşü artırmadan kârı her ölçüde artırmadı.
+Sonra düşüşün kaynağına bakıldı. Aşağıda ilk pozisyonların (hiç pozisyon yokken açılan, bakiyenin %63'ü × 5x) işlem
+başı neti girişteki genişliğe göre verilmiştir (sabit tutar, 3 çekiliş):
+
+| İlk pozisyon açılırken düşen coin | Seçim (2020-01 → 2023-10) | Doğrulama (2023-11 → 2026-11) |
+|---|---|---|
+| 0-1 (yalnız çöküş, %25 boy) | −%0.03 | +%0.08 |
+| 2-4 (tam boy) | +%0.24 | +%0.18 |
+| 5-7 | +%0.44 | +%0.65 |
+| 8+ | +%0.63 | +%0.62 |
+
+2-4 coin düşerken açılan ilk pozisyonlar tam boyla açılıp riskin büyüğünü taşıyor ama az kazandırıyor; iki dönemde de
+aynı tablo var. Mevcut ayarlarla çözüm: `FUTURES_ISOLATED_BREADTH=5` ve `FUTURES_ISOLATED_SIZE_PCT=50`. Böylece 5'ten az
+coin düşerken açılan ilk pozisyon yarım boyda açılır. Sonuçlar 10 çekilişin ortancası:
+
+| Ayar | A son bakiye | A düşüş | Yıllık seçim / doğrulama | Doğrulamada kayma ×3 | Son 12 ay | 71 hesap: 12 ay ortanca | 71 hesap: %60'ı aşan düşüş | Şimdikinden iyi çekiliş (seçim / doğr. / 71 hesap) |
+|---|---|---|---|---|---|---|---|---|
+| Şimdiki (rapor 12) | 3,14 milyon | %57.7 | +%391 / +%313 | +%104 | +%239 | +%760 | 16 | — |
+| **<5 coin, %50 (önerilen)** | 3,31 milyon | %55.7 | +%396 / +%352 | +%137 | +%252 | +%827 | 10 | 9 / 9 / 9 |
+| <5 coin, %40 | 2,96 milyon | %56.1 | +%374 / +%330 | +%138 | +%250 | +%835 | 10 | 7 / 7 / 7 |
+| <5 coin, %60 | 3,18 milyon | %55.6 | +%391 / +%341 | +%132 | +%228 | +%785 | 12 | 5 / 7 / 6 |
+
+- Komşular (5 çekiliş): <4 coin %40 seçimde kötü (+%389 / şimdiki +%416). <6 coin %40'ta kâr şimdikiyle aynı, düşüş
+  %49. Eşik 5 en iyisi; düşüş 4-6 arasında tutarlı biçimde azalıyor.
+- Stres (10 çekiliş): kayma ×2: 2,41 → 2,54 milyon. Kayma ×3: 1,45 → 1,52 milyon. Komisyon ×2: 1,47 → 1,52 milyon.
+  Kill-switch hiçbir çekilişte durdurmadı. Kötümser stop dolumunda ikisi de eriyor.
+- B (her yıl 1 Ocak'tan, 10 çekiliş): getiri 4 yılda yüksek, 3 yılda düşük (2020 −%3, 2021 −%19, 2026 +%169 → +%121).
+  Yıl içi düşüş 6 yılda aynı ya da düşük (2026: %46 → %39), 2021'de yüksek (%60 → %65).
+- Denenip elenenler:
+  - Açılan düşüş payını 6x ile kâra çevirmek: A düşüşü %52-60 kalıyor ama 71 hesapta %60'ı aşan düşüş 16 → 33-34.
+  - Dalgada yeniden girişleri büyütmek (×1.5 / ×2): işlem başı en kârlı grup bunlar ama aynı dalgada toplanıyorlar;
+    düşüş %70-75.
+  - 5+ coinde ilk pozisyonu büyütmek (×1.15 / ×1.3): düşüş %59-63.
+  - Kısa hafızalı düşüşte küçültme (1-7 günlük zirve): kâr %10-20 düşük.
+  - Önerilenle birlikte küçültme boyu %85: 71 hesap +%889 ama kayma ×3'te düşüş %79.
+  - Tekil ayarlar: başabaş tabanı 0.05-0.20, başabaş tetiği 1.0 / 1.2, ek başabaş 0.35 / 0.5, zaman stopları, Kâr Al
+    5.5-7, Zarar Kes 4.5 / 5, ek kapısı 9-12, yeniden giriş 2 / 4, ek boyu, 5 pozisyon, derinlik 7.5 / 12.5, küçültme eşiği
+    ve boyu, zarar sonrası bekleme 2-8 saat. Hiçbiri iki dönemde, 71 hesapta ve düşüşte birlikte iyi değil.
+- Rapor artık "İlk pozisyonlar genişliğe göre" satırını ve "Yalnız çöküş eşiği <N coin" tek kural satırlarını gösterir.
+
 ### 🏆 Strateji turnuvası (`--turnuva`)
 Hangi strateji türünün sizin dönemde işe yaradığını **tek komutla** görmek için:
 ```bash

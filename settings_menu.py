@@ -27,7 +27,7 @@ from config import (futures_scan_shifts, futures_snapshot_on, DEFAULT_FUTURES_CO
                     FUTURES_ENTRY_ORDERS, FUTURES_PHASE6_OFF, FUTURES_PHASE6_PRESET, FUTURES_PHASE6_SINGLE_PRESET,
                     FUTURES_PHASE8_OFF, FUTURES_PHASE9_OFF, FUTURES_GRID_PRESETS, FUTURES_LIQ_SOURCES, FUTURES_RECOMMENDED, FUTURES_SIDES,
                     FUTURES_TACTIC_EXITS, FUTURES_TACTICS, FUTURES_TP_ORDERS, FUTURES_UNIVERSE_MODES, futures_be_trigger,
-                    futures_hold_minutes,
+                    futures_hold_minutes, tr_from,
                     futures_coin_list, futures_crash_rules,
                     futures_funding_rules, futures_liq_distance_pct, futures_modules, futures_pump_rules,
                     futures_dd_factor, futures_slot_share, futures_wave_rules, is_futures, is_rotation,
@@ -403,8 +403,8 @@ PAGES: Dict[str, Page] = {
             else f"ek: %{float(v):g}", show=lambda cfg: _crash(cfg) and cfg.futures_max_positions > 1, per_row=4),
         Row("FUTURES_ISOLATED_SIZE_PCT", values=(100, 50, 25), fmt=lambda v: "Yalnız çöküş: tam" if float(v) >= 100
             else f"Yalnız çöküş: %{float(v):g}", show=_crash, per_row=3),
-        Row("FUTURES_ISOLATED_BREADTH", icon="🔎", values=(2, 3), fmt=lambda v: f"yalnız: <{v} coin",
-            show=lambda cfg: _crash(cfg) and cfg.futures_isolated_size_pct < 100, per_row=2),
+        Row("FUTURES_ISOLATED_BREADTH", icon="🔎", values=(2, 3, 5), fmt=lambda v: f"yalnız: <{v} coin",
+            show=lambda cfg: _crash(cfg) and cfg.futures_isolated_size_pct < 100, per_row=3),
         Row("FUTURES_REENTRY_BREADTH", icon="🔁", values=(0, 3, 8), fmt=lambda v: "yeniden giriş: kapalı" if int(v) == 0
             else f"yeniden giriş: ≥{v} coin", show=_crash, per_row=3),
         Row("FUTURES_WAVE_RULES", values=WAVE_RULE_CHOICES, fmt=lambda v: _wave_label(v), show=_crash, per_row=2),
@@ -969,7 +969,7 @@ class SettingsMenu:
                     f"her biri %{each:.1f}'i (ilkinin %{cfg.futures_extra_size_pct:g}'i).")
         else:
             mode = "Kapalı: aynı anda tek pozisyon (tüm bakiye)."
-        size = (f"Yalnız çöküş (son 1 saatte {cfg.futures_isolated_breadth}'den az coin %3+ düşüyor): pozisyon "
+        size = (f"Yalnız çöküş (son 1 saatte {tr_from(cfg.futures_isolated_breadth)} az coin %3+ düşüyor): pozisyon "
                 f"<b>%{cfg.futures_isolated_size_pct:g}</b> büyüklükte." if cfg.futures_isolated_size_pct < 100
                 else "Yalnız çöküşte pozisyon tam büyüklükte.")
         lines = ["🌊 <b>Dalga Modu</b>", LINE, mode, size]
