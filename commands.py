@@ -63,6 +63,7 @@ COMMAND_MENU = [
     ("gecikme", "Binance'e ağ gecikmesi (ms)"),
     ("loglar", "Son 15 log satırı"),
     ("ip", "Sunucunun dış IP adresi"),
+    ("sistem", "Sunucu durumu: RAM, işlemci, disk, sıcaklık"),
     ("pano", "Canlı K/Z panosu (aç / kapat)"),
     ("backtest", "Backtest menüsü: ayarla, başlat, sonuçları al"),
     ("toz", "Küçük bakiyeleri (toz) BNB'ye çevir"),
@@ -551,6 +552,11 @@ class CommandProcessor:
 
     def cmd_ip(self, args) -> None:
         self.panel.ip_info()
+
+    def cmd_sistem(self, args) -> None:
+        self.panel.system_info()
+
+    cmd_sunucu = cmd_sistem
 
     def cmd_pano(self, args) -> None:
         smart = self.bot.smart

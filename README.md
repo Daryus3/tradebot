@@ -182,6 +182,7 @@ seçilemez), vadelide stop güvencesini kapatmak ve vadeli taktiği değiştirme
 | `/ayarlar` · `/ping` · `/yardim` | Ayarlar, "çalışıyor musun?", komut listesi |
 | `/menu` · `/ayar tp 2.5` | Kontrol paneli; tek bir ayarı değiştirme |
 | `/piyasa` · `/gecikme` · `/loglar` · `/ip` | Piyasa taraması, ağ gecikmesi, son loglar, dış IP |
+| `/sistem` (ya da `/sunucu`) | Sunucu durumu: RAM ve takas kullanımı, botun belleği, işlemci yükü, disk, açık kalma süresi, sıcaklık (menüde 🖥️ Sunucu Durumu). Sanal sunucularda (VPS) donanım sıcaklığı genelde görünmez; bot bunu yazar |
 | `/pano` · `/toz` | Canlı K/Z panosu (aç / kapat); tozları BNB'ye çevir |
 | `/backtest` | Backtest menüsü (düğmelerle ayarla, başlat, sonuçları al) |
 

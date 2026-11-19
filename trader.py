@@ -61,7 +61,7 @@ SLOW_TICK_SEC = 20           # Döngü bundan uzun sürerse adım adım süreler
 # Tarama sürerken de hemen cevaplanan, yalnızca bilgi gösteren komutlar (diğerleri tarama bitince çalışır)
 READ_ONLY_COMMANDS = frozenset({"durum", "pozisyon", "bakiye", "islemler", "csv", "istatistik", "rapor", "tarama",
                                 "ayarlar", "ping", "yardim", "help", "start", "menu", "panel", "piyasa", "gecikme",
-                                "loglar", "log", "ip", "pano", "toz", "backtest", "bt"})
+                                "loglar", "log", "ip", "sistem", "sunucu", "pano", "toz", "backtest", "bt"})
 # Risk sigortaları: zarar serisine sayılan çıkışlar; seriyi ne bozan ne artıran (elle / bot dışı) çıkışlar
 STOP_EXITS = frozenset({ExitReason.STOP_LOSS, ExitReason.BACKUP_STOP})
 NEUTRAL_EXITS = frozenset({ExitReason.MANUAL, ExitReason.KILL_SWITCH, ExitReason.EXTERNAL})

@@ -20,7 +20,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
-from config import (LOG_DIR, PROFILE_ATTRS, PROFILES, STRATEGY_NAMES, Config, ConfigError, divergence_trading,
+from config import (DATA_DIR, LOG_DIR, PROFILE_ATTRS, PROFILES, STRATEGY_NAMES, Config, ConfigError, divergence_trading,
                     is_futures, is_rotation, strategy_family, with_strategy)
 from entry_filters import DIV_FILTER_RECENT_BARS
 from logger import get_logger, redact
@@ -39,7 +39,7 @@ LOG_TAIL_LINES = 15
 BLACKLIST_HOURS = 24
 # Tarama sürerken de hemen çalışan (yalnızca bilgi gösteren / menüde gezinen) düğmeler
 READ_ONLY_CALLBACKS = frozenset({"menu", "st", "cfg", "cap", "strat", "ntf", "flt", "risk", "scan", "lat", "log",
-                                 "ip", "x", "rst", "smart", "board", "dust", "bt", "pg"})
+                                 "ip", "sys", "x", "rst", "smart", "board", "dust", "bt", "pg"})
 # Ayar düğmeleri: kısa ad → (ayar, adım)
 STEPS = {"TP": ("TAKE_PROFIT_PCT", 0.5), "SL": ("STOP_LOSS_PCT", 0.5), "TR": ("TRAILING_ACTIVATION_PCT", 0.5),
          "POS": ("MAX_OPEN_POSITIONS", 1), "LEV": ("FUTURES_LEVERAGE", 1)}
@@ -144,6 +144,7 @@ class ControlPanel:
             "lat": self.latency,
             "log": self.logs,
             "ip": self.ip_info,
+            "sys": self.system_info,
             "rst": self.ask_restart,
             "x": lambda: self.proc.reply_menu("🎛️ Menü kapatıldı. Tekrar açmak için /menu", [], mid),
             "yes": lambda: self._confirm(arg, True),
@@ -227,6 +228,7 @@ class ControlPanel:
             [("🧪 Backtest", "bt")],
             [("🔎 Piyasayı Tara", "scan"), ("📶 Gecikme", "lat")],
             [("📜 Son Loglar", "log"), ("🌐 IP", "ip")],
+            [("🖥️ Sunucu Durumu", "sys")],
             [("🧹 Toz → BNB", "dust"), ("🔄 Sunucu Reset", "rst")],
             [("✖️ Kapat", "x")],
         ]
@@ -680,6 +682,12 @@ class ControlPanel:
             body.insert(0, text)
             size += len(text) + 1
         self.proc.reply(f"📜 <b>Son {len(body)} log satırı</b>\n<pre>" + "\n".join(body) + "</pre>")
+
+    def system_info(self) -> None:
+        """Sunucu durumu: RAM, takas, botun belleği, işlemci yükü, disk (veri klasörü), açık kalma süresi, sıcaklık."""
+        import system_info
+        disk = str(DATA_DIR) if Path(DATA_DIR).exists() else "."
+        self.proc.reply(system_info.format_text(system_info.read(disk_path=disk)))
 
     def ip_info(self) -> None:
         from ip_monitor import IpMonitor
