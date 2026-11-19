@@ -100,6 +100,13 @@ def _is_network(exc: Exception) -> bool:
     return ccxt is not None and isinstance(exc, (ccxt.NetworkError,)) and not isinstance(exc, ccxt.InvalidNonce)
 
 
+def rate_limited(exc: BaseException) -> bool:
+    """Ağ hatası (requests.ConnectionError) Binance'in istek sınırından (429 / 418 IP yasağı) mı geliyor: o durumda
+    coin coin yeniden denenmez, tarama ağ kesintisi gibi durur (istek yağdırılmaz)."""
+    cause = getattr(exc, "__cause__", None)
+    return ccxt is not None and isinstance(cause, (ccxt.RateLimitExceeded, ccxt.DDoSProtection))
+
+
 def _order_ts(order: dict) -> int:
     """Emir yanıtındaki işlem zamanı (ms, Binance saati): updateTime; yoksa CCXT'nin zaman alanları. Bulunamazsa 0."""
     try:

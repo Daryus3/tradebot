@@ -47,7 +47,7 @@ from config import (MINUTE_SCAN_STEP_MS, futures_be_trigger, futures_breadth_on,
                     futures_slot_share, futures_snapshot_on, futures_wave_cfg, futures_wave_rules)
 from futures_data import history_mismatch, merge_tail, resample, split_history, with_bar
 from futures_depth import DEPTH_CHECK_MIN_NOTIONAL
-from futures_exchange import FFill, FuturesError, MinNotionalError, describe_error
+from futures_exchange import FFill, FuturesError, MinNotionalError, describe_error, rate_limited
 from logger import get_logger
 from risk import ExitReason, Position, cooldown_minutes, kill_switch_hit
 from strategy import (FUT_BAR_MS, FUT_BREADTH_DROP_PCT, FUT_BREADTH_HOURS, FUT_BTC_1H_LIMIT, FUT_H1_LIMIT, FUT_HOUR_MS,
@@ -71,6 +71,11 @@ TRAIL_MIN_STEP_PCT = 0.1      # ...ve yeni seviye eskisinden en az bu kadar (fiy
 PREFILTER_SLACK_PCT = 1.0     # En hacimli N + çöküş: 24 saatlik tepeye göre ön elemede pay (fiyat puanı)
 KLINE_PARALLEL_MIN = 16       # Bundan çok coinin mumları paralel istenir (120-150 coinlik evrende tarama gecikmesin)
 KLINE_WORKERS = 6
+# Ağ hatası (zaman aşımı, bağlantı kopması) tek tük coinde: o coinler bu taramada atlanır, ötekiler taranır (eskiden tek
+# coinin hatası taramanın tamamını düşürüyordu). Bundan çok coinde ya da hepsinde: ağ kesintisi (ana döngü bekler,
+# Telegram'a yazar). Hızlı girişte ağ hatası veren coin, süre kaldıysa bir kez daha istenir.
+KLINE_NET_MAX_MISSING = 2
+KLINE_NET_RETRIES = 1
 UNIVERSE_REFRESH_SEC = 24 * 3600   # En hacimli N köklü coin sıralaması günde bir yenilenir (parite başına 1 istek)
 UNIVERSE_RETRY_SEC = 600           # Sıralama alınamazsa bu kadar sonra yeniden denenir
 SCAN_LOG_DAYS = 30                 # Canlı tarama kaydı (futures_scans_<mod>.jsonl) bu kadar gün tutulur
@@ -787,8 +792,12 @@ class FuturesBot(TradingBot):
                 return symbol, ex.klines(symbol, interval, limit), 0, None
             except FuturesError as exc:
                 return symbol, None, 0, exc
+            except requests.ConnectionError as exc:  # Tek coinde ağ hatası: o coin atlanır (çoğunda: ağ kesintisi)
+                if rate_limited(exc):                 # İstek sınırı: tarama durur, istek yağdırılmaz
+                    raise
+                return symbol, None, 0, exc
 
-        def burst(symbols: List[str]):                # Ağ hatası (ConnectionError) sıralı sürümdeki gibi yükselir
+        def burst(symbols: List[str]):                # İstek sınırı hatası (ConnectionError) burada yükselir
             if fast:                                  # Tek dalga, CCXT'nin istekler arası beklemesi olmadan
                 with ex.unthrottled():
                     if len(symbols) == 1:
@@ -802,6 +811,8 @@ class FuturesBot(TradingBot):
 
         klines: Dict[str, dict] = {}
         failed: Dict[str, str] = {}
+        net: Dict[str, Exception] = {}              # Ağ hatasıyla alınamayanlar (son durum)
+        net_tries: Dict[str, int] = {}
         settled: Set[str] = set()
         pending, tries = list(targets), 0
         deadline = closed_ms / 1000 + SCAN_DELAY_SEC
@@ -812,8 +823,14 @@ class FuturesBot(TradingBot):
                 if exc is not None:
                     if symbol not in klines:          # Yeniden denemede hata: önceki yanıt (aynı mum) kullanılır
                         failed[symbol] = f"{symbol}: {exc}"
+                        if isinstance(exc, requests.ConnectionError):
+                            net[symbol] = exc
+                            if fast and net_tries.get(symbol, 0) < KLINE_NET_RETRIES:
+                                net_tries[symbol] = net_tries.get(symbol, 0) + 1
+                                again.append(symbol)  # Süre kaldıysa bir kez daha istenir
                     continue
                 failed.pop(symbol, None)
+                net.pop(symbol, None)
                 fresh = bool(len(k["t"])) and int(k["t"][-1]) + bar_ms == closed_ms
                 if fresh and shift:                   # 1 dk mumlar → bu dakikada kapanan 5 dk mumlar
                     k = resample(k, FUT_BAR_MS, shift_ms=shift)
@@ -838,6 +855,8 @@ class FuturesBot(TradingBot):
         if fast and (tries > 1 or quiet):
             log.info("Hızlı giriş: mumlar %d denemede alındı (yeni mumu görünen %d / %d coin; beklenmeyen sakin coin %d)",
                      tries, len(settled), len(targets), len(quiet))
+        if net and (len(net) > KLINE_NET_MAX_MISSING or not klines):
+            raise next(iter(net.values()))            # Çok coinde ağ hatası: ağ kesintisi (ana döngü bekleyip yeniden dener)
         return klines, list(failed.values()), tries
 
     def _quiet_rules(self) -> Optional[Tuple[Tuple[int, float], ...]]:
@@ -993,7 +1012,7 @@ class FuturesBot(TradingBot):
                     if merged is not None:
                         return symbol, (merged, forming), None, False
                 return symbol, split_history(*ex.klines_open(symbol, interval, limit), closed_ms, bar_ms), None, True
-            except FuturesError as exc:
+            except (FuturesError, requests.ConnectionError) as exc:    # O coin eksik sayılır (SNAP_MAX_MISSING)
                 return symbol, None, exc, False
 
         try:
@@ -1032,7 +1051,9 @@ class FuturesBot(TradingBot):
         ready = {symbol: (k, forming) for symbol, (k, forming) in got.items()
                  if len(k["t"]) and int(k["t"][-1]) + 2 * bar_ms == closed_ms}
         if len(ready) < max(1, len(symbols) - SNAP_MAX_MISSING):
-            self._snap_miss = f"geçmiş mumlar {len(ready)} / {len(symbols)} coinde hazır"
+            net_err = sum(1 for _s, _r, exc, _f in rows if isinstance(exc, requests.ConnectionError))
+            self._snap_miss = (f"geçmiş mumlar {len(ready)} / {len(symbols)} coinde hazır"
+                               + (f" (ağ hatası: {net_err} coin)" if net_err else ""))
             return
         self._snap = {"closed_ms": closed_ms, "shift": shift, "bar_ms": bar_ms, "k": ready}
 

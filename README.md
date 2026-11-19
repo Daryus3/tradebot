@@ -118,7 +118,7 @@ kilitli kalır (`--reset-state` ile açılır).
 |---|---|
 | 🧷 Binance'te yedek zarar-kes | Her alımdan sonra Binance'e `BACKUP_STOP_PCT`'de bekleyen bir stop emri bırakır; bot ulaşılamazken de pozisyon korunur |
 | 🔄 Hesap mutabakatı | Açılışta Binance ile karşılaştırır: bot kapalıyken stop çalıştıysa veya coini elle sattıysanız gerçek fiyatı kaydeder; sonucu belirsiz kalan emri bulup takibe alır |
-| 📶 Kesinti dayanıklılığı | İnternet kesilirse Telegram mesajları kaybolmaz; açılışta internet yoksa bot bekler; uzun kesintide uyarır |
+| 📶 Kesinti dayanıklılığı | İnternet kesilirse Telegram mesajları kaybolmaz; açılışta internet yoksa bot bekler; uzun kesintide uyarır. Vadeli taramada tek tük coinin mum isteği ağ hatası verirse (zaman aşımı, bağlantı kopması) yalnızca o coin atlanır; hızlı girişte o coin bir kez daha istenir. En çok 2 coin atlanabilir; daha çok coinde hata ağ kesintisi sayılır. Binance'in istek sınırı (429 / 418) taramayı eskisi gibi durdurur |
 | ⚡ Anlık fiyat akışı | Açık pozisyon ~1 sn'de bir kontrol edilir (WebSocket); bağlantı koparsa normal sorguya döner |
 | ☣️ Tehlikeli coin filtresi | Delist takvimindeki, yeni listelenmiş ve son günlerde pompalanıp sönen coinleri eler |
 | 🌡️ Piyasa rejimi | Genel çöküşte alım yapmaz; zayıf piyasada kurallar sıkılaşır ve en fazla 1 pozisyon açılır |
