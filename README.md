@@ -1932,6 +1932,28 @@ coin düşerken açılan ilk pozisyon yarım boyda açılır. Sonuçlar 10 çeki
     ve boyu, zarar sonrası bekleme 2-8 saat. Hiçbiri iki dönemde, 71 hesapta ve düşüşte birlikte iyi değil.
 - Rapor artık "İlk pozisyonlar genişliğe göre" satırını ve "Yalnız çöküş eşiği <N coin" tek kural satırlarını gösterir.
 
+#### Rapor 13: kâr araması (4.000 USDT, Kasım 2026)
+Rapor 13 ayarı: rapor 12 + yalnız çöküş <5 coin %50. Raporun kaldıraç tablosunda 6x'in düşüşü %48'e inmiş görünüyordu
+(eskiden %66). Rapor ayrıca 0-1 coin düşerken açılan ilk pozisyonların işlem başı ~%0 getirdiğini gösteriyordu. Bu iki
+fikir 10 çekilişle ölçüldü:
+
+| Ayar | A son bakiye | A düşüş | Yıllık seçim / doğrulama | Son 12 ay | 71 hesap: 12 ay ortanca | 71 hesap: %60'ı aşan düşüş | 71 hesap: kill-switch |
+|---|---|---|---|---|---|---|---|
+| Şimdiki (rapor 13, 5x) | 3,31 milyon | %55.7 | +%396 / +%352 | +%252 | +%827 | 10 | 0 |
+| 6x | 3,30 milyon | %58.5 | +%395 / +%382 | +%200 | +%1.016 | 35 | 5 |
+| 7x | 3,28 milyon | %68.4 | +%406 / +%393 | +%296 | +%984 | 54 | 8 |
+| İki kademe (0-1 coin %25, 2-4 coin %50) | 3,34 milyon | %48.6 | +%402 / +%335 | +%244 | +%805 | 10 | 1 |
+| İki kademe + 6x | 3,61 milyon | %52.0 | +%417 / +%386 | +%276 | +%962 | 30 | 6 |
+| 6x + düşüşte küçültme 30 / 60 | 2,89 milyon | %59.3 | +%367 / +%356 | +%174 | +%777 | 14 | 2 |
+
+- Daha çok kâr yalnızca daha büyük pozisyonla geliyor. 6x, 71 hesabın 12 ay ortancasını %16-23 artırıyor. Bedeli: %60'ı
+  aşan düşüş yaşayan hesap 10'dan 30-35'e, kill-switch'in botu durdurduğu hesap 0'dan 5-6'ya çıkıyor. A'nın tek yoldaki
+  düşüşü (%52-58) bu riski göstermiyor; 71 hesaba bakmak gerekiyor.
+- İki kademeli boy A'nın düşüşünü %56'dan %49'a indiriyor ama kârı artırmıyor. Düşüşte küçültmeyle 6x'i dengelemek
+  kârı geri alıyor.
+- Önceki turlarda evren (15-30 coin), çöküş eşikleri, kısa pencereler, çıkışlar ve boy ayarları da denendi; düşüşü
+  artırmadan kâr artıran bir ayar kalmadı. Şimdiki ayar kâr ile düşüş arasındaki en iyi dengede.
+
 ### 🏆 Strateji turnuvası (`--turnuva`)
 Hangi strateji türünün sizin dönemde işe yaradığını **tek komutla** görmek için:
 ```bash
