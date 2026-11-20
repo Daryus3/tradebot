@@ -38,6 +38,23 @@ def test_entry_lag_applies_to_market_entries_only(fcfg):
     assert filled is not None and filled.entry == pytest.approx(99.95)
 
 
+# ====================================================================== stop dolumu
+def test_stop_fills_pay_the_measured_stop_slippage(fcfg):
+    assert fb.STOP_SLIP_PCT == 0.015 and fb.params_from_cfg(fcfg).stop_slip_pct == 0.015    # Raporda açık
+    rows = [(100, 100.2, 97.0, 97.5)] + [(97.5, 97.6, 97.4, 97.5)] * 3                     # Zarar kes (%2) ilk mumda
+    base = params(sl_pct=2.0, hold_min=10, tp_pct=6.0)
+    off = fb.run_trade(base, sig(), window(rows), margin=10.0, notional=100.0)
+    on = fb.run_trade(replace(base, stop_slip_pct=0.03), sig(), window(rows), margin=10.0, notional=100.0)
+    assert off.reason == on.reason == "SL" and off.exit == pytest.approx(98.0)
+    assert on.exit == pytest.approx(98.0 * (1 - 0.0003))                                   # Ölçülen stop payı kadar kötü
+    both = fb.run_trade(replace(base, stop_slip_pct=0.03, slippage_pct=0.02), sig(), window(rows), 10.0, 100.0)
+    assert both.exit == pytest.approx(98.0 * 1.0002 * (1 - 0.0005), rel=1e-6)              # Kaymayla toplanır
+    calm = [(100, 100.2, 99.9, 100.1)] * 5                                                  # Zaman stopu: etkilenmez
+    t_off = fb.run_trade(params(hold_min=3), sig(), window(calm), 10.0, 100.0)
+    t_on = fb.run_trade(params(hold_min=3, stop_slip_pct=0.03), sig(), window(calm), 10.0, 100.0)
+    assert t_on.reason == t_off.reason == "TIME" and t_on.exit == t_off.exit
+
+
 # ====================================================================== mum içi başabaş
 def test_be_retouch_probability_shape():
     q = fb.be_retouch_prob
@@ -168,7 +185,8 @@ def test_realism_label_and_comparison_row(fcfg):
     p = fb.params_from_cfg(fcfg)
     text = fb.realism_label(p)
     assert "Gerçekçilik payları" in text and "~5 sn" in text and "%0.05" in text and "tabana geri dönme" in text
-    assert fb.realism_label(replace(p, be_intrabar=False, entry_lag_pct=0.0)) == ""
+    assert "zarar kes / başabaş stopu stoptan %0.015 daha kötü dolar" in text and p.stop_slip_pct == fb.STOP_SLIP_PCT
+    assert fb.realism_label(replace(p, be_intrabar=False, entry_lag_pct=0.0, stop_slip_pct=0.0)) == ""
     assert "tabana" not in fb.realism_label(replace(p, be_enabled=False)) and "~5 sn" in fb.realism_label(
         replace(p, be_enabled=False))
     assert "~5 sn" not in fb.realism_label(replace(p, entry_limit=True))       # Limit girişte gecikme payı yok
@@ -181,7 +199,7 @@ def test_realism_label_and_comparison_row(fcfg):
     # İki kıyas satırı: giriş 1 sn'de dolsaydı (anlık taramanın hedefi) ve eski iyimser hesap
     assert [r[0][:22] for r in rows] == ["Giriş 1 sn'de dolsaydı", "Eski (iyimser) hesap: "]
     assert "%0.05 → %0.02" in rows[0][0] and fb.FAST_ENTRY_LAG_PCT == 0.02
-    assert seen == [{"entry_lag_pct": 0.02}, {"be_intrabar": False, "entry_lag_pct": 0.0}]
+    assert seen == [{"entry_lag_pct": 0.02}, {"be_intrabar": False, "entry_lag_pct": 0.0, "stop_slip_pct": 0.0}]
     seen.clear()                                 # Limit girişte gecikme payı yok: hız satırı da yok
     rows = fb.realism_rows(replace(fcfg, futures_entry_order="limit"), ev)
     assert len(rows) == 1 and "Eski (iyimser) hesap" in rows[0][0]

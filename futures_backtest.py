@@ -578,6 +578,14 @@ ENTRY_LAG_PCT = 0.05
 # kayma dahil) → saniyelik veride 1 sn'de +%0.015-0.023: pay %0.02. Bu pay kayma (futures_slippage_pct) üstüne eklenir.
 ENTRY_LAG_FAST_PCT = 0.04
 FAST_ENTRY_LAG_PCT = 0.02
+# Stop dolumu (zarar kes / başabaş / izleyen stop; canlıda Binance'te STOP_MARKET, son işlem fiyatıyla tetiklenir).
+# Saniyelik işlem verisinde (300 coin-gün; rapor 13 ayarıyla 179 zarar kes ve ~1.010 başabaş çıkışı; Kasım 2026) emrin
+# dolumuna en yakın ölçüler (stopu tetikleyen işlemden hemen sonraki işlem / sonraki 50 ms'nin ortancası) kaymanın
+# (futures_slippage_pct, %0.02) üstüne başabaşta +%0.015 / +%0.019 (± %0.012), zarar keste −%0.018 / +%0.044 (± %0.02-0.05)
+# gösterdi; tetikleyen işlemin kendisi +%0.024-0.028. Fark çöküş anlarından geliyor (ortanca dolum stoptan ~%0.01
+# aşağıda, %99'luk dilim %0.7-0.8). Kötümser stop stresi (fitilin yarısı) bunun çok ötesindedir: ölçülen dolum mumun stop
+# ötesindeki fitilinin ~%2-3'ü.
+STOP_SLIP_PCT = 0.015
 
 
 def entry_lag_for(cfg) -> Tuple[float, str]:
@@ -672,6 +680,7 @@ class SimParams:
     # olabilir. False = eski iyimser varsayım (yükselen mumda yalnızca kapanış tabanın altındaysa çıkılır).
     be_intrabar: bool = True
     entry_lag_pct: float = ENTRY_LAG_PCT   # Piyasa emriyle girişte gecikme payı (fiyat %; 0 = mum açılışından giriş)
+    stop_slip_pct: float = 0.0          # Stop dolumunda kaymaya ek pay (fiyat %; raporda STOP_SLIP_PCT, ölçülen)
     be_force: Optional[bool] = None     # Yalnızca kalibrasyon / test: o mumdaki çekilişi zorla (True çık, False kal)
     be_seed: int = 0                    # Mum içi başabaş çekilişinin tohumu (0 = raporun kendi çekilişi; bkz. draw_spread)
 
@@ -707,7 +716,7 @@ def params_from_cfg(cfg, **over) -> SimParams:
                   dd_scale_size_pct=float(getattr(cfg, "futures_dd_scale_size_pct", 60.0)),
                   depth_cap_pct=float(getattr(cfg, "futures_depth_cap_pct", 0.0) or 0.0),
                   depth_impact=bool(getattr(cfg, "futures_backtest_depth", False)),
-                  entry_lag_pct=entry_lag_for(cfg)[0])
+                  entry_lag_pct=entry_lag_for(cfg)[0], stop_slip_pct=STOP_SLIP_PCT)
     return replace(p, **over) if over else p
 
 
@@ -866,6 +875,7 @@ def run_trade(p: SimParams, s: FutSignal, window: tuple, margin: float, notional
     bar_ms, t, o, h, l, c = window
     side = 1 if s.side == "long" else -1
     slip = p.slippage_pct / 100
+    sslip = slip + p.stop_slip_pct / 100                # Stop dolumu: kayma + ölçülen stop payı
     lag = p.entry_lag_pct / 100
     start, entry_ms, maker = 0, s.close_ms, False
     if p.entry_limit:
@@ -931,7 +941,7 @@ def run_trade(p: SimParams, s: FutSignal, window: tuple, margin: float, notional
             # hareket hiç sayılmaz (stres).
             worst = max(worst, side * (entry - adverse[j]) / entry * 100)
             if worse(adverse[j], stop):
-                exit_price, reason, exit_ms = stop * (1 - side * slip), kind, tj
+                exit_price, reason, exit_ms = stop * (1 - side * sslip), kind, tj
                 break
             if p.limit_strict:
                 continue
@@ -944,7 +954,7 @@ def run_trade(p: SimParams, s: FutSignal, window: tuple, margin: float, notional
                 break
             favorable(fj)
             if worse(cj, stop):
-                exit_price, reason, exit_ms = stop * (1 - side * slip), kind, tj
+                exit_price, reason, exit_ms = stop * (1 - side * sslip), kind, tj
                 break
             continue
         if tj >= deadline:
@@ -967,7 +977,7 @@ def run_trade(p: SimParams, s: FutSignal, window: tuple, margin: float, notional
         adverse_first = cj >= oj if side > 0 else cj <= oj
         if adverse_first and worse(aj, stop):
             fill = (stop + aj) / 2 if p.harsh_stops else stop
-            exit_price, reason, exit_ms = fill * (1 - side * slip), kind, tj
+            exit_price, reason, exit_ms = fill * (1 - side * sslip), kind, tj
             break
         if reached(fj, tp):
             exit_price = tp if p.tp_limit else tp * (1 - side * slip)
@@ -978,7 +988,7 @@ def run_trade(p: SimParams, s: FutSignal, window: tuple, margin: float, notional
         after = cj if adverse_first else aj                 # Tepeden sonra görülen en kötü fiyat
         if worse(after, stop):
             fill = (stop + after) / 2 if p.harsh_stops and not adverse_first else stop
-            exit_price, reason, exit_ms = fill * (1 - side * slip), kind, tj
+            exit_price, reason, exit_ms = fill * (1 - side * sslip), kind, tj
             break
         if p.be_intrabar and be_on and not was_on and kind == "BE" and adverse_first and worse(aj, stop):
             # Başabaş bu mumda tetiklendi, mumun ters ucu yeni stopun gerisinde ama kapanış ilerisinde. Standart sıra
@@ -988,7 +998,7 @@ def run_trade(p: SimParams, s: FutSignal, window: tuple, margin: float, notional
             be_q = be_retouch_prob(side, fj, aj, cj, be_trig, stop)
             hit = p.be_force if p.be_force is not None else trade_uniform(s.symbol, s.close_ms, p.be_seed) < be_q
             if hit:
-                exit_price, reason, exit_ms = stop * (1 - side * slip), kind, tj
+                exit_price, reason, exit_ms = stop * (1 - side * sslip), kind, tj
                 break
     if exit_price is None:                                  # Veri penceresi bitti (son mumun kapanışı)
         last = n - 1
@@ -1667,6 +1677,8 @@ def realism_label(p: SimParams) -> str:
         parts.append(f"giriş mum kapanışından {lag_text(p.entry_lag_pct)} (fiyat ort. %{p.entry_lag_pct:g} daha yukarıda)")
     if p.be_intrabar and p.be_enabled:
         parts.append("başabaşın tetiklendiği dakikada fiyatın tabana geri dönme olasılığı")
+    if p.stop_slip_pct > 0:
+        parts.append(f"zarar kes / başabaş stopu stoptan %{p.stop_slip_pct:g} daha kötü dolar (kaymaya ek)")
     if not parts:
         return ""
     return ("Gerçekçilik payları (saniyelik işlem verisiyle ölçüldü): " + "; ".join(parts)
@@ -1685,8 +1697,8 @@ def realism_rows(cfg, ev) -> List[Tuple[str, "Evaluation"]]:
     if base.entry_lag_pct < ENTRY_LAG_PCT and not base.entry_limit:
         rows.append((f"Eski giriş varsayımıyla (~5 sn, gecikme payı %{base.entry_lag_pct:g} → %{ENTRY_LAG_PCT:g})",
                      ev(entry_lag_pct=ENTRY_LAG_PCT)))
-    return rows + [("Eski (iyimser) hesap: giriş gecikmesi ve mum içi başabaş payı yok",
-                    ev(be_intrabar=False, entry_lag_pct=0.0))]
+    return rows + [("Eski (iyimser) hesap: giriş gecikmesi, mum içi başabaş ve stop kayma payı yok",
+                    ev(be_intrabar=False, entry_lag_pct=0.0, stop_slip_pct=0.0))]
 
 
 def phase8_active(p: SimParams) -> bool:
@@ -1908,7 +1920,8 @@ def cost_variant_rows(cfg, ev, depth: bool = False) -> List[Tuple[str, "Evaluati
     rows = [(f"Kayma {k} kat (%{base.slippage_pct * k:.2f})", ev(slippage_pct=base.slippage_pct * k))
             for k in SLIPPAGE_TRIES]
     rows.append(("Komisyon 2 kat", ev(taker_fee=base.taker_fee * 2, maker_fee=base.maker_fee * 2)))
-    rows.append(("Kötümser stop dolumu (fitilin yarısı)", ev(harsh_stops=True)))
+    rows.append(("Kötümser stop dolumu (fitilin yarısı; en kötü durum, saniyelik veride gerçek dolum fitilin ~%3'ü)",
+                 ev(harsh_stops=True)))
     return pre + rows
 
 
@@ -3761,8 +3774,9 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
         if wicks and wicks[0] > 0:
             big = sum(1 for w in wicks if w >= 2)
             L.append(f"  Zarar kes mumunda fiyatın stopun ötesine sarktığı en uzun fitil: %{wicks[0]:.1f} (≥%2 fitilli "
-                     f"stop: {big}). Backtest stopu stop fiyatından doldurur; böyle anlarda gerçek dolum daha kötü "
-                     f"olabilir (bkz. 'Kötümser stop dolumu' satırı).")
+                     f"stop: {big}). Backtest stopu stop fiyatından kayma + %{p.stop_slip_pct:g} kötü doldurur "
+                     f"(saniyelik veride ölçülen ortalama); tek tük ani çöküşte gerçek dolum daha kötü olabilir (en kötü "
+                     f"durum: 'Kötümser stop dolumu' satırı).")
         wm = np.array([tr.window_mae_pct for tr in fixed])
         L.append(f"  Zarar kes OLMASAYDI: {p.hold_min} dk içinde fiyatın likidasyon mesafesini aştığı işlem:")
         L.append("    " + " | ".join(f"{lev}x (%{futures_liq_distance_pct(lev, p.mmr_pct):.1f}): "

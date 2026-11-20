@@ -119,7 +119,7 @@ def test_variant_rows_are_grouped_and_cover_settings_around_the_current_ones(fcf
     # Maliyet
     assert got["Kayma 2 kat (%0.04)"].slippage_pct == pytest.approx(0.04)
     assert got["Kayma 5 kat (%0.10)"].slippage_pct == pytest.approx(0.10)
-    assert got["Kötümser stop dolumu (fitilin yarısı)"].harsh_stops
+    assert got["Kötümser stop dolumu (fitilin yarısı; en kötü durum, saniyelik veride gerçek dolum fitilin ~%3'ü)"].harsh_stops
 
 
 def test_variant_rows_follow_the_current_settings(fcfg, monkeypatch):

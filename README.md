@@ -1954,6 +1954,62 @@ fikir 10 çekilişle ölçüldü:
 - Önceki turlarda evren (15-30 coin), çöküş eşikleri, kısa pencereler, çıkışlar ve boy ayarları da denendi; düşüşü
   artırmadan kâr artıran bir ayar kalmadı. Şimdiki ayar kâr ile düşüş arasındaki en iyi dengede.
 
+#### Backtest ne kadar gerçekçi? Stop dolumunun saniyelik ölçümü (Kasım 2026)
+Backtest en kötü durumu değil, en olası sonucu hedefler. En kötü durumlar ayrı stres satırlarında: kayma 2 / 3 / 5 kat,
+komisyon 2 kat, kötümser stop dolumu. Saniyelik veriyle ölçülüp motora eklenenler:
+
+- **Giriş:** Mum kapanışından sonraki fiyat artışı sayılıyor. Anlık taramada pay %0.02 kayma üstüne; canlıda ölçülen
+  dolum kapanışa göre +%0.022 (kayma dahil). Backtest +%0.04 saydığı için girişte biraz kötümser.
+- **Başabaş:** Tetiğin görüldüğü dakikada fiyatın tabana dönme olasılığı.
+- **Emir defteri:** Büyük pozisyonun defteri tüketmesi (ölçülen derinlik) ve derinliğe göre boy.
+- **Stop dolumu (yeni).** Canlıda zarar kes ve başabaş stopu Binance'te STOP_MARKET emri olarak bekler. Rapor 13
+  ayarının 300 coin-günlük saniyelik verideki çıkışları oynatıldı (179 zarar kes, ~1.010 başabaş). Emrin dolumuna en
+  yakın ölçüler: stopu tetikleyen işlemden hemen sonraki işlem ve sonraki 50 ms'nin ortancası. Bunlar %0.02 kaymanın
+  üstüne başabaşta +%0.015 / +%0.019 (± %0.012), zarar keste −%0.018 / +%0.044 (± %0.02-0.05) gösterdi. Motor artık stop
+  dolumlarına %0.015 ekliyor (`STOP_SLIP_PCT`). Sıradan çıkışta fark yok: ortanca dolum stoptan ~%0.01 aşağıda. Fark ani
+  çöküşlerden geliyor (%99'luk dilim %0.7-0.8).
+- **Limit Kâr Al:** 152-153 çıkışın hepsinde fiyat hedefin ötesinde işlem gördü; emrin dolmama riski görülmedi.
+- **"Kötümser stop dolumu (fitilin yarısı)" satırı en kötü durumdur.** Ölçülen dolum, mumun stop ötesindeki fitilinin
+  ~%2-3'ü kadar aşağıda; o satır %50 varsayar.
+
+Stop payının şimdiki ayara etkisi (10 çekiliş, 4.000 USDT):
+
+| Stop payı | A son bakiye | A düşüş | Yıllık seçim / doğrulama | 71 hesap: 12 ay ortanca | 71 hesap: %60'ı aşan düşüş | 71 hesap: kill-switch |
+|---|---|---|---|---|---|---|
+| Yok (eski hesap) | 3,31 milyon | %55.7 | +%396 / +%352 | +%827 | 10 | 0 |
+| **%0.015 (ölçülen, yeni varsayılan)** | 2,89 milyon | %56.7 | +%382 / +%322 | +%709 | 14 | 2 |
+| %0.03 (üst tahmin) | 2,63 milyon | %58.4 | +%360 / +%317 | +%605 | 16 | 4 |
+
+Pay küçük görünse de stoplar işlemlerin ~%78'ini kapatıyor ve hesap 5x ile bileşik büyüyor; bu yüzden etkisi belirgin.
+Backtestin hâlâ saymadıkları:
+
+- **İyimser yanlar:**
+  - Her sinyalin açıldığı varsayılır; emir hatası, bağlantı kopması ve bakım sayılmaz. Canlı karşılaştırma bölümü
+    kaçanları gösterir.
+  - Test evreninde tamamen çöken bir coin (LUNA, FTT gibi) yok.
+  - Ayarlar aynı 2020-2026 verisinde seçildi. Seçim / doğrulama ayrımı ve çok çekiliş bunu azaltır ama yok etmez;
+    gelecekte sonuç daha düşük olabilir.
+  - Tek tük ani çöküşte stop çok daha kötü dolabilir. Bu ortalama payın içinde, ama tek bir olay hesabı derinden etkiler.
+- **Kötümser yanlar:** Giriş payı (canlı ölçüm daha iyi) ve fonlama (çöküş sonrası fonlama genelde longların lehine).
+
+Gerçekçi motorla zararı azaltan / kârı artıran adaylar (rapor 13 ayarı, 10 çekiliş; kill-switch 3 çekilişin ortancası):
+
+| Ayar | 71 hesap: 12 ay ortanca | 71 hesap: %60'ı aşan düşüş | 71 hesap: kill-switch | A düşüş | Yıllık seçim / doğrulama |
+|---|---|---|---|---|---|
+| Şimdiki (5x) | +%709 | 14 | 2 | %56.7 | +%382 / +%322 |
+| 4x | +%525 | 4 | 0 | %49.4 | +%376 / +%291 |
+| 6x | +%857 | 38 | 7 | %60.1 | +%387 / +%352 |
+| İki kademe (0-1 coin %25, 2-4 coin %50) | +%744 | 13 | 1 | %57.1 | +%383 / +%311 |
+| Düşüşte küçültme 30 / 60 | +%602 | 11 | 0 | %58.7 | +%351 / +%235 |
+| Zarar Kes 4.25 | +%722 | 12 | 0 | %55.3 | +%387 / +%297 |
+| Zarar Kes 4.0 / 4.5 | +%575 / +%682 | 14 / 14 | 3 / 3 | %51.1 / %57.9 | +%380 / +%312 · +%376 / +%308 |
+
+- Zarar Kes 4.25'in iyi görünmesi şans: komşuları 4.0 ve 4.5 hem daha az kâr hem daha çok kill-switch gösterdi.
+- İki kademeli boy küçük bir artı gösteriyor ama doğrulamada geride ve çekilişlerin yarısında iyi; yeni kod gerektirdiği
+  için alınmadı.
+- Zararı belirgin azaltan tek ayar 4x: %60'ı aşan düşüş 14'ten 4'e, kill-switch 2'den 0'a iniyor; bedeli kârın %26'sı.
+  Kârı belirgin artıran tek ayar 6x: %21 daha çok kâr, ama kill-switch 7 hesapta devreye giriyor.
+
 ### 🏆 Strateji turnuvası (`--turnuva`)
 Hangi strateji türünün sizin dönemde işe yaradığını **tek komutla** görmek için:
 ```bash
