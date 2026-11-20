@@ -586,6 +586,15 @@ def tr_from(n: int) -> str:
     return f"{n}'{suffix}"
 
 
+def tr_from_num(x: float) -> str:
+    """tr_from'un ondalıklı sayılar için hâli; ek okunuşun son kelimesine uyar: 2 → "2'den", 2.4 → "2.4'ten",
+    0.1 → "0.1'den", 2.25 → "2.25'ten"."""
+    text = f"{float(x):g}"
+    if "." not in text or "e" in text:
+        return tr_from(int(round(float(x))))
+    return f"{text}'{tr_from(int(text.split('.')[1])).split(chr(39))[1]}"
+
+
 def dd_scale_factor(threshold_pct: float, size_pct: float, capital: float, peak: float) -> float:
     """Düşüşte küçültme çarpanı (canlı bot ve backtest aynı kural): sermaye zirvenin threshold_pct (%) ya da daha
     fazla altındaysa size_pct / 100, değilse 1. threshold_pct ≤ 0 (kapalı) ya da zirve bilinmiyorsa 1."""
@@ -938,6 +947,10 @@ class Config:
     futures_extra_breadth: int = 8         # 2. ve sonraki pozisyon: son 1 saatte %3+ düşen coin sayısı en az bu kadar
     futures_isolated_size_pct: float = 100.0   # Yalnız çöküşte (genişlik < FUTURES_ISOLATED_BREADTH) pozisyon büyüklüğü %
     futures_isolated_breadth: int = 2      # Bundan az coin düşüyorsa çöküş "yalnız" sayılır
+    # Çöküş sürüyor mu (rapor 14 araştırması): girişten önceki 15 dk'da fiyat FUTURES_RECENT_DROP_PCT'den az düştüyse
+    # (çöküş durulmuş) pozisyon büyüklüğü FUTURES_RECENT_SIZE_PCT (%; 100 = kapalı, eskisi gibi)
+    futures_recent_size_pct: float = 100.0
+    futures_recent_drop_pct: float = 2.4
     # Faz 6 (bkz. FUTURES_PHASE6_PRESET üstündeki açıklama; varsayılanlar = kapalı, eskisi gibi)
     futures_extra_size_pct: float = 100.0  # Ek pozisyonların büyüklüğü, ilk pozisyonun %'si (100 = eşit, Faz 5)
     futures_reentry_breadth: int = 0       # Genişlik ≥ bu iken zarar sonrası bekleme atlanır (0 = kapalı)
@@ -1292,6 +1305,8 @@ class Config:
             errors.append("FUTURES_EXTRA_BREADTH ve FUTURES_ISOLATED_BREADTH 1-100 coin olmalı")
         if not 10 <= self.futures_isolated_size_pct <= 100:
             errors.append("FUTURES_ISOLATED_SIZE_PCT 10-100 arasında olmalı (%; 100 = tam büyüklük)")
+        if not 10 <= self.futures_recent_size_pct <= 100 or not 0.1 <= self.futures_recent_drop_pct <= 20:
+            errors.append("FUTURES_RECENT_SIZE_PCT 10-100 (%; 100 = kapalı), FUTURES_RECENT_DROP_PCT 0.1-20 (%) olmalı")
         if not 5 <= self.futures_extra_size_pct <= 100:
             errors.append("FUTURES_EXTRA_SIZE_PCT 5-100 arasında olmalı (%; ilk pozisyona göre, 100 = eşit)")
         if not 0 <= self.futures_reentry_breadth <= 100 or not 1 <= self.futures_wave_breadth <= 100:
@@ -1585,6 +1600,8 @@ def load_config(env_file: Optional[str] = None, mode_override: Optional[str] = N
         futures_extra_breadth=_env_int("FUTURES_EXTRA_BREADTH", 8),
         futures_isolated_size_pct=_env_float("FUTURES_ISOLATED_SIZE_PCT", 100.0),
         futures_isolated_breadth=_env_int("FUTURES_ISOLATED_BREADTH", 2),
+        futures_recent_size_pct=_env_float("FUTURES_RECENT_SIZE_PCT", 100.0),
+        futures_recent_drop_pct=_env_float("FUTURES_RECENT_DROP_PCT", 2.4),
         futures_extra_size_pct=_env_float("FUTURES_EXTRA_SIZE_PCT", 100.0),
         futures_reentry_breadth=_env_int("FUTURES_REENTRY_BREADTH", 0),
         futures_wave_rules=canonical_crash_extra(_env_str("FUTURES_WAVE_RULES", "")),
@@ -1893,6 +1910,14 @@ def _setting_notes(cfg: Config) -> List[str]:
                          f"Rapor 12 araştırması (gerçekçi model, 4.000 USDT, 5x): 2-4 coin düşerken açılan ilk pozisyonlar "
                          f"de zayıf (işlem başı +%0.2; 5+ coinde +%0.45-0.65); FUTURES_ISOLATED_BREADTH=5 ve %50 ile 10 "
                          f"çekilişin 9'unda iki dönemde de kâr arttı, 71 hesapta %60'ı aşan düşüş 16 → 10.")
+        if cfg.futures_recent_size_pct < 100:
+            notes.append(f"FUTURES_RECENT_SIZE_PCT={cfg.futures_recent_size_pct:g} (durulmuş çöküş): girişten önceki "
+                         f"15 dk'da fiyat %{tr_from_num(cfg.futures_recent_drop_pct)} az düştüyse pozisyon "
+                         f"%{cfg.futures_recent_size_pct:g} büyüklükte (hâlâ sert düşen coinde tam boy). Rapor 14 "
+                         f"araştırması (gerçekçi model, 2020-2026, 4.000 USDT, 5x, 10 çekiliş): son 15 dk'da %2.4'ten az "
+                         f"düşerken açılan işlemler 2020'den 2026'ya her yıl işlem başı ~%0 getirdi (öbürleri +%0.24-0.56). "
+                         f"%2.4 ve %50 ile 71 hesabın 12 ay ortancası +%709 → +%794, %60'ı aşan düşüş yaşayan hesap "
+                         f"14 → 4, A'nın en büyük düşüşü %57 → %46; iki dönemde de kâr arttı. Önce test modunda deneyin.")
         if cfg.futures_reentry_breadth > 0:
             if cfg.loss_cooldown_minutes <= cfg.symbol_cooldown_minutes:
                 notes.append(f"FUTURES_REENTRY_BREADTH={cfg.futures_reentry_breadth}: LOSS_COOLDOWN_MINUTES="

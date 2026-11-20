@@ -1681,6 +1681,9 @@ FUT_FUNDING_HOURS = 8        # Fonlama oranları 8 saate oranlanır (4 / 1 saatt
 FUT_H1_LIMIT = 1000          # Canlı: düzeltme modülü için istenen 1 saatlik mum (EMA200'ün oturması için)
 FUT_BREADTH_DROP_PCT = 3.0   # Dalga modu: "genişlik" = son FUT_BREADTH_HOURS saatte en az bu kadar (%) düşen coin sayısı
 FUT_BREADTH_HOURS = 1
+# Çöküş sürüyor mu (FUTURES_RECENT_SIZE_PCT): girişten önceki bu kadar dakikadaki düşüş (5 dk mumların kapanışından;
+# dakikalık taramada kaydırılmış 5 dk mumlar). 5'in katı olmalı.
+FUT_RECENT_DROP_MINUTES = 15
 
 
 def _need_numpy() -> None:
@@ -1828,6 +1831,29 @@ def market_breadth(klines: Dict[str, Dict[str, "np.ndarray"]]) -> int:
 def isolated_factor(size_pct: float, isolated_breadth: int, breadth: int) -> float:
     """Pozisyon büyüklüğü çarpanı: genişlik isolated_breadth'in altındaysa (yalnız çöküş) size_pct / 100, değilse 1."""
     if size_pct >= 100 or breadth >= isolated_breadth:
+        return 1.0
+    return max(0.0, float(size_pct)) / 100
+
+
+def recent_drop_pct(f: Dict[str, "np.ndarray"], minutes: int = FUT_RECENT_DROP_MINUTES):
+    """Son `minutes` dakikada kapanıştan kapanışa düşüş (%; pozitif = düşüş): kapanış / `minutes` dk önceki kapanış.
+    5 dk mumlarda minutes / 5 mum geri; ilk mumlar NaN."""
+    def calc():
+        c = f["c"]
+        bars = max(1, int(minutes) // 5)
+        out = np.full(len(c), np.nan)
+        if len(c) > bars:
+            with np.errstate(divide="ignore", invalid="ignore"):
+                out[bars:] = (1 - c[bars:] / c[:-bars]) * 100
+        return out
+    return _memo(f, ("recent", int(minutes)), calc)
+
+
+def recent_size_factor(size_pct: float, min_drop_pct: float, drop: Optional[float]) -> float:
+    """Çöküş durulmuşsa küçük boy (FUTURES_RECENT_SIZE_PCT): girişten önceki FUT_RECENT_DROP_MINUTES dakikadaki düşüş
+    `min_drop_pct`'nin altındaysa size_pct / 100, değilse (ya da ölçü yoksa) 1. Canlı bot ve backtest aynı çarpanı
+    kullanır (sinyal ölçüsü metrics["drop15"])."""
+    if size_pct >= 100 or drop is None or drop != drop or drop >= min_drop_pct:
         return 1.0
     return max(0.0, float(size_pct)) / 100
 
@@ -2373,6 +2399,9 @@ def futures_signal_at(f: Dict[str, "np.ndarray"], i: int, side: str, cfg, liq_lo
         out = {"side": side, "price": float(f["c"][i]), "drop_pct": float(drop[p]),
                "liq_ratio": float(f["sell_ratio"][i]), "vol_ratio": float(f["vol_ratio"][i]), "hours": float(hours[p]),
                "score": float(crash_scores(f, cfg, [i])[0]), "tactic": 1.0, "thr_pct": float(thr[p])}
+        d15 = float(recent_drop_pct(f)[i])                    # Çöküş sürüyor mu: son 15 dk düşüş (FUTURES_RECENT_*)
+        if d15 == d15:
+            out["drop15"] = d15
         if getattr(cfg, "futures_crash_z", 0.0):
             out["z"] = float(cfg.futures_crash_z)
         if mode != "close":
@@ -2454,6 +2483,8 @@ class FuturesSignal:
                 bars = int(m.get("confirm_bars", 0))
                 text += f" (çöküşten {bars * 5} dk sonra)" if bars else " (çöküş mumunda)"
             text += f" | Satış hacmi x{m.get('liq_ratio', 0):.1f} | Hacim x{m.get('vol_ratio', 0):.1f}"
+            if "drop15" in m:
+                text += f" | Son {FUT_RECENT_DROP_MINUTES} dk {-m['drop15']:+.1f}%"
             if m.get("feed_usdt"):
                 text += f" | Likidasyon akışı {m['feed_usdt']:,.0f} USDT".replace(",", ".")
             return text
@@ -2471,6 +2502,9 @@ class FuturesSignal:
             parts.append("Dalgada yeniden giriş (zarar sonrası bekleme atlandı)")
         if m.get("size_pct") and m["size_pct"] < 100:
             parts.append(f"Pozisyon %{m['size_pct']:g} ({m.get('size_kind', 'yalnız çöküş')})")
+        if m.get("recent_size_pct") is not None and m["recent_size_pct"] < 100:
+            parts.append(f"Çöküş durulmuş (son {FUT_RECENT_DROP_MINUTES} dk {-m.get('drop15', 0.0):+.1f}%, gereken "
+                         f"−%{m.get('recent_min_pct', 0):g}): pozisyon %{m['recent_size_pct']:g}")
         if m.get("depth_cap"):
             parts.append((f"Derinliğe göre boy: pozisyon {m['depth_cap']:,.0f} USDT ile sınırlı (±%1 içinde alış "
                           f"{m.get('depth_bid', 0):,.0f} / satış {m.get('depth_ask', 0):,.0f} USDT)").replace(",", "."))

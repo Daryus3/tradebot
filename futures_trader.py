@@ -40,7 +40,7 @@ import math
 
 import requests
 
-from config import (MINUTE_SCAN_STEP_MS, futures_be_trigger, futures_breadth_on, futures_close_only, futures_coin_list,
+from config import (MINUTE_SCAN_STEP_MS, futures_be_trigger, tr_from_num, futures_breadth_on, futures_close_only, futures_coin_list,
                     futures_dd_factor, futures_hold_minutes, scan_log_path,
                     futures_crash_rules, futures_funding_rules,
                     futures_liq_distance_pct, futures_minute_limit, futures_modules, futures_pump_rules, futures_scan_shifts,
@@ -52,7 +52,8 @@ from logger import get_logger
 from risk import ExitReason, Position, cooldown_minutes, kill_switch_hit
 from strategy import (FUT_BAR_MS, FUT_BREADTH_DROP_PCT, FUT_BREADTH_HOURS, FUT_BTC_1H_LIMIT, FUT_H1_LIMIT, FUT_HOUR_MS,
                       FuturesSignal,
-                      ScanResult, funding_per_bar, futures_kline_limit, isolated_factor, market_breadth)
+                      ScanResult, funding_per_bar, futures_kline_limit, isolated_factor, market_breadth,
+                      recent_size_factor)
 from telegram_bot import CRITICAL_EXITS, Messages, esc, fmt_duration, fmt_price, fmt_signed, fmt_usdt, futures_tag
 from trader import ALIVE_SAVE_SEC, POSITION_LOG_SEC, RULES_REFRESH_SEC, Mark, TradingBot
 
@@ -1627,14 +1628,20 @@ class FuturesBot(TradingBot):
     def _entry_margin(self, sig: FuturesSignal, free: float) -> float:
         """Girişin teminatı (USDT). Tek pozisyonda serbest bakiye × FUTURES_MARGIN_USAGE_PCT (eskisi gibi); dalga
         modunda (serbest + açık pozisyon teminatları) × kullanım / FUTURES_MAX_POSITIONS, serbest bakiyeyi aşmadan.
-        Yalnız çöküşte (genişlik < FUTURES_ISOLATED_BREADTH) × FUTURES_ISOLATED_SIZE_PCT; sermaye zirvesinin
-        FUTURES_DD_SCALE_PCT altındayken × FUTURES_DD_SCALE_SIZE_PCT (backtest: simulate / simulate_slots)."""
+        Yalnız çöküşte (genişlik < FUTURES_ISOLATED_BREADTH) × FUTURES_ISOLATED_SIZE_PCT; çöküş durulmuşsa (son 15 dk
+        düşüş FUTURES_RECENT_DROP_PCT'nin altında) × FUTURES_RECENT_SIZE_PCT; sermaye zirvesinin FUTURES_DD_SCALE_PCT
+        altındayken × FUTURES_DD_SCALE_SIZE_PCT (backtest: simulate / simulate_slots)."""
         cfg = self.cfg
         usage = cfg.futures_margin_usage_pct / 100
         factor = isolated_factor(cfg.futures_isolated_size_pct, cfg.futures_isolated_breadth,
                                  int(sig.metrics.get("breadth", cfg.futures_isolated_breadth)))
         if factor < 1:
             sig.metrics["size_pct"] = round(factor * 100, 1)
+        recent = recent_size_factor(cfg.futures_recent_size_pct, cfg.futures_recent_drop_pct, sig.metrics.get("drop15"))
+        if recent < 1:
+            sig.metrics["recent_size_pct"] = round(recent * 100, 1)
+            sig.metrics["recent_min_pct"] = cfg.futures_recent_drop_pct
+            factor *= recent
         dd = self._dd_factor(sig)
         slots = self.slots()
         if slots <= 1:
@@ -2244,6 +2251,9 @@ class FuturesBot(TradingBot):
             if cfg.futures_wave_hold_minutes > 0:
                 extra += (f", ≥{cfg.futures_wave_hold_breadth} coin düşerken ilk pozisyon "
                           f"{cfg.futures_wave_hold_minutes} dk")
+            if cfg.futures_recent_size_pct < 100:
+                extra += (f", son 15 dk'da %{tr_from_num(cfg.futures_recent_drop_pct)} az düşende boy "
+                          f"%{cfg.futures_recent_size_pct:g}")
             lines.append(f"🌊 Genişlik: {self.last_breadth} coin son 1 saatte %3+ düştü (dalga ≥"
                          f"{cfg.futures_extra_breadth}, yalnız çöküş <{cfg.futures_isolated_breadth}{extra})")
         tm = self.last_timing

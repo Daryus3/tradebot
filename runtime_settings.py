@@ -169,6 +169,11 @@ EDITABLE: Dict[str, Setting] = {
                                          "Yalnız çöküşte pozisyon büyüklüğü (%; 100 = tam)"),
     "FUTURES_ISOLATED_BREADTH": Setting("futures_isolated_breadth", "int",
                                         "Bundan az coin düşüyorsa çöküş yalnız sayılır"),
+    "FUTURES_RECENT_SIZE_PCT": Setting("futures_recent_size_pct", "float",
+                                       "Çöküş durulmuşsa (son 15 dk düşüş eşiğin altında) pozisyon büyüklüğü "
+                                       "(%; 100 = kapalı)"),
+    "FUTURES_RECENT_DROP_PCT": Setting("futures_recent_drop_pct", "float",
+                                       "Tam boy için girişten önceki 15 dk'da gereken en az düşüş (%)"),
     "FUTURES_EXTRA_SIZE_PCT": Setting("futures_extra_size_pct", "float",
                                       "Faz 6: ek pozisyonların büyüklüğü (ilk pozisyonun %'si; 100 = eşit)"),
     "FUTURES_REENTRY_BREADTH": Setting("futures_reentry_breadth", "int",

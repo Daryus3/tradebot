@@ -23,7 +23,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Tuple
 
-from config import (futures_scan_shifts, futures_snapshot_on, DEFAULT_FUTURES_COINS, FUTURES_BB_MODES, FUTURES_CASCADE_PRESET, FUTURES_CONFIRMS,
+from config import (futures_scan_shifts, futures_snapshot_on, tr_from_num, DEFAULT_FUTURES_COINS, FUTURES_BB_MODES, FUTURES_CASCADE_PRESET, FUTURES_CONFIRMS,
                     FUTURES_ENTRY_ORDERS, FUTURES_PHASE6_OFF, FUTURES_PHASE6_PRESET, FUTURES_PHASE6_SINGLE_PRESET,
                     FUTURES_PHASE8_OFF, FUTURES_PHASE9_OFF, FUTURES_GRID_PRESETS, FUTURES_LIQ_SOURCES, FUTURES_RECOMMENDED, FUTURES_SIDES,
                     FUTURES_TACTIC_EXITS, FUTURES_TACTICS, FUTURES_TP_ORDERS, FUTURES_UNIVERSE_MODES, futures_be_trigger,
@@ -72,6 +72,10 @@ EXTRA_BE_CHOICES = (0, 0.4, 0.5, 0.6, 0.75)
 # Faz 9: pozisyona göre zaman stopu (0 = ana ayar). Faz 5 / Faz 6 setleri ve "kapat" düğmesi bunları da kapatır.
 EXTRA_HOLD_CHOICES = (0, 30, 35)
 WAVE_HOLD_CHOICES = (0, 60, 70)
+# Durulmuş çöküş (rapor 14 araştırması; varsayılan kapalı): girişten önceki 15 dk'da az düşen coinde pozisyon boyu (%)
+# ve tam boy için gereken düşüş (%)
+RECENT_SIZE_CHOICES = (100, 65, 50, 33)
+RECENT_DROP_CHOICES = (2, 2.4, 3)
 # Düşüşte küçültme (rapor 24 araştırması; varsayılan kapalı): sermaye zirvesinden düşüş eşiği ve düşüşteki boy
 DD_SCALE_CHOICES = (0, 20, 30, 40)
 DD_SIZE_CHOICES = (40, 50, 60, 75)
@@ -405,6 +409,12 @@ PAGES: Dict[str, Page] = {
             else f"Yalnız çöküş: %{float(v):g}", show=_crash, per_row=3),
         Row("FUTURES_ISOLATED_BREADTH", icon="🔎", values=(2, 3, 5), fmt=lambda v: f"yalnız: <{v} coin",
             show=lambda cfg: _crash(cfg) and cfg.futures_isolated_size_pct < 100, per_row=3),
+        Row("FUTURES_RECENT_SIZE_PCT", icon="⏱️", values=RECENT_SIZE_CHOICES,
+            fmt=lambda v: "Durulmuş çöküş: tam" if float(v) >= 100 else f"Durulmuş çöküş: %{float(v):g}",
+            show=_crash, per_row=2),
+        Row("FUTURES_RECENT_DROP_PCT", icon="📉", values=RECENT_DROP_CHOICES,
+            fmt=lambda v: f"son 15 dk < %{float(v):g}",
+            show=lambda cfg: _crash(cfg) and cfg.futures_recent_size_pct < 100, per_row=3),
         Row("FUTURES_REENTRY_BREADTH", icon="🔁", values=(0, 3, 8), fmt=lambda v: "yeniden giriş: kapalı" if int(v) == 0
             else f"yeniden giriş: ≥{v} coin", show=_crash, per_row=3),
         Row("FUTURES_WAVE_RULES", values=WAVE_RULE_CHOICES, fmt=lambda v: _wave_label(v), show=_crash, per_row=2),
@@ -973,6 +983,12 @@ class SettingsMenu:
                 f"<b>%{cfg.futures_isolated_size_pct:g}</b> büyüklükte." if cfg.futures_isolated_size_pct < 100
                 else "Yalnız çöküşte pozisyon tam büyüklükte.")
         lines = ["🌊 <b>Dalga Modu</b>", LINE, mode, size]
+        if cfg.futures_recent_size_pct < 100:
+            lines.append(f"⏱️ Durulmuş çöküş: girişten önceki 15 dk'da fiyat %{tr_from_num(cfg.futures_recent_drop_pct)} az "
+                         f"düştüyse pozisyon <b>%{cfg.futures_recent_size_pct:g}</b> büyüklükte (hâlâ sert düşen "
+                         f"coinde tam boy).")
+        else:
+            lines.append("⏱️ Durulmuş çöküş (son 15 dk'da az düşen coin) küçültülmüyor.")
         if cfg.futures_reentry_breadth > 0:
             lines.append(f"🔁 Dalgada yeniden giriş: son 1 saatte ≥{cfg.futures_reentry_breadth} coin %3+ düşerken zarar "
                          f"sonrası bekleme ({cfg.loss_cooldown_minutes} dk) atlanır."

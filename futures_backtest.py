@@ -37,11 +37,13 @@ import numpy as np
 
 from config import (DATA_DIR, dd_scale_factor, format_crash_rules, futures_coin_list, futures_crash_rules, futures_funding_rules,
                     futures_liq_distance_pct, futures_long_windows, futures_modules, futures_scan_shifts,
-                    futures_snapshot_on, futures_wave_cfg, futures_wave_rules, parse_crash_rules, scan_log_path, tr_from)
+                    futures_snapshot_on, futures_wave_cfg, futures_wave_rules, parse_crash_rules, scan_log_path, tr_from,
+                    tr_from_num)
 from futures_data import FuturesArchive, concat, resample, slice_range
 from futures_depth import DEPTH_CHECK_MIN_NOTIONAL, DepthBook, daily_volume_fn
 from strategy import (FUT_BAR_MS, FUT_HOUR_MS, breadth_flags, btc_trend_1h, crash_state, funding_per_bar,
-                      futures_candidates, futures_entries, futures_features, isolated_factor, pick_signal, trend_at)
+                      futures_candidates, futures_entries, futures_features, isolated_factor, pick_signal,
+                      recent_size_factor, trend_at)
 
 DAY_MS = 86_400_000
 MIN_MS = 60_000
@@ -654,6 +656,10 @@ class SimParams:
     extra_breadth: int = 8
     isolated_size_pct: float = 100.0
     isolated_breadth: int = 2
+    # Çöküş sürüyor mu (FUTURES_RECENT_SIZE_PCT; canlı: FuturesBot._entry_margin): girişten önceki 15 dk'da düşüş
+    # recent_drop_pct'nin altındaysa (sinyal ölçüsü metrics["drop15"]) pozisyon recent_size_pct (%; 100 = kapalı)
+    recent_size_pct: float = 100.0
+    recent_drop_pct: float = 2.4
     # Faz 6: ek pozisyonların büyüklüğü (ilk pozisyonun %'si; 100 = eşit, Faz 5) ve dalgada yeniden giriş (genişlik
     # ≥ reentry_breadth iken zarar sonrası bekleme atlanır; 0 = kapalı)
     extra_size_pct: float = 100.0
@@ -706,6 +712,8 @@ def params_from_cfg(cfg, **over) -> SimParams:
                   extra_breadth=int(getattr(cfg, "futures_extra_breadth", 8)),
                   isolated_size_pct=float(getattr(cfg, "futures_isolated_size_pct", 100.0)),
                   isolated_breadth=int(getattr(cfg, "futures_isolated_breadth", 2)),
+                  recent_size_pct=float(getattr(cfg, "futures_recent_size_pct", 100.0)),
+                  recent_drop_pct=float(getattr(cfg, "futures_recent_drop_pct", 2.4)),
                   extra_size_pct=float(getattr(cfg, "futures_extra_size_pct", 100.0)),
                   reentry_breadth=int(getattr(cfg, "futures_reentry_breadth", 0)),
                   extra_be_trigger_pct=float(getattr(cfg, "futures_extra_be_trigger_pct", 0.0)),
@@ -776,6 +784,7 @@ class FutTrade:
     dd_scaled: bool = False  # Düşüşte küçültmeyle (FUTURES_DD_SCALE_PCT) küçük boyla açıldı
     depth_capped: bool = False  # Derinliğe göre boy sınırına takıldı (FUTURES_DEPTH_CAP_PCT)
     impact_pct: float = 0.0  # Emir defteri kayması, giriş + çıkış (fiyat %; FUTURES_BACKTEST_DEPTH)
+    drop15: float = float("nan")  # Girişten önceki 15 dk'daki düşüş (%; sinyal ölçüsü, FUTURES_RECENT_SIZE_PCT)
 
 
 @dataclass
@@ -1083,6 +1092,13 @@ def capacity_order(signals: Sequence["FutSignal"], p: SimParams, data: "FutData"
         i = j
 
 
+def size_factor(p: SimParams, s: "FutSignal") -> float:
+    """Sinyalin boy çarpanı (canlı: FuturesBot._entry_margin ile aynı): yalnız çöküşte (genişlik < isolated_breadth)
+    × isolated_size_pct; çöküş durulmuşsa (son 15 dk düşüş < recent_drop_pct) × recent_size_pct."""
+    return (isolated_factor(p.isolated_size_pct, p.isolated_breadth, s.breadth)
+            * recent_size_factor(p.recent_size_pct, p.recent_drop_pct, s.metrics.get("drop15")))
+
+
 def slot_share(p: SimParams, n_open: int) -> float:
     """Yeni pozisyonun teminatı, kullanılabilir bakiyenin kaçta kaçı (config.futures_slot_share ile aynı kural): tek
     pozisyonda 1; dalga modunda ilk pozisyon 1, ek pozisyonlar x = extra_size_pct / 100 ağırlıkta, toplam 1 + (N-1)·x."""
@@ -1176,7 +1192,7 @@ def simulate(p: SimParams, data: FutData, signals: Sequence[FutSignal], windows:
         if s.close_ms < freeze_until:
             skipped["risk sigortası (zarar serisi / günlük limit)"] += 1
             continue
-        factor = isolated_factor(p.isolated_size_pct, p.isolated_breadth, s.breadth)   # Yalnız çöküş: küçük
+        factor = size_factor(p, s)          # Yalnız çöküş / çöküş durulmuş: küçük
         ddf = 1.0 if fixed_notional else dd_scale_factor(p.dd_scale_pct, p.dd_scale_size_pct, equity, peak)
         capped = False
         if fixed_notional:
@@ -1210,6 +1226,7 @@ def simulate(p: SimParams, data: FutData, signals: Sequence[FutSignal], windows:
         tr.equity_after = equity
         tr.reentry = reentry
         tr.wave_rule = bool(s.metrics.get("wave_rule"))
+        tr.drop15 = float(s.metrics.get("drop15", float("nan")))
         tr.dd_scaled = ddf < 1
         peak = max(peak, equity)
         trades.append(tr)
@@ -1345,7 +1362,7 @@ def simulate_slots(p: SimParams, data: FutData, signals: Sequence[FutSignal], wi
         if s.close_ms < freeze_until:
             skipped["risk sigortası (zarar serisi / günlük limit)"] += 1
             continue
-        factor = isolated_factor(p.isolated_size_pct, p.isolated_breadth, s.breadth)
+        factor = size_factor(p, s)
         share = slot_share(p, len(heap))
         ddf = 1.0 if fixed_notional else dd_scale_factor(p.dd_scale_pct, p.dd_scale_size_pct, equity, peak)
         capped = False
@@ -1385,6 +1402,7 @@ def simulate_slots(p: SimParams, data: FutData, signals: Sequence[FutSignal], wi
         tr.slot = len(heap) + 1
         tr.reentry = reentry
         tr.wave_rule = bool(s.metrics.get("wave_rule"))
+        tr.drop15 = float(s.metrics.get("drop15", float("nan")))
         tr.dd_scaled = ddf < 1
         trades.append(tr)
         free_at = tr.exit_ms if tr.reason == "TIME" else tr.exit_ms + tr.bar_ms
@@ -1769,6 +1787,8 @@ POSITION_TRIES = (2, 3, 5)                      # Dalga modu: en fazla pozisyon
 EXTRA_SIZE_TRIES = (8.0, 25.0, 33.3)            # Faz 6: ek pozisyon boyu (ilkinin %'si)
 ISOLATED_TRIES = (25.0, 50.0, 100.0)            # Yalnız çöküş boyu (%)
 ISOLATED_BREADTH_TRIES = (2, 3, 5)               # Yalnız çöküş eşiği: bundan az coin düşerken (rapor 12: 5)
+RECENT_SIZE_TRIES = (33.0, 50.0, 100.0)          # Çöküş durulmuşsa boy (%; rapor 14 araştırması)
+RECENT_DROP_TRIES = (2.0, 2.4, 3.0)              # ...tam boy için girişten önceki 15 dk'da gereken düşüş (%)
 REENTRY_TRIES = (5, 8)                          # Faz 6: dalgada yeniden giriş eşiği (coin)
 DD_SCALE_TRIES = (20.0, 40.0)                   # Düşüşte küçültme eşiği (%)
 DD_SIZE_TRIES = (50.0, 75.0)                    # Düşüşte küçültme boyu (%)
@@ -1853,6 +1873,7 @@ def size_variant_rows(cfg, ev, depth: bool = False) -> List[Tuple[str, "Evaluati
                 rows.append((f"{name} (şimdi %{base.isolated_size_pct:g})", ev(isolated_size_pct=v)))
         rows += [(f"Yalnız çöküş eşiği <{b} coin (şimdi <{base.isolated_breadth})", ev(isolated_breadth=b))
                  for b in ISOLATED_BREADTH_TRIES if b != base.isolated_breadth]
+    rows += recent_variant_rows(base, ev)
     if base.reentry_breadth > 0:
         rows += [(f"Dalgada yeniden giriş ≥{b} coin (şimdi ≥{base.reentry_breadth})", ev(reentry_breadth=b))
                  for b in REENTRY_TRIES if b != base.reentry_breadth]
@@ -1864,6 +1885,22 @@ def size_variant_rows(cfg, ev, depth: bool = False) -> List[Tuple[str, "Evaluati
                  for z in DD_SIZE_TRIES if not _same(z, base.dd_scale_size_pct)]
     else:
         rows.append(("Düşüşte küçültme: zirveden %30 düşünce %60 boy", ev(dd_scale_pct=30.0, dd_scale_size_pct=60.0)))
+    return rows
+
+
+def recent_variant_rows(base: SimParams, ev) -> List[Tuple[str, "Evaluation"]]:
+    """Çöküş sürüyor mu (FUTURES_RECENT_SIZE_PCT): açıksa boy ve eşik çevresi, kapalıysa %50 / son 15 dk < %2.4."""
+    rows: List[Tuple[str, "Evaluation"]] = []
+    if base.recent_size_pct >= 100:
+        rows.append(("Çöküş durulmuşsa (son 15 dk düşüş < %2.4) boy %50",
+                     ev(recent_size_pct=50.0, recent_drop_pct=2.4)))
+        return rows
+    for v in RECENT_SIZE_TRIES:
+        if not _same(v, base.recent_size_pct):
+            name = "Çöküş durulmuşsa da tam boy (kural kapalı)" if v >= 100 else f"Çöküş durulmuşsa boy %{v:g}"
+            rows.append((f"{name} (şimdi %{base.recent_size_pct:g})", ev(recent_size_pct=v)))
+    rows += [(f"Çöküş durulmuş sayılan: son 15 dk düşüş < %{d:g} (şimdi < %{base.recent_drop_pct:g})",
+              ev(recent_drop_pct=d)) for d in RECENT_DROP_TRIES if not _same(d, base.recent_drop_pct)]
     return rows
 
 
@@ -2868,6 +2905,9 @@ def cascade_label(p: SimParams) -> str:
                      f"yalnızca son 1 saatte ≥{p.extra_breadth} coin %3+ düşerken")
     if p.isolated_size_pct < 100:
         parts.append(f"yalnız çöküşte (≤{p.isolated_breadth - 1} coin düşüyor) pozisyon %{p.isolated_size_pct:g}")
+    if p.recent_size_pct < 100:
+        parts.append(f"çöküş durulmuşsa (girişten önceki 15 dk'da düşüş %{tr_from_num(p.recent_drop_pct)} az) pozisyon "
+                     f"%{p.recent_size_pct:g}")
     if p.reentry_breadth > 0:
         parts.append(f"dalgada yeniden giriş: ≥{p.reentry_breadth} coin düşerken zarar sonrası bekleme yok")
     if phase8_active(p):
@@ -2923,6 +2963,27 @@ def first_breadth_line(trades: Sequence[FutTrade], p: SimParams) -> Optional[str
     size = (f"{tr_from(p.isolated_breadth)} az coin düşerken boy %{p.isolated_size_pct:g}"
             if p.isolated_size_pct < 100 else "hepsi tam boy")
     return f"İlk pozisyonlar genişliğe göre (sabit tutar; {size}): " + " | ".join(parts)
+
+
+RECENT_DROP_BUCKETS = ((None, 1.0), (1.0, 2.4), (2.4, 5.5), (5.5, None))   # Son 15 dk düşüş kovaları (%)
+
+
+def recent_drop_line(trades: Sequence[FutTrade], p: SimParams) -> Optional[str]:
+    """Girişten önceki 15 dk'daki düşüşe göre işlem başı sonuç (sabit tutar). Rapor 14 araştırması: çöküş durulmuşken
+    (son 15 dk'da az düşüş) açılan işlemler her yıl ~%0 getirdi, hâlâ sert düşerken açılanlar en kârlısıydı
+    (FUTURES_RECENT_SIZE_PCT ile küçültülebilir)."""
+    known = [t for t in trades if t.drop15 == t.drop15]
+    if not known:
+        return None
+    parts = []
+    for a, b in RECENT_DROP_BUCKETS:
+        mv = [net_move_pct(t) for t in known if (a is None or t.drop15 >= a) and (b is None or t.drop15 < b)]
+        if mv:
+            name = f"%{tr_from_num(b)} az" if a is None else f"%{a:g}+" if b is None else f"%{a:g}-{b:g}"
+            parts.append(f"{name}: {len(mv)} işlem, ort. {np.mean(mv):+.3f}%")
+    size = (f"%{tr_from_num(p.recent_drop_pct)} az düşüşte boy %{p.recent_size_pct:g}" if p.recent_size_pct < 100
+            else "hepsi tam boy")
+    return f"Girişten önceki 15 dk'daki düşüşe göre (sabit tutar; {size}): " + " | ".join(parts)
 
 
 # ===================================================================== canlı bot karşılaştırması
@@ -3661,7 +3722,7 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
                      "pullback": "trend içi düzeltme long"}
             L.append("Ek modüller (VEYA): " + ", ".join(parts[m] for m in mods)
                      + "; öncelik çöküş > fonlama > pompa > düzeltme > kırılım > Bollinger")
-        if p.max_positions > 1 or p.isolated_size_pct < 100 or p.reentry_breadth > 0:
+        if p.max_positions > 1 or p.isolated_size_pct < 100 or p.reentry_breadth > 0 or p.recent_size_pct < 100:
             L.append(cascade_label(p))
         wave = futures_wave_rules(cfg)
         if wave:
@@ -3708,6 +3769,9 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
         first_line = first_breadth_line(fixed, p)
         if first_line:
             L.append("  " + first_line)
+    recent_line = recent_drop_line(fixed, p) if crash and fixed else None
+    if recent_line:
+        L.append("  " + recent_line)
     if res.kill_ms:
         L.append(f"  ⚠️ Kill-switch (-%{p.kill_pct:g}) canlıda {_date(res.kill_ms)} tarihinde botu durdururdu")
     if res.ruined_ms:
