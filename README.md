@@ -2075,6 +2075,10 @@ bunun olduğu çekiliş sayısı):
   artıyor, düşüşün her ölçüsü yine bugünkünden düşük. Çekilişlerin 9-10'unda iki dönemde ve 71 hesapta şimdikinden iyi.
 - Kural + 6x (küçültme 40 / 75): kâr ~%36-40 artıyor ama %60'ı aşan düşüş yaşayan hesap 14 → 18-22. 7x riski belirgin
   büyütüyor.
+- Önerilen birleşimin komşuları (10 çekiliş; 12 ay ortanca, %60'ı aşan düşüş): küçültme 25 / 60 → +%894, 6; 35 / 60 →
+  +%938, 10; 30 / 50 → +%908, 6; 30 / 70 → +%1.030, 10; eşik %2 → +%943, 8; eşik %3 → +%820, 6. Hepsi şimdikinden hem
+  kârlı hem az düşüşlü. Kural olmadan 6x + küçültme 30 / 60: +%681, 16, A düşüşü %58.5 (şimdikinden kötü): farkı kural
+  yaratıyor.
 
 Stres (3 çekilişin ortancası; A'nın son bakiyesi, parantezde en büyük düşüş):
 
