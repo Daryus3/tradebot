@@ -2010,6 +2010,79 @@ Gerçekçi motorla zararı azaltan / kârı artıran adaylar (rapor 13 ayarı, 1
 - Zararı belirgin azaltan tek ayar 4x: %60'ı aşan düşüş 14'ten 4'e, kill-switch 2'den 0'a iniyor; bedeli kârın %26'sı.
   Kârı belirgin artıran tek ayar 6x: %21 daha çok kâr, ama kill-switch 7 hesapta devreye giriyor.
 
+#### Rapor 14 araştırması: çöküş sürüyor mu? (Kasım 2026)
+Rapor 14 ayarı rapor 13'le aynı (5x, yalnız çöküş <5 coin %50, gerçekçi motor: stop payı %0.015). Bu kez ayarların
+çevresi yerine her işlemin girişteki piyasa durumuna bakıldı. Ölçüler: coinin son 1 / 5 / 15 / 60 / 240 dakikadaki ve
+1 / 3 / 7 gündeki getirisi, son 1 saatin dibinden dönüşü, son 5 dk'lık aralığı, 24 saatlik tepeye uzaklığı, BTC'nin son
+5 dk - 1 gün getirisi, genişliğin son 15-60 dk'daki değişimi ve 4 saatlik zirvesine uzaklığı, coinin son 6 / 24 saatteki
+sinyal sayısı, saat ve gün. İşlemler her ölçüye göre beşe bölündü; seçim ve doğrulama döneminde ayrı ayrı işlem başı net
+karşılaştırıldı (sabit tutar, 3 çekiliş).
+
+En güçlü ve en tutarlı ayrım **girişten önceki 15 dakikadaki düşüş**. Çöküş hâlâ sürüyorsa (likidasyonlar devam ediyor,
+fiyat aşırı aşağı itiliyor) dönüş sert oluyor. Çöküş durulduysa (4 saatlik düşüş eşiği hâlâ sağlanıyor ama son 15 dk
+yatay) dönüş büyük ölçüde gelmiş ya da fiyat yavaş yavaş eriyor:
+
+| Son 15 dk'daki düşüş | Tüm işlemler: seçim / doğrulama | İlk pozisyonlar: seçim / doğrulama |
+|---|---|---|
+| %1'den az (yükselenler dahil) | +%0.06 / %0.00 | −%0.07 / −%0.02 |
+| %1-2.4 | +%0.08 / +%0.04 | +%0.18 / %0.00 |
+| %2.4-4 | +%0.11 / +%0.02 | +%0.11 / +%0.22 |
+| %4-6 | +%0.33 / +%0.33 | +%0.59 / +%0.48 |
+| %6+ | +%0.58 / +%0.89 (Kâr Al %17-19) | +%0.88 / +%0.95 (Kâr Al %22-23) |
+
+İşlemlerin ~%38'i son 15 dk'da %2.4'ten az düşerken açılıyor. Yıl yıl işlem başı net (durulmuş / öbürleri): 2020 +%0.01 /
++%0.42 · 2021 +%0.08 / +%0.39 · 2022 +%0.17 / +%0.24 · 2023 −%0.04 / +%0.53 · 2024 −%0.06 / +%0.44 · 2025 +%0.08 /
++%0.56 · 2026 +%0.16 / +%0.31. Yedi yılın yedisinde aynı yön. Benzer ama daha zayıf ayrımlar: son 5 dk'lık aralık, son
+5 dk'lık getiri, BTC'nin son 15 dk'lık düşüşü (hepsi "çöküş şu an sürüyor mu" sorusunun başka biçimleri).
+
+Bu işlemleri hiç açmamak (süzgeç) mı, küçük açmak (boy) mı daha iyi? 10 çekilişin ortancası (4.000 USDT, 5x):
+
+| Ayar | A son bakiye | A düşüş | Yıllık seçim / doğrulama | Doğrulamada kayma ×3 | Son 12 ay | 71 hesap: 12 ay ortanca | 71 hesap: %60'ı aşan düşüş | Kill-switch'in durdurduğu hesap (10 çekilişte en çok) |
+|---|---|---|---|---|---|---|---|---|
+| Şimdiki (rapor 14) | 2,89 milyon | %56.7 | +%382 / +%322 | +%124 | +%202 | +%709 | 14 | 4 (4 çekilişte) |
+| Süzgeç: son 15 dk < %1 ise girme | 3,37 milyon | %52.4 | +%415 / +%300 | +%112 | +%158 | +%712 | 8 | 1 |
+| Süzgeç: son 15 dk < %2.4 ise girme | 3,92 milyon | %53.8 | +%434 / +%366 | +%156 | +%218 | +%677 | 6 | 6 (7 çekilişte) |
+| **Boy: son 15 dk < %2.4 ise %50** | 3,26 milyon | **%45.8** | +%398 / +%350 | +%156 | +%258 | **+%794** | **4** | 1 (1 çekilişte) |
+| Boy: son 15 dk < %2.4 ise %33 | 3,36 milyon | %43.2 | +%404 / +%368 | +%176 | +%288 | +%816 | 5 | 0 |
+| Boy: son 15 dk < %2.4 ise %65 | 3,24 milyon | %47.3 | +%397 / +%351 | +%149 | +%251 | +%774 | 7 | 3 |
+
+Süzgeç kârı A'da büyütüyor ama 71 hesapta kazandırmıyor ve kill-switch riskini artırıyor: durulmuş işlemlerin ortalaması
+~%0 olsa da içlerinde büyük kazananlar da var. Küçük boy ise her ölçüde iyi: çekilişlerin 8-10'unda iki dönemde de
+şimdikinden kârlı, A'nın düşüşü 9-13 puan düşük. %33-50 boyda 71 hesabın hiçbirinde 12 ay içinde %70'i aşan düşüş yok
+(şimdi 10 çekilişin 8'inde var); en kötü 12 ay düşüşünün ortancası %79 → %65-66.
+
+Komşular tutarlı (10 çekiliş, boy %50): pencere 10 dk / eşik %2 → +%805, %60+ düşüş 4; 20 dk / %2.8 → +%832, 8; 30 dk /
+%3.4 → +%817, 10; 15 dk / %2 → +%784, 7; 15 dk / %3 → +%782, 5. Yalnız ilk pozisyonda uygulamak (+%797, 8) ve yalnız çöküşü
+tam boya döndürmek (+%791, 12; A düşüşü %57) daha zayıf.
+
+Açılan düşüş payını kaldıraçla kâra çevirmek (boy %50):
+
+| Ayar | A düşüş | Yıllık seçim / doğrulama | 71 hesap: 12 ay ortanca | 71 hesap: %60'ı aşan düşüş | Kill-switch (çekiliş başına en çok) | En kötü 12 ay düşüşü (ortanca) |
+|---|---|---|---|---|---|---|
+| Şimdiki (5x, kural yok) | %56.7 | +%382 / +%322 | +%709 | 14 | 4 (4 çekilişte) | %79 |
+| Kural + 5x | %45.8 | +%398 / +%350 | +%794 | 4 | 1 (1 çekilişte) | %66 |
+| Kural + 6x | %47.5 | +%402 / +%398 | +%989 | 22 | 5 (4 çekilişte) | %71 |
+| Kural + 7x | %51.6 | +%411 / +%426 | +%1.050 | 37 | 9 (10 çekilişte) | %76 |
+
+Kural + 6x bugünkü riskle (kill-switch 10 çekilişin 4'ünde, A düşüşü daha düşük, en kötü 12 ay düşüşü daha düşük ama
+%60'ı aşan düşüş yaşayan hesap 14 → 22) kârı ~%40 artırıyor. 7x riski belirgin büyütüyor.
+
+**Ayarlar** (varsayılan kapalı; Telegram → 🧭 Giriş sinyali → 🌊 Dalga modu → ⏱️ Durulmuş çöküş):
+
+| Ayar | Ne yapar |
+|---|---|
+| `FUTURES_RECENT_SIZE_PCT` | Girişten önceki 15 dk'da fiyat `FUTURES_RECENT_DROP_PCT`'den az düştüyse (çöküş durulmuş) pozisyon bu büyüklükte (%; 100 = kapalı). Yalnız çöküş ve düşüşte küçültme çarpanlarıyla çarpılır. |
+| `FUTURES_RECENT_DROP_PCT` | Tam boy için gereken en az düşüş (%; varsayılan 2.4). |
+
+Ölçü 5 dk mumların kapanışından alınır (dakikalık taramada o dakikada kapanan 5 dk mumlar; anlık taramada son fiyat):
+canlı bot ve backtest aynı fonksiyonu kullanır (`strategy.recent_drop_pct`, sinyal ölçüsü `drop15`). Pozisyon mesajında
+"Son 15 dk −%x" yazar; kural uygulanınca "Çöküş durulmuş (...): pozisyon %50" eklenir. Rapor: başlıkta kural, A
+bölümünde "Girişten önceki 15 dk'daki düşüşe göre" satırı ve tek kural tablosunda boy / eşik satırları.
+
+Uyarılar: Bu ayrım bütün geçmişe (iki döneme de) bakılarak bulundu; doğrulama dönemi bu yüzden tam bağımsız değil. Etki
+yedi yılın yedisinde aynı yönde, mantığı açık ve tek bir eşiğe bağlı, komşular da tutarlı; yine de geleceği garanti
+etmez. Önce test modunda deneyin.
+
 ### 🏆 Strateji turnuvası (`--turnuva`)
 Hangi strateji türünün sizin dönemde işe yaradığını **tek komutla** görmek için:
 ```bash
@@ -2087,6 +2160,10 @@ karar için ortancaya ve en kötüye bakın. Çıkış taraması her gün dengel
   zararı sayılmaz. Kill-switch'in botu durduracağı ve hesabın eridiği dönem işaretlenir. Hesap büyüdükçe derinliğe göre
   boy sınırı yüzde büyümeyi yavaşlatır: rapor 12 ayarıyla 2021 ortasında yaklaşık 2 milyon USDT'den sonra 6 aylık
   büyüme %0-20'ye iner.
+- **Girişten önceki 15 dk'daki düşüşe göre** (A bölümünde, genişlik satırlarının altında; sabit tutar): işlemlerin
+  girişten önceki 15 dakikadaki düşüşe göre işlem başı sonucu (%1'den az, %1-2.4, %2.4-5.5, %5.5+). Çöküş durulmuşken
+  açılan işlemler zayıfsa `FUTURES_RECENT_SIZE_PCT` ile küçültülebilir (bkz. "Rapor 14 araştırması"); açıksa kural
+  başlıktaki 🌊 satırında da yazar.
 - **📆 AYLIK İŞLEM YIĞILMASI** (yıl yıl): ayın günlük işlem hızı o yılın ortalamasının en az 1.5 katıysa o ay yığılma
   sayılır. Her yıl için yığılma ayları (işlem sayısı ve kaç kat), bu ayların yılın işlemlerinden ve C'deki net kârından
   payı; ay ay işlem başı sonuç, kazanma, C toplamı, B hesabının o aydaki getirisi ve ay içindeki en büyük düşüşü; yığılma

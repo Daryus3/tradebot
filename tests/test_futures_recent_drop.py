@@ -149,3 +149,25 @@ def test_wave_page_rows_and_text(fcfg, tmp_path):
     assert size.show(off) and not drop.show(off) and drop.show(on)
     assert size.fmt(100) == "Durulmuş çöküş: tam" and size.fmt(50) == "Durulmuş çöküş: %50"
     assert drop.fmt(2.4) == "son 15 dk < %2.4"
+
+
+def test_wave_page_buttons_set_and_persist_the_rule(fcfg, tmp_path):
+    from test_futures_cascade import press
+    bot, _fake, notes, _clock = make_fbot(replace(fcfg, futures_tactic="crash"), tmp_path)
+    env = tmp_path / ".env"
+    env.write_text("BINANCE_API_KEY=gizli\n", encoding="utf-8")
+    bot.settings_path = env
+    press(bot, "pg:fw")
+    text, keyboard, _mid = notes.menus[-1]
+    data = [d for row in keyboard for _l, d in row]
+    assert "Durulmuş çöküş (son 15 dk'da az düşen coin) küçültülmüyor." in text
+    assert "kv:fw:FUTURES_RECENT_SIZE_PCT:50" in data and not any("FUTURES_RECENT_DROP_PCT" in d for d in data)
+    assert all(len(d.encode()) <= 64 for d in data)
+    press(bot, "kv:fw:FUTURES_RECENT_SIZE_PCT:50")
+    assert bot.cfg.futures_recent_size_pct == 50.0 and "FUTURES_RECENT_SIZE_PCT=50" in env.read_text()
+    text, keyboard, _mid = notes.menus[-1]
+    data = [d for row in keyboard for _l, d in row]
+    assert "girişten önceki 15 dk'da fiyat %2.4'ten az düştüyse pozisyon <b>%50</b>" in text
+    assert "kv:fw:FUTURES_RECENT_DROP_PCT:3" in data
+    press(bot, "kv:fw:FUTURES_RECENT_DROP_PCT:2")
+    assert bot.cfg.futures_recent_drop_pct == 2.0 and "%2'den az düştüyse" in notes.menus[-1][0]
