@@ -2051,21 +2051,43 @@ Süzgeç kârı A'da büyütüyor ama 71 hesapta kazandırmıyor ve kill-switch 
 şimdikinden kârlı, A'nın düşüşü 9-13 puan düşük. %33-50 boyda 71 hesabın hiçbirinde 12 ay içinde %70'i aşan düşüş yok
 (şimdi 10 çekilişin 8'inde var); en kötü 12 ay düşüşünün ortancası %79 → %65-66.
 
-Komşular tutarlı (10 çekiliş, boy %50): pencere 10 dk / eşik %2 → +%805, %60+ düşüş 4; 20 dk / %2.8 → +%832, 8; 30 dk /
-%3.4 → +%817, 10; 15 dk / %2 → +%784, 7; 15 dk / %3 → +%782, 5. Yalnız ilk pozisyonda uygulamak (+%797, 8) ve yalnız çöküşü
+Komşular tutarlı (10 çekiliş; 71 hesabın 12 ay ortancası, %60'ı aşan düşüş yaşayan hesap). Boy %50: pencere 10 dk /
+eşik %2 → +%805, 4; 20 dk / %2.8 → +%832, 8; 30 dk / %3.4 → +%817, 10; 15 dk / %2 → +%784, 7; 15 dk / %3 → +%782, 5. Boy
+%33: eşik %2 → +%826, 6; %3 → +%790, 4. Boy %25 → +%808, 5. Yalnız ilk pozisyonda uygulamak (+%797, 8) ve yalnız çöküşü
 tam boya döndürmek (+%791, 12; A düşüşü %57) daha zayıf.
 
-Açılan düşüş payını kaldıraçla kâra çevirmek (boy %50):
+Açılan düşüş payını kaldıraçla kâra çevirmek (10 çekiliş; kill-switch sütunu: çekiliş başına en çok durdurulan hesap ve
+bunun olduğu çekiliş sayısı):
 
-| Ayar | A düşüş | Yıllık seçim / doğrulama | 71 hesap: 12 ay ortanca | 71 hesap: %60'ı aşan düşüş | Kill-switch (çekiliş başına en çok) | En kötü 12 ay düşüşü (ortanca) |
+| Ayar | A düşüş | Yıllık seçim / doğrulama | 71 hesap: 12 ay ortanca | 71 hesap: %60'ı aşan düşüş | Kill-switch | En kötü 12 ay düşüşü (ortanca) |
 |---|---|---|---|---|---|---|
 | Şimdiki (5x, kural yok) | %56.7 | +%382 / +%322 | +%709 | 14 | 4 (4 çekilişte) | %79 |
-| Kural + 5x | %45.8 | +%398 / +%350 | +%794 | 4 | 1 (1 çekilişte) | %66 |
-| Kural + 6x | %47.5 | +%402 / +%398 | +%989 | 22 | 5 (4 çekilişte) | %71 |
-| Kural + 7x | %51.6 | +%411 / +%426 | +%1.050 | 37 | 9 (10 çekilişte) | %76 |
+| Kural %50 + 5x | %45.8 | +%398 / +%350 | +%794 | 4 | 1 (1 çekilişte) | %66 |
+| Kural %33 + 5x | %43.2 | +%404 / +%368 | +%816 | 5 | yok | %65 |
+| Kural %50 + 6x | %47.5 | +%402 / +%398 | +%989 | 22 | 5 (4 çekilişte) | %71 |
+| Kural %33 + 6x | %47.4 | +%412 / +%402 | +%964 | 18 | 5 (5 çekilişte) | %70 |
+| **Kural %33 + 6x + düşüşte küçültme 30 / 60** | %44.9 | +%408 / +%391 | **+%927** | **8** | 1 (4 çekilişte) | %66 |
+| Kural %50 + 6x + düşüşte küçültme 30 / 60 | %46.3 | +%399 / +%400 | +%907 | 9 | 3 (4 çekilişte) | %70 |
+| Kural %50 + 7x | %51.6 | +%411 / +%426 | +%1.050 | 37 | 9 (10 çekilişte) | %76 |
 
-Kural + 6x bugünkü riskle (kill-switch 10 çekilişin 4'ünde, A düşüşü daha düşük, en kötü 12 ay düşüşü daha düşük ama
-%60'ı aşan düşüş yaşayan hesap 14 → 22) kârı ~%40 artırıyor. 7x riski belirgin büyütüyor.
+- Kural + 5x: kâr %12-15 artıyor, düşüşün her ölçüsü belirgin azalıyor. En temkinli seçenek.
+- Kural %33 + 6x + düşüşte küçültme 30 / 60 (`FUTURES_DD_SCALE_PCT=30`, `FUTURES_DD_SCALE_SIZE_PCT=60`): kâr ~%31
+  artıyor, düşüşün her ölçüsü yine bugünkünden düşük. Çekilişlerin 9-10'unda iki dönemde ve 71 hesapta şimdikinden iyi.
+- Kural + 6x (küçültme 40 / 75): kâr ~%36-40 artıyor ama %60'ı aşan düşüş yaşayan hesap 14 → 18-22. 7x riski belirgin
+  büyütüyor.
+
+Stres (3 çekilişin ortancası; A'nın son bakiyesi, parantezde en büyük düşüş):
+
+| Ayar | Kayma ×2 | Kayma ×3 | Komisyon ×2 | Kötümser stop | B: yıl yıl getiri (yıl içi düşüş) |
+|---|---|---|---|---|---|
+| Şimdiki | 2,25 milyon (%59) | 1,13 milyon (%74) | 1,29 milyon (%76) | 18 USDT | 2020 +%1.391 (%56) · 2021 +%19.505 (%69) · 2022 +%185 (%57) · 2023 +%266 (%50) · 2024 +%1.211 (%50) · 2025 +%683 (%56) · 2026 +%148 (%38) |
+| Kural %50 + 5x | 2,61 milyon (%51) | 1,91 milyon (%61) | 1,60 milyon (%64) | 242 USDT | 2020 +%2.839 (%54) · 2021 +%22.116 (%61) · 2022 +%314 (%46) · 2023 +%294 (%51) · 2024 +%1.223 (%42) · 2025 +%661 (%55) · 2026 +%149 (%35) |
+| Kural %33 + 5x | 2,61 milyon (%49) | 2,08 milyon (%50) | 1,64 milyon (%65) | 677 USDT | 2020 +%3.130 (%44) · 2021 +%24.110 (%58) · 2022 +%250 (%49) · 2023 +%299 (%51) · 2024 +%1.231 (%41) · 2025 +%669 (%54) · 2026 +%150 (%35) |
+| Kural %33 + 6x + küçültme 30 / 60 | 2,56 milyon (%55) | 1,65 milyon (%67) | 1,64 milyon (%69) | 966 USDT | 2020 +%3.017 (%48) · 2021 +%20.439 (%63) · 2022 +%343 (%41) · 2023 +%327 (%50) · 2024 +%2.099 (%44) · 2025 +%983 (%55) · 2026 +%143 (%40) |
+
+Kural maliyete dayanıklılığı da artırıyor: kayma 3 katında şimdiki ayarın düşüşü %74, kuralla %50-67. Kötümser stop
+dolumunda (en kötü durum) hepsi yine ağır zarar ediyor, ama şimdiki gibi 18 USDT'ye inmiyor. Kill-switch'le A (tüm
+dönem) hiçbir çekilişte durmadı.
 
 **Ayarlar** (varsayılan kapalı; Telegram → 🧭 Giriş sinyali → 🌊 Dalga modu → ⏱️ Durulmuş çöküş):
 

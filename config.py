@@ -1914,10 +1914,12 @@ def _setting_notes(cfg: Config) -> List[str]:
             notes.append(f"FUTURES_RECENT_SIZE_PCT={cfg.futures_recent_size_pct:g} (durulmuş çöküş): girişten önceki "
                          f"15 dk'da fiyat %{tr_from_num(cfg.futures_recent_drop_pct)} az düştüyse pozisyon "
                          f"%{cfg.futures_recent_size_pct:g} büyüklükte (hâlâ sert düşen coinde tam boy). Rapor 14 "
-                         f"araştırması (gerçekçi model, 2020-2026, 4.000 USDT, 5x, 10 çekiliş): son 15 dk'da %2.4'ten az "
-                         f"düşerken açılan işlemler 2020'den 2026'ya her yıl işlem başı ~%0 getirdi (öbürleri +%0.24-0.56). "
-                         f"%2.4 ve %50 ile 71 hesabın 12 ay ortancası +%709 → +%794, %60'ı aşan düşüş yaşayan hesap "
-                         f"14 → 4, A'nın en büyük düşüşü %57 → %46; iki dönemde de kâr arttı. Önce test modunda deneyin.")
+                         f"araştırması (gerçekçi model, 2020-2026, 4.000 USDT, 5x, 10 çekiliş): son 15 dk'da %2.4'ten "
+                         f"az düşerken açılan işlemler her yıl işlem başı ~%0 getirdi (öbürleri +%0.24-0.56). %2.4 ve "
+                         f"%50 / %33 ile 71 hesabın 12 ay ortancası +%709 → +%794 / +%816, %60'ı aşan düşüş yaşayan "
+                         f"hesap 14 → 4 / 5, A'nın en büyük düşüşü %57 → %46 / %43, kayma 3 katında düşüş %74 → %61 / "
+                         f"%50. %33 + 6x + düşüşte küçültme 30 / 60 ile +%927, %60'ı aşan düşüş 8, A düşüşü %45. "
+                         f"Önce test modunda deneyin.")
         if cfg.futures_reentry_breadth > 0:
             if cfg.loss_cooldown_minutes <= cfg.symbol_cooldown_minutes:
                 notes.append(f"FUTURES_REENTRY_BREADTH={cfg.futures_reentry_breadth}: LOSS_COOLDOWN_MINUTES="
