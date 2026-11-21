@@ -3711,6 +3711,36 @@ def half_year_lines(res: FutResult, start_capital: float, start_ms: int, end_ms:
     return L
 
 
+def summary_lines(p: SimParams, res: FutResult, ev: Evaluation, levs, live: Optional[List[str]], days: float) -> List[str]:
+    """Raporun başındaki özet: A'nın sonucu, her ayın 1'inde başlayan hesaplar (kaldıraç tablosundaki şimdiki satır),
+    stratejinin işlem başı gücü ve çıkış dağılımı, canlı giriş maliyeti (ölçüldüyse)."""
+    L = ["📋 ÖZET"]
+    ch = res
+    a = (f"eridi {_date(ch.ruined_ms)}" if ch.ruined_ms else f"{_num(ch.final_equity, 0)} USDT ({_pct(ch.net_pct)})")
+    L.append(f"  A) {_num(p.start_capital, 0)} USDT → {a} | en büyük düşüş %{max_drawdown(ch.curve)[0]:.1f} | "
+             f"kârlı yıl {ev.profitable_years}/{len(ev.years)}"
+             + (f" | ⚠️ kill-switch {_date(ch.kill_ms)}'de durdururdu" if ch.kill_ms else ""))
+    rows = [r if isinstance(r, LevRow) else LevRow(*r) for r in (levs or [])]
+    roll = next((r.roll for r in rows if r.lev == p.leverage and r.roll), None)
+    if roll:
+        L.append(f"  Her ayın 1'inde başlayan {roll['n']} hesap (12 ay, kill-switch uygulanır): ortanca "
+                 f"{_pct(roll['median'])} | %60'ı aşan düşüş {roll['dd60']} | kill-switch {roll['kills']}")
+    fixed = ev.trades
+    if fixed:
+        n = len(fixed)
+        share = {k: sum(tr.reason == k for tr in fixed) / n * 100 for k in ("TP", "BE", "SL", "TIME")}
+        per_year = f"{n / max(days / 365.25, 1e-9):,.0f}".replace(",", ".")
+        L.append(f"  Strateji (C): yılda ~{per_year} işlem, işlem başı net {ev.avg_move:+.3f}%, kazanma "
+                 f"%{ev.win_rate:.1f} | çıkış: Kâr Al %{share['TP']:.0f}, başabaş %{share['BE']:.0f}, zarar kes "
+                 f"%{share['SL']:.0f}, zaman stopu %{share['TIME']:.0f}")
+    fill = next((x for x in (live or []) if "Giriş gecikmesi (anlık tarama" in x or
+                 ("Giriş gecikmesi" in x and "anlık tarama" not in " ".join(live or []))), None)
+    if fill and "dolum, kapanış fiyatına göre ortalama" in fill:
+        part = fill.split("dolum, kapanış fiyatına göre ")[1]
+        L.append(f"  Canlı girişler: dolum {part}")
+    return L + [""]
+
+
 def sl_streak_line(p: SimParams, trades: Sequence[FutTrade]) -> str:
     """En uzun art arda zarar kes serisinin (C, giriş sırasıyla) ilk pozisyon boyunda bakiyeye etkisi: her zarar kes
     teminatın stop mesafesi + kayma + komisyon × kaldıraç kadarını götürür; düşüşte küçültme açıksa eşikten sonra küçük boy."""
@@ -3806,6 +3836,7 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
     else:
         L.append("Taktik: 4'lü onay (likidasyon + hacim + RSI uyumsuzluğu + BTC 1 saatlik trendi)")
     L.append("")
+    L.extend(summary_lines(p, res, ev, levs, live, days))
     per_month = funnel.signals / max(days / 30.4, 1e-9)
     if crash:
         L.append("🔎 Sinyal hunisi (aktif dönemdeki 5 dk mumlar):")
@@ -3834,6 +3865,9 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
                  f"İki raporun son bakiyesi arasındaki fark bu aralığın içindeyse şans olabilir.")
     L.append(f"  İşlem {st.trades} | kazanan {st.wins} | kazanma %{st.win_rate:.1f} | kâr faktörü {_pf(st.profit_factor)}"
              f" | işlem başı ROE {st.avg_roe:+.2f}%")
+    if p.depth_impact and data.depth is not None and fixed and st.win_rate < ev.win_rate - 15:
+        L.append(f"  (Kazanma oranı C'dekinden (%{ev.win_rate:.1f}) düşük: hesap büyüdükçe emir defteri kayması başabaş "
+                 f"çıkışlarını (net ~%0) küçük zarara çevirir; kâr Kâr Al ve zaman stopundan gelir.)")
     L.append(f"  Maks. düşüş %{dd:.1f}" + (f" ({_date(dd_a)} → {_date(dd_b)})" if dd_a else "")
              + f" | en uzun kayıp serisi {loss_streak} işlem (bakiye -%{streak_drop:.1f}) | kazanç serisi {win_streak}")
     skipped = ", ".join(f"{k}: {v}" for k, v in res.skipped.most_common())

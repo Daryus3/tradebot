@@ -2232,31 +2232,41 @@ karar için ortancaya ve en kötüye bakın. Çıkış taraması her gün dengel
 
 ## 📊 Backtest nasıl okunur?
 
-- **Vadeli raporda 🧯 KALDIRAÇ RİSKİ bölümü** (Kaldıraç duyarlılığı tablosunun hemen altında; ayardaki kaldıraç ve bir
-  alt kıyas kaldıracı, 10x için 5x, aynı sinyaller ve çıkışlarla): her yıl 1 Ocak'tan başlayan hesabın yıl içindeki en
-  büyük düşüşü (dip tarihiyle) ve en düşük bakiyesi; kill-switch (`MAX_TOTAL_LOSS_PCT`) uygulansaydı hangi yıllarda botu
-  hangi gün durduracağı; en kötü günler (gün içi en düşük bakiye); her ayın 1'inde başlayan hesapların ilk 12 ayı
-  (%80 / %90'ı aşan düşüş, bakiyenin 5 USDT altına inmesi, 3 ve 12 ay sonra zararda kalma, kill-switch, ortanca getiri,
-  ayardaki kaldıracın kıyastan kötü bittiği başlangıçlar); zarar kes kayarsa likidasyon bölgesine giren işlemler (stop
-  dakikasında fiyatın girişin likidasyon mesafesinden fazla altına indiği işlemler ve tarihleri); kayma 2-5 katına çıkınca
-  son bakiye ya da erime tarihi. A / B tabloları stopun tam stop fiyatından dolduğunu varsayar ve kill-switch'i
-  uygulamaz; bu bölüm ikisini de gösterir. Raporu ~20 sn uzatır.
-- **🎚️ KALDIRAÇ DUYARLILIĞI: 1x-20x hepsi** (aynı sinyaller ve çıkışlar). Sütunlar: A'nın sonucu, B'de kârlı yıl, A'daki
-  en büyük düşüş, B'de en kötü yıl içi düşüş (yılıyla) ve C'deki likidasyon sayısı; C'nin işlem başı sonucu kaldıraçtan
-  bağımsız olduğu için satır satır tekrarlanmaz. Şimdiki kaldıraç "◀ şimdiki" ile işaretli. Zarar kes likidasyona 0.5
-  puandan yakınsa satır hesaplanır ama "⛔ canlı bot açmaz" yazar (bot o kaldıraçla işlem açmaz); zarar kes likidasyonun
-  ötesindeyse satır hesaplanmaz.
-- **🧪 TEK KURAL DEĞİŞİNCE** (diğer her şey aynı; dört grup): ▸ çıkışlar ve başabaş (başabaş tetiği 0.8 / 1.5 / 2, tabanı
-  0.15 / 0.35 / 0.5, Kâr Al ±1, Zarar Kes ±0.5, zaman stopu 30 / 60 / 120 dk, ek pozisyon başabaşı ve Faz 9 zaman
-  stopları, Kâr Al emri), ▸ pozisyon büyüklüğü ve dalga modu (teminat kullanımı ×0.75 / ×0.6, en fazla 2 / 3 / 5
-  pozisyon, ek pozisyon boyu ve kapısı, yalnız çöküş boyu, dalgada yeniden giriş eşiği, düşüşte küçültme, Faz 5 / 6
-  setleri), ▸ giriş kuralı, tarama ve bekleme (çöküş eşiği ±2, ek pencere ±1 puan / kapalı, likidasyon şartı, 5 dk
-  tarama, zarardan sonra ve aynı coine bekleme, zarar serisi molası), ▸ maliyet ve gerçekçilik (kayma 2 / 3 / 5 kat,
-  komisyon 2 kat, kötümser stop, giriş varsayımları). Denenen değerler mevcut ayarınızın çevresindedir; mevcut değere
-  eşit olan satır yazılmaz. Dakikalık taramada yeni sinyal gerektiren satırlar "· 5 dk taramayla" hesaplanır ve "5 dk'da
-  bir tarama" satırıyla karşılaştırılmalıdır. **▲ / ▼**: A'daki son bakiye mevcut ayarınkinden çekiliş aralığından
-  (aynı ayarın 10 farklı mum içi başabaş çekilişi) fazla yüksek / düşük; işaretsiz satırlardaki fark şans olabilir. C
-  (sabit pozisyon) sütunu bileşik büyümeden bağımsızdır, karşılaştırmada önce ona bakın.
+- **Vadeli rapor sırası:** başlık (ayarlar) → 📋 ÖZET → sinyal hunisi → canlı bot karşılaştırması → A (tek hesap) ve
+  6 aylık bakiyesi → B (her yıl yeniden) → C (sabit tutar) ve çıkış nedenleri → marjin riski → aylık yığılma → kaldıraç
+  tablosu → kaldıraç riski → Kâr Al / Zarar Kes ızgarası → tek kural tablosu. Telegram'dan gelen `rapor.txt`'ye ayar
+  uyarıları (⚠️, bot açılırken zaten yazılır) ve ilerleme satırları (⏳) girmez.
+- **📋 ÖZET** (başlığın altında): A'nın sonucu ve en büyük düşüşü, her ayın 1'inde başlayan hesapların 12 ay ortancası /
+  %60'ı aşan düşüş / kill-switch sayısı (kaldıraç tablosundaki şimdiki satır), stratejinin işlem başı neti ve çıkış
+  dağılımı, canlı girişlerin ölçülen dolum maliyeti.
+- **📌 Çıkış nedenleri (C):** her çıkış için işlem sayısı ve payı, net ortalama (komisyon, kayma ve fonlama dahil fiyat
+  hareketi), toplam kârdaki payı, ROE ve süre. Başabaş çıkışları net ~%0'dır: kâr çıkışı değil, dönüşü sönen işlemi zarar
+  kese gitmeden kapatır (bkz. "Rapor 15").
+- **🎚️ KALDIRAÇ DUYARLILIĞI: 2x-10x** (+ ayardaki kaldıraç; aynı sinyaller ve çıkışlar). Sol taraf her ayın 1'inde
+  başlayan hesapların ilk 12 ayı (kill-switch uygulanır): ortanca getiri, %60'ı aşan düşüş yaşayan ve kill-switch'in
+  durdurduğu hesap sayısı. Kaldıraç seçiminde asıl ölçü bu. Sağ taraf A (tek başlangıç tarihi; hesap büyüyünce derinliğe
+  göre boy pozisyonu sınırladığı için kaldıraçtan neredeyse bağımsız, kill-switch'in durduracağı gün yazılır) ve B'de en
+  kötü yıl içi düşüş. Zarar kes likidasyona 0.5 puandan yakınsa "⛔ canlı bot açmaz"; likidasyonun ötesindeyse satır
+  hesaplanmaz. Tek çekiliştir; 10 çekilişli ölçüm README "Kaldıraç yeniden".
+- **🧯 KALDIRAÇ RİSKİ** (ayardaki kaldıraç ve bir alt kıyas kaldıracı, 10x için 5x): her yıl 1 Ocak'tan başlayan hesabın
+  yıl içindeki en büyük düşüşü (dip tarihiyle) ve en düşük bakiyesi; kill-switch (`MAX_TOTAL_LOSS_PCT`) uygulansaydı
+  hangi yıllarda botu hangi gün durduracağı; en kötü günler; her ayın 1'inde başlayan hesapların ilk 12 ayı (%80 / %90'ı
+  aşan düşüş, bakiyenin 5 USDT altına inmesi, 3 ve 12 ay sonra zararda kalma, kill-switch, ortanca getiri, ayardaki
+  kaldıracın kıyastan kötü bittiği başlangıçlar); zarar kes kayarsa likidasyon bölgesine giren işlemler.
+- **🎯 KÂR AL / ZARAR KES:** şimdiki ayarın çevresi (Kâr Al ±1, Zarar Kes ±0.5; canlı botun kabul ettiği aralıkta),
+  şimdiki hücre "◀ şimdiki" ile işaretli.
+- **🧪 TEK KURAL DEĞİŞİNCE** (diğer her şey aynı; dört grup): ▸ çıkışlar ve başabaş (başabaş kalkanı, tetiği 0.8 / 1.5 /
+  2, tabanı 0.15 / 0.35 / 0.5, zaman stopu 30 / 60 / 120 dk, ek pozisyon başabaşı ve Faz 9 zaman stopları, Kâr Al emri),
+  ▸ pozisyon büyüklüğü ve dalga modu (derinliğe göre boy, teminat kullanımı ×0.75 / ×0.6, en fazla 2 / 3 / 5 pozisyon,
+  ek pozisyon boyu ve kapısı, yalnız çöküş, durulmuş çöküş, dalgada yeniden giriş, düşüşte küçültme), ▸ giriş kuralı,
+  tarama ve bekleme (çöküş eşiği ±2, ek pencereler, likidasyon şartı, zarardan sonra ve aynı coine bekleme, zarar serisi
+  molası), ▸ maliyet ve gerçekçilik (kayma 2 / 3 / 5 kat, komisyon 2 kat, kötümser stop, canlıda ölçülen giriş maliyeti).
+  Denenen değerler mevcut ayarınızın çevresindedir; mevcut değere eşit olan satır yazılmaz. Dakikalık taramada yeni
+  sinyal gerektiren satırlar "· 5 dk taramayla" hesaplanır; önce "5 dk'da bir tarama" kıyas satırı gelir ve bu satırların
+  ▲ / ▼ işareti ona göredir. **▲ / ▼**: A'daki son bakiye kıyasınkinden çekiliş aralığından (aynı ayarın 10 farklı mum
+  içi başabaş çekilişi) fazla yüksek / düşük; işaretsiz satırlardaki fark şans olabilir. C (sabit pozisyon) sütunu bileşik
+  büyümeden bağımsızdır, karşılaştırmada önce ona bakın. Başka kaldıraçla hesaplanan eski ön ayar satırları (Faz 5 / 6
+  setleri), iyimser izleyen stop ve gerçek dışı kıyaslar (kayma yok, eski hesap) artık yazılmaz.
 - **📒 A'NIN 6 AYLIK BAKİYESİ** (A'nın hemen altında): tek hesabın her 6 aylık dönemin (1 Ocak / 1 Temmuz) sonundaki
   bakiyesi. Ayrıca dönemdeki değişim, dönem içindeki en düşük bakiye ve en büyük düşüş, dönemde açılan işlem sayısı
   gösterilir. İlk ve son dönem kısmi olabilir. Bakiye kapanan işlemlerle hesaplanır; açık pozisyonun anlık kârı ya da
@@ -2269,8 +2279,7 @@ karar için ortancaya ve en kötüye bakın. Çıkış taraması her gün dengel
   başlıktaki 🌊 satırında da yazar.
 - **📆 AYLIK İŞLEM YIĞILMASI** (yıl yıl): ayın günlük işlem hızı o yılın ortalamasının en az 1.5 katıysa o ay yığılma
   sayılır. Her yıl için yığılma ayları (işlem sayısı ve kaç kat), bu ayların yılın işlemlerinden ve C'deki net kârından
-  payı; ay ay işlem başı sonuç, kazanma, C toplamı, B hesabının o aydaki getirisi ve ay içindeki en büyük düşüşü; yığılma
-  ayları olmadan C'nin toplamı ve B'nin "bu aylar yatay geçseydi" sonucu. Yığılma yoksa yılın en yoğun ayı yazılır. Son
+  payı; yığılma ayları olmadan C'nin toplamı, işlem başı sonucu ve B'nin "bu aylar yatay geçseydi" sonucu. Yığılma yoksa yılın en yoğun ayı yazılır. Son
   satır tüm yılların özeti (yığılma aylarında ve diğer aylarda işlem başı sonuç).
 - **📚 Emir defteri kayması / 📏 Derinliğe göre boy satırları** (rapor başlığında): 📚, büyük pozisyonların defteri
   tüketmesinden gelen kaymanın A'daki toplamını (USDT) ve 2023 öncesinde derinliği hacimden tahmin edilen işlem sayısını

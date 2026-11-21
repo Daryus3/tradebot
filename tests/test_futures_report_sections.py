@@ -299,3 +299,26 @@ def test_report_places_the_cluster_section_before_the_leverage_table(fcfg):
     text = fb.format_report(on, data, ev, funnel, levs=[(20, None, "deneme")])
     assert "📆 AYLIK İŞLEM YIĞILMASI" in text
     assert text.index("⚠️ MARJİN ÇAĞRISI") < text.index("📆 AYLIK İŞLEM YIĞILMASI") < text.index("🎚️ KALDIRAÇ DUYARLILIĞI")
+
+
+def test_report_starts_with_a_summary_of_the_key_numbers(fcfg):
+    on, data, sigs, funnel, windows = small_inputs(fcfg)
+    ev = fb.evaluate(fb.params_from_cfg(on), data, sigs, windows)
+    roll = {"n": 71, "median": 927.0, "dd60": 8, "kills": 4}
+    live = ["🔍 CANLI BOT KARŞILAŞTIRMASI (canlı bot kaydı)",
+            "  Giriş gecikmesi (hızlı giriş açık: mum kapanışı → dolum): ortalama 4.5 sn (1 giriş) | dolum, kapanış "
+            "fiyatına göre ortalama +0.081% (backtest varsayımı +%0.06: gecikme %0.04 + kayma)",
+            "  Giriş gecikmesi (anlık tarama: mum kapanışı → dolum): ortalama 0.6 sn (9 giriş) | dolum, kapanış fiyatına "
+            "göre ortalama +0.084% (backtest varsayımı +%0.04: gecikme %0.02 + kayma); ortanca +0.061%, en kötü +0.456%"]
+    text = fb.format_report(on, data, ev, funnel, levs=[fb.LevRow(on.futures_leverage, ev, "", roll)], live=live)
+    assert text.index("📋 ÖZET") < text.index("🔎 Sinyal hunisi") < text.index("💰 A)")
+    summary = text[text.index("📋 ÖZET"):text.index("🔎 Sinyal hunisi")]
+    assert f"A) {fb._num(on.start_capital, 0)} USDT → " in summary and "en büyük düşüş %" in summary
+    assert "Her ayın 1'inde başlayan 71 hesap (12 ay, kill-switch uygulanır): ortanca +927.0% | %60'ı aşan düşüş 8 | " \
+           "kill-switch 4" in summary
+    assert "Strateji (C): yılda ~" in summary and "| çıkış: Kâr Al %" in summary and ", zaman stopu %" in summary
+    assert ("Canlı girişler: dolum ortalama +0.084% (backtest varsayımı +%0.04: gecikme %0.02 + kayma); ortanca "
+            "+0.061%, en kötü +0.456%") in summary                          # Anlık taramanın satırı seçilir
+    plain = fb.format_report(on, data, ev, funnel)                      # Kaldıraç tablosu / canlı kayıt yoksa o satırlar yok
+    head = plain[plain.index("📋 ÖZET"):plain.index("🔎 Sinyal hunisi")]
+    assert "Her ayın 1'inde" not in head and "Canlı girişler" not in head
