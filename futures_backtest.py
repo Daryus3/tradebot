@@ -2895,29 +2895,36 @@ def _num(v: float, d: int = 2) -> str:
     return f"{v:,.{d}f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
+EVAL_HEAD = f"{'A) tek hesap':>16s} │ {'B) kârlı yıl':12s} │ C) sabit pozisyon"
+
+
 def _eval_line(ev: Evaluation) -> str:
+    """Tablo satırının sonuç kısmı (EVAL_HEAD ile hizalı): A'nın sonucu, B'de kârlı yıl, C'nin işlem başı gücü."""
     ch = ev.chained
     ruined = f"eridi {_date(ch.ruined_ms)}" if ch.ruined_ms else _pct(ch.net_pct)
-    return (f"{ruined:>16s} | {ev.profitable_years}/{len(ev.years)} | {len(ev.trades):5d} işlem, kazanma "
-            f"%{ev.win_rate:4.1f}, işlem başı {ev.avg_move:+.3f}%")
+    years = f"{ev.profitable_years}/{len(ev.years)}"
+    return (f"{ruined:>16s} │ {years:^12s} │ {len(ev.trades):5d} işlem, kazanma %{ev.win_rate:4.1f}, işlem başı "
+            f"{ev.avg_move:+.3f}%")
 
 
-LEV_HEAD = ("  Kaldıraç       12 ay ortanca  %60+ düşüş  kill-switch  │  A) tek hesap        A düşüş  B en kötü yıl")
+LEV_LABEL_W = 13
+LEV_HEAD = (f"  {'Kaldıraç':{LEV_LABEL_W}s}{'12 ay ortanca':>14s}{'%60+ düşüş':>12s}{'kill-switch':>13s}  │  "
+            f"{'A) tek hesap':<20s}{'A düşüş':>8s}  B en kötü yıl")
 
 
 def _lev_line(ev: Evaluation, roll: Optional[dict] = None) -> str:
-    """Kaldıraç tablosu satırı: her ayın 1'inde başlayan hesapların özeti (12 ay ortanca getiri, %60'ı aşan düşüş,
-    kill-switch'in durdurduğu hesap; kill-switch uygulanır), sonra A'nın sonucu ve en büyük düşüşü (A kill-switch
-    uygulamaz: durduracağı gün yazılır) ve B'de en kötü yıl içi düşüş."""
+    """Kaldıraç tablosu satırı (etiketten sonrası, LEV_HEAD ile hizalı): her ayın 1'inde başlayan hesapların özeti (12 ay
+    ortanca getiri, %60'ı aşan düşüş, kill-switch'in durdurduğu hesap; kill-switch uygulanır), sonra A'nın sonucu ve en
+    büyük düşüşü (A kill-switch uygulamaz: durduracağı gün yazılır) ve B'de en kötü yıl içi düşüş."""
     ch = ev.chained
     a = f"eridi {_date(ch.ruined_ms)}" if ch.ruined_ms else _pct(ch.net_pct)
     if ch.kill_ms and not ch.ruined_ms:
         a += f" (durur {_date(ch.kill_ms)})"
     worst = max(((max_drawdown(r.curve)[0], y) for y, r in ev.years), default=(0.0, None))
-    left = (f"{_pct(roll['median']):>13s}  {roll['dd60']:>4d} / {roll['n']:<3d}  {roll['kills']:>6d}     "
-            if roll else f"{'—':>13s}  {'—':>10s}  {'—':>6s}     ")
-    return (left + f"│  {a:<19s}  %{max_drawdown(ch.curve)[0]:5.1f}  %{worst[0]:4.1f}"
-            + (f" ({worst[1]})" if worst[1] else ""))
+    med, deep, kills = ((_pct(roll["median"]), f"{roll['dd60']} / {roll['n']}", str(roll["kills"])) if roll
+                        else ("—", "—", "—"))
+    return (f"{med:>14s}{deep:>12s}{kills:>13s}  │  {a:<20s}{'%' + format(max_drawdown(ch.curve)[0], '.1f'):>8s}  "
+            f"%{worst[0]:.1f}" + (f" ({worst[1]})" if worst[1] else ""))
 
 
 def cascade_label(p: SimParams) -> str:
@@ -3968,7 +3975,10 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
         if cluster_lines:
             L.append("")
             L.extend(cluster_lines)
-    head_row = "  Ayar                        A) tek hesap | B) kârlı yıl | C) sabit pozisyon"
+    names = ([f"TP +%{tp:g} / SL -%{sl:g} ◀ şimdiki" for tp, sl, _e in (grid or [])]
+             + [n for n, e in (variants or []) if e is not None])
+    width = min(max([24] + [len(n) for n in names]), 72)
+    head_row = f"    {'Ayar':{width}s} " + EVAL_HEAD
     band = _noise_band(draws)
     band_note = (f"  ▲ / ▼: A'daki son bakiye mevcut ayarınkinden çekiliş aralığından fazla yüksek / düşük (−%"
                  f"{(1 - band[0]) * 100:.0f} … +%{(band[1] - 1) * 100:.0f} şans payı; ▼ eriyen de); işaretsiz satırlardaki "
@@ -3988,9 +3998,9 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
         for r in rows:
             label = f"{r.lev}x" + (" ◀ şimdiki" if r.lev == p.leverage else "")
             if r.ev is None:
-                L.append(f"  {label:13s}  — ({r.note})")
+                L.append(f"  {label:{LEV_LABEL_W}s}  — ({r.note})")
             else:
-                L.append(f"  {label:13s}" + _lev_line(r.ev, r.roll) + (f"  {r.note}" if r.note else ""))
+                L.append(f"  {label:{LEV_LABEL_W}s}" + _lev_line(r.ev, r.roll) + (f"  {r.note}" if r.note else ""))
     if risk:
         L.append("")
         L.extend(leverage_risk_lines(risk))
@@ -4002,7 +4012,7 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
         L.append(head_row)
         for tp, sl, ev2 in grid:
             name = f"TP +%{tp:g} / SL -%{sl:g}" + (" ◀ şimdiki" if _same(tp, p.tp_pct) and _same(sl, p.sl_pct) else "")
-            L.append(f"  {_mark(ev2, res.final_equity, band)}{name:26s} " + _eval_line(ev2))
+            L.append(f"  {_mark(ev2, res.final_equity, band) or '  '}{name:{width}s} " + _eval_line(ev2))
     if variants:
         L.append("")
         L.append("🧪 TEK KURAL DEĞİŞİNCE (diğer her şey aynı)")
@@ -4015,8 +4025,8 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
                 L.append(f"  ▸ {name}")
                 continue
             five = ref5 is not None and name.endswith("5 dk taramayla")   # 5 dk taramalı satırlar kendi kıyasıyla
-            L.append(f"  {_mark(ev2, ref5.chained.final_equity if five else res.final_equity, band)}{name:26s} "
-                     + _eval_line(ev2))
+            mk = _mark(ev2, ref5.chained.final_equity if five else res.final_equity, band) or "  "
+            L.append(f"  {mk}{name:{width}s} " + _eval_line(ev2))
             if name == SCAN5_REF and ref5 is not None:
                 L.append("    (alttaki \"· 5 dk taramayla\" satırları yeni sinyal gerektirdiği için 5 dk taramayla hesaplandı; "
                          "▲ / ▼ bu satıra göre)")
