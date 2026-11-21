@@ -2262,8 +2262,8 @@ karar için ortancaya ve en kötüye bakın. Çıkış taraması her gün dengel
   tarama ve bekleme (çöküş eşiği ±2, ek pencereler, likidasyon şartı, zarardan sonra ve aynı coine bekleme, zarar serisi
   molası), ▸ maliyet ve gerçekçilik (kayma 2 / 3 / 5 kat, komisyon 2 kat, kötümser stop, canlıda ölçülen giriş maliyeti).
   Maliyet satırlarında C'deki kazanma oranının sert düşmesi (ör. %85 → %18) hata değil: başabaş çıkışları net ~%0
-  olduğu için maliyet artınca küçük zarara döner; satırın altındaki not bunu söyler. Kötümser stop dolumu kaba bir üst
-  sınırdır (saniyelik veride gerçek dolum, mumun stop ötesindeki fitilinin ~%3'ü).
+  olduğu için maliyet artınca küçük zarara döner; satırın altındaki not bunu söyler. Kötümser stop dolumu (fitilin
+  yarısı) çok kötümser bir varsayımdır: saniyelik veride gerçek dolum, mumun stop ötesindeki fitilinin ~%3'ü.
   Denenen değerler mevcut ayarınızın çevresindedir; mevcut değere eşit olan satır yazılmaz. Dakikalık taramada yeni
   sinyal gerektiren satırlar "· 5 dk taramayla" hesaplanır; önce "5 dk'da bir tarama" kıyas satırı gelir ve bu satırların
   ▲ / ▼ işareti ona göredir. **▲ / ▼**: A'daki son bakiye kıyasınkinden çekiliş aralığından (aynı ayarın 10 farklı mum

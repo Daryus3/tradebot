@@ -2007,7 +2007,7 @@ ROW_NOTES = {
                "▲ / ▼ bu satıra göre",
     FEE2_ROW: "kayma ve komisyon artınca başabaş çıkışları (net ~%0) küçük zarara döner; C'deki kazanma oranı bu yüzden "
               "düşer",
-    HARSH_STOP_ROW: "saniyelik veride gerçek stop dolumu fitilin ~%3'ü; bu satır kaba bir üst sınırdır",
+    HARSH_STOP_ROW: "saniyelik veride gerçek stop dolumu fitilin ~%3'ü; fitilin yarısı çok kötümser bir varsayımdır",
 }
 
 
@@ -2550,11 +2550,12 @@ def format_grid_report(cfg, data: FutData, rows: Sequence[GridRow], base: GridRo
             ch = ev.chained
             L.append(f"   Tek hesap: {p.start_capital:g} USDT → {_num(ch.final_equity)} USDT, maks. düşüş "
                      f"%{max_drawdown(ch.curve)[0]:.0f} | kârlı yıl {ev.profitable_years}/{len(ev.years)}")
-            L.append("   Yıl   İşlem  Kazanma  Getiri (her yıl baştan)  Maks.düşüş")
+            L.append(f"   {'Yıl':4s}  {'İşlem':>5s}  {'Kazanma':>7s}  {'Getiri (her yıl baştan)':>23s}  "
+                     f"{'Maks.düşüş':>10s}")
             for y, res in ev.years:
                 st = stats_of(res)
-                L.append(f"   {y}  {st.trades:5d}  {_pct_cell(st.win_rate)}  {_pct(st.net_pct):>12s}            "
-                         f"{_pct_cell(st.max_dd, 5, 0)}")
+                L.append(f"   {str(y):4s}  {st.trades:5d}  {_pct_cell(st.win_rate, 7)}  {_pct(st.net_pct):>23s}  "
+                         f"{_pct_cell(st.max_dd, 10, 0)}")
     L.append("")
     L.append("ℹ️ Kazanma oranına başabaş stopuyla küçük kârla kapanan işlemler de dahildir. Tek pozisyon: aynı anda "
              "çöken coinlerden yalnızca eşiğini en çok aşan alınır. Geçmiş sonuç gelecek garantisi değildir; yeni "
@@ -3428,17 +3429,21 @@ def leverage_risk_lines(risk: Optional[dict]) -> List[str]:
     if risk["yearly"].get(lev):
         L.append("  Her yıl 1 Ocak'tan başlayan hesap: yıl sonu | yıl içindeki en büyük düşüş (dip tarihi) | en düşük bakiye")
         by_year = {L2: {y: (st, ruined) for y, st, ruined in risk["yearly"][L2]} for L2 in levs}
+        rows = []                                   # (yıl, [(kaldıraç, getiri, düşüş, dip, en düşük, eridi)])
         for y in sorted(by_year[lev]):
             cells = []
             for L2 in levs:
                 st, ruined = by_year[L2].get(y, (None, None))
-                if st is None:
-                    continue
-                ret = (st["final"] / cap - 1) * 100
-                trough = f" ({_date(st['trough_ms'])})" if st["trough_ms"] else " " * 13
-                cells.append(f"{L2}x {_pct(ret):>9s} | {'−%' + format(st['dd'], '.1f'):>6s}{trough} | "
-                             f"{_usdt(st['low']):>9s} USDT" + (f" | ERİDİ {_date(ruined)}" if ruined else ""))
-            L.append(f"    {y}: " + "   ·   ".join(cells))
+                if st is not None:
+                    cells.append((f"{L2}x", _pct((st["final"] / cap - 1) * 100), f"−%{st['dd']:.1f}",
+                                  f" ({_date(st['trough_ms'])})" if st["trough_ms"] else " " * 13, _usdt(st["low"]),
+                                  f" | ERİDİ {_date(ruined)}" if ruined else ""))
+            rows.append((y, cells))
+        wid = [max([len(c[k]) for _y, cs in rows for c in cs] or [0]) for k in range(5)]   # Sütunlar alt alta hizalı
+        for y, cells in rows:
+            L.append(f"    {y}: " + "   ·   ".join(
+                f"{c[0]:{wid[0]}s} {c[1]:>{wid[1]}s} | {c[2]:>{wid[2]}s}{c[3]} | {c[4]:>{wid[4]}s} USDT{c[5]}"
+                for c in cells))
         if kill:
             parts = []
             for L2 in levs:
@@ -3731,7 +3736,8 @@ def half_year_lines(res: FutResult, start_capital: float, start_ms: int, end_ms:
     money = lambda v: _num(v, 2 if abs(v) < 1000 else 0)       # noqa: E731
     L = [f"📒 A'NIN 6 AYLIK BAKİYESİ ({money(start_capital)} USDT ile başlayan tek hesap; kapanan işlemlerle, açık "
          f"pozisyonun anlık kârı / zararı sayılmaz)",
-         "  Dönem                      Dönem sonu bakiye    6 ayda    Dönem içi en düşük  Dönem içi düşüş  İşlem"]
+         f"  {'Dönem':25s}  {'Dönem sonu bakiye':>17s}  {'6 ayda':>9s}  {'Dönem içi en düşük':>18s}  "
+         f"{'Dönem içi düşüş':>15s}  {'İşlem':>6s}"]
     i, bal = 0, start_capital
     for a, b in half_year_periods(start_ms, end_ms):
         start_bal = bal
@@ -3751,8 +3757,8 @@ def half_year_lines(res: FutResult, start_capital: float, start_ms: int, end_ms:
             mark += f"  ⚠️ kill-switch (-%{kill_pct:g}) botu burada durdururdu"
         if res.ruined_ms is not None and a <= res.ruined_ms < b:
             mark += "  🛑 hesap eridi"
-        L.append(f"  {name:25s}  {money(bal):>15s} USDT  {_pct(change):>9s}  {money(low):>14s} USDT  "
-                 f"{_pct_cell(dd)}        {n:5d}{mark}")
+        L.append(f"  {name:25s}  {money(bal) + ' USDT':>17s}  {_pct(change):>9s}  {money(low) + ' USDT':>18s}  "
+                 f"{_pct_cell(dd, 15)}  {n:6d}{mark}")
     return L
 
 
@@ -3934,24 +3940,27 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
     L.extend(half_year_lines(res, p.start_capital, data.start_ms, data.end_ms, p.kill_pct))
     L.append("")
     L.append(f"📅 B) Her yıl {p.start_capital:g} USDT ile yeniden başlasaydınız")
-    L.append("  Yıl   İşlem  Kazanma  Getiri      Maks.düşüş  Kayıp serisi  Likid.  BTC al-tut")
+    L.append(f"  {'Yıl':4s}  {'İşlem':>5s}  {'Kazanma':>7s}  {'Getiri':>10s}  {'Maks.düşüş':>10s}  "
+             f"{'Kayıp serisi':>12s}  {'Likid.':>6s}  {'BTC al-tut':>10s}")
     for y, r in ev.years:
         s2 = stats_of(r)
         mark = f"  🛑 eridi {_date(r.ruined_ms)[5:]}" if s2.ruined else ""
-        L.append(f"  {y}  {s2.trades:5d}  {_pct_cell(s2.win_rate)}  {_pct(s2.net_pct):>10s}  {_pct_cell(s2.max_dd)}      "
-                 f"{s2.loss_streak:3d}       {s2.liquidations:3d}   {_pct(btc_hold_pct(data, r.start_ms, r.end_ms)):>8s}"
-                 f"{mark}")
+        L.append(f"  {str(y):4s}  {s2.trades:5d}  {_pct_cell(s2.win_rate, 7)}  {_pct(s2.net_pct):>10s}  "
+                 f"{_pct_cell(s2.max_dd, 10)}  {s2.loss_streak:12d}  {s2.liquidations:6d}  "
+                 f"{_pct(btc_hold_pct(data, r.start_ms, r.end_ms)):>10s}{mark}")
     L.append(f"  Kârlı yıl: {ev.profitable_years}/{len(ev.years)}")
     L.append("")
     L.append(f"📈 C) Stratejinin kendisi: her sinyal sabit {size:g} USDT'lik pozisyonla (bakiye etkisi ve erime yok)")
-    L.append("  Yıl   İşlem  Kazanma  İşlem başı net  Toplam (fiyat %)  Kâr faktörü  Kayıp serisi")
+    L.append(f"  {'Yıl':4s}  {'İşlem':>5s}  {'Kazanma':>7s}  {'İşlem başı net':>14s}  {'Toplam (fiyat %)':>16s}  "
+             f"{'Kâr faktörü':>11s}  {'Kayıp serisi':>12s}")
     for y, group in ev.fixed_years():
         w = sum(tr.pnl > 0 for tr in group)
         gain = sum(tr.pnl for tr in group if tr.pnl > 0)
         loss = -sum(tr.pnl for tr in group if tr.pnl <= 0)
         moves = [net_move_pct(tr) for tr in group]
-        L.append(f"  {y}  {len(group):5d}  {_pct_cell(w / len(group) * 100)}  {np.mean(moves):+13.3f}%  {np.sum(moves):+14.1f}%"
-                 f"   {_pf(gain / loss if loss > 0 else float('inf')):>9s}   {streaks(group)[0]:6d}")
+        L.append(f"  {str(y):4s}  {len(group):5d}  {_pct_cell(w / len(group) * 100, 7)}  {np.mean(moves):+13.3f}%  "
+                 f"{np.sum(moves):+15.1f}%  {_pf(gain / loss if loss > 0 else float('inf')):>11s}  "
+                 f"{streaks(group)[0]:12d}")
     if fixed:
         moves = [net_move_pct(tr) for tr in fixed]
         gross = [m + tr.fees / tr.notional * 100 + tr.funding / tr.notional * 100 for m, tr in zip(moves, fixed)]
@@ -3962,12 +3971,14 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
         L.append("")
         total = sum(tr.pnl for tr in fixed)
         L.append("📌 Çıkış nedenleri (C; net = komisyon, kayma ve fonlama dahil fiyat hareketi):")
-        L.append("  Çıkış           İşlem  (pay)  | net ort. | toplam kârdaki payı | ort. ROE | ort. süre")
+        L.append("  Çıkış           İşlem  (pay) | net ort. | toplam kârdaki payı | ort. ROE | ort. süre")
         for reason in ("TP", "TRAIL", "BE", "SL", "TIME", "LIQ", "END"):
             group = [tr for tr in fixed if tr.reason == reason]
             if group:
                 part = sum(tr.pnl for tr in group) / total * 100 if total else 0.0
-                L.append(f"  {REASON_TR[reason]:14s} {len(group):5d} (%{len(group) / len(fixed) * 100:4.1f}) | "
+                x = len(group) / len(fixed) * 100
+                pay = f"(%{x:.1f})" if x < 99.95 else "(%100)"          # Sütun 7 karakter: tek çıkış türünde de hizalı
+                L.append(f"  {REASON_TR[reason]:14s} {len(group):5d} {pay:>7s} | "
                          f"{np.mean([net_move_pct(tr) for tr in group]):+7.3f}% | "
                          f"{('+' if part >= 0 else '−') + '%' + f'{abs(part):.0f}':>19s} | "
                          f"{np.mean([tr.roe_pct for tr in group]):+7.2f}% | "

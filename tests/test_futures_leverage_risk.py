@@ -78,8 +78,10 @@ def test_leverage_risk_measures_and_report_lines(fcfg, monkeypatch):
     text = "\n".join(fb.leverage_risk_lines(risk))
     assert text.startswith("🧯 KALDIRAÇ RİSKİ (10x, kıyas 5x; aynı sinyaller ve çıkışlar, 28,99 USDT ile)")
     assert "kill-switch'i uygulamaz" in text
-    assert ("2024: 10x   +200.0% | −%96.0 (2024-01-21) |      2,32 USDT   ·   5x   +200.0% | −%50.0 (2024-01-21) |     "
+    assert ("2024: 10x +200.0% | −%96.0 (2024-01-21) |  2,32 USDT   ·   5x  +200.0% | −%50.0 (2024-01-21) | "
             "28,99 USDT") in text                                       # Sütunlar hizalı: yıl satırları alt alta okunur
+    years = [x for x in text.splitlines() if x.startswith("    2024: ") or x.startswith("    2025: ")]
+    assert len(years) == 2 and len({x.index("·") for x in years}) == 1 and len({x.index("USDT") for x in years}) == 1
     assert ("Kill-switch (toplam zarar sermayenin %45'i) uygulansaydı 1 Ocak başlangıçlı hesabı durdururdu: 10x: 2024 "
             "(2024-01-21), 2025 (2025-01-21) | 5x: hiçbir yılda") in text
     assert ("En kötü günler (gün içi en düşük bakiye, bir önceki günün sonuna göre; 10x / 5x): 2024-01-21 −%96 / −%50, "

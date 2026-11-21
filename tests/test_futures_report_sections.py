@@ -170,11 +170,11 @@ def test_noise_band_marks_and_group_headers_in_report(fcfg):
     i = next(k for k, s in enumerate(lines) if s.strip().startswith(fb.FEE2_ROW))
     assert on.breakeven_enabled and lines[i + 1].startswith("    (kayma ve komisyon artınca başabaş çıkışları")
     j = next(k for k, s in enumerate(lines) if s.strip().startswith("Kötümser stop dolumu"))
-    assert lines[j + 1] == "    (saniyelik veride gerçek stop dolumu fitilin ~%3'ü; bu satır kaba bir üst sınırdır)"
+    assert lines[j + 1] == "    (saniyelik veride gerçek stop dolumu fitilin ~%3'ü; fitilin yarısı çok kötümser bir varsayımdır)"
     no_be = replace(on, breakeven_enabled=False)
     text = fb.format_report(no_be, data, fb.evaluate(fb.params_from_cfg(no_be), data, sigs, windows), funnel,
                             variants=costs)
-    assert "başabaş çıkışları (net ~%0)" not in text and "kaba bir üst sınırdır" in text
+    assert "başabaş çıkışları (net ~%0)" not in text and "çok kötümser bir varsayımdır" in text
     bars = {s.index("│") for s in lines if "│" in s}                     # Satır adı sütunu taşmıyor: sütunlar hizalı
     assert len(bars) == 1 and bars.pop() <= 4 + 60 + 18
 
@@ -365,5 +365,38 @@ def test_header_cooldown_wave_block_and_table_cells(fcfg):
     ev = fb.evaluate(fb.params_from_cfg(on), data, sigs, windows)
     text = fb.format_report(on, data, ev, funnel)
     assert ev.fixed
-    row = next(x for x in text.splitlines() if x.startswith("    2x (%"))
+    lines = text.splitlines()
+    i = next(k for k, x in enumerate(lines) if x.startswith("📌 Çıkış nedenleri"))
+    end = lines.index("", i)
+    table = [x for x in lines[i + 1:end] if " | " in x]                  # Başlık + çıkış satırları: "|" sütunları hizalı
+    assert len(table) >= 2 and len({tuple(k for k, ch in enumerate(x) if ch == "|") for x in table}) == 1, table
+    row = next(x for x in lines if x.startswith("    2x (%"))
     assert [c.split(" ")[0] for c in row.strip().split(" | ")] == ["2x", "3x", "5x", "6x", "8x", "10x"]
+
+
+def _right_aligned(lines, start, labels):
+    """`start` ile başlayan tablonun başlığındaki her sütun adının son karakteri, her veri satırında değerin son
+    karakterine denk geliyor mu (sağa hizalı sütunlar). Tablo ilk boş satırda biter."""
+    i = next(k for k, x in enumerate(lines) if x.startswith(start))
+    head = lines[i + 1]
+    rows = []
+    for x in lines[i + 2:]:
+        if not x.strip() or not x.strip()[0].isdigit():
+            break
+        rows.append(x)
+    assert rows
+    for name in labels:
+        end = head.index(name) + len(name) - 1
+        for r in rows:
+            assert r[end] != " " and (end + 1 == len(r) or r[end + 1] == " "), (name, head, r)
+
+
+def test_year_and_period_tables_line_up_with_their_headers(fcfg):
+    on, data, sigs, funnel, windows = small_inputs(fcfg)
+    ev = fb.evaluate(fb.params_from_cfg(on), data, sigs, windows)
+    lines = fb.format_report(on, data, ev, funnel).splitlines()
+    _right_aligned(lines, "📅 B)", ["İşlem", "Kazanma", "Getiri", "Maks.düşüş", "Kayıp serisi", "Likid.", "BTC al-tut"])
+    _right_aligned(lines, "📈 C)", ["İşlem", "Kazanma", "İşlem başı net", "Toplam (fiyat %)", "Kâr faktörü",
+                                    "Kayıp serisi"])
+    _right_aligned(lines, "📒 A'NIN 6 AYLIK", ["Dönem sonu bakiye", "6 ayda", "Dönem içi en düşük", "Dönem içi düşüş",
+                                               "İşlem"])
