@@ -55,7 +55,7 @@ MAX_NOTIONAL = 1_000_000.0              # Bileşik büyüme sınırı (kaldıra�
 FUNDING_DEFAULT = 0.0001                # Fonlama verisi yoksa 8 saatte %0.01 (pozitif: long öder)
 FUNDING_HOURS = (0, 8, 16)
 BNB_FUTURES_DISCOUNT = 0.10             # Vadeli işlemde BNB ile komisyon indirimi
-LEVERAGES = (1, 3, 5, 10, 15, 20)       # "Zarar kes olmasaydı" satırındaki likidasyon mesafeleri
+LEVERAGES = (2, 3, 5, 8, 10)            # "Zarar kes olmasaydı" satırındaki likidasyon mesafeleri (+ şimdiki kaldıraç)
 LEVERAGE_TABLE = tuple(range(2, 11))    # Kaldıraç duyarlılığı tablosu: 2x-10x (+ ayardaki kaldıraç; 10x üstü
                                         # 71 hesapta kill-switch'le bitiyordu, bkz. README "Kaldıraç yeniden")
 LIVE_SL_MARGIN = 0.5                    # Canlı bot: zarar kes likidasyona en az bu kadar (puan) uzak olmalı
@@ -2553,8 +2553,8 @@ def format_grid_report(cfg, data: FutData, rows: Sequence[GridRow], base: GridRo
             L.append("   Yıl   İşlem  Kazanma  Getiri (her yıl baştan)  Maks.düşüş")
             for y, res in ev.years:
                 st = stats_of(res)
-                L.append(f"   {y}  {st.trades:5d}  %{st.win_rate:5.1f}  {_pct(st.net_pct):>12s}            "
-                         f"%{st.max_dd:4.0f}")
+                L.append(f"   {y}  {st.trades:5d}  {_pct_cell(st.win_rate)}  {_pct(st.net_pct):>12s}            "
+                         f"{_pct_cell(st.max_dd, 5, 0)}")
     L.append("")
     L.append("ℹ️ Kazanma oranına başabaş stopuyla küçük kârla kapanan işlemler de dahildir. Tek pozisyon: aynı anda "
              "çöken coinlerden yalnızca eşiğini en çok aşan alınır. Geçmiş sonuç gelecek garantisi değildir; yeni "
@@ -2899,6 +2899,21 @@ def _pf(v: float) -> str:
     return "∞" if v == float("inf") else f"{v:.2f}"
 
 
+def _pct_cell(v: float, w: int = 6, d: int = 1) -> str:
+    """Tablo hücresi: sağa hizalı "%47.4" (eski "% 47.4" yerine)."""
+    return f"{'%' + format(v, f'.{d}f'):>{w}s}"
+
+
+def cooldown_text(p: SimParams) -> str:
+    """Taktik satırının bekleme kısmı; bekleme yoksa boş (eski "işlemden sonra 0 dk" yazılmaz)."""
+    loss = max(p.symbol_cooldown_min, p.loss_cooldown_min)
+    if p.symbol_cooldown_min and loss > p.symbol_cooldown_min:
+        return f"; aynı coine işlemden sonra {p.symbol_cooldown_min} dk, zarardan sonra {loss} dk girilmez"
+    if p.symbol_cooldown_min:
+        return f"; aynı coine işlemden sonra {p.symbol_cooldown_min} dk girilmez"
+    return f"; zarardan sonra aynı coine {loss} dk girilmez" if loss else ""
+
+
 def _num(v: float, d: int = 2) -> str:
     return f"{v:,.{d}f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
@@ -2936,7 +2951,21 @@ def _lev_line(ev: Evaluation, roll: Optional[dict] = None) -> str:
 
 
 def cascade_label(p: SimParams) -> str:
-    """Dalga modu / yalnız çöküş büyüklüğü / Faz 6 dalgada yeniden giriş özeti (rapor satırı)."""
+    """Dalga modu / yalnız çöküş büyüklüğü / Faz 6 dalgada yeniden giriş özeti (tek satır)."""
+    return "; ".join(cascade_parts(p))
+
+
+def cascade_lines(p: SimParams) -> List[str]:
+    """Rapor başlığındaki dalga modu bloğu: ilk satır dalga modu, sonraki kurallar birer alt satırda."""
+    parts = cascade_parts(p)
+    if not parts:
+        return []
+    head, rest = (parts[0], parts[1:]) if parts[0].startswith("🌊") else ("📐 Pozisyon boyu kuralları:", parts)
+    return [head] + [f"   · {x}" for x in rest]
+
+
+def cascade_parts(p: SimParams) -> List[str]:
+    """cascade_label / cascade_lines'ın parçaları (kural başına bir metin)."""
     parts = []
     if p.max_positions > 1 and p.extra_size_pct >= 100:
         parts.append(f"🌊 Dalga modu: en fazla {p.max_positions} pozisyon (her biri bakiyenin "
@@ -2957,7 +2986,7 @@ def cascade_label(p: SimParams) -> str:
     if phase8_active(p):
         parts.append(f"ek pozisyonlarda başabaş +%{p.extra_be_trigger_pct:g} (Faz 8; ilk pozisyonda "
                      f"+%{p.be_trigger_pct:g})")
-    return "; ".join(parts)
+    return parts
 
 
 FIRST_BREADTH_BUCKETS = ((0, 2), (2, 5), (5, 8), (8, None))   # İlk pozisyonlar: genişlik kovaları (alt, üst hariç)
@@ -3406,8 +3435,9 @@ def leverage_risk_lines(risk: Optional[dict]) -> List[str]:
                 if st is None:
                     continue
                 ret = (st["final"] / cap - 1) * 100
-                cells.append(f"{L2}x {_pct(ret)} | −%{st['dd']:.1f}" + (f" ({_date(st['trough_ms'])})" if st["trough_ms"] else "")
-                             + f" | {_usdt(st['low'])} USDT" + (f" | ERİDİ {_date(ruined)}" if ruined else ""))
+                trough = f" ({_date(st['trough_ms'])})" if st["trough_ms"] else " " * 13
+                cells.append(f"{L2}x {_pct(ret):>9s} | {'−%' + format(st['dd'], '.1f'):>6s}{trough} | "
+                             f"{_usdt(st['low']):>9s} USDT" + (f" | ERİDİ {_date(ruined)}" if ruined else ""))
             L.append(f"    {y}: " + "   ·   ".join(cells))
         if kill:
             parts = []
@@ -3722,7 +3752,7 @@ def half_year_lines(res: FutResult, start_capital: float, start_ms: int, end_ms:
         if res.ruined_ms is not None and a <= res.ruined_ms < b:
             mark += "  🛑 hesap eridi"
         L.append(f"  {name:25s}  {money(bal):>15s} USDT  {_pct(change):>9s}  {money(low):>14s} USDT  "
-                 f"%{dd:5.1f}        {n:5d}{mark}")
+                 f"{_pct_cell(dd)}        {n:5d}{mark}")
     return L
 
 
@@ -3828,8 +3858,7 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
     if crash:
         L.append(f"Taktik: ÇÖKÜŞ DÖNÜŞÜ — {rule_label(cfg)}, long" + (" (+ likidasyon dalgası şartı)"
                                                                      if cfg.futures_crash_liq else "")
-                 + f"; aynı coine işlemden sonra {p.symbol_cooldown_min} dk, zarardan sonra "
-                 f"{max(p.symbol_cooldown_min, p.loss_cooldown_min)} dk girilmez")
+                 + cooldown_text(p))
         if funnel.between:
             L.append("⏱️ Her dakika tarama (FUTURES_MINUTE_SCAN): kural 5 dk kapanışlarının yanında aradaki dakikalarda da "
                      "değerlendirilir (1 dk mumlardan üretilen, o dakikada kapanan 5 dk mumlarla; eşikler aynı)")
@@ -3843,7 +3872,7 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
             L.append("Ek modüller (VEYA): " + ", ".join(parts[m] for m in mods)
                      + "; öncelik çöküş > fonlama > pompa > düzeltme > kırılım > Bollinger")
         if p.max_positions > 1 or p.isolated_size_pct < 100 or p.reentry_breadth > 0 or p.recent_size_pct < 100:
-            L.append(cascade_label(p))
+            L.extend(cascade_lines(p))
         wave = futures_wave_rules(cfg)
         if wave:
             L.append(f"Dalga eşikleri (Faz 6): son 1 saatte ≥{cfg.futures_wave_breadth} coin %3+ düşerken "
@@ -3909,7 +3938,7 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
     for y, r in ev.years:
         s2 = stats_of(r)
         mark = f"  🛑 eridi {_date(r.ruined_ms)[5:]}" if s2.ruined else ""
-        L.append(f"  {y}  {s2.trades:5d}  %{s2.win_rate:5.1f}  {_pct(s2.net_pct):>10s}  %{s2.max_dd:5.1f}      "
+        L.append(f"  {y}  {s2.trades:5d}  {_pct_cell(s2.win_rate)}  {_pct(s2.net_pct):>10s}  {_pct_cell(s2.max_dd)}      "
                  f"{s2.loss_streak:3d}       {s2.liquidations:3d}   {_pct(btc_hold_pct(data, r.start_ms, r.end_ms)):>8s}"
                  f"{mark}")
     L.append(f"  Kârlı yıl: {ev.profitable_years}/{len(ev.years)}")
@@ -3921,7 +3950,7 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
         gain = sum(tr.pnl for tr in group if tr.pnl > 0)
         loss = -sum(tr.pnl for tr in group if tr.pnl <= 0)
         moves = [net_move_pct(tr) for tr in group]
-        L.append(f"  {y}  {len(group):5d}  %{w / len(group) * 100:5.1f}  {np.mean(moves):+13.3f}%  {np.sum(moves):+14.1f}%"
+        L.append(f"  {y}  {len(group):5d}  {_pct_cell(w / len(group) * 100)}  {np.mean(moves):+13.3f}%  {np.sum(moves):+14.1f}%"
                  f"   {_pf(gain / loss if loss > 0 else float('inf')):>9s}   {streaks(group)[0]:6d}")
     if fixed:
         moves = [net_move_pct(tr) for tr in fixed]
@@ -3977,7 +4006,8 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
         wm = np.array([tr.window_mae_pct for tr in fixed])
         L.append(f"  Zarar kes OLMASAYDI: {p.hold_min} dk içinde fiyatın likidasyon mesafesini aştığı işlem:")
         L.append("    " + " | ".join(f"{lev}x (%{futures_liq_distance_pct(lev, p.mmr_pct):.1f}): "
-                                   f"{int((wm >= futures_liq_distance_pct(lev, p.mmr_pct)).sum())}" for lev in LEVERAGES))
+                                   f"{int((wm >= futures_liq_distance_pct(lev, p.mmr_pct)).sum())}"
+                                   for lev in sorted({*LEVERAGES, p.leverage})))
         L.append("  " + sl_streak_line(p, fixed))
         cluster_lines = monthly_cluster_lines(monthly_clusters(ev, data))
         if cluster_lines:

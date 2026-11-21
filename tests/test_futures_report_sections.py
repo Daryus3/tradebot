@@ -60,9 +60,9 @@ def test_leverage_rows_show_rolling_columns_current_marker_and_notes(fcfg):
     lines = fb.format_report(on, data, ev, funnel, levs=levs).splitlines()
     assert fb.LEV_HEAD in lines
     assert any("her ayın 1'inde başlayan 71 hesabın ilk 12 ayı (kill-switch uygulanır)" in x for x in lines)
-    cur = next(x for x in lines if x.strip().startswith(f"{on.futures_leverage}x"))
+    cur = next(x for x in lines if x.startswith(f"  {on.futures_leverage}x "))         # Tablo satırı (2 boşluk girinti)
     assert "◀ şimdiki" in cur and "+927.0%" in cur and "   8 / 71 " in cur and "│" in cur
-    assert next(x for x in lines if x.strip().startswith("2x")).count("—") == 3       # 12 ay özeti yoksa çizgi
+    assert next(x for x in lines if x.startswith("  2x ")).count("—") == 3            # 12 ay özeti yoksa çizgi
     stopped = fb.Evaluation(replace(ev.chained, kill_ms=fb._ms("2020-03-12")), ev.years, ev.fixed)
     assert "(durur 2020-03-12)" in fb._lev_line(stopped, roll)
     assert any(x.strip().startswith("19x") and x.endswith("⛔ canlı bot açmaz: deneme") for x in lines)
@@ -256,8 +256,8 @@ def test_half_year_lines_show_balance_change_low_drawdown_and_markers(fcfg):
     assert lines[0].startswith("📒 A'NIN 6 AYLIK BAKİYESİ (100,00 USDT ile başlayan tek hesap")
     h1, h2, h3 = lines[2:]
     assert h1.startswith("  2020-01-01 → 2020-06-30") and "120,00 USDT" in h1 and "+20.0%" in h1
-    assert "90,00 USDT" in h1 and "% 40.0" in h1 and h1.endswith("    2")       # Dip 90, zirve 150'den %40 düşüş
-    assert h2.startswith("  2020-07-01 → 2020-12-31") and "60,00 USDT" in h2 and "-50.0%" in h2 and "% 50.0" in h2
+    assert "90,00 USDT" in h1 and " %40.0" in h1 and h1.endswith("    2")       # Dip 90, zirve 150'den %40 düşüş
+    assert h2.startswith("  2020-07-01 → 2020-12-31") and "60,00 USDT" in h2 and "-50.0%" in h2 and " %50.0" in h2
     assert h2.endswith("⚠️ kill-switch (-%60) botu burada durdururdu")
     assert h3.startswith("  2021-01-01 → 2021-03-15") and "2.000 USDT" in h3 and "+3233.3%" in h3   # Son dönem kısmi
     assert "% " in h3 and "kill-switch" not in h3
@@ -335,3 +335,34 @@ def test_report_starts_with_a_summary_of_the_key_numbers(fcfg):
     plain = fb.format_report(on, data, ev, funnel)                      # Kaldıraç tablosu / canlı kayıt yoksa o satırlar yok
     head = plain[plain.index("📋 ÖZET"):plain.index("🔎 Sinyal hunisi")]
     assert "Her ayın 1'inde" not in head and "Canlı girişler" not in head
+
+
+# ====================================================================== başlık ve tablo biçimi
+def test_header_cooldown_wave_block_and_table_cells(fcfg):
+    p = params()
+    # Taktik satırının bekleme kısmı: 0 dk bekleme yazılmaz
+    assert fb.cooldown_text(replace(p, symbol_cooldown_min=0, loss_cooldown_min=240)) == \
+        "; zarardan sonra aynı coine 240 dk girilmez"
+    assert fb.cooldown_text(replace(p, symbol_cooldown_min=15, loss_cooldown_min=240)) == \
+        "; aynı coine işlemden sonra 15 dk, zarardan sonra 240 dk girilmez"
+    assert fb.cooldown_text(replace(p, symbol_cooldown_min=30, loss_cooldown_min=0)) == \
+        "; aynı coine işlemden sonra 30 dk girilmez"
+    assert fb.cooldown_text(replace(p, symbol_cooldown_min=0, loss_cooldown_min=0)) == ""
+    # Dalga modu bloğu: ilk satır dalga modu, diğer kurallar alt satırlarda; tek satırlık metin aynı parçalardan
+    wave = replace(p, max_positions=4, extra_size_pct=16.7, isolated_size_pct=50.0, isolated_breadth=5,
+                   recent_size_pct=33.0, recent_drop_pct=2.4, reentry_breadth=3)
+    lines = fb.cascade_lines(wave)
+    assert lines[0].startswith("🌊 Dalga modu: en fazla 4 pozisyon") and len(lines) == 4
+    assert all(x.startswith("   · ") for x in lines[1:]) and lines[1] == "   · yalnız çöküşte (≤4 coin düşüyor) pozisyon %50"
+    assert fb.cascade_label(wave) == "; ".join([lines[0]] + [x[5:] for x in lines[1:]])
+    assert fb.cascade_lines(replace(wave, max_positions=1))[0] == "📐 Pozisyon boyu kuralları:"
+    # Yüzde hücreleri sağa hizalı ve eski "% 4.0" biçimiyle aynı genişlikte
+    assert [fb._pct_cell(v) for v in (4.0, 47.44, 100.0)] == ["  %4.0", " %47.4", "%100.0"]
+    assert fb._pct_cell(35.2, 5, 0) == "  %35"
+    # "Zarar kes olmasaydı" satırı rapordaki kaldıraç aralığından ve şimdiki kaldıraçtan
+    on, data, sigs, funnel, windows = small_inputs(fcfg, futures_leverage=6)
+    ev = fb.evaluate(fb.params_from_cfg(on), data, sigs, windows)
+    text = fb.format_report(on, data, ev, funnel)
+    assert ev.fixed
+    row = next(x for x in text.splitlines() if x.startswith("    2x (%"))
+    assert [c.split(" ")[0] for c in row.strip().split(" | ")] == ["2x", "3x", "5x", "6x", "8x", "10x"]
