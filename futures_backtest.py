@@ -1715,7 +1715,7 @@ def realism_label(p: SimParams) -> str:
     """Rapor başlığı: saniyelik veriyle ayarlanan gerçekçilik payları (Kasım 2026). Kapalıysa boş."""
     parts = []
     if p.entry_lag_pct > 0 and not p.entry_limit:
-        parts.append(f"giriş mum kapanışından {lag_text(p.entry_lag_pct)} (fiyat ort. %{p.entry_lag_pct:g} daha yukarıda)")
+        parts.append(f"giriş mum kapanışından {lag_text(p.entry_lag_pct)}, fiyat ort. %{p.entry_lag_pct:g} daha yukarıda")
     if p.be_intrabar and p.be_enabled:
         parts.append("başabaşın tetiklendiği dakikada fiyatın tabana geri dönme olasılığı")
     if p.stop_slip_pct > 0:
@@ -3940,7 +3940,7 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
                      "sinyale açar; kâr Kâr Al ve zaman stopundan gelir.)")
         for side, name in (("long", "LONG"), ("short", "SHORT")):
             group = [tr for tr in fixed if tr.side == side]
-            if group:
+            if group and len(group) < len(fixed):           # Tek yönlüyse satır toplamın aynısı: yazılmaz
                 w = sum(tr.pnl > 0 for tr in group)
                 L.append(f"  {name:5s}: {len(group)} işlem, kazanma %{w / len(group) * 100:.1f}, işlem başı "
                          f"{np.mean([net_move_pct(tr) for tr in group]):+.3f}%")
