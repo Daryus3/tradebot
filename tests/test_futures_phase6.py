@@ -174,10 +174,10 @@ def test_phase6_rows_and_phase5_rows_without_phase6(fcfg):
     # Dalga modu açıkken "tek pozisyon (2x)" kıyası yok: başka kaldıraçla hesaplandığı için yanıltıcıydı
     assert fb.cascade_rows(p6, ev, sigs) == [] and calls == []
     labels = [r[0] for r in fb.phase6_rows(p6, ev, sigs)]
-    assert labels == ["Dalgada yeniden giriş kapalı (zarar sonrası bekleme hep)", "Dalga eşikleri kapalı",
+    assert labels == ["Dalgada yeniden giriş kapalı (zarardan sonra bekler)", "Dalga eşikleri kapalı",
                       "Ek pozisyonlar ilk pozisyonla eşit büyüklükte"]
     plain_rows = fb.phase6_rows(fcfg, ev, sigs)                          # ⭐ Faz 6 setleri (2x / 3x) artık yok
-    assert [r[0] for r in plain_rows] == ["Dalgada yeniden giriş (≥3 coin düşerken zarar sonrası bekleme yok)"]
+    assert [r[0] for r in plain_rows] == ["Dalgada yeniden giriş (≥3 coin düşerken bekleme yok)"]
     p = fb.params_from_cfg(p6)
     label = fb.cascade_label(p)
     assert "ilk pozisyon bakiyenin %63.3" in label and "dalgada yeniden giriş" in label

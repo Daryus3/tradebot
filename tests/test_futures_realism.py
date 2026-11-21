@@ -205,7 +205,7 @@ def test_realism_label_and_comparison_row(fcfg):
     seen.clear()
     snap = replace(fcfg, futures_fast_entry=True, futures_snapshot_scan=True)
     rows = fb.realism_rows(snap, ev)
-    assert [r[0][:28] for r in rows] == ["Eski giriş varsayımıyla (~5 "]
+    assert [r[0][:23] for r in rows] == ["Giriş ~5 sn'de dolsaydı"]
     assert "%0.02 → %0.05" in rows[0][0] and seen[0] == {"entry_lag_pct": 0.05}
     label = fb.realism_label(fb.params_from_cfg(snap))
     assert "~0.6 sn sonra (anlık tarama; canlıda ölçüldü)" in label and "%0.02" in label

@@ -89,7 +89,7 @@ def test_params_from_cfg_and_report_rows(fcfg):
     rows = fb.phase8_rows(p6cfg(fcfg), ev)
     assert rows == [("Ek pozisyonlarda başabaş +%0.5 (Faz 8)", {"extra_be_trigger_pct": 0.5})]
     rows = fb.phase8_rows(on, ev)
-    assert rows[0][0].startswith("Ek pozisyon başabaşı ana ayarla aynı (+%1") and rows[0][1] == {"extra_be_trigger_pct": 0.0}
+    assert rows[0][0] == "Ek pozisyonlarda da başabaş +%1 (Faz 8 kapalı)" and rows[0][1] == {"extra_be_trigger_pct": 0.0}
     assert fb.phase8_rows(fcfg, ev) == []                                              # Tek pozisyon: satır yok
     assert fb.phase8_rows(p6cfg(fcfg, breakeven_enabled=False), ev) == []
     assert fb.phase8_rows(p6cfg(fcfg, breakeven_trigger_pct=0.5), ev) == []            # Ana tetik zaten ≤ 0.5

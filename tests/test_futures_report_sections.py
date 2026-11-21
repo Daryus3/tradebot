@@ -105,9 +105,9 @@ def test_variant_rows_are_grouped_and_cover_settings_around_the_current_ones(fcf
     # Büyüklük ve dalga modu
     assert got["Teminat kullanımı %71 (şimdi %95)"].margin_usage_pct == 71
     assert got["Teminat kullanımı %57 (şimdi %95)"].margin_usage_pct == 57
-    assert any(n.startswith("En fazla 2 pozisyon (ilk pozisyon bakiyenin %") and e.max_positions == 2
+    assert any(n.startswith("En fazla 2 pozisyon (ilki bakiyenin %") and e.max_positions == 2
                for n, e in got.items())
-    assert any(n.startswith("Ek pozisyon boyu ilkinin %8'i") for n in got)
+    assert any(n.startswith("Ek pozisyon ilkinin %8'i (ilki bakiyenin %") for n in got)
     assert got["Ek pozisyon: ≥6 coin düşerken (şimdi ≥8)"].extra_breadth == 6
     assert got["Yalnız çöküş tam boy (şimdi %25)"].isolated_size_pct == 100
     assert got["Yalnız çöküş eşiği <5 coin (şimdi <2)"].isolated_breadth == 5
@@ -128,7 +128,7 @@ def test_variant_rows_are_grouped_and_cover_settings_around_the_current_ones(fcf
     # Maliyet
     assert got["Kayma 2 kat (%0.04)"].slippage_pct == pytest.approx(0.04)
     assert got["Kayma 5 kat (%0.10)"].slippage_pct == pytest.approx(0.10)
-    assert got["Kötümser stop dolumu (fitilin yarısı; en kötü durum, saniyelik veride gerçek dolum fitilin ~%3'ü)"].harsh_stops
+    assert got[fb.HARSH_STOP_ROW].harsh_stops and fb.HARSH_STOP_ROW.startswith("Kötümser stop dolumu (fitilin yarısı")
 
 
 def test_variant_rows_follow_the_current_settings(fcfg, monkeypatch):
@@ -164,6 +164,19 @@ def test_noise_band_marks_and_group_headers_in_report(fcfg):
     assert "  ▲ Daha iyi" in text and "  ▼ Daha kötü" in text
     plain = fb.format_report(on, data, ev, funnel, variants=variants)
     assert "▲ / ▼" not in plain and "  Daha iyi" in plain                # Çekiliş yoksa işaret de yok
+    # Açıklama notu ilgili satırın hemen altında; komisyon notu yalnızca başabaş açıkken (kazanma oranı düşüşü)
+    costs = [("Maliyet ve gerçekçilik", None), (fb.FEE2_ROW, down), (fb.HARSH_STOP_ROW, down)]
+    lines = fb.format_report(on, data, ev, funnel, variants=costs).splitlines()
+    i = next(k for k, s in enumerate(lines) if s.strip().startswith(fb.FEE2_ROW))
+    assert on.breakeven_enabled and lines[i + 1].startswith("    (kayma ve komisyon artınca başabaş çıkışları")
+    j = next(k for k, s in enumerate(lines) if s.strip().startswith("Kötümser stop dolumu"))
+    assert lines[j + 1] == "    (saniyelik veride gerçek stop dolumu fitilin ~%3'ü; bu satır kaba bir üst sınırdır)"
+    no_be = replace(on, breakeven_enabled=False)
+    text = fb.format_report(no_be, data, fb.evaluate(fb.params_from_cfg(no_be), data, sigs, windows), funnel,
+                            variants=costs)
+    assert "başabaş çıkışları (net ~%0)" not in text and "kaba bir üst sınırdır" in text
+    bars = {s.index("│") for s in lines if "│" in s}                     # Satır adı sütunu taşmıyor: sütunlar hizalı
+    assert len(bars) == 1 and bars.pop() <= 4 + 60 + 18
 
 
 # ====================================================================== aylık işlem yığılması

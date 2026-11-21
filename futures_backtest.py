@@ -1701,9 +1701,9 @@ def phase6_rows(cfg, ev, signals=None) -> List[Tuple[str, "Evaluation"]]:
     base = params_from_cfg(cfg)
     rows = []
     if base.reentry_breadth > 0:
-        rows.append(("Dalgada yeniden giriş kapalı (zarar sonrası bekleme hep)", ev(reentry_breadth=0)))
+        rows.append(("Dalgada yeniden giriş kapalı (zarardan sonra bekler)", ev(reentry_breadth=0)))
     elif base.loss_cooldown_min > base.symbol_cooldown_min:
-        rows.append(("Dalgada yeniden giriş (≥3 coin düşerken zarar sonrası bekleme yok)", ev(reentry_breadth=3)))
+        rows.append(("Dalgada yeniden giriş (≥3 coin düşerken bekleme yok)", ev(reentry_breadth=3)))
     if futures_wave_rules(cfg) and signals is not None:
         rows.append(("Dalga eşikleri kapalı", ev(no_wave(signals))))
     if base.max_positions > 1 and base.extra_size_pct < 100:
@@ -1737,14 +1737,13 @@ def realism_rows(cfg, ev) -> List[Tuple[str, "Evaluation"]]:
         mean = float(np.mean(fills))
         lag = round(max(0.0, mean - base.slippage_pct), 3)
         if abs(lag - base.entry_lag_pct) >= 0.005:
-            return [(f"Canlıda ölçülen giriş maliyetiyle (dolum kapanıştan ort. {mean:+.3f}%, {len(fills)} giriş; "
-                     f"gecikme payı %{base.entry_lag_pct:g} → %{lag:g})", ev(entry_lag_pct=lag))]
+            return [(f"Canlı giriş dolumuyla (kapanıştan {mean:+.3f}%, {len(fills)} giriş)", ev(entry_lag_pct=lag))]
         return []
     if base.entry_lag_pct > FAST_ENTRY_LAG_PCT:
-        return [(f"Giriş 1 sn'de dolsaydı (gecikme payı %{base.entry_lag_pct:g} → %{FAST_ENTRY_LAG_PCT:g}; anlık "
-                 f"tarama)", ev(entry_lag_pct=FAST_ENTRY_LAG_PCT))]
+        return [(f"Giriş 1 sn'de dolsaydı (gecikme payı %{base.entry_lag_pct:g} → %{FAST_ENTRY_LAG_PCT:g})",
+                 ev(entry_lag_pct=FAST_ENTRY_LAG_PCT))]
     if base.entry_lag_pct < ENTRY_LAG_PCT:
-        return [(f"Eski giriş varsayımıyla (~5 sn, gecikme payı %{base.entry_lag_pct:g} → %{ENTRY_LAG_PCT:g})",
+        return [(f"Giriş ~5 sn'de dolsaydı (gecikme payı %{base.entry_lag_pct:g} → %{ENTRY_LAG_PCT:g})",
                  ev(entry_lag_pct=ENTRY_LAG_PCT))]
     return []
 
@@ -1780,7 +1779,7 @@ def phase8_rows(cfg, ev) -> List[Tuple[str, "Evaluation"]]:
     if base.max_positions <= 1 or not base.be_enabled:
         return []
     if phase8_active(base):
-        return [(f"Ek pozisyon başabaşı ana ayarla aynı (+%{base.be_trigger_pct:g}; Faz 8 kapalı)",
+        return [(f"Ek pozisyonlarda da başabaş +%{base.be_trigger_pct:g} (Faz 8 kapalı)",
                  ev(extra_be_trigger_pct=0.0))]
     if base.be_trigger_pct <= PHASE8_BE:
         return []
@@ -1897,13 +1896,13 @@ def size_variant_rows(cfg, ev, depth: bool = False) -> List[Tuple[str, "Evaluati
         for n in POSITION_TRIES:
             if n != base.max_positions:
                 first = base.margin_usage_pct * slot_share(replace(base, max_positions=n), 0)
-                rows.append((f"En fazla {n} pozisyon (ilk pozisyon bakiyenin {_pct_of(first, 1)})", ev(max_positions=n)))
+                rows.append((f"En fazla {n} pozisyon (ilki bakiyenin {_pct_of(first, 1)})", ev(max_positions=n)))
         if base.extra_size_pct < 100:
             for x in EXTRA_SIZE_TRIES:
                 if abs(x - base.extra_size_pct) > 0.05:
                     first = base.margin_usage_pct * slot_share(replace(base, extra_size_pct=x), 0)
-                    rows.append((f"Ek pozisyon boyu ilkinin {_pct_of(x, 1)} (ilk pozisyon bakiyenin "
-                                 f"{_pct_of(first, 1)})", ev(extra_size_pct=x)))
+                    rows.append((f"Ek pozisyon ilkinin {_pct_of(x, 1)} (ilki bakiyenin {_pct_of(first, 1)})",
+                                 ev(extra_size_pct=x)))
         for b in (base.extra_breadth - 2, base.extra_breadth + 2):
             if b >= 1:
                 rows.append((f"Ek pozisyon: ≥{b} coin düşerken (şimdi ≥{base.extra_breadth})", ev(extra_breadth=b)))
@@ -1938,9 +1937,9 @@ def recent_variant_rows(base: SimParams, ev) -> List[Tuple[str, "Evaluation"]]:
         return rows
     for v in RECENT_SIZE_TRIES:
         if not _same(v, base.recent_size_pct):
-            name = "Çöküş durulmuşsa da tam boy (kural kapalı)" if v >= 100 else f"Çöküş durulmuşsa boy %{v:g}"
+            name = "Çöküş durulmuşsa da tam boy" if v >= 100 else f"Çöküş durulmuşsa boy %{v:g}"
             rows.append((f"{name} (şimdi %{base.recent_size_pct:g})", ev(recent_size_pct=v)))
-    rows += [(f"Çöküş durulmuş sayılan: son 15 dk düşüş < %{d:g} (şimdi < %{base.recent_drop_pct:g})",
+    rows += [(f"Durulmuş sayılan: 15 dk düşüş < %{d:g} (şimdi < %{base.recent_drop_pct:g})",
               ev(recent_drop_pct=d)) for d in RECENT_DROP_TRIES if not _same(d, base.recent_drop_pct)]
     return rows
 
@@ -1994,13 +1993,22 @@ def cost_variant_rows(cfg, ev, depth: bool = False) -> List[Tuple[str, "Evaluati
     base = params_from_cfg(cfg)
     rows = [(f"Kayma {k} kat (%{base.slippage_pct * k:.2f})", ev(slippage_pct=base.slippage_pct * k))
             for k in SLIPPAGE_TRIES]
-    rows.append(("Komisyon 2 kat", ev(taker_fee=base.taker_fee * 2, maker_fee=base.maker_fee * 2)))
-    rows.append(("Kötümser stop dolumu (fitilin yarısı; en kötü durum, saniyelik veride gerçek dolum fitilin ~%3'ü)",
-                 ev(harsh_stops=True)))
+    rows.append((FEE2_ROW, ev(taker_fee=base.taker_fee * 2, maker_fee=base.maker_fee * 2)))
+    rows.append((HARSH_STOP_ROW, ev(harsh_stops=True)))
     return rows
 
 
 SCAN5_REF = "5 dk'da bir tarama (dakikalık tarama kapalı)"   # "· 5 dk taramayla" satırlarının kıyas satırı
+FEE2_ROW = "Komisyon 2 kat"
+HARSH_STOP_ROW = "Kötümser stop dolumu (fitilin yarısı; en kötü durum)"
+# Tek kural tablosunda satırın altına yazılan açıklama (FEE2_ROW'unki yalnızca başabaş açıkken)
+ROW_NOTES = {
+    SCAN5_REF: "alttaki \"· 5 dk taramayla\" satırları yeni sinyal gerektirdiği için 5 dk taramayla hesaplandı; "
+               "▲ / ▼ bu satıra göre",
+    FEE2_ROW: "kayma ve komisyon artınca başabaş çıkışları (net ~%0) küçük zarara döner; C'deki kazanma oranı bu yüzden "
+              "düşer",
+    HARSH_STOP_ROW: "saniyelik veride gerçek stop dolumu fitilin ~%3'ü; bu satır kaba bir üst sınırdır",
+}
 
 
 def _crash_variant_rows(cfg, signals, minute: bool, tag: str, ev, other,
@@ -3376,7 +3384,7 @@ def leverage_risk(cfg, data: FutData, signals, windows, fixed_trades: Sequence[F
 
 
 def _usdt(v: float) -> str:
-    return f"{v:,.2f}" if v < 1000 else f"{v:,.0f}"
+    return _num(v, 2) if v < 1000 else _num(v, 0)
 
 
 def leverage_risk_lines(risk: Optional[dict]) -> List[str]:
@@ -4027,9 +4035,8 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
             five = ref5 is not None and name.endswith("5 dk taramayla")   # 5 dk taramalı satırlar kendi kıyasıyla
             mk = _mark(ev2, ref5.chained.final_equity if five else res.final_equity, band) or "  "
             L.append(f"  {mk}{name:{width}s} " + _eval_line(ev2))
-            if name == SCAN5_REF and ref5 is not None:
-                L.append("    (alttaki \"· 5 dk taramayla\" satırları yeni sinyal gerektirdiği için 5 dk taramayla hesaplandı; "
-                         "▲ / ▼ bu satıra göre)")
+            if name in ROW_NOTES and (name != FEE2_ROW or p.be_enabled):
+                L.append(f"    ({ROW_NOTES[name]})")
     L.append("")
     if crash:
         L.append("⚠️ Çöküşte alım riskleri: ani çöküşlerde (ör. 10 Ekim 2025) zarar kes emri stop fiyatının çok ötesinde "

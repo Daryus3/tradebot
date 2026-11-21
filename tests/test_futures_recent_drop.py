@@ -91,9 +91,9 @@ def test_report_lines_for_the_recent_drop_rule(fcfg):
     assert fb.recent_drop_line(trades[-1:], p) is None                            # Ölçü yok: satır yok
     assert "çöküş durulmuşsa (girişten önceki 15 dk'da düşüş %2.4'ten az) pozisyon %50" in fb.cascade_label(p)
     names = [n for n, _e in fb.recent_variant_rows(p, lambda **kw: kw)]
-    assert names == ["Çöküş durulmuşsa boy %33 (şimdi %50)", "Çöküş durulmuşsa da tam boy (kural kapalı) (şimdi %50)",
-                     "Çöküş durulmuş sayılan: son 15 dk düşüş < %2 (şimdi < %2.4)",
-                     "Çöküş durulmuş sayılan: son 15 dk düşüş < %3 (şimdi < %2.4)"]
+    assert names == ["Çöküş durulmuşsa boy %33 (şimdi %50)", "Çöküş durulmuşsa da tam boy (şimdi %50)",
+                     "Durulmuş sayılan: 15 dk düşüş < %2 (şimdi < %2.4)",
+                     "Durulmuş sayılan: 15 dk düşüş < %3 (şimdi < %2.4)"]
     rows = fb.recent_variant_rows(replace(p, recent_size_pct=100.0), lambda **kw: kw)
     assert rows == [("Çöküş durulmuşsa (son 15 dk düşüş < %2.4) boy %50", {"recent_size_pct": 50.0,
                                                                             "recent_drop_pct": 2.4})]
@@ -205,9 +205,8 @@ def test_realism_row_uses_the_live_measured_entry_cost(fcfg, tmp_path, monkeypat
     path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
     assert len(fb.live_entry_fills(cfg)) == 9
     names = {n: e for n, e in fb.realism_rows(cfg, lambda **kw: kw)}
-    row = [n for n in names if n.startswith("Canlıda ölçülen giriş maliyetiyle")]
-    assert row == ["Canlıda ölçülen giriş maliyetiyle (dolum kapanıştan ort. +0.084%, 9 giriş; gecikme payı %0.02 → "
-                   "%0.064)"]
+    row = [n for n in names if n.startswith("Canlı giriş dolumuyla")]
+    assert row == ["Canlı giriş dolumuyla (kapanıştan +0.084%, 9 giriş)"]
     assert names[row[0]] == {"entry_lag_pct": 0.064}
     path.write_text("".join(json.dumps(r) + "\n" for r in rows[:4]), encoding="utf-8")   # 5'ten az giriş: satır yok
     assert not any(n.startswith("Canlıda ölçülen") for n, _e in fb.realism_rows(cfg, lambda **kw: kw))

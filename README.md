@@ -1561,8 +1561,8 @@ yukarıda; iki ölçüm uyumlu. Backtest artık giriş gecikmesi payını botun 
 
 Üç giriş az (standart hata ~%0.05); pay ölçülen ortalamadan (%0.023) biraz kötümser seçildi ve saniyelik veriyle
 destekleniyor. Rapor 22 ayarında bunun etkisi rapordaki eski "Giriş 1 sn'de dolsaydı" satırıydı: son bakiye +%4.7e+07 →
-+%5.5e+07, işlem 9.750 → 9.928, işlem başı +%0.222 → +%0.241. Anlık tarama açıkken rapor artık "Eski giriş varsayımıyla
-(~5 sn)" satırıyla eski hesabı gösterir; canlı karşılaştırmadaki "backtest varsayımı" da giriş yoluna göre yazılır.
++%5.5e+07, işlem 9.750 → 9.928, işlem başı +%0.222 → +%0.241. Anlık tarama açıkken rapor artık "Giriş ~5 sn'de
+dolsaydı" satırıyla eski hesabı gösterir; canlı karşılaştırmadaki "backtest varsayımı" da giriş yoluna göre yazılır.
 Girişler biriktikçe rapordaki "Giriş gecikmesi (anlık tarama: …)" ortalaması payı denetler.
 
 #### Zarar kesin mark fiyatıyla tetiklenmesi: elendi (rapor 22 araştırması, Kasım 2026)
@@ -2160,7 +2160,7 @@ ortanca +%0.061, en kötü +%0.456; en kötüsü olmadan ortalama +%0.037. Backt
 
 Her +%0.02'lik giriş maliyeti 71 hesabın ortancasını ~%15-18 düşürüyor. 9 giriş karar vermek için az: tek bir kötü
 dolum ortalamayı ikiye katlıyor. Rapor artık canlı giriş satırında ortanca ve en kötü dolumu da gösteriyor. En az 5
-giriş ölçülünce "Maliyet ve gerçekçilik" grubunda "Canlıda ölçülen giriş maliyetiyle" satırı çıkıyor: backtest, canlı ortalama
+giriş ölçülünce "Maliyet ve gerçekçilik" grubunda "Canlı giriş dolumuyla" satırı çıkıyor: backtest, canlı ortalama
 dolumun gerektirdiği gecikme payıyla yeniden hesaplanıyor. Giriş maliyeti birkaç hafta sonra da +%0.06'nın üstünde
 kalırsa, kötü dolumları sınırlayan bir giriş emri (fiyat tavanlı) araştırılmalı.
 
@@ -2261,6 +2261,9 @@ karar için ortancaya ve en kötüye bakın. Çıkış taraması her gün dengel
   ek pozisyon boyu ve kapısı, yalnız çöküş, durulmuş çöküş, dalgada yeniden giriş, düşüşte küçültme), ▸ giriş kuralı,
   tarama ve bekleme (çöküş eşiği ±2, ek pencereler, likidasyon şartı, zarardan sonra ve aynı coine bekleme, zarar serisi
   molası), ▸ maliyet ve gerçekçilik (kayma 2 / 3 / 5 kat, komisyon 2 kat, kötümser stop, canlıda ölçülen giriş maliyeti).
+  Maliyet satırlarında C'deki kazanma oranının sert düşmesi (ör. %85 → %18) hata değil: başabaş çıkışları net ~%0
+  olduğu için maliyet artınca küçük zarara döner; satırın altındaki not bunu söyler. Kötümser stop dolumu kaba bir üst
+  sınırdır (saniyelik veride gerçek dolum, mumun stop ötesindeki fitilinin ~%3'ü).
   Denenen değerler mevcut ayarınızın çevresindedir; mevcut değere eşit olan satır yazılmaz. Dakikalık taramada yeni
   sinyal gerektiren satırlar "· 5 dk taramayla" hesaplanır; önce "5 dk'da bir tarama" kıyas satırı gelir ve bu satırların
   ▲ / ▼ işareti ona göredir. **▲ / ▼**: A'daki son bakiye kıyasınkinden çekiliş aralığından (aynı ayarın 10 farklı mum

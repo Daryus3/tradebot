@@ -76,9 +76,9 @@ def test_leverage_risk_measures_and_report_lines(fcfg, monkeypatch):
     assert risk["sl"] == 3 and [t.mae_pct for t in risk["beyond"][10]] == [25.0, 12.0] and len(risk["beyond"][5]) == 1
     assert risk["liq"][10] == pytest.approx(futures_liq_distance_pct(10, fcfg.futures_mmr_pct))
     text = "\n".join(fb.leverage_risk_lines(risk))
-    assert text.startswith("🧯 KALDIRAÇ RİSKİ (10x, kıyas 5x; aynı sinyaller ve çıkışlar, 28.99 USDT ile)")
+    assert text.startswith("🧯 KALDIRAÇ RİSKİ (10x, kıyas 5x; aynı sinyaller ve çıkışlar, 28,99 USDT ile)")
     assert "kill-switch'i uygulamaz" in text
-    assert "2024: 10x +200.0% | −%96.0 (2024-01-21) | 2.32 USDT   ·   5x +200.0% | −%50.0 (2024-01-21) | 28.99 USDT" in text
+    assert "2024: 10x +200.0% | −%96.0 (2024-01-21) | 2,32 USDT   ·   5x +200.0% | −%50.0 (2024-01-21) | 28,99 USDT" in text
     assert ("Kill-switch (toplam zarar sermayenin %45'i) uygulansaydı 1 Ocak başlangıçlı hesabı durdururdu: 10x: 2024 "
             "(2024-01-21), 2025 (2025-01-21) | 5x: hiçbir yılda") in text
     assert ("En kötü günler (gün içi en düşük bakiye, bir önceki günün sonuna göre; 10x / 5x): 2024-01-21 −%96 / −%50, "
