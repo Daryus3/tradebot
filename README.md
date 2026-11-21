@@ -2164,6 +2164,28 @@ giriş ölçülünce "Maliyet ve gerçekçilik" grubunda "Canlıda ölçülen gi
 dolumun gerektirdiği gecikme payıyla yeniden hesaplanıyor. Giriş maliyeti birkaç hafta sonra da +%0.06'nın üstünde
 kalırsa, kötü dolumları sınırlayan bir giriş emri (fiyat tavanlı) araştırılmalı.
 
+**Kaldıraç yeniden (rapor 15 sonrası, 10 çekiliş; kural %33 + düşüşte küçültme 30 / 60).** Raporun kaldıraç tablosu tek
+çekilişe dayanıyor ve A'nın son bakiyesi derinliğe göre boy yüzünden 4x-19x arasında hep aynı bantta (+%78.000-94.000;
+6x'in çekiliş aralığı 2,95-3,82 milyon bu bandı kapsıyor). Tek yoldaki düşüş de şansa bağlı (9x %50.6, 8x %64.8). Bugün
+4.000 USDT ile başlayan biri için doğru ölçü her ayın 1'inde başlayan 71 hesap:
+
+| Kaldıraç | A son bakiye | 71 hesap: 12 ay ortanca | %60'ı aşan düşüş | Kill-switch (çekiliş / en çok / toplam) | En kötü 12 ay düşüşü | 71 hesabın en kötü %10'u | 12 ay sonra zararda |
+|---|---|---|---|---|---|---|---|
+| 5x | 3,22 milyon | +%754 | 0 | 0 / 10 | %59 | +%169 | 2 |
+| **6x (şimdiki)** | 3,32 milyon | **+%927** | 8 | 4 / 1 / 4 | %66 | +%199 | 2 |
+| 7x | 3,31 milyon | +%1.068 | 14 | 4 / 4 / 13 | %73 | +%226 | 2 |
+| 8x | 3,26 milyon | +%1.072 | 34 | 10 / 8 / 45 | %77 | +%64 | 6 |
+| 9x | 3,32 milyon | +%1.002 | 49 | 10 / 12 / 92 | %80 | −%61 | 11 |
+| 10x | 3,18 milyon | +%1.114 | 56 | 10 / 17 / 115 | %84 | −%61 | 12 |
+| 9x + küçültme 20 / 50 | 3,19 milyon | +%1.259 | 32 | 10 / 8 / 43 | %74 | +%40 | 6 |
+
+- 9x ortanca getiriyi 6x'e göre yalnızca ~%8 artırıyor ama 71 başlangıcın 49'unda %60'ı aşan düşüş var, kill-switch her
+  çekilişte devreye giriyor (çekiliş başına ortalama ~9 hesap), en kötü %10'luk dilim kill-switch'le −%61'de bitiyor.
+  Neden: ilk pozisyon bakiyenin %63'ü teminat; 9x'te tek bir zarar kes bakiyenin ~%28'ini götürür (6x'te ~%18), art arda
+  3-4 zarar kes kill-switch'e yeter.
+- 7x en fazla düşünülebilecek adım: ortanca +%15, ama %60'ı aşan düşüş 8 → 14, kill-switch toplamı 4 → 13. 8x ve üstü
+  önerilmiyor.
+
 ### 🏆 Strateji turnuvası (`--turnuva`)
 Hangi strateji türünün sizin dönemde işe yaradığını **tek komutla** görmek için:
 ```bash
