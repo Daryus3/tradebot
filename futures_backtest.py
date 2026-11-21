@@ -1715,8 +1715,33 @@ def realism_rows(cfg, ev) -> List[Tuple[str, "Evaluation"]]:
     if base.entry_lag_pct < ENTRY_LAG_PCT and not base.entry_limit:
         rows.append((f"Eski giriş varsayımıyla (~5 sn, gecikme payı %{base.entry_lag_pct:g} → %{ENTRY_LAG_PCT:g})",
                      ev(entry_lag_pct=ENTRY_LAG_PCT)))
+    fills = live_entry_fills(cfg) if not base.entry_limit else []
+    if len(fills) >= LIVE_FILL_MIN:
+        mean = float(np.mean(fills))
+        lag = round(max(0.0, mean - base.slippage_pct), 3)
+        if abs(lag - base.entry_lag_pct) >= 0.005:
+            rows.append((f"Canlıda ölçülen giriş maliyetiyle (dolum kapanıştan ort. {mean:+.3f}%, {len(fills)} giriş; "
+                         f"gecikme payı %{base.entry_lag_pct:g} → %{lag:g})", ev(entry_lag_pct=lag)))
     return rows + [("Eski (iyimser) hesap: giriş gecikmesi, mum içi başabaş ve stop kayma payı yok",
                     ev(be_intrabar=False, entry_lag_pct=0.0, stop_slip_pct=0.0))]
+
+
+LIVE_FILL_MIN = 5                       # Canlı giriş maliyeti stres satırı için en az ölçülmüş giriş
+
+
+def live_entry_fills(cfg, path: Optional[Path] = None) -> List[float]:
+    """Canlı botun tarama kaydındaki (futures_scans_<mod>.jsonl) girişlerin dolum farkı: kapanış fiyatına göre %, kayma
+    dahil. Yalnızca şimdiki giriş yolunun (anlık tarama / hızlı giriş / eski yol) taramalarından. Kayıt yoksa boş."""
+    path = Path(path) if path is not None else scan_log_path(DATA_DIR, getattr(cfg, "trading_mode", "paper"))
+    if not path.exists():
+        return []
+    want = 2 if futures_snapshot_on(cfg) else int(bool(getattr(cfg, "futures_fast_entry", False)))
+    out: List[float] = []
+    for r in read_scan_log(path, 0, 2 ** 62):
+        if (2 if r.get("sn") else int(bool(r.get("fast")))) != want:
+            continue
+        out += [float(f["p"]) for f in (r.get("f") or {}).values() if isinstance(f, dict) and f.get("p") is not None]
+    return out
 
 
 def phase8_active(p: SimParams) -> bool:
@@ -3072,6 +3097,8 @@ def live_timing(cfg, journal: Sequence[dict]) -> List[str]:
             if slips:
                 text += (f" | dolum, kapanış fiyatına göre ortalama {np.mean(slips):+.3f}% (backtest varsayımı "
                          f"+%{lag_of[fast] + slip:.2f}: gecikme %{lag_of[fast]:g} + kayma)")
+                if len(slips) >= 3:                 # Az girişte tek bir kötü dolum ortalamayı çok oynatır
+                    text += f"; ortanca {np.median(slips):+.3f}%, en kötü {max(slips):+.3f}%"
             out.append(text)
     return out + live_snapshot_check(journal)
 

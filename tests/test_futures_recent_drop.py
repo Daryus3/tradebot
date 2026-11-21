@@ -171,3 +171,43 @@ def test_wave_page_buttons_set_and_persist_the_rule(fcfg, tmp_path):
     assert "kv:fw:FUTURES_RECENT_DROP_PCT:3" in data
     press(bot, "kv:fw:FUTURES_RECENT_DROP_PCT:2")
     assert bot.cfg.futures_recent_drop_pct == 2.0 and "%2'den az düştüyse" in notes.menus[-1][0]
+
+
+# ====================================================================== canlı giriş maliyeti (rapor 15)
+def _fill_rows(t0, slips, snapshot=True):
+    rows = []
+    for i, p in enumerate(slips):
+        r = {"t": t0 + i * MIN, "ms": [150, 400, 410], "fast": 1, "f": {"SOL": {"o": 440, "r": 700, "x": 600, "p": p}}}
+        if snapshot:
+            r["sn"] = [390, 170]
+        rows.append(r)
+    return rows
+
+
+def test_live_entry_line_shows_median_and_worst_fill(fcfg):
+    rows = _fill_rows(BASE_MS, [0.0, 0.111, -0.043, 0.061, 0.163, -0.08, 0.456, -0.023, 0.107])
+    text = "\n".join(fb.live_timing(fcfg, rows))
+    assert ("dolum, kapanış fiyatına göre ortalama +0.084% (backtest varsayımı +%0.04: gecikme %0.02 + kayma); "
+            "ortanca +0.061%, en kötü +0.456%") in text
+    two = "\n".join(fb.live_timing(fcfg, rows[:2]))
+    assert "ortalama +0.056%" in two and "en kötü" not in two                    # 3'ten az girişte yok
+
+
+def test_realism_row_uses_the_live_measured_entry_cost(fcfg, tmp_path, monkeypatch):
+    import json
+    cfg = replace(fcfg, futures_fast_entry=True, futures_snapshot_scan=True, futures_crash_extra="1:6",
+                  trading_mode="live")
+    assert fb.futures_snapshot_on(cfg)
+    monkeypatch.setattr(fb, "DATA_DIR", tmp_path)
+    path = tmp_path / "futures_scans_live.jsonl"
+    rows = _fill_rows(BASE_MS, [0.0, 0.111, -0.043, 0.061, 0.163, -0.08, 0.456, -0.023, 0.107])
+    rows += _fill_rows(BASE_MS + 100 * MIN, [0.9, 0.9], snapshot=False)          # Başka giriş yolu: sayılmaz
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    assert len(fb.live_entry_fills(cfg)) == 9
+    names = {n: e for n, e in fb.realism_rows(cfg, lambda **kw: kw)}
+    row = [n for n in names if n.startswith("Canlıda ölçülen giriş maliyetiyle")]
+    assert row == ["Canlıda ölçülen giriş maliyetiyle (dolum kapanıştan ort. +0.084%, 9 giriş; gecikme payı %0.02 → "
+                   "%0.064)"]
+    assert names[row[0]] == {"entry_lag_pct": 0.064}
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows[:4]), encoding="utf-8")   # 5'ten az giriş: satır yok
+    assert not any(n.startswith("Canlıda ölçülen") for n, _e in fb.realism_rows(cfg, lambda **kw: kw))
