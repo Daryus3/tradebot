@@ -2109,6 +2109,61 @@ Uyarılar: Bu ayrım bütün geçmişe (iki döneme de) bakılarak bulundu; doğ
 yedi yılın yedisinde aynı yönde, mantığı açık ve tek bir eşiğe bağlı, komşular da tutarlı; yine de geleceği garanti
 etmez. Önce test modunda deneyin.
 
+#### Rapor 15: başabaş çıkışları ve canlı giriş maliyeti (Kasım 2026)
+Rapor 15 ayarı: rapor 14 + kural %33 + 6x + düşüşte küçültme 30 / 60. Canlıda başabaşla kapanan işlemler çok az
+kazandırıyor (ör. FIL 0.49280 → 0.49340, +%0.12 fiyat; teminata göre +%0.36). Bu bilinçli: başabaş bir kâr çıkışı
+değil. Sabit tutarlı backtestte (C, 9.097 işlem) çıkış nedenlerine göre net (komisyon ve kayma dahil):
+
+| Çıkış | İşlem | Fiyat hareketi (ort.) | Komisyon | Net (ort.) | Toplam net kârın payı |
+|---|---|---|---|---|---|
+| Başabaş | 6.340 (%70) | +%0.114 | %0.092 | +%0.022 | %3 |
+| Zaman stopu | 1.263 | +%1.636 | %0.098 | +%1.537 | %84 |
+| Kâr Al | 705 | +%6.000 | %0.073 | +%5.926 | %143 |
+| Zarar Kes | 789 | −%4.783 | %0.096 | −%4.880 | −%130 |
+
+Başabaşla kapanan 6.340 işlem başabaş olmasaydı (aynı işlem, yuva etkisi olmadan): %25'i zarar kesle (−%4.9), %59'u
+zaman stopuyla, %16'sı Kâr Al'la kapanırdı. Tek tek ortalamaları daha yüksek olurdu (işlem başı +%0.30), ama pozisyonlar
+çok daha uzun açık kalır: yuvalar dolu kaldığı için sonraki sinyaller açılamaz ve aynı anda zarar kese giden pozisyonlar
+düşüşü büyütür. Başabaşın değeri kendi kârı değil: riski kesip yuvayı yeni sinyale açması.
+
+Başabaş ayarları yeni ayarla yeniden sınandı (10 çekiliş, 4.000 USDT):
+
+| Başabaş | A son bakiye | A düşüş | Yıllık seçim / doğrulama | 71 hesap: 12 ay ortanca | 71 hesap: %60'ı aşan düşüş | İşlem (C) | İşlem başı net (C) |
+|---|---|---|---|---|---|---|---|
+| **Şimdiki: tetik +%1.1, taban +%0.15** | 3,32 milyon | %44.9 | +%408 / +%391 | **+%927** | 8 | 9.158 | +%0.259 |
+| Taban +%0.10 | 3,48 milyon | %49.4 | +%408 / +%435 | +%889 | 6 | 8.554 | +%0.288 |
+| Taban +%0.20 | 3,09 milyon | %46.8 | +%397 / +%358 | +%798 | 15 | 9.486 | +%0.240 |
+| Taban +%0.25 | 2,46 milyon | %56.9 | +%359 / +%364 | +%753 | 20 | 9.812 | +%0.209 |
+| Tetik +%0.9 | 3,18 milyon | %45.8 | +%396 / +%361 | +%796 | 8 | 9.454 | +%0.249 |
+| Tetik +%1.3 | 3,24 milyon | %48.6 | +%389 / +%378 | +%855 | 14 | 8.979 | +%0.262 |
+| Tetik +%1.5 | 2,66 milyon | %65.8 | +%345 / +%317 | +%835 | 20 | 8.811 | +%0.261 |
+| Tetik +%2 | 2,84 milyon | %50.4 | +%379 / +%299 | +%653 | 22 | 8.564 | +%0.271 |
+| Taban girişin %0.5 altında | 4,18 milyon | %49.7 | +%420 / +%442 | +%812 | 6 | 6.894 | +%0.422 |
+| Taban girişin %1 altında | 4,15 milyon | %47.8 | +%416 / +%393 | +%723 | 9 | 6.145 | +%0.468 |
+| Başabaş kapalı | 2,10 milyon | %64.4 | +%261 / +%297 | +%478 | 23 | 4.213 | +%0.528 |
+
+- Tabanı yükseltmek (başabaş çıkışından daha çok almak) kârı düşürüyor ve düşüşü artırıyor: stop fiyata yaklaşınca olağan
+  dalgalanmada daha çok işlem erken kapanıyor.
+- Tabanı girişin altına indirmek A'yı büyütüyor ama 71 hesabın 12 ay ortancasını 10 çekilişin 10'unda düşürüyor.
+- Başabaşı kapatmak kârı yarıya indiriyor; kill-switch 10 çekilişin hepsinde en az bir hesabı durduruyor.
+- Şimdiki ayar (tetik +%1.1, taban +%0.15) en iyisi; değişiklik önerilmiyor.
+
+**Asıl maliyet kalemi giriş dolumu.** Canlıda ölçülen 9 anlık tarama girişi kapanış fiyatına göre: ortalama +%0.084,
+ortanca +%0.061, en kötü +%0.456; en kötüsü olmadan ortalama +%0.037. Backtest +%0.04 sayıyor (gecikme %0.02 + kayma
+%0.02). Giriş maliyetinin etkisi (rapor 15 ayarı, 10 çekiliş):
+
+| Giriş maliyeti (kapanışa göre) | 71 hesap: 12 ay ortanca | 71 hesap: %60'ı aşan düşüş | Yıllık seçim / doğrulama | Kill-switch (10 çekilişte) |
+|---|---|---|---|---|
+| +%0.04 (backtest varsayımı) | +%927 | 8 | +%408 / +%391 | 4 çekilişte, en çok 1 hesap |
+| +%0.06 | +%763 | 8 | +%397 / +%341 | 5 çekilişte, en çok 3 |
+| +%0.084 (canlı ortalama) | +%615 | 16 | +%357 / +%307 | 8 çekilişte, en çok 7 |
+
+Her +%0.02'lik giriş maliyeti 71 hesabın ortancasını ~%15-18 düşürüyor. 9 giriş karar vermek için az: tek bir kötü
+dolum ortalamayı ikiye katlıyor. Rapor artık canlı giriş satırında ortanca ve en kötü dolumu da gösteriyor. En az 5
+giriş ölçülünce "Maliyet ve gerçekçilik" grubunda "Canlıda ölçülen giriş maliyetiyle" satırı çıkıyor: backtest, canlı ortalama
+dolumun gerektirdiği gecikme payıyla yeniden hesaplanıyor. Giriş maliyeti birkaç hafta sonra da +%0.06'nın üstünde
+kalırsa, kötü dolumları sınırlayan bir giriş emri (fiyat tavanlı) araştırılmalı.
+
 ### 🏆 Strateji turnuvası (`--turnuva`)
 Hangi strateji türünün sizin dönemde işe yaradığını **tek komutla** görmek için:
 ```bash
