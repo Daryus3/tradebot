@@ -170,6 +170,8 @@ TOGGLES: Tuple[Tuple[str, str], ...] = (
 MODES: Tuple[Tuple[str, str], ...] = (("DCA_MODE", "DCA"), ("PYRAMID_MODE", "Piramit"),
                                       ("TIME_EXIT_MODE", "Süre kuralı"), ("ESCAPE_MODE", "Erken kaçış"))
 _LOG_LINE = re.compile(r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d \| INFO")
+# Ayar notları (config._setting_notes, bot açılırken de yazılır): backtest sonucunun parçası değil, rapordan çıkarılır
+_NOTE_LINE = re.compile(r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d \| WARNING +\| ⚠️ ")
 
 
 # ================================================================ taslak (menüde seçilen ayarlar)
@@ -367,9 +369,10 @@ def split_chunks(text: str, limit: int = CHUNK_CHARS) -> List[str]:
 
 
 def clean_output(text: str) -> str:
-    """Raporda gösterilmeyecek satırlar: ilerleme (⏳) ve INFO log satırları."""
+    """Raporda gösterilmeyecek satırlar: ilerleme (⏳), INFO log satırları ve ayar notları (⚠️ uyarıları; bot açılırken
+    ve ayar değişince zaten yazılır). Diğer uyarı ve hatalar kalır."""
     keep = [line.rstrip() for line in text.splitlines()
-            if not line.lstrip().startswith("⏳") and not _LOG_LINE.match(line)]
+            if not line.lstrip().startswith("⏳") and not _LOG_LINE.match(line) and not _NOTE_LINE.match(line)]
     return "\n".join(keep).strip()
 
 

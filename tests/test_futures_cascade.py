@@ -169,8 +169,7 @@ def test_cascade_rows_and_report_lines(fcfg):
     assert rows[0][0].startswith("🌊 Dalga modu") and calls[0]["max_positions"] == 2 and calls[0]["leverage"] == 3
     assert rows[1][1]["isolated_size_pct"] == 50.0
     on = replace(fcfg, futures_max_positions=2, futures_isolated_size_pct=50.0)
-    rows = fb.cascade_rows(on, lambda **over: over)
-    assert rows[0][0].startswith("Tek pozisyon") and len(rows) == 1
+    assert fb.cascade_rows(on, lambda **over: over) == []      # Dalga modu açık: başka kaldıraçla "tek pozisyon" kıyası yok
     p = fb.params_from_cfg(on)
     assert "en fazla 2 pozisyon" in fb.cascade_label(p) and "%50" in fb.cascade_label(p)
     trades = [fb.FutTrade("A", "long", 0, 1, 1, 1, "TP", 2, 1, 2, 0, 0, 0.01, 1, 0, 0, 0, False, False, MIN,

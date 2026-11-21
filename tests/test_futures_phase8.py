@@ -96,12 +96,9 @@ def test_params_from_cfg_and_report_rows(fcfg):
     label = fb.cascade_label(fb.params_from_cfg(on))
     assert "ek pozisyonlarda başabaş +%0.5 (Faz 8; ilk pozisyonda +%1)" in label
     assert "Faz 8" not in fb.cascade_label(fb.params_from_cfg(p6cfg(fcfg)))
-    # Faz 5 / Faz 6 satırları saf kalır: Faz 8 kapalı hesaplanır; Faz 8 açıkken "⭐ Faz 6 seti" satırı yine gösterilir
+    # Faz 6 ön ayarı (rapor satırı yok artık; Telegram'daki ⭐ düğmesi config.FUTURES_PHASE6_PRESET) Faz 8'siz kalır
     assert fb.PHASE6_SIM["extra_be_trigger_pct"] == 0.0
-    labels = [r[0] for r in fb.phase6_rows(on, ev, [], phase6=lambda **o: o)]
-    assert any(x.startswith("⭐ Faz 6 seti") for x in labels)
-    pure = [r[0] for r in fb.phase6_rows(p6cfg(fcfg), ev, [], phase6=lambda **o: o)]
-    assert not any(x.startswith("⭐ Faz 6 seti") for x in pure)
+    assert not any(r[0].startswith("⭐") for r in fb.phase6_rows(on, ev, []))
     calls.clear()
     fb.cascade_rows(replace(fcfg, futures_extra_be_trigger_pct=0.5), lambda **over: calls.append(over) or over)
     assert calls[0]["max_positions"] == 2 and calls[0]["extra_be_trigger_pct"] == 0.0

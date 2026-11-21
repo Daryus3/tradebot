@@ -609,16 +609,19 @@ def test_report_shows_measured_scan_timing_and_entry_lag(fcfg, tmp_path):
     path.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
     data = fb.FutData(t0, t0 + 6 * FUT_BAR_MS, [fb.Segment(t0 - 1, t0 + 6 * FUT_BAR_MS, ("BTC", "ETH"))], {},
                       ((), (), ()), (None, None), {}, None, "5m")
-    text = "\n".join(fb.live_comparison(fcfg, data, [], path=path))
+    text = "\n".join(fb.live_comparison(fcfg, data, [], path=path))        # Ayar: hızlı giriş kapalı
     assert ("Tarama zamanlaması (hızlı giriş kapalı: mum kapanışından sonra, ortanca): başlangıç 3.3 sn → mumlar "
             "alındı 4.8 sn → sinyaller hazır 4.9 sn (2 tarama)") in text
     assert ("Giriş gecikmesi (hızlı giriş kapalı: mum kapanışı → dolum): ortalama 5.8 sn, ortanca 5.8 sn, en uzun "
             "5.8 sn (1 giriş) | dolum, kapanış fiyatına göre ortalama +0.060% (backtest varsayımı +%0.07") in text
+    assert "hızlı giriş açık:" not in text          # Şimdi kullanılmayan yol, 1 tarama / 1 giriş: gürültü, yazılmaz
+    assert text.index("Tarama zamanlaması") < text.index("Bu aralıkta backtestte işlem yok")
+    fast = "\n".join(fb.live_comparison(replace(fcfg, futures_fast_entry=True), data, [], path=path))
     assert ("Tarama zamanlaması (hızlı giriş açık: mum kapanışından sonra, ortanca): başlangıç 1.0 sn → mumlar "
             "alındı 1.4 sn → sinyaller hazır 1.4 sn (1 tarama; 1 taramada mumlar yeniden istendi; Binance ile saat "
-            "farkı ortanca 40 ms)") in text
-    assert "Giriş gecikmesi (hızlı giriş açık: mum kapanışı → dolum): ortalama 1.9 sn" in text and "+0.020%" in text
-    assert text.index("Tarama zamanlaması") < text.index("Bu aralıkta backtestte işlem yok")
+            "farkı ortanca 40 ms)") in fast
+    assert "Giriş gecikmesi (hızlı giriş açık: mum kapanışı → dolum): ortalama 1.9 sn" in fast and "+0.020%" in fast
+    assert "hızlı giriş kapalı:" not in fast
     # Ölçümsüz (eski) kayıt: satır eklenmez
     path.write_text(json.dumps({"t": t0, "u": ["BTC"], "a": ["BTC"]}) + "\n", encoding="utf-8")
     assert "zamanlaması" not in "\n".join(fb.live_comparison(fcfg, data, [], path=path))

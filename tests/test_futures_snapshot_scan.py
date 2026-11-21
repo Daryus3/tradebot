@@ -678,9 +678,15 @@ def test_report_lines_for_snapshot_scans(fcfg):
              "sv": [{"t": t0 + 2 * MIN, "n": 24, "av": 0.002, "mx": 0.011, "sg": 2, "ok": 0}, {"t": 1, "n": 0}]},
             {"t": t0 + 4 * MIN, "ms": [150, 2000, 2010], "fast": 1, "sx": "geçmiş mumlar 6 / 24 coinde hazır"},
             {"t": t0 + 5 * MIN, "ms": [150, 2000, 2010], "fast": 1, "sx": "geçmiş mumlar 0 / 24 coinde hazır"}]
-    text = "\n".join(fb.live_timing(fcfg, rows))
+    snap = replace(fcfg, futures_fast_entry=True, futures_snapshot_scan=True)
+    assert fb.futures_snapshot_on(snap)
+    text = "\n".join(fb.live_timing(snap, rows))
+    # Şimdi kullanılmayan yol (olağan hızlı giriş, 4 tarama) az örnekli: zamanlama satırı yazılmaz; ayar onu
+    # kullanıyorsa yazılır
+    assert "hızlı giriş açık: mum kapanışından sonra" not in text
     assert ("Tarama zamanlaması (hızlı giriş açık: mum kapanışından sonra, ortanca): başlangıç 0.1 sn → mumlar alındı "
-            "2.0 sn → sinyaller hazır 2.0 sn (4 tarama)") in text
+            "2.0 sn → sinyaller hazır 2.0 sn (4 tarama)") in "\n".join(fb.live_timing(replace(fcfg, futures_fast_entry=True),
+                                                                                       rows))
     assert ("Tarama zamanlaması (anlık tarama: mum kapanışından sonra, ortanca): başlangıç 0.15 sn → anlık fiyatlar "
             "alındı 0.40 sn → sinyaller hazır 0.41 sn (2 tarama; Binance ile saat farkı ortanca 12 ms)") in text
     assert "Giriş gecikmesi (anlık tarama: mum kapanışı → dolum): ortalama 0.6 sn" in text and "+0.012%" in text
@@ -713,9 +719,10 @@ def test_report_timing_lines_cover_the_journal_after_the_backtest_data_ends(fcfg
     path = tmp_path / "futures_scans_paper.jsonl"
     path.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
     data = fb.FutData(t0, end, [fb.Segment(t0 - 1, end, ("SOL", "ADA"))], {}, ((), (), ()), (None, None), {}, None, "5m")
-    text = "\n".join(fb.live_comparison(fcfg, data, [], path=path))
+    snap = replace(fcfg, futures_fast_entry=True, futures_snapshot_scan=True)    # Ayar: anlık tarama
+    text = "\n".join(fb.live_comparison(snap, data, [], path=path))
     assert "Kayıtlı 5 dk mum: 2 / 2" in text                              # İşlem karşılaştırması: veri aralığındaki satırlar
-    assert "Tarama zamanlaması (hızlı giriş açık: mum kapanışından sonra, ortanca): başlangıç 1.0 sn" in text
+    assert "hızlı giriş açık: mum kapanışından sonra" not in text         # Eski yol, 2 tarama: az örnek, yazılmaz
     assert "Tarama zamanlaması (anlık tarama: mum kapanışından sonra, ortanca): başlangıç 0.15 sn" in text
     assert "Giriş gecikmesi (anlık tarama: mum kapanışı → dolum): ortalama 0.5 sn" in text and "+0.011%" in text
     assert "Anlık tarama doğrulaması (1 tarama" in text and "aynı sinyaller: 1 / 1 tarama" in text

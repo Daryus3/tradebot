@@ -75,8 +75,6 @@ def test_leverage_risk_measures_and_report_lines(fcfg, monkeypatch):
     assert len(risk["roll"][10]) == len(risk["roll"][5]) == 13
     assert risk["sl"] == 3 and [t.mae_pct for t in risk["beyond"][10]] == [25.0, 12.0] and len(risk["beyond"][5]) == 1
     assert risk["liq"][10] == pytest.approx(futures_liq_distance_pct(10, fcfg.futures_mmr_pct))
-    assert [r is not None for _k, r, _e in risk["stress"][10]] == [False, False, True, True]     # Kayma ×4 ve ×5: erir
-    assert all(r is None for _k, r, _e in risk["stress"][5])
     text = "\n".join(fb.leverage_risk_lines(risk))
     assert text.startswith("🧯 KALDIRAÇ RİSKİ (10x, kıyas 5x; aynı sinyaller ve çıkışlar, 28.99 USDT ile)")
     assert "kill-switch'i uygulamaz" in text
@@ -90,10 +88,10 @@ def test_leverage_risk_measures_and_report_lines(fcfg, monkeypatch):
             "12 ay sonra zararda 0, ortanca 12 ay getirisi +200.0%, kill-switch 13 (ortanca 20. gün)") in text
     assert "5x: %80'i aşan düşüş 0, %90'ı aşan 0" in text and "kill-switch 0" in text
     assert "12 ay sonunda 10x'in 5x'ten az bakiyeyle bittiği başlangıç: 0 / 13" in text
-    assert ("Zarar kes kayarsa: 3 zarar kes işleminin 2'inde stop dakikasında fiyat girişin %9.5'inden fazla altına indi "
+    assert ("Zarar kes kayarsa: 3 zarar kes işleminin 2'sinde stop dakikasında fiyat girişin %9.5'inden fazla altına indi "
             "(10x'te stop o dibe kayarsa likidasyon; 5x için %19.5: 1 işlem). En derinleri: 2025-02-10 CRV −%25.0, "
             "2024-01-06 DOT −%12.0") in text
-    assert "Kayma katlanırsa (tek hesap, son bakiye USDT): 10x ×2: 86.97, ×3: 86.97, ×4: ERİDİ 2024-01-31" in text
+    assert "Kayma katlanırsa" not in text and "stress" not in risk      # Kayma stresi tek kural tablosunda (tekrar yok)
     # 1x'te kıyas yok; kill-switch kapalıysa o satır yok; sonuç yoksa bölüm boş
     one = fb.leverage_risk(replace(risk_cfg(fcfg), futures_leverage=1), data, [], {}, trades)
     assert one["levs"] == [1] and "kıyas" not in fb.leverage_risk_lines(one)[0]
@@ -140,4 +138,5 @@ def test_section_follows_the_leverage_table_and_run_cli_computes_it(fcfg, tmp_pa
     messages = []
     fb.run_cli(fcfg, 7, None, tmp_path, chart=False, sensitivity=True, progress=messages.append)
     assert seen["risk"] == {"lev": 10} and seen["args"] == ["sabit boy işlemleri"]
-    assert any(m.startswith("🧯 Kaldıraç riski hesaplanıyor") for m in messages)
+    assert any(m.startswith("⏳ 🧯 Kaldıraç riski hesaplanıyor") for m in messages)
+    assert all(m.startswith("⏳") for m in messages)                  # Rapor dosyasına girmesin (backtest_runner)

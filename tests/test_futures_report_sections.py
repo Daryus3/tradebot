@@ -1,5 +1,5 @@
-"""Backtest raporunun genişletilmiş bölümleri: kaldıraç duyarlılığı 1x-20x (düşüş sütunları, canlı botun açmadığı
-kaldıraçlar), gruplanmış "tek kural değişince" satırları (mevcut ayarın çevresi), ▲ / ▼ şans bandı işaretleri ve yıl yıl
+"""Backtest raporunun genişletilmiş bölümleri: kaldıraç duyarlılığı 2x-10x (her ay başlayan hesaplar, canlı botun
+açmadığı kaldıraçlar), gruplanmış "tek kural değişince" satırları (mevcut ayarın çevresi), ▲ / ▼ şans bandı işaretleri ve yıl yıl
 aylık işlem yığılması. Küçük / sahte verilerle; gerçek emir yok."""
 from collections import Counter
 from dataclasses import replace
@@ -26,39 +26,47 @@ def small_inputs(fcfg, **over):
     return on, data, sigs, funnel, windows
 
 
-# ====================================================================== kaldıraç 1x-20x
-def test_leverage_table_covers_every_leverage_from_1_to_20(fcfg, monkeypatch):
-    cfg = replace(fcfg, stop_loss_pct=4.75, futures_leverage=10, futures_mmr_pct=0.5)
+# ====================================================================== kaldıraç 2x-10x
+def test_leverage_table_covers_2x_to_10x_plus_the_current_leverage(fcfg, monkeypatch):
+    cfg = replace(fcfg, stop_loss_pct=4.75, futures_leverage=6, futures_mmr_pct=0.5)
     monkeypatch.setattr(fb, "evaluate", lambda p, *a, **k: p.leverage)
     said = []
     rows = fb.leverage_table(cfg, None, [], {}, progress=said.append)
-    assert [r[0] for r in rows] == list(range(1, 21))
-    assert said == [f"⏳ Kaldıraç 1x-20x: {k} / 19 ayar hesaplandı" for k in (5, 10, 15, 19)]   # 20x hesaplanmaz
-    assert all(ev == lev and note == "" for lev, ev, note in rows[:17])
-    # 18x / 19x: zarar kes likidasyona 0.5 puandan yakın: hesaplanır, canlı bot açmaz
-    assert [ev for _l, ev, _n in rows[17:19]] == [18, 19]
-    assert all(note.startswith("⛔ canlı bot açmaz") for _l, _e, note in rows[17:19])
-    # 20x: zarar kes (%4.75) likidasyonun (%4.5) ötesinde: hesaplanmaz
-    assert rows[19][1] is None and "likidasyonun (%4.5) ötesinde" in rows[19][2]
+    assert [r.lev for r in rows] == list(range(2, 11))
+    assert said == [f"⏳ Kaldıraç 2x-10x: {k} / 9 ayar hesaplandı" for k in (3, 6, 9)]
+    assert all(r.ev == r.lev and r.note == "" and r.roll is None for r in rows)     # Veri yoksa 12 ay özeti yok
+    # Ayardaki kaldıraç aralığın dışındaysa eklenir: 18x hesaplanır ama canlı bot açmaz; 20x hiç hesaplanmaz
+    rows = fb.leverage_table(replace(cfg, futures_leverage=18), None, [], {})
+    assert [r.lev for r in rows] == list(range(2, 11)) + [18] and rows[-1].note.startswith("⛔ canlı bot açmaz")
+    last = fb.leverage_table(replace(cfg, futures_leverage=20), None, [], {})[-1]
+    assert last.lev == 20 and last.ev is None and "likidasyonun (%4.5) ötesinde" in last.note
 
 
-def test_leverage_rows_show_drawdowns_current_marker_and_notes(fcfg):
+def test_rolling_summary_counts_deep_drawdowns_and_kill_switch_stops(fcfg):
+    on, data, sigs, funnel, windows = small_inputs(fcfg)
+    p = fb.params_from_cfg(on)
+    assert fb.rolling_summary(p, data, sigs, windows) is None          # Veri 12 aydan kısa: başlangıç yok
+    long = replace(data, end_ms=data.start_ms + 400 * DAY)
+    roll = fb.rolling_summary(p, long, sigs, windows)
+    assert roll["n"] >= 1 and set(roll) == {"n", "median", "dd60", "kills"}
+
+
+def test_leverage_rows_show_rolling_columns_current_marker_and_notes(fcfg):
     on, data, sigs, funnel, windows = small_inputs(fcfg)
     ev = fb.evaluate(fb.params_from_cfg(on), data, sigs, windows)
-    levs = [(1, ev, ""), (on.futures_leverage, ev, ""), (19, ev, "⛔ canlı bot açmaz: deneme"),
-            (20, None, "zarar kes deneme")]
+    roll = {"n": 71, "median": 927.0, "dd60": 8, "kills": 4}
+    levs = [fb.LevRow(2, ev, "", None), fb.LevRow(on.futures_leverage, ev, "", roll),
+            fb.LevRow(19, ev, "⛔ canlı bot açmaz: deneme", roll), fb.LevRow(20, None, "zarar kes deneme")]
     lines = fb.format_report(on, data, ev, funnel, levs=levs).splitlines()
-    assert any("A) tek hesap | B) kârlı yıl | A'da en büyük düşüş | B'de en kötü yıl içi düşüş | C'de likidasyon | "
-               "kill-switch (%" in x for x in lines)
+    assert fb.LEV_HEAD in lines
+    assert any("her ayın 1'inde başlayan 71 hesabın ilk 12 ayı (kill-switch uygulanır)" in x for x in lines)
     cur = next(x for x in lines if x.strip().startswith(f"{on.futures_leverage}x"))
-    assert "◀ şimdiki" in cur and "düşüş %" in cur and "en kötü yıl %" in cur
-    assert cur.endswith("likidasyon 0 | kill-switch yok") or "| kill-switch 20" in cur
+    assert "◀ şimdiki" in cur and "+927.0%" in cur and "   8 / 71 " in cur and "│" in cur
+    assert next(x for x in lines if x.strip().startswith("2x")).count("—") == 3       # 12 ay özeti yoksa çizgi
     stopped = fb.Evaluation(replace(ev.chained, kill_ms=fb._ms("2020-03-12")), ev.years, ev.fixed)
-    assert fb._lev_line(stopped).endswith("| kill-switch 2020-03-12")
-    assert any(x.strip().startswith("19x") and x.endswith("| ⛔ canlı bot açmaz: deneme") for x in lines)
+    assert "(durur 2020-03-12)" in fb._lev_line(stopped, roll)
+    assert any(x.strip().startswith("19x") and x.endswith("⛔ canlı bot açmaz: deneme") for x in lines)
     assert any(x.strip().startswith("20x") and x.endswith("— (zarar kes deneme)") for x in lines)
-    assert any("C'nin işlem başı sonucu her kaldıraçta aynıdır" in x and "en fazla 1.000.000 USDT kabul edildiği" in x
-               for x in lines)
 
 
 # ====================================================================== tek kural değişince
@@ -88,8 +96,7 @@ def test_variant_rows_are_grouped_and_cover_settings_around_the_current_ones(fcf
     assert got["Başabaş tetiği +%0.8 (şimdi +%1.1)"].be_trigger_pct == 0.8
     assert got["Başabaş tabanı +%0.35 (şimdi +%0.25)"].be_floor_pct == 0.35
     assert not any(n.startswith("Başabaş tabanı +%0.5") for n in got)    # Faz 8 ek tetiğinin (+%0.4) üstü atlanır
-    assert got["Kâr Al +%5 (şimdi +%6)"].tp_pct == 5 and got["Kâr Al +%7 (şimdi +%6)"].tp_pct == 7
-    assert got["Zarar Kes -%5.25 (şimdi -%4.75)"].sl_pct == 5.25
+    assert not any(n.startswith(("Kâr Al +%", "Zarar Kes -%")) for n in got)   # Kâr Al / Zarar Kes komşuları ızgarada
     assert {"Zaman stopu 30 dk", "Zaman stopu 60 dk", "Zaman stopu 120 dk"} <= set(got)
     assert got["Ek pozisyon başabaşı +%0.6 (şimdi +%0.4)"].extra_be_trigger_pct == 0.6
     assert got["Ek pozisyon zaman stopu 25 dk (şimdi 35 dk)"].extra_hold_min == 25
@@ -109,7 +116,9 @@ def test_variant_rows_are_grouped_and_cover_settings_around_the_current_ones(fcf
     assert got["Dalgada yeniden giriş ≥5 coin (şimdi ≥3)"].reentry_breadth == 5
     assert got["Düşüşte küçültme kapalı"].dd_scale_pct == 0
     assert got["Düşüşte küçültme boyu %50 (şimdi %60)"].dd_scale_size_pct == 50
-    # Giriş kuralı (5 dk taramayla yeni sinyaller), tarama ve bekleme
+    # Giriş kuralı (5 dk taramayla yeni sinyaller; önce kıyas satırı), tarama ve bekleme
+    names = [n for n, _e in rows]
+    assert names.index(fb.SCAN5_REF) == names.index("Giriş kuralı, tarama ve bekleme") + 1
     main = f"{on.futures_crash_hours} sa %{on.futures_crash_drop_pct:g}"
     assert {"Ek pencere 1 sa %5 · 5 dk taramayla", "Ek pencere 1 sa %7 · 5 dk taramayla",
             f"Ek pencere yok (yalnız {main}) · 5 dk taramayla", "5 dk'da bir tarama (dakikalık tarama kapalı)"} <= set(got)
@@ -275,7 +284,7 @@ def test_monthly_cluster_lines_explain_the_effect():
     text = "\n".join(fb.monthly_cluster_lines(fb.monthly_clusters(ev, data)))
     assert text.startswith("📆 AYLIK İŞLEM YIĞILMASI (C: sabit pozisyon işlemleri; B: her yıl yeniden başlayan hesap)")
     assert "2024: 150 işlem (ayda ort. 12) | yığılma: Mart 40 (×3.1) → işlemlerin %27'si, C kârının %65'i" in text
-    assert "Mart: işlem başı +0.500%, kazanma %100, C +20.0%, B ay +100.0% (düşüş %20)" in text
+    assert "Mart: işlem başı" not in text                         # Ay ay ayrıntı satırı kalktı (rapor sadeleşti)
     assert ("Yığılma ayları olmadan: C +11.0% (yerine +31.0%), işlem başı +0.100% (yığılma aylarında +0.500%) | B "
             "(bu aylar yatay geçseydi) +21.0% (yerine +142.0%)") in text
     assert "2025: 11 işlem (ayda ort. 6) | yığılma yok; en yoğun ay Ocak 6 işlem (×1.0)" in text

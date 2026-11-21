@@ -31,7 +31,7 @@ from collections import Counter
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, Iterable, List, NamedTuple, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -56,12 +56,11 @@ FUNDING_DEFAULT = 0.0001                # Fonlama verisi yoksa 8 saatte %0.01 (p
 FUNDING_HOURS = (0, 8, 16)
 BNB_FUTURES_DISCOUNT = 0.10             # Vadeli işlemde BNB ile komisyon indirimi
 LEVERAGES = (1, 3, 5, 10, 15, 20)       # "Zarar kes olmasaydı" satırındaki likidasyon mesafeleri
-LEVERAGE_TABLE = tuple(range(1, 21))    # Kaldıraç duyarlılığı tablosu: 1x-20x, hepsi
+LEVERAGE_TABLE = tuple(range(2, 11))    # Kaldıraç duyarlılığı tablosu: 2x-10x (+ ayardaki kaldıraç; 10x üstü
+                                        # 71 hesapta kill-switch'le bitiyordu, bkz. README "Kaldıraç yeniden")
 LIVE_SL_MARGIN = 0.5                    # Canlı bot: zarar kes likidasyona en az bu kadar (puan) uzak olmalı
 TP_GRID = (1.0, 1.2, 1.5)
 SL_GRID = (0.8, 0.9, 1.0)
-CRASH_TP_GRID = (3.0, 4.0, 6.0, 8.0)
-CRASH_SL_GRID = (3.0, 4.0, 5.0)
 MAX_WINDOW_MIN = 240                    # Çıkış penceresi (zaman stopu duyarlılığı için en uzun süre)
 LONG_WINDOW_MIN = 720                   # Bundan uzun tutma sürelerinde çıkışlar 5 dk mumlarla izlenir (bellek)
 # Dönem başında piyasa değeri en büyük 10 coin (stabil coinler hariç; o tarihte USDⓈ-M vadeli işlemi olanlar).
@@ -1588,28 +1587,66 @@ class _RowProgress:
         return run
 
 
+class LevRow(NamedTuple):
+    """Kaldıraç tablosunun bir satırı: kaldıraç, değerlendirme (hesaplanmadıysa None), not, her ayın 1'inde başlayan
+    hesapların özeti (rolling_summary)."""
+    lev: int
+    ev: Optional["Evaluation"]
+    note: str
+    roll: Optional[dict] = None
+
+
+def rolling_summary(p: SimParams, data: FutData, signals, windows) -> Optional[dict]:
+    """Her ayın 1'inde başlayan hesapların ilk RISK_START_MONTHS ayı (kill-switch uygulanır: bot durunca hesap orada
+    kalır): ortanca getiri, %60'ı aşan düşüş yaşayan ve kill-switch'in durdurduğu hesap sayısı. Bugün başlayan biri için
+    kaldıraç seçiminde asıl ölçü (A tek bir başlangıç tarihidir)."""
+    starts = _month_starts(data.start_ms, data.end_ms, RISK_START_MONTHS)
+    if not starts:
+        return None
+    rets, deep, kills = [], 0, 0
+    for s0 in starts:
+        res = simulate(p, data, signals, windows, True, s0, s0 + RISK_START_MONTHS * 30 * DAY_MS + 5 * DAY_MS)
+        rets.append((res.final_equity / p.start_capital - 1) * 100)
+        deep += curve_stats(res.curve, p.start_capital, p.kill_pct)["dd"] > 60
+        kills += res.kill_ms is not None
+    return {"n": len(starts), "median": float(np.median(rets)), "dd60": int(deep), "kills": int(kills)}
+
+
 def leverage_table(cfg, data: FutData, signals, windows,
-                   progress: Optional[Callable[[str], None]] = None) -> List[Tuple[int, Optional[Evaluation], str]]:
-    """Kaldıraç duyarlılığı: 1x-20x hepsi, aynı sinyaller ve çıkışlarla. Zarar kes likidasyonun ötesindeyse (her zarar
-    kes likidasyon olurdu) hesaplanmaz; likidasyona LIVE_SL_MARGIN puandan yakınsa hesaplanır ama canlı bot bu
-    kaldıraçla işlem açmaz (satırda not)."""
-    rooms = {lev: futures_liq_distance_pct(lev, cfg.futures_mmr_pct) for lev in LEVERAGE_TABLE}
-    bar = _RowProgress("Kaldıraç 1x-20x", sum(1 for r in rooms.values() if cfg.stop_loss_pct < r), progress, every=5)
-    rows = []
+                   progress: Optional[Callable[[str], None]] = None) -> List[LevRow]:
+    """Kaldıraç duyarlılığı: 2x-10x ve ayardaki kaldıraç, aynı sinyaller ve çıkışlarla; her satırda A / B ve her ayın
+    1'inde başlayan hesapların özeti. Zarar kes likidasyonun ötesindeyse (her zarar kes likidasyon olurdu) hesaplanmaz;
+    likidasyona LIVE_SL_MARGIN puandan yakınsa hesaplanır ama canlı bot bu kaldıraçla işlem açmaz (satırda not)."""
+    levs = sorted(set(LEVERAGE_TABLE) | {int(cfg.futures_leverage)})
+    rooms = {lev: futures_liq_distance_pct(lev, cfg.futures_mmr_pct) for lev in levs}
+    bar = _RowProgress(f"Kaldıraç {levs[0]}x-{levs[-1]}x", sum(1 for r in rooms.values() if cfg.stop_loss_pct < r),
+                       progress, every=3)
+    rows: List[LevRow] = []
     for lev, room in rooms.items():
         if cfg.stop_loss_pct >= room:
-            rows.append((lev, None, f"zarar kes (%{cfg.stop_loss_pct:g}) likidasyonun (%{room:.1f}) ötesinde: her zarar "
-                                    f"kes likidasyon olurdu"))
+            rows.append(LevRow(lev, None, f"zarar kes (%{cfg.stop_loss_pct:g}) likidasyonun (%{room:.1f}) ötesinde: her "
+                                          f"zarar kes likidasyon olurdu"))
             continue
         note = (f"⛔ canlı bot açmaz: zarar kes likidasyona (%{room:.1f}) {LIVE_SL_MARGIN:g} puandan yakın"
                 if cfg.stop_loss_pct >= room - LIVE_SL_MARGIN else "")
-        rows.append((lev, evaluate(params_from_cfg(cfg, leverage=lev), data, signals, windows), note))
+        p = params_from_cfg(cfg, leverage=lev)
+        rows.append(LevRow(lev, evaluate(p, data, signals, windows), note,
+                           rolling_summary(p, data, signals, windows) if data is not None else None))
         bar.step()
     return rows
 
 
 def exit_grid(cfg, data: FutData, signals, windows) -> List[Tuple[float, float, Evaluation]]:
-    tps, sls = (CRASH_TP_GRID, CRASH_SL_GRID) if cfg.futures_tactic == "crash" else (TP_GRID, SL_GRID)
+    """Kâr Al / Zarar Kes ızgarası. Çöküş taktiğinde şimdiki ayarın çevresi: Kâr Al ±1, Zarar Kes ±0.5 (canlı botun kabul
+    ettiği aralıkta; Kâr Al başabaş tetiğinin üstünde); 4'lü onayda sabit küçük ızgara."""
+    if cfg.futures_tactic == "crash":
+        base = params_from_cfg(cfg)
+        room = futures_liq_distance_pct(base.leverage, base.mmr_pct)
+        tps = [t for t in (base.tp_pct - 1, base.tp_pct, base.tp_pct + 1)
+               if t >= 1 and (not base.be_enabled or t > base.be_trigger_pct)]
+        sls = [x for x in (base.sl_pct - 0.5, base.sl_pct, base.sl_pct + 0.5) if 0.5 <= x < room - LIVE_SL_MARGIN]
+    else:
+        tps, sls = TP_GRID, SL_GRID
     return [(tp, sl, evaluate(params_from_cfg(cfg, tp_pct=tp, sl_pct=sl), data, signals, windows))
             for tp in tps for sl in sls]
 
@@ -1640,8 +1677,8 @@ def no_wave(signals: Sequence[FutSignal]) -> List[FutSignal]:
 
 
 def cascade_rows(cfg, ev, signals=None) -> List[Tuple[str, "Evaluation"]]:
-    """Dalga modu karşılaştırması: kapalıysa Faz 5 seti ve yalnız çöküş yarım; açıksa tek pozisyon (2x). Faz 6 ekleri
-    açıksa bu satırlar Faz 6'sız hesaplanır (Faz 5 tam olarak Faz 5; Faz 6 satırları: phase6_rows)."""
+    """Dalga modu önerisi: kapalıysa Faz 5 seti ve yalnız çöküş yarım (dalga modu açıkken satır yok: başka kaldıraçla
+    "tek pozisyon" kıyası yanıltıcıydı)."""
     base = params_from_cfg(cfg)
     on = phase6_on(cfg)
     plain = no_wave(signals) if signals is not None and on else None
@@ -1654,17 +1691,13 @@ def cascade_rows(cfg, ev, signals=None) -> List[Tuple[str, "Evaluation"]]:
         rows.append(("🌊 Dalga modu (2 pozisyon, 3x, ek ≥8 coin, yalnız çöküş %50)",
                      ev0(max_positions=2, leverage=3, extra_breadth=8, isolated_size_pct=50.0, isolated_breadth=2,
                          extra_be_trigger_pct=0.0, extra_hold_min=0, wave_hold_min=0)))
-    else:
-        rows.append(("Tek pozisyon (dalga modu" + (" ve Faz 6" if on else "") + " kapalı, 2x)",
-                     ev0(max_positions=1, leverage=2, isolated_size_pct=100.0, wave_hold_min=0)))
     if base.isolated_size_pct >= 100:
         rows.append(("Yalnız çöküş yarım büyüklük (<2 coin)", ev(isolated_size_pct=50.0, isolated_breadth=2)))
     return rows
 
 
-def phase6_rows(cfg, ev, signals=None, phase6=None) -> List[Tuple[str, "Evaluation"]]:
-    """Faz 6 karşılaştırması: açık eklerin tek tek kapatılması, kapalıysa dalgada yeniden girişin tek başına etkisi ve
-    ⭐ Faz 6 setleri (`phase6(**over)`: dalga eşikli 1:5,4:8 / ≥12 sinyallerle değerlendirme, variant_rows verir)."""
+def phase6_rows(cfg, ev, signals=None) -> List[Tuple[str, "Evaluation"]]:
+    """Faz 6 eklerinin tek tek kapatılması (açıksa) ya da dalgada yeniden girişin tek başına etkisi (kapalıysa)."""
     base = params_from_cfg(cfg)
     rows = []
     if base.reentry_breadth > 0:
@@ -1674,17 +1707,7 @@ def phase6_rows(cfg, ev, signals=None, phase6=None) -> List[Tuple[str, "Evaluati
     if futures_wave_rules(cfg) and signals is not None:
         rows.append(("Dalga eşikleri kapalı", ev(no_wave(signals))))
     if base.max_positions > 1 and base.extra_size_pct < 100:
-        rows.append(("Ek pozisyonlar eşit büyüklükte (Faz 5 gibi)", ev(extra_size_pct=100.0)))
-    if phase6 is not None:
-        wave = futures_wave_rules(cfg) == ((1, 5.0), (4, 8.0)) and cfg.futures_wave_breadth == 12
-        cur = (base.max_positions, base.leverage, base.extra_size_pct, base.reentry_breadth, base.isolated_size_pct,
-               base.loss_cooldown_min)
-        if not (wave and cur == (4, 3, 16.7, 3, 50.0, 240) and not phase8_active(base)):
-            rows.append(("⭐ Faz 6 seti (4 pozisyon: ilk tam + 3 × %16.7, 3x, dalgada yeniden giriş, dalga eşikleri)",
-                         phase6(**PHASE6_SIM)))
-        if not (wave and cur[:2] == (1, 2) and cur[3:] == (3, 50.0, 240)):
-            rows.append(("⭐ Faz 6 tek pozisyon (dalgada yeniden giriş, dalga eşikleri, yalnız çöküş %50)",
-                         phase6(**PHASE6_SINGLE_SIM)))
+        rows.append(("Ek pozisyonlar ilk pozisyonla eşit büyüklükte", ev(extra_size_pct=100.0)))
     return rows
 
 
@@ -1704,26 +1727,26 @@ def realism_label(p: SimParams) -> str:
 
 
 def realism_rows(cfg, ev) -> List[Tuple[str, "Evaluation"]]:
-    """Kıyas satırı: gerçekçilik payları olmadan (Kasım 2026 öncesi raporlardaki iyimser hesap)."""
+    """Giriş maliyeti kıyası: canlıda en az LIVE_FILL_MIN giriş ölçüldüyse o ortalama dolumla; yoksa giriş yoluna göre
+    1 sn'de dolsaydı (anlık taramanın hedefi) ya da eski ~5 sn varsayımıyla. Limit girişte satır yok."""
     base = params_from_cfg(cfg)
-    if not realism_label(base):
+    if not realism_label(base) or base.entry_limit:
         return []
-    rows = []
-    if base.entry_lag_pct > FAST_ENTRY_LAG_PCT and not base.entry_limit:
-        rows.append((f"Giriş 1 sn'de dolsaydı (gecikme payı %{base.entry_lag_pct:g} → %{FAST_ENTRY_LAG_PCT:g}; anlık "
-                     f"tarama)", ev(entry_lag_pct=FAST_ENTRY_LAG_PCT)))
-    if base.entry_lag_pct < ENTRY_LAG_PCT and not base.entry_limit:
-        rows.append((f"Eski giriş varsayımıyla (~5 sn, gecikme payı %{base.entry_lag_pct:g} → %{ENTRY_LAG_PCT:g})",
-                     ev(entry_lag_pct=ENTRY_LAG_PCT)))
-    fills = live_entry_fills(cfg) if not base.entry_limit else []
+    fills = live_entry_fills(cfg)
     if len(fills) >= LIVE_FILL_MIN:
         mean = float(np.mean(fills))
         lag = round(max(0.0, mean - base.slippage_pct), 3)
         if abs(lag - base.entry_lag_pct) >= 0.005:
-            rows.append((f"Canlıda ölçülen giriş maliyetiyle (dolum kapanıştan ort. {mean:+.3f}%, {len(fills)} giriş; "
-                         f"gecikme payı %{base.entry_lag_pct:g} → %{lag:g})", ev(entry_lag_pct=lag)))
-    return rows + [("Eski (iyimser) hesap: giriş gecikmesi, mum içi başabaş ve stop kayma payı yok",
-                    ev(be_intrabar=False, entry_lag_pct=0.0, stop_slip_pct=0.0))]
+            return [(f"Canlıda ölçülen giriş maliyetiyle (dolum kapanıştan ort. {mean:+.3f}%, {len(fills)} giriş; "
+                     f"gecikme payı %{base.entry_lag_pct:g} → %{lag:g})", ev(entry_lag_pct=lag))]
+        return []
+    if base.entry_lag_pct > FAST_ENTRY_LAG_PCT:
+        return [(f"Giriş 1 sn'de dolsaydı (gecikme payı %{base.entry_lag_pct:g} → %{FAST_ENTRY_LAG_PCT:g}; anlık "
+                 f"tarama)", ev(entry_lag_pct=FAST_ENTRY_LAG_PCT))]
+    if base.entry_lag_pct < ENTRY_LAG_PCT:
+        return [(f"Eski giriş varsayımıyla (~5 sn, gecikme payı %{base.entry_lag_pct:g} → %{ENTRY_LAG_PCT:g})",
+                 ev(entry_lag_pct=ENTRY_LAG_PCT))]
+    return []
 
 
 LIVE_FILL_MIN = 5                       # Canlı giriş maliyeti stres satırı için en az ölçülmüş giriş
@@ -1828,8 +1851,8 @@ def _same(a: float, b: float) -> bool:
 
 
 def exit_variant_rows(cfg, ev) -> List[Tuple[str, "Evaluation"]]:
-    """Çıkışların mevcut ayar çevresinde tek tek değişmesi: başabaş tetiği / tabanı, Kâr Al ±1, Zarar Kes ±0.5 (canlı
-    botun kabul ettiği aralıkta), zaman stopu, Faz 8 ek başabaş ve Faz 9 zaman stopları (açıksa)."""
+    """Çıkışların mevcut ayar çevresinde tek tek değişmesi: başabaş tetiği / tabanı, zaman stopu, Faz 8 ek başabaş ve
+    Faz 9 zaman stopları (açıksa). Kâr Al / Zarar Kes komşuları ızgarada (exit_grid)."""
     base = params_from_cfg(cfg)
     rows: List[Tuple[str, "Evaluation"]] = []
     if base.be_enabled:
@@ -1840,13 +1863,6 @@ def exit_variant_rows(cfg, ev) -> List[Tuple[str, "Evaluation"]]:
             if (not _same(f, base.be_floor_pct) and f < base.be_trigger_pct
                     and (not phase8_active(base) or f < base.extra_be_trigger_pct)):
                 rows.append((f"Başabaş tabanı +%{f:g} (şimdi +%{base.be_floor_pct:g})", ev(be_floor_pct=f)))
-    for tp in (base.tp_pct - 1, base.tp_pct + 1):
-        if tp >= 1 and (not base.be_enabled or tp > base.be_trigger_pct):
-            rows.append((f"Kâr Al +%{tp:g} (şimdi +%{base.tp_pct:g})", ev(tp_pct=tp)))
-    room = futures_liq_distance_pct(base.leverage, base.mmr_pct)
-    for sl in (base.sl_pct - 0.5, base.sl_pct + 0.5):
-        if 0.5 <= sl < room - LIVE_SL_MARGIN:
-            rows.append((f"Zarar Kes -%{sl:g} (şimdi -%{base.sl_pct:g})", ev(sl_pct=sl)))
     rows += [(f"Zaman stopu {m} dk", ev(hold_min=m)) for m in HOLD_TRIES if m != base.hold_min]
     if phase8_active(base):
         for x in EXTRA_BE_TRIES:
@@ -1974,38 +1990,38 @@ def window_variant_rows(cfg, other, tag: str = "") -> List[Tuple[str, "Evaluatio
 
 
 def cost_variant_rows(cfg, ev, depth: bool = False) -> List[Tuple[str, "Evaluation"]]:
-    """Maliyet stresi: kayma 2 / 3 / 5 katı, komisyon 2 katı, kötümser stop dolumu; emir defteri kayması açıksa onsuz
-    (eski hesap) kıyas."""
+    """Maliyet stresi: kayma 2 / 3 / 5 katı, komisyon 2 katı, kötümser stop dolumu (en kötü durum)."""
     base = params_from_cfg(cfg)
-    pre = ([("Emir defteri kayması yok (eski hesap: kayma büyüklükten bağımsız)", ev(depth_impact=False))]
-           if depth and base.depth_impact else [])
     rows = [(f"Kayma {k} kat (%{base.slippage_pct * k:.2f})", ev(slippage_pct=base.slippage_pct * k))
             for k in SLIPPAGE_TRIES]
     rows.append(("Komisyon 2 kat", ev(taker_fee=base.taker_fee * 2, maker_fee=base.maker_fee * 2)))
     rows.append(("Kötümser stop dolumu (fitilin yarısı; en kötü durum, saniyelik veride gerçek dolum fitilin ~%3'ü)",
                  ev(harsh_stops=True)))
-    return pre + rows
+    return rows
 
 
-def _crash_variant_rows(cfg, signals, minute: bool, tag: str, ev, other, phase6,
+SCAN5_REF = "5 dk'da bir tarama (dakikalık tarama kapalı)"   # "· 5 dk taramayla" satırlarının kıyas satırı
+
+
+def _crash_variant_rows(cfg, signals, minute: bool, tag: str, ev, other,
                         depth: bool = False) -> List[Tuple[str, object]]:
     """Çöküş taktiğinin "tek kural değişince" satırları (gruplu; değeri None olan satır grup başlığı). `ev(sinyaller,
-    **SimParams değişikliği)`, `other(**cfg değişikliği)` (yeni sinyallerle) ve `phase6(**over)` değerlendirir;
-    variant_rows önce taslak fonksiyonlarla satırları sayar, sonra gerçek değerlendirmeyle çağırır."""
+    **SimParams değişikliği)` ve `other(**cfg değişikliği)` (yeni sinyallerle) değerlendirir; variant_rows önce taslak
+    fonksiyonlarla satırları sayar, sonra gerçek değerlendirmeyle çağırır. Kâr Al / Zarar Kes komşuları ızgarada (exit_grid).
+    Dakikalık taramada yeni sinyal gerektiren satırlar 5 dk taramayla hesaplanır: önce kıyas satırları (SCAN5_REF) gelir,
+    rapor bu satırları ona göre işaretler."""
     base = params_from_cfg(cfg)
-    trail = (("İzleyen stop kapalı", ev(trail_enabled=False)) if base.trail_enabled else
-             ("İzleyen stop +%3 / %1.5 (iyimser: saniyelik veride işlem başı %0.06-0.09 daha kötü)",
-              ev(trail_enabled=True, trail_act_pct=3.0, trail_gap_pct=1.5)))
     shield = (("Başabaş kalkanı kapalı", ev(be_enabled=False)) if base.be_enabled else
               ("Başabaş kalkanı açık (+%1 → +%0.3)", ev(be_enabled=True, be_trigger_pct=1.0, be_floor_pct=0.3)))
     tp_order = (("Kâr Al piyasa emriyle (taker)", ev(tp_limit=False)) if base.tp_limit else
                 ("Kâr Al limit emirle (maker)", ev(tp_limit=True)))
-    return ([("Çıkışlar ve başabaş", None), shield, trail,
-             ("Başabaş +%5 → +%2", ev(be_enabled=True, be_trigger_pct=5.0, be_floor_pct=2.0))]
+    trail = [("İzleyen stop kapalı", ev(trail_enabled=False))] if base.trail_enabled else []
+    scan5 = [(SCAN5_REF, ev([s for s in signals if not s.close_ms % FUT_BAR_MS]))] if minute else []
+    return ([("Çıkışlar ve başabaş", None), shield] + trail
             + exit_variant_rows(cfg, ev) + [tp_order] + phase8_rows(cfg, ev) + phase9_rows(cfg, ev)
             + [("Pozisyon büyüklüğü ve dalga modu", None)]
-            + size_variant_rows(cfg, ev, depth) + cascade_rows(cfg, ev, signals) + phase6_rows(cfg, ev, signals, phase6)
-            + [("Giriş kuralı, tarama ve bekleme", None)]
+            + size_variant_rows(cfg, ev, depth) + cascade_rows(cfg, ev, signals) + phase6_rows(cfg, ev, signals)
+            + [("Giriş kuralı, tarama ve bekleme", None)] + scan5
             + [(f"Çöküş eşiği %{cfg.futures_crash_drop_pct - 2:g}{tag}",
                 other(futures_crash_drop_pct=cfg.futures_crash_drop_pct - 2)),
                (f"Çöküş eşiği %{cfg.futures_crash_drop_pct + 2:g}{tag}",
@@ -2014,8 +2030,6 @@ def _crash_variant_rows(cfg, signals, minute: bool, tag: str, ev, other, phase6,
                 other(futures_crash_liq=not cfg.futures_crash_liq))]
             + window_variant_rows(cfg, other, tag)
             + [(name + tag, e) for name, e in long_window_rows(cfg, other)]
-            + ([("5 dk'da bir tarama (dakikalık tarama kapalı)",
-                 ev([s for s in signals if not s.close_ms % FUT_BAR_MS]))] if minute else [])
             + wait_variant_rows(cfg, ev)
             + [("Maliyet ve gerçekçilik", None)] + cost_variant_rows(cfg, ev, depth) + realism_rows(cfg, ev))
 
@@ -2039,28 +2053,12 @@ def variant_rows(cfg, data: FutData, signals, windows,
             if data.depth is not None:
                 data.depth.prefetch([(x.symbol, x.close_ms) for x in sigs])
             return evaluate(params_from_cfg(c2), data, sigs, windows)
-        wave_cache: List[List[FutSignal]] = []
-
-        def phase6(**over):     # Faz 6 setleri: dalga eşikli sinyaller (ayar zaten aynıysa mevcut sinyaller)
-            if not wave_cache:
-                if (futures_wave_rules(cfg) == ((1, 5.0), (4, 8.0))
-                        and int(getattr(cfg, "futures_wave_breadth", 12)) == PHASE6_WAVE["futures_wave_breadth"]):
-                    wave_cache.append(list(signals))
-                else:
-                    sigs, _f = find_signals(replace(cfg, **PHASE6_WAVE, **({"futures_minute_scan": False}
-                                                                           if minute else {})), data)
-                    load_windows(data, sigs, window_minutes(cfg), cache=windows)
-                    if data.depth is not None:
-                        data.depth.prefetch([(x.symbol, x.close_ms) for x in sigs])
-                    wave_cache.append(sigs)
-            return evaluate(params_from_cfg(cfg, **over), data, wave_cache[0], windows)
-
         def stub(*_a, **_k):
             return 0
         depth = data.depth is not None
-        total = sum(1 for _n, e in _crash_variant_rows(cfg, signals, minute, tag, stub, stub, stub, depth) if e is not None)
+        total = sum(1 for _n, e in _crash_variant_rows(cfg, signals, minute, tag, stub, stub, depth) if e is not None)
         bar = _RowProgress("Tek kural değişince", total, progress)
-        return _crash_variant_rows(cfg, signals, minute, tag, bar.wrap(ev), bar.wrap(other), bar.wrap(phase6), depth)
+        return _crash_variant_rows(cfg, signals, minute, tag, bar.wrap(ev), bar.wrap(other), depth)
     out = [("Başabaş kalkanı kapalı", ev(be_enabled=False)),
            ("Zaman stopu 30 dk", ev(hold_min=30)),
            ("Zaman stopu 120 dk", ev(hold_min=120)),
@@ -2904,16 +2902,22 @@ def _eval_line(ev: Evaluation) -> str:
             f"%{ev.win_rate:4.1f}, işlem başı {ev.avg_move:+.3f}%")
 
 
-def _lev_line(ev: Evaluation) -> str:
-    """Kaldıraç tablosu satırı: A'nın sonucu ve en büyük düşüşü, B'de kârlı yıl ve en kötü yıl içi düşüş, C'de
-    likidasyon (C'nin işlem başı sonucu kaldıraçtan bağımsızdır, satır satır tekrarlanmaz)."""
+LEV_HEAD = ("  Kaldıraç       12 ay ortanca  %60+ düşüş  kill-switch  │  A) tek hesap        A düşüş  B en kötü yıl")
+
+
+def _lev_line(ev: Evaluation, roll: Optional[dict] = None) -> str:
+    """Kaldıraç tablosu satırı: her ayın 1'inde başlayan hesapların özeti (12 ay ortanca getiri, %60'ı aşan düşüş,
+    kill-switch'in durdurduğu hesap; kill-switch uygulanır), sonra A'nın sonucu ve en büyük düşüşü (A kill-switch
+    uygulamaz: durduracağı gün yazılır) ve B'de en kötü yıl içi düşüş."""
     ch = ev.chained
-    ruined = f"eridi {_date(ch.ruined_ms)}" if ch.ruined_ms else _pct(ch.net_pct)
+    a = f"eridi {_date(ch.ruined_ms)}" if ch.ruined_ms else _pct(ch.net_pct)
+    if ch.kill_ms and not ch.ruined_ms:
+        a += f" (durur {_date(ch.kill_ms)})"
     worst = max(((max_drawdown(r.curve)[0], y) for y, r in ev.years), default=(0.0, None))
-    return (f"{ruined:>16s} | {ev.profitable_years}/{len(ev.years)} | düşüş %{max_drawdown(ch.curve)[0]:4.1f} | "
-            f"en kötü yıl %{worst[0]:4.1f}" + (f" ({worst[1]})" if worst[1] else "")
-            + f" | likidasyon {sum(tr.liquidated for tr in ev.trades)}"
-            + (f" | kill-switch {_date(ch.kill_ms)}" if ch.kill_ms else " | kill-switch yok"))
+    left = (f"{_pct(roll['median']):>13s}  {roll['dd60']:>4d} / {roll['n']:<3d}  {roll['kills']:>6d}     "
+            if roll else f"{'—':>13s}  {'—':>10s}  {'—':>6s}     ")
+    return (left + f"│  {a:<19s}  %{max_drawdown(ch.curve)[0]:5.1f}  %{worst[0]:4.1f}"
+            + (f" ({worst[1]})" if worst[1] else ""))
 
 
 def cascade_label(p: SimParams) -> str:
@@ -2921,12 +2925,12 @@ def cascade_label(p: SimParams) -> str:
     parts = []
     if p.max_positions > 1 and p.extra_size_pct >= 100:
         parts.append(f"🌊 Dalga modu: en fazla {p.max_positions} pozisyon (her biri bakiyenin "
-                     f"%{p.margin_usage_pct / p.max_positions:.1f}'i teminat × {p.leverage}x); ek pozisyon yalnızca son 1 "
+                     f"{_pct_of(p.margin_usage_pct / p.max_positions, 1)} teminat × {p.leverage}x); ek pozisyon yalnızca son 1 "
                      f"saatte ≥{p.extra_breadth} coin %3+ düşerken")
     elif p.max_positions > 1:
         first, each = p.margin_usage_pct * slot_share(p, 0), p.margin_usage_pct * slot_share(p, 1)
-        parts.append(f"🌊 Dalga modu: en fazla {p.max_positions} pozisyon (ilk pozisyon bakiyenin %{first:.1f}'i teminat "
-                     f"× {p.leverage}x, ek pozisyonlar %{each:.1f}'i: ilkinin %{p.extra_size_pct:g}'i); ek pozisyon "
+        parts.append(f"🌊 Dalga modu: en fazla {p.max_positions} pozisyon (ilk pozisyon bakiyenin {_pct_of(first, 1)} teminat "
+                     f"× {p.leverage}x, ek pozisyonlar {_pct_of(each, 1)}: ilkinin {_pct_of(p.extra_size_pct, 1)}); ek pozisyon "
                      f"yalnızca son 1 saatte ≥{p.extra_breadth} coin %3+ düşerken")
     if p.isolated_size_pct < 100:
         parts.append(f"yalnız çöküşte (≤{p.isolated_breadth - 1} coin düşüyor) pozisyon %{p.isolated_size_pct:g}")
@@ -3060,6 +3064,10 @@ def live_status(symbol: str, row: Optional[dict]) -> Tuple[str, str]:
     return "analiz edilmedi", "coin analiz edilmedi (24 saatlik ön eleme ya da mumu alınamadı)"
 
 
+LIVE_TIMING_MIN_SCANS = 20    # Şimdi kullanılmayan giriş yolunun zamanlama satırı en az bu kadar taramayla
+LIVE_FILL_MIN_SHOWN = 3       # ...ve dolum satırı en az bu kadar girişle gösterilir
+
+
 def live_timing(cfg, journal: Sequence[dict]) -> List[str]:
     """Canlı botun ölçtüğü giriş gecikmesi (tarama kaydındaki "ms" ve "f" alanları): taramanın mum kapanışından kaç
     saniye sonra başladığı / mumların ne zaman alındığı ve açılan pozisyonların ne zaman, kapanış fiyatına göre kaça
@@ -3072,11 +3080,13 @@ def live_timing(cfg, journal: Sequence[dict]) -> List[str]:
         return 2 if r.get("sn") else int(bool(r.get("fast")))
     tags = {0: "hızlı giriş kapalı: ", 1: "hızlı giriş açık: ", 2: "anlık tarama: "}
     modes = sorted({mode_of(r) for r in journal if r.get("ms") or r.get("f")})
+    current = 2 if futures_snapshot_on(cfg) else int(bool(getattr(cfg, "futures_fast_entry", False)))
     for fast in modes:
         rows = [r for r in journal if mode_of(r) == fast]
         tag = "" if len(modes) == 1 and not fast else tags[fast]
         scans = [r["ms"] for r in rows if isinstance(r.get("ms"), list) and len(r["ms"]) >= 3]
-        if scans:
+        few = fast != current and len(modes) > 1           # Şimdi kullanılmayan yol: az örnekli satırı gürültü
+        if scans and not (few and len(scans) < LIVE_TIMING_MIN_SCANS):
             st, kl, sg = (float(np.median([m[i] for m in scans])) / 1000 for i in range(3))
             retried = sum(1 for r in rows if r.get("kt"))
             quiet = sum(1 for r in rows if r.get("kq"))
@@ -3090,7 +3100,7 @@ def live_timing(cfg, journal: Sequence[dict]) -> List[str]:
                        + (f"; Binance ile saat farkı ortanca {np.median(offsets):.0f} ms" if offsets else "") + ")")
         fills = [f for r in rows for f in (r.get("f") or {}).values() if isinstance(f, dict)]
         lags = [float(f.get("x", f.get("r"))) / 1000 for f in fills if f.get("x", f.get("r")) is not None]
-        if lags:
+        if lags and not (few and len(lags) < LIVE_FILL_MIN_SHOWN):
             slips = [float(f["p"]) for f in fills if f.get("p") is not None]
             text = (f"  Giriş gecikmesi ({tag}mum kapanışı → dolum): ortalama {np.mean(lags):.1f} sn, ortanca "
                     f"{np.median(lags):.1f} sn, en uzun {max(lags):.1f} sn ({len(lags)} giriş)")
@@ -3133,6 +3143,7 @@ def live_snapshot_check(journal: Sequence[dict]) -> List[str]:
 
 
 ACCOUNT_BLOCK_RECENT_MS = 6 * FUT_HOUR_MS    # Hesap modu reddi bundan yeniyse "hâlâ sürüyor olabilir" diye uyarılır
+ACCOUNT_BLOCK_STALE_MS = 3 * DAY_MS          # Çözülmüş (sonra pozisyon açılmış) ret bundan eskiyse rapora yazılmaz
 
 
 def live_account_block(journal: Sequence[dict]) -> Optional[str]:
@@ -3149,6 +3160,8 @@ def live_account_block(journal: Sequence[dict]) -> Optional[str]:
     head = (f"{len(hits)} taramada giriş reddedildi (son {when}): Binance hesabı o an Çoklu Varlık (Multi-Assets) "
             f"modundaydı, bu modda yalıtılmış teminat kullanılamaz (-4168)")
     if any(int(r["t"]) > last and "açıldı" in (r.get("s") or {}).values() for r in journal):
+        if end - last > ACCOUNT_BLOCK_STALE_MS:          # Çözülmüş ve eski: rapora yazılmaz
+            return None
         return f"  ℹ️ {head}. Sonrasında pozisyon açılabilmiş: engel kalkmış."
     if end - last <= ACCOUNT_BLOCK_RECENT_MS:
         return (f"  ⛔ {head}. Ret çok yeni; hesap hâlâ bu moddaysa bot hiçbir sinyali açamaz. Binance → Vadeli → "
@@ -3250,7 +3263,6 @@ def live_comparison(cfg, data: FutData, trades: Sequence[FutTrade], path: Option
 RISK_START_MONTHS = 12          # "Her ayın 1'inde başlayan hesap" penceresi (ay)
 RISK_WORST_DAYS = 6             # Raporda gösterilen en kötü gün sayısı
 RISK_DEEP_TRADES = 5            # Zarar kes kayarsa: gösterilen en derin işlem sayısı
-RISK_SLIPPAGE_MULTS = (2, 3, 4, 5)
 
 
 def risk_ref_leverage(lev: int) -> Optional[int]:
@@ -3325,8 +3337,8 @@ def _equity_at(curve: Sequence[Tuple[int, float]], t: int) -> float:
 def leverage_risk(cfg, data: FutData, signals, windows, fixed_trades: Sequence[FutTrade]) -> Optional[dict]:
     """Kaldıraç riski bölümünün ölçüleri (ayardaki kaldıraç ve risk_ref_leverage kıyası; aynı sinyaller ve çıkışlar):
     her yıl 1 Ocak'tan başlayan hesabın düşüşleri ve kill-switch'i, en kötü günler, her ayın 1'inde başlayan hesapların
-    ilk 12 ayı, zarar kes kayarsa likidasyon bölgesine giren işlemler (sabit boy işlemlerin stop dakikasındaki dibi) ve
-    kayma stresi. Rapordaki A / B tabloları stopun tam stop fiyatından dolduğunu varsayar ve kill-switch'i uygulamaz."""
+    ilk 12 ayı, zarar kes kayarsa likidasyon bölgesine giren işlemler (sabit boy işlemlerin stop dakikasındaki dibi).
+    Kayma stresi tek kural tablosunun maliyet grubunda. A / B tabloları kill-switch'i uygulamaz."""
     base = params_from_cfg(cfg)
     lev = int(base.leverage)
     ref = risk_ref_leverage(lev)
@@ -3334,7 +3346,7 @@ def leverage_risk(cfg, data: FutData, signals, windows, fixed_trades: Sequence[F
     kill = float(base.kill_pct or 0.0)
     cap = float(base.start_capital)
     out = {"lev": lev, "ref": ref, "levs": levs, "kill": kill, "start": cap, "yearly": {L: [] for L in levs},
-           "daily": {L: {} for L in levs}, "roll": {L: [] for L in levs}, "stress": {L: [] for L in levs}}
+           "daily": {L: {} for L in levs}, "roll": {L: [] for L in levs}}
     for y in range(_year(data.start_ms), _year(data.end_ms - 1) + 1):
         a, b = max(data.start_ms, _ms(f"{y}-01-01")), min(data.end_ms, _ms(f"{y + 1}-01-01"))
         if b - a < 30 * DAY_MS:
@@ -3353,10 +3365,6 @@ def leverage_risk(cfg, data: FutData, signals, windows, fixed_trades: Sequence[F
     out["sl"] = len(sl)
     out["liq"] = {L: futures_liq_distance_pct(L, base.mmr_pct) for L in levs}
     out["beyond"] = {L: sorted((t for t in sl if t.mae_pct >= out["liq"][L]), key=lambda t: -t.mae_pct) for L in levs}
-    for k in RISK_SLIPPAGE_MULTS:
-        for L in levs:
-            res = simulate(replace(base, leverage=L, slippage_pct=base.slippage_pct * k), data, signals, windows)
-            out["stress"][L].append((k, res.ruined_ms, res.final_equity))
     return out
 
 
@@ -3371,8 +3379,8 @@ def leverage_risk_lines(risk: Optional[dict]) -> List[str]:
     lev, ref, levs, kill, cap = risk["lev"], risk["ref"], risk["levs"], risk["kill"], risk["start"]
     tag = f"{lev}x" + (f", kıyas {ref}x" if ref else "")
     L = [f"🧯 KALDIRAÇ RİSKİ ({tag}; aynı sinyaller ve çıkışlar, {_usdt(cap)} USDT ile)",
-         "  A / B tabloları zarar kes emrinin tam stop fiyatından dolduğunu varsayar ve kill-switch'i uygulamaz; bu bölüm "
-         "yıl içindeki dipleri, kill-switch'i ve stop kaymasını gösterir."]
+         "  A / B tabloları kill-switch'i uygulamaz; bu bölüm yıl içindeki dipleri, kill-switch'i ve stopun "
+         "likidasyona kadar kayma riskini gösterir."]
     if risk["yearly"].get(lev):
         L.append("  Her yıl 1 Ocak'tan başlayan hesap: yıl sonu | yıl içindeki en büyük düşüş (dip tarihi) | en düşük bakiye")
         by_year = {L2: {y: (st, ruined) for y, st, ruined in risk["yearly"][L2]} for L2 in levs}
@@ -3391,7 +3399,7 @@ def leverage_risk_lines(risk: Optional[dict]) -> List[str]:
             for L2 in levs:
                 stops = [f"{y} ({_date(st['kill_ms'])})" for y, st, _r in risk["yearly"][L2] if st["kill_ms"]]
                 parts.append(f"{L2}x: " + (", ".join(stops) if stops else "hiçbir yılda"))
-            L.append(f"  Kill-switch (toplam zarar sermayenin %{kill:g}'i) uygulansaydı 1 Ocak başlangıçlı hesabı durdururdu: "
+            L.append(f"  Kill-switch (toplam zarar sermayenin {_pct_of(kill, 1)}) uygulansaydı 1 Ocak başlangıçlı hesabı durdururdu: "
                      + " | ".join(parts))
     daily = {day: v for day, v in (risk["daily"].get(lev) or {}).items() if v[0] < 0}      # Yalnızca kayıplı günler
     if daily:
@@ -3429,8 +3437,9 @@ def leverage_risk_lines(risk: Optional[dict]) -> List[str]:
             L.append(line)
     if risk.get("sl"):
         cur = risk["beyond"][lev]
-        line = (f"  Zarar kes kayarsa: {risk['sl']} zarar kes işleminin {len(cur)}'inde stop dakikasında fiyat girişin "
-                f"%{risk['liq'][lev]:.1f}'inden fazla altına indi ({lev}x'te stop o dibe kayarsa likidasyon")
+        line = (f"  Zarar kes kayarsa: {risk['sl']} zarar kes işleminin {_int_case(len(cur), 'loc')} stop dakikasında "
+                f"fiyat girişin {_pct_case(risk['liq'][lev], 'abl', 1)} fazla altına indi ({lev}x'te stop o dibe kayarsa "
+                f"likidasyon")
         if ref:
             line += f"; {ref}x için %{risk['liq'][ref]:.1f}: {len(risk['beyond'][ref])} işlem"
         line += ")"
@@ -3438,12 +3447,6 @@ def leverage_risk_lines(risk: Optional[dict]) -> List[str]:
             line += ". En derinleri: " + ", ".join(f"{_date(t.entry_ms)} {t.symbol[:-4] if t.symbol.endswith('USDT') else t.symbol} "
                                                     f"−%{t.mae_pct:.1f}" for t in cur[:RISK_DEEP_TRADES])
         L.append(line)
-    if risk["stress"].get(lev):
-        parts = []
-        for L2 in levs:
-            cells = [f"×{k}: " + (f"ERİDİ {_date(r)}" if r else f"{_usdt(e)}") for k, r, e in risk["stress"][L2]]
-            parts.append(f"{L2}x " + ", ".join(cells))
-        L.append("  Kayma katlanırsa (tek hesap, son bakiye USDT): " + " | ".join(parts))
     return L
 
 
@@ -3458,9 +3461,20 @@ _UNIT_SFX = {1: "i", 2: "si", 3: "ü", 4: "ü", 5: "i", 6: "sı", 7: "si", 8: "i
 _TEN_SFX = {1: "u", 2: "si", 3: "u", 4: "ı", 5: "si", 6: "ı", 7: "i", 8: "i", 9: "ı"}       # on, yirmi ... doksan
 
 
-def _pct_of(v: float, digits: int = 0) -> str:
-    """Yüzdenin Türkçe iyelik ekiyle yazımı (`digits` ondalık, sondaki sıfırlar atılır): %27'si, %65'i, %60'ı, %100'ü,
-    %81.4'ü. Ek, okunuştaki son kelimeye göre: ondalıklıda son basamak, tam sayıda birler ya da onlar basamağı."""
+def _int_sfx(n: int) -> str:
+    """Tam sayının Türkçe iyelik eki (okunuştaki son kelimeye göre): 1'i, 2'si, 6'sı, 10'u, 40'ı, 100'ü, 1000'i."""
+    n = abs(int(n))
+    if n % 10:
+        return _UNIT_SFX[n % 10]
+    if n % 100:
+        return _TEN_SFX[(n // 10) % 10]
+    if n == 0:
+        return "ı"                                  # sıfır
+    return "ü" if n % 1000 else "i"                 # yüz / bin
+
+
+def _pct_parts(v: float, digits: int = 0) -> Tuple[str, str]:
+    """(%-li sayı, iyelik eki): ondalıklıda son basamağa, tam sayıda birler ya da onlar basamağına göre."""
     text = f"{abs(v):.{digits}f}"
     if "." in text:
         text = text.rstrip("0").rstrip(".")
@@ -3468,18 +3482,41 @@ def _pct_of(v: float, digits: int = 0) -> str:
         last = int(text[-1])
         sfx = _UNIT_SFX[last] if last else "ı"
     else:
-        n = int(text)
-        if n % 10:
-            sfx = _UNIT_SFX[n % 10]
-        elif n % 100:
-            sfx = _TEN_SFX[(n // 10) % 10]
-        elif n == 0:
-            sfx = "ı"                               # sıfır
-        elif n % 1000:
-            sfx = "ü"                               # yüz
-        else:
-            sfx = "i"                               # bin
-    return f"{'−' if v < 0 and float(text) else ''}%{text}'{sfx}"
+        sfx = _int_sfx(int(text))
+    return f"{'−' if v < 0 and float(text) else ''}%{text}", sfx
+
+
+def _pct_of(v: float, digits: int = 0) -> str:
+    """Yüzdenin Türkçe iyelik ekiyle yazımı (`digits` ondalık, sondaki sıfırlar atılır): %27'si, %65'i, %60'ı, %100'ü,
+    %81.4'ü. Ek, okunuştaki son kelimeye göre: ondalıklıda son basamak, tam sayıda birler ya da onlar basamağı."""
+    text, sfx = _pct_parts(v, digits)
+    return f"{text}'{sfx}"
+
+
+def _case(sfx: str, kind: str) -> str:
+    """İyelik ekinin ardına hâl eki (ünlü uyumuyla): acc → -ni / -nı / -nu / -nü, abl → -nden / -ndan, loc → -nde /
+    -nda, ins → -yle / -yla."""
+    v = sfx[-1]
+    back = v in "ıu"
+    if kind == "acc":
+        return sfx + "n" + v
+    if kind == "abl":
+        return sfx + ("ndan" if back else "nden")
+    if kind == "loc":
+        return sfx + ("nda" if back else "nde")
+    return sfx + ("yla" if back else "yle")
+
+
+def _pct_case(v: float, kind: str, digits: int = 0) -> str:
+    """%-li sayı iyelik + hâl ekiyle: _pct_case(93, "acc") → "%93'ünü", _pct_case(16.2, "abl", 1) → "%16.2'sinden",
+    _pct_case(10, "ins") → "%10'uyla"."""
+    text, sfx = _pct_parts(v, digits)
+    return f"{text}'{_case(sfx, kind)}"
+
+
+def _int_case(n: int, kind: str) -> str:
+    """Sayı iyelik + hâl ekiyle: _int_case(8, "loc") → "8'inde", _int_case(6, "loc") → "6'sında"."""
+    return f"{int(n)}'{_case(_int_sfx(int(n)), kind)}"
 
 
 def _month_range(y: int, m: int) -> Tuple[int, int]:
@@ -3537,8 +3574,7 @@ def monthly_cluster_lines(rows: Sequence[dict]) -> List[str]:
         return []
     L = ["📆 AYLIK İŞLEM YIĞILMASI (C: sabit pozisyon işlemleri; B: her yıl yeniden başlayan hesap)",
          f"  Yığılma: ayın günlük işlem hızı o yılın ortalamasının en az {CLUSTER_RATIO:g} katı (×). Paylar yılın işlem "
-         f"sayısına ve C'deki net kârına göre; B ay: B hesabının o aydaki getirisi (parantezde ay içindeki en büyük "
-         f"düşüş)."]
+         f"sayısına ve C'deki net kârına göre."]
     tot_months = tot_cl = tot_n = tot_cn = 0
     tot_sum = tot_csum = 0.0
     for r in rows:
@@ -3558,14 +3594,6 @@ def monthly_cluster_lines(rows: Sequence[dict]) -> List[str]:
         share = f", C kârının {_pct_of(csum / ysum * 100)}" if ysum > 0 else ""
         L.append(f"{head} | yığılma: " + " · ".join(f"{MONTHS_TR[mo['m'] - 1]} {mo['n']} (×{mo['x']:.1f})" for mo in cl)
                  + f" → işlemlerin {_pct_of(cn / n * 100)}{share}")
-        parts = []
-        for mo in cl:
-            txt = (f"{MONTHS_TR[mo['m'] - 1]}: işlem başı {mo['sum'] / mo['n']:+.3f}%, kazanma "
-                   f"%{mo['wins'] / mo['n'] * 100:.0f}, C {mo['sum']:+.1f}%")
-            if mo["ret"] is not None:
-                txt += f", B ay {_pct(mo['ret'])} (düşüş %{mo['dd']:.0f})"
-            parts.append(txt)
-        L.append("    " + " · ".join(parts))
         rest = [mo for mo in r["months"] if not mo["cluster"]]
         rn, rsum = sum(mo["n"] for mo in rest), sum(mo["sum"] for mo in rest)
         txt = f"    Yığılma ayları olmadan: C {rsum:+.1f}% (yerine {ysum:+.1f}%)"
@@ -3594,7 +3622,7 @@ def depth_lines(p: SimParams, data: FutData, res: FutResult) -> List[str]:
     if p.depth_cap_pct > 0 and data.depth is not None:
         capped = sum(1 for tr in res.trades if tr.depth_capped)
         out.append(f"📏 Derinliğe göre boy: pozisyon, girişten önceki 2 dk'da fiyatın ±%1 içindeki alış ve satış "
-                   f"emirlerinden küçük olanın %{p.depth_cap_pct:g}'iyle sınırlı (1.000 USDT altındaki pozisyonda "
+                   f"emirlerinden küçük olanın {_pct_case(p.depth_cap_pct, 'ins', 1)} sınırlı (1.000 USDT altındaki pozisyonda "
                    f"bakılmaz); aynı anda birden çok sinyalde sınıra takılınca kapasitesi büyük olan önce. A'da "
                    f"{capped} / {len(res.trades)} işlem sınıra takıldı")
     if p.depth_impact and data.depth is not None:
@@ -3683,6 +3711,26 @@ def half_year_lines(res: FutResult, start_capital: float, start_ms: int, end_ms:
     return L
 
 
+def sl_streak_line(p: SimParams, trades: Sequence[FutTrade]) -> str:
+    """En uzun art arda zarar kes serisinin (C, giriş sırasıyla) ilk pozisyon boyunda bakiyeye etkisi: her zarar kes
+    teminatın stop mesafesi + kayma + komisyon × kaldıraç kadarını götürür; düşüşte küçültme açıksa eşikten sonra küçük boy."""
+    run = best = 0
+    for tr in trades:
+        run = run + 1 if tr.reason == "SL" else 0
+        best = max(best, run)
+    best = max(best, 1)
+    share = p.margin_usage_pct * (slot_share(p, 0) if p.max_positions > 1 else 1.0)
+    per_loss = (p.sl_pct + 2 * p.slippage_pct + p.stop_slip_pct + 2 * p.taker_fee * 100) * p.leverage * share / 100
+    equity = peak = 100.0
+    for _ in range(best):
+        equity *= 1 - per_loss / 100 * dd_scale_factor(p.dd_scale_pct, p.dd_scale_size_pct, equity, peak)
+    scaled = " (düşüşte küçültmeyle)" if p.dd_scale_pct > 0 and equity < peak * (1 - p.dd_scale_pct / 100) else ""
+    size = "ilk pozisyon boyunda" if p.max_positions > 1 else "tam boyda"
+    return (f"En uzun zarar kes serisi {best} işlem: {p.leverage}x'te {size} (bakiyenin "
+            f"{_pct_of(share, 1)} teminat) art arda {best} zarar kes bakiyenin ~{_pct_case(100 - equity, 'acc')} götürür"
+            f"{scaled}; her biri ~%{per_loss:.1f}.")
+
+
 def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None, grid=None, variants=None,
                   live: Optional[List[str]] = None, draws: Optional[Sequence[float]] = None,
                   risk: Optional[dict] = None) -> str:
@@ -3701,11 +3749,11 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
         L.append(f"Coinler: {data.universe_note}; son ay: {','.join(last[:20])}" + (" ..." if len(last) > 20 else ""))
     else:
         L.append("Coinler: " + "; ".join(f"{_date(s.start_ms)}'den: {','.join(s.coins)}" for s in data.segments))
-    margin_text = (f"serbest bakiyenin %{p.margin_usage_pct:g}'i (bileşik)" if p.max_positions <= 1 else
-                   f"pozisyon başına bakiyenin %{p.margin_usage_pct / p.max_positions:.1f}'i (en fazla "
+    margin_text = (f"serbest bakiyenin {_pct_of(p.margin_usage_pct, 1)} (bileşik)" if p.max_positions <= 1 else
+                   f"pozisyon başına bakiyenin {_pct_of(p.margin_usage_pct / p.max_positions, 1)} (en fazla "
                    f"{p.max_positions} pozisyon, bileşik)" if p.extra_size_pct >= 100 else
-                   f"ilk pozisyon bakiyenin %{p.margin_usage_pct * slot_share(p, 0):.1f}'i, ek pozisyonlar "
-                   f"%{p.margin_usage_pct * slot_share(p, 1):.1f}'i (en fazla {p.max_positions} pozisyon, bileşik)")
+                   f"ilk pozisyon bakiyenin {_pct_of(p.margin_usage_pct * slot_share(p, 0), 1)}, ek pozisyonlar "
+                   f"{_pct_of(p.margin_usage_pct * slot_share(p, 1), 1)} (en fazla {p.max_positions} pozisyon, bileşik)")
     L.append(f"Kaldıraç {p.leverage}x isolated | teminat: {margin_text} | başlangıç {p.start_capital:g} USDT")
     L.extend(depth_lines(p, data, res))
     if p.dd_scale_pct > 0:
@@ -3761,9 +3809,9 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
     per_month = funnel.signals / max(days / 30.4, 1e-9)
     if crash:
         L.append("🔎 Sinyal hunisi (aktif dönemdeki 5 dk mumlar):")
-        L.append(f"  {_num(funnel.candles, 0)} mum → {cfg.futures_crash_hours} saatte ≥%{cfg.futures_crash_drop_pct:g} "
-                 f"düşüş {_num(funnel.liq, 0)} (likidasyon dalgalı: {_num(funnel.liq_vol, 0)}) → {_num(funnel.signals, 0)} "
-                 f"sinyal mumu" + (f" + {_num(funnel.wave, 0)} dalga eşiği sinyali" if funnel.wave else "")
+        L.append(f"  {_num(funnel.candles, 0)} mum → çöküş kuralını ({rule_label(cfg).split(' · ')[0]}) geçen "
+                 f"{_num(funnel.liq, 0)} (bunların likidasyon dalgalı olanı: {_num(funnel.liq_vol, 0)}) → "
+                 f"{_num(funnel.signals, 0)} sinyal mumu" + (f" + {_num(funnel.wave, 0)} dalga eşiği sinyali" if funnel.wave else "")
                  + (f" + {_num(funnel.between, 0)} ara dakika sinyali" if funnel.between else "")
                  + f" ({'tek pozisyon' if p.max_positions <= 1 else 'pozisyon sınırı'} ve bekleme "
                  f"kurallarıyla işleme dönüşen {len(fixed)})")
@@ -3829,17 +3877,26 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
     if fixed:
         moves = [net_move_pct(tr) for tr in fixed]
         gross = [m + tr.fees / tr.notional * 100 + tr.funding / tr.notional * 100 for m, tr in zip(moves, fixed)]
+        roe = np.mean(moves) * p.leverage
         L.append(f"  Toplam {len(fixed)} işlem | kazanma %{ev.win_rate:.1f} | işlem başı net {np.mean(moves):+.3f}% "
-                 f"(komisyon ve fonlama hariç {np.mean(gross):+.3f}%) | "
-                 f"{p.leverage}x'te teminatın {np.mean(moves) * p.leverage:+.2f}%'i")
+                 f"(komisyon ve fonlama hariç {np.mean(gross):+.3f}%) | {p.leverage}x'te teminata göre "
+                 f"{'+' if roe >= 0 else '−'}%{abs(roe):.2f}")
         L.append("")
-        L.append("📌 Çıkış nedenleri (C):")
+        total = sum(tr.pnl for tr in fixed)
+        L.append("📌 Çıkış nedenleri (C; net = komisyon, kayma ve fonlama dahil fiyat hareketi):")
+        L.append("  Çıkış           İşlem  (pay)  | net ort. | toplam kârdaki payı | ort. ROE | ort. süre")
         for reason in ("TP", "TRAIL", "BE", "SL", "TIME", "LIQ", "END"):
             group = [tr for tr in fixed if tr.reason == reason]
             if group:
-                L.append(f"  {REASON_TR[reason]:14s} {len(group):5d} (%{len(group) / len(fixed) * 100:4.1f}) | ort. ROE "
-                         f"{np.mean([tr.roe_pct for tr in group]):+6.2f}% | ort. süre "
-                         f"{np.mean([(tr.exit_ms - tr.entry_ms) / MIN_MS for tr in group]):3.0f} dk")
+                part = sum(tr.pnl for tr in group) / total * 100 if total else 0.0
+                L.append(f"  {REASON_TR[reason]:14s} {len(group):5d} (%{len(group) / len(fixed) * 100:4.1f}) | "
+                         f"{np.mean([net_move_pct(tr) for tr in group]):+7.3f}% | "
+                         f"{('+' if part >= 0 else '−') + '%' + f'{abs(part):.0f}':>19s} | "
+                         f"{np.mean([tr.roe_pct for tr in group]):+7.2f}% | "
+                         f"{np.mean([(tr.exit_ms - tr.entry_ms) / MIN_MS for tr in group]):5.0f} dk")
+        if any(tr.reason == "BE" for tr in fixed):
+            L.append("  (Başabaş bir kâr çıkışı değil: dönüşü sönen işlemi zarar kese gitmeden kapatır ve yuvayı yeni "
+                     "sinyale açar; kâr Kâr Al ve zaman stopundan gelir.)")
         for side, name in (("long", "LONG"), ("short", "SHORT")):
             group = [tr for tr in fixed if tr.side == side]
             if group:
@@ -3872,10 +3929,7 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
         L.append(f"  Zarar kes OLMASAYDI: {p.hold_min} dk içinde fiyatın likidasyon mesafesini aştığı işlem:")
         L.append("    " + " | ".join(f"{lev}x (%{futures_liq_distance_pct(lev, p.mmr_pct):.1f}): "
                                    f"{int((wm >= futures_liq_distance_pct(lev, p.mmr_pct)).sum())}" for lev in LEVERAGES))
-        streak = max(streaks(fixed)[0], 1)
-        per_loss = (p.sl_pct + 2 * p.slippage_pct + 2 * p.taker_fee * 100) * p.leverage * p.margin_usage_pct / 100
-        L.append(f"  En uzun kayıp serisi {streak} işlem: {p.leverage}x'te art arda {streak} zarar kes bakiyenin "
-                 f"~%{(1 - (1 - per_loss / 100) ** streak) * 100:.0f}'ini götürür (işlem başı ~%{per_loss:.1f}).")
+        L.append("  " + sl_streak_line(p, fixed))
         cluster_lines = monthly_cluster_lines(monthly_clusters(ev, data))
         if cluster_lines:
             L.append("")
@@ -3886,47 +3940,52 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
                  f"{(1 - band[0]) * 100:.0f} … +%{(band[1] - 1) * 100:.0f} şans payı; ▼ eriyen de); işaretsiz satırlardaki "
                  f"fark şans olabilir. C (sabit pozisyon) bileşik büyümeden bağımsız ölçüdür." if band else "")
     if levs:
+        rows = [r if isinstance(r, LevRow) else LevRow(*r) for r in levs]
+        n = next((r.roll["n"] for r in rows if r.roll), None)
         L.append("")
         L.append("🎚️ KALDIRAÇ DUYARLILIĞI (aynı sinyaller ve çıkışlar)")
-        L.append("  Kaldıraç                    A) tek hesap | B) kârlı yıl | A'da en büyük düşüş | B'de en kötü yıl içi "
-                 f"düşüş | C'de likidasyon | kill-switch (%{p.kill_pct:g}) A'yı durdururdu")
-        for lev, ev2, note in levs:
-            label = f"{lev}x" + (" ◀ şimdiki" if lev == p.leverage else "")
-            if ev2 is None:
-                L.append(f"  {label:26s} — ({note})")
+        limit = ("emir defteri kayması ve derinliğe göre boy büyük pozisyonları sınırladığı için"
+                 if p.depth_impact and data.depth is not None else
+                 f"pozisyon tutarı en fazla {_num(p.max_notional, 0)} USDT kabul edildiği için")
+        L.append((f"  Sol taraf: her ayın 1'inde başlayan {n} hesabın ilk 12 ayı (kill-switch uygulanır); bugün başlayan "
+                  f"biri için asıl ölçü bu. " if n else "  ")
+                 + f"A tek bir başlangıç tarihidir; hesap büyüyünce {limit} kaldıraçtan neredeyse bağımsızdır.")
+        L.append(LEV_HEAD)
+        for r in rows:
+            label = f"{r.lev}x" + (" ◀ şimdiki" if r.lev == p.leverage else "")
+            if r.ev is None:
+                L.append(f"  {label:13s}  — ({r.note})")
             else:
-                L.append(f"  {label:26s} " + _lev_line(ev2) + (f" | {note}" if note else ""))
-        if any(ev2 is not None for _lev, ev2, _n in levs):
-            limit = ("emir defteri kayması açık: kaldıraç büyüdükçe pozisyonlar büyür ve daha çok kayma öder, A düşebilir"
-                     if p.depth_impact and data.depth is not None else
-                     f"A'da pozisyon tutarı en fazla {_num(p.max_notional, 0)} USDT kabul edildiği için (likidite sınırı) "
-                     f"yüksek kaldıraçlarda son bakiyeler birbirine yaklaşır")
-            L.append("  (C'nin işlem başı sonucu her kaldıraçta aynıdır; kaldıraç yalnızca bileşik büyümeyi, düşüşü ve "
-                     f"erime riskini değiştirir. {limit[0].upper() + limit[1:]}; kaldıraç seçerken düşüş sütunlarına da "
-                     f"bakın. A kill-switch'i uygulamaz: tarih yazan satırlarda bot o gün durur ve A'nın sonucu "
-                     f"gerçekleşmez. Yıl içi dipler, her ay başlayan hesaplar ve kill-switch: 🧯 KALDIRAÇ RİSKİ)")
+                L.append(f"  {label:13s}" + _lev_line(r.ev, r.roll) + (f"  {r.note}" if r.note else ""))
     if risk:
         L.append("")
         L.extend(leverage_risk_lines(risk))
     if grid:
         L.append("")
-        L.append(f"🎯 KÂR AL / ZARAR KES DUYARLILIĞI ({p.leverage}x)")
+        L.append(f"🎯 KÂR AL / ZARAR KES (şimdiki ayarın çevresi, {p.leverage}x)")
         if band_note:
             L.append(band_note)
         L.append(head_row)
         for tp, sl, ev2 in grid:
-            L.append(f"  {_mark(ev2, res.final_equity, band)}{f'TP +%{tp:g} / SL -%{sl:g}':26s} " + _eval_line(ev2))
+            name = f"TP +%{tp:g} / SL -%{sl:g}" + (" ◀ şimdiki" if _same(tp, p.tp_pct) and _same(sl, p.sl_pct) else "")
+            L.append(f"  {_mark(ev2, res.final_equity, band)}{name:26s} " + _eval_line(ev2))
     if variants:
         L.append("")
         L.append("🧪 TEK KURAL DEĞİŞİNCE (diğer her şey aynı)")
         if band_note and not grid:
             L.append(band_note)
         L.append(head_row)
+        ref5 = next((e for n, e in variants if n == SCAN5_REF and e is not None), None)
         for name, ev2 in variants:
             if ev2 is None:                         # Grup başlığı
                 L.append(f"  ▸ {name}")
                 continue
-            L.append(f"  {_mark(ev2, res.final_equity, band)}{name:26s} " + _eval_line(ev2))
+            five = ref5 is not None and name.endswith("5 dk taramayla")   # 5 dk taramalı satırlar kendi kıyasıyla
+            L.append(f"  {_mark(ev2, ref5.chained.final_equity if five else res.final_equity, band)}{name:26s} "
+                     + _eval_line(ev2))
+            if name == SCAN5_REF and ref5 is not None:
+                L.append("    (alttaki \"· 5 dk taramayla\" satırları yeni sinyal gerektirdiği için 5 dk taramayla hesaplandı; "
+                         "▲ / ▼ bu satıra göre)")
     L.append("")
     if crash:
         L.append("⚠️ Çöküşte alım riskleri: ani çöküşlerde (ör. 10 Ekim 2025) zarar kes emri stop fiyatının çok ötesinde "
@@ -4053,7 +4112,13 @@ def attach_depth(cfg, data: FutData, signals: Sequence[FutSignal],
 def run_cli(cfg, days: Optional[int], end_ms: Optional[int], out_dir: Path, chart: bool = True,
             full_history: bool = False, exit_interval: str = "1m", sensitivity: bool = True,
             progress: Callable[[str], None] = print) -> Tuple[str, Optional[Path], Evaluation]:
-    """Backtesti çalıştırır; (rapor, grafik yolu, değerlendirme). İşlemler CSV olarak `out_dir`'e yazılır."""
+    """Backtesti çalıştırır; (rapor, grafik yolu, değerlendirme). İşlemler CSV olarak `out_dir`'e yazılır. İlerleme
+    mesajları "⏳" ile başlar: Telegram'daki durum satırında görünür, rapor dosyasına girmez (backtest_runner)."""
+    out = progress
+
+    def progress(msg: str) -> None:             # noqa: F811 - ilerleme mesajlarını işaretleyen sarmalayıcı
+        text = str(msg).strip()
+        out(text if text.startswith("⏳") else f"⏳ {text}")
     start, end, segments = period(cfg, days, end_ms, full_history)
     data = prepare(cfg, start, end, segments, exit_interval=exit_interval, progress=progress)
     progress("🔎 Sinyaller aranıyor ("
@@ -4073,7 +4138,7 @@ def run_cli(cfg, days: Optional[int], end_ms: Optional[int], out_dir: Path, char
         variants = variant_rows(cfg, data, signals, windows, progress=progress)
     risk = None
     if sensitivity:
-        progress("🧯 Kaldıraç riski hesaplanıyor (yıl içi dipler, her ay başlayan hesaplar, kill-switch, stop kayması)...")
+        progress("🧯 Kaldıraç riski hesaplanıyor (yıl içi dipler, her ay başlayan hesaplar, kill-switch)...")
         risk = leverage_risk(cfg, data, signals, windows, ev.trades)
     draws = draw_spread(params_from_cfg(cfg), data, signals, windows) if sensitivity else []
     report = format_report(cfg, data, ev, funnel, levs, grid, variants, live=live_comparison(cfg, data, ev.chained.trades),

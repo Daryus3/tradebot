@@ -283,8 +283,9 @@ def test_trailing_stop_is_flagged_as_optimistic_in_report_and_notes(fcfg):
     win = fb.slice_range(k1["SOLUSDT"], sigs[0].close_ms, sigs[0].close_ms + 60 * MIN)
     windows = {(sigs[0].symbol, sigs[0].close_ms): (MIN, win["t"], win["o"], win["h"], win["l"], win["c"])}
     rows = dict(fb.variant_rows(on, data, sigs, windows))
-    assert any(name.startswith("İzleyen stop +%3 / %1.5 (iyimser") for name in rows)
+    assert not any(name.startswith("İzleyen stop") for name in rows)    # Kapalıyken iyimser satır gösterilmez (▲ yanıltırdı)
     trail = replace(on, futures_trailing=True)
+    assert "İzleyen stop kapalı" in dict(fb.variant_rows(trail, data, sigs, windows))
     text = fb.format_report(trail, data, fb.evaluate(fb.params_from_cfg(trail), data, sigs, windows), funnel)
     assert "⚠️ İzleyen stop açık: backtest bu çıkışı iyimser hesaplar" in text
     assert "⚠️ İzleyen stop açık" not in fb.format_report(on, data, fb.evaluate(fb.params_from_cfg(on), data, sigs, windows),

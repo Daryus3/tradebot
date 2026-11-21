@@ -171,17 +171,13 @@ def test_phase6_rows_and_phase5_rows_without_phase6(fcfg):
     def ev(s=None, **over):
         calls.append((None if s is None else [x.symbol for x in s], over))
         return over
-    rows = fb.cascade_rows(p6, ev, sigs)                                # Faz 6 açıkken: Faz 6'sız #2
-    assert rows[0][0] == "Tek pozisyon (dalga modu ve Faz 6 kapalı, 2x)"
-    assert calls[0] == (["AAAUSDT"], dict(extra_size_pct=100.0, reentry_breadth=0, max_positions=1, leverage=2,
-                                          isolated_size_pct=100.0, wave_hold_min=0))          # Faz 9 da kapalı
-    labels = [r[0] for r in fb.phase6_rows(p6, ev, sigs, phase6=lambda **o: o)]
-    assert labels[:3] == ["Dalgada yeniden giriş kapalı (zarar sonrası bekleme hep)", "Dalga eşikleri kapalı",
-                          "Ek pozisyonlar eşit büyüklükte (Faz 5 gibi)"]
-    assert not any("⭐ Faz 6 seti" in x for x in labels)                  # Zaten Faz 6 seti
-    plain_rows = fb.phase6_rows(fcfg, ev, sigs, phase6=lambda **o: o)
-    assert [r[0] for r in plain_rows][0].startswith("Dalgada yeniden giriş (≥3")
-    assert plain_rows[1][1] == fb.PHASE6_SIM and plain_rows[2][1] == fb.PHASE6_SINGLE_SIM
+    # Dalga modu açıkken "tek pozisyon (2x)" kıyası yok: başka kaldıraçla hesaplandığı için yanıltıcıydı
+    assert fb.cascade_rows(p6, ev, sigs) == [] and calls == []
+    labels = [r[0] for r in fb.phase6_rows(p6, ev, sigs)]
+    assert labels == ["Dalgada yeniden giriş kapalı (zarar sonrası bekleme hep)", "Dalga eşikleri kapalı",
+                      "Ek pozisyonlar ilk pozisyonla eşit büyüklükte"]
+    plain_rows = fb.phase6_rows(fcfg, ev, sigs)                          # ⭐ Faz 6 setleri (2x / 3x) artık yok
+    assert [r[0] for r in plain_rows] == ["Dalgada yeniden giriş (≥3 coin düşerken zarar sonrası bekleme yok)"]
     p = fb.params_from_cfg(p6)
     label = fb.cascade_label(p)
     assert "ilk pozisyon bakiyenin %63.3" in label and "dalgada yeniden giriş" in label

@@ -196,18 +196,16 @@ def test_realism_label_and_comparison_row(fcfg):
         seen.append(over)
         return "E"
     rows = fb.realism_rows(fcfg, ev)
-    # İki kıyas satırı: giriş 1 sn'de dolsaydı (anlık taramanın hedefi) ve eski iyimser hesap
-    assert [r[0][:22] for r in rows] == ["Giriş 1 sn'de dolsaydı", "Eski (iyimser) hesap: "]
+    # Tek kıyas satırı: giriş 1 sn'de dolsaydı (anlık taramanın hedefi); eski iyimser hesap satırı artık yok
+    assert [r[0][:22] for r in rows] == ["Giriş 1 sn'de dolsaydı"]
     assert "%0.05 → %0.02" in rows[0][0] and fb.FAST_ENTRY_LAG_PCT == 0.02
-    assert seen == [{"entry_lag_pct": 0.02}, {"be_intrabar": False, "entry_lag_pct": 0.0, "stop_slip_pct": 0.0}]
-    seen.clear()                                 # Limit girişte gecikme payı yok: hız satırı da yok
-    rows = fb.realism_rows(replace(fcfg, futures_entry_order="limit"), ev)
-    assert len(rows) == 1 and "Eski (iyimser) hesap" in rows[0][0]
-    # Anlık taramada taban zaten %0.02: "1 sn'de dolsaydı" yerine eski 5 sn varsayımıyla kıyas
+    assert seen == [{"entry_lag_pct": 0.02}]
+    assert fb.realism_rows(replace(fcfg, futures_entry_order="limit"), ev) == []   # Limit girişte gecikme payı yok
+    # Anlık taramada taban zaten %0.02: "1 sn'de dolsaydı" yerine eski 5 sn varsayımıyla kıyas (canlı ölçüm yoksa)
     seen.clear()
     snap = replace(fcfg, futures_fast_entry=True, futures_snapshot_scan=True)
     rows = fb.realism_rows(snap, ev)
-    assert [r[0][:28] for r in rows] == ["Eski giriş varsayımıyla (~5 ", "Eski (iyimser) hesap: giriş "]
+    assert [r[0][:28] for r in rows] == ["Eski giriş varsayımıyla (~5 "]
     assert "%0.02 → %0.05" in rows[0][0] and seen[0] == {"entry_lag_pct": 0.05}
     label = fb.realism_label(fb.params_from_cfg(snap))
     assert "~0.6 sn sonra (anlık tarama; canlıda ölçüldü)" in label and "%0.02" in label

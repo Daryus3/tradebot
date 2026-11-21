@@ -109,6 +109,8 @@ def test_child_env_rereads_setting_files(tmp_path, monkeypatch):
 def test_output_helpers():
     text = "⏳ İndiriliyor %50\n2026-10-27 10:00:00 | INFO    | x\nRAPOR\n2026-10-27 10:00:00 | WARNING | dikkat"
     assert clean_output(text) == "RAPOR\n2026-10-27 10:00:00 | WARNING | dikkat"
+    note = "2026-11-21 11:38:45 | WARNING | ⚠️ FUTURES_LEVERAGE=6: zarar kes ..."        # Ayar notu: rapora girmez
+    assert clean_output(note + "\n📊 VADELİ\n⏳ 🧯 Kaldıraç riski hesaplanıyor") == "📊 VADELİ"
     chunks = split_chunks("\n".join(f"satır {i:03d}" for i in range(100)), 100)
     assert all(len(c) <= 100 for c in chunks) and "".join(chunks).count("satır") == 100
 

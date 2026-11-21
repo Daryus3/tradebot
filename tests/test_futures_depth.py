@@ -239,7 +239,11 @@ def test_params_report_lines_variant_rows_and_attach(fcfg, monkeypatch, tmp_path
     ev2 = fb.evaluate(fb.params_from_cfg(on2), data2, sigs2, windows2)
     data2.depth = FakeDepth({})
     text = fb.format_report(on2, data2, ev2, funnel2, levs=[(1, ev2, "")])
-    assert "Emir defteri kayması açık: kaldıraç büyüdükçe pozisyonlar büyür" in text and "1.000.000 USDT" not in text
+    assert "emir defteri kayması ve derinliğe göre boy büyük pozisyonları sınırladığı için" in text
+    assert "1.000.000 USDT" not in text
+    data2.depth = None
+    assert "pozisyon tutarı en fazla 1.000.000 USDT kabul edildiği için" in fb.format_report(on2, data2, ev2, funnel2,
+                                                                                          levs=[(1, ev2, "")])
     # Tek kural satırları: derinlik verisi varsa
     monkeypatch.setattr(fb, "evaluate", lambda p, *a, **k: p)
     got = dict(fb.size_variant_rows(on, lambda **o: fb.params_from_cfg(on, **o), depth=True))
@@ -249,7 +253,7 @@ def test_params_report_lines_variant_rows_and_attach(fcfg, monkeypatch, tmp_path
     assert off["Derinliğe göre boy %10 + kapasite önceliği"].depth_cap_pct == 10
     assert not any("Derinliğe" in n for n in dict(fb.size_variant_rows(fcfg, lambda **o: o)))
     cost = dict(fb.cost_variant_rows(on, lambda **o: fb.params_from_cfg(on, **o), depth=True))
-    assert cost["Emir defteri kayması yok (eski hesap: kayma büyüklükten bağımsız)"].depth_impact is False
+    assert not any("kayması yok" in n for n in cost)                       # Gerçek dışı kıyas satırı artık yok
     # Derinlik deposu: ayar açıksa ve arşiv varsa kurulur
     data = bt_data(None)
     assert fb.attach_depth(on, data, [s1]) is None                          # Arşiv yok (bellekteki veri)
