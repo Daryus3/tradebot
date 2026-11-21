@@ -327,6 +327,7 @@ def test_report_starts_with_a_summary_of_the_key_numbers(fcfg):
     assert text.index("📋 ÖZET") < text.index("🔎 Sinyal hunisi") < text.index("💰 A)")
     summary = text[text.index("📋 ÖZET"):text.index("🔎 Sinyal hunisi")]
     assert f"A) {fb._num(on.start_capital, 0)} USDT → " in summary and "en büyük düşüş %" in summary
+    assert f"| B'de kârlı yıl {ev.profitable_years}/{len(ev.years)}" in summary          # Kârlı yıl B'nin (her yıl baştan)
     assert "Her ayın 1'inde başlayan 71 hesap (12 ay, kill-switch uygulanır): ortanca +927.0% | %60'ı aşan düşüş 8 | " \
            "kill-switch 4" in summary
     assert "Strateji (C): yılda ~" in summary and "| çıkış: Kâr Al %" in summary and ", zaman stopu %" in summary

@@ -2236,9 +2236,9 @@ karar için ortancaya ve en kötüye bakın. Çıkış taraması her gün dengel
   6 aylık bakiyesi → B (her yıl yeniden) → C (sabit tutar) ve çıkış nedenleri → marjin riski → aylık yığılma → kaldıraç
   tablosu → kaldıraç riski → Kâr Al / Zarar Kes ızgarası → tek kural tablosu. Telegram'dan gelen `rapor.txt`'ye ayar
   uyarıları (⚠️, bot açılırken zaten yazılır) ve ilerleme satırları (⏳) girmez.
-- **📋 ÖZET** (başlığın altında): A'nın sonucu ve en büyük düşüşü, her ayın 1'inde başlayan hesapların 12 ay ortancası /
-  %60'ı aşan düşüş / kill-switch sayısı (kaldıraç tablosundaki şimdiki satır), stratejinin işlem başı neti ve çıkış
-  dağılımı, canlı girişlerin ölçülen dolum maliyeti.
+- **📋 ÖZET** (başlığın altında): A'nın sonucu ve en büyük düşüşü, B'de kârlı yıl sayısı, her ayın 1'inde başlayan
+  hesapların 12 ay ortancası / %60'ı aşan düşüş / kill-switch sayısı (kaldıraç tablosundaki şimdiki satır), stratejinin
+  işlem başı neti ve çıkış dağılımı, canlı girişlerin ölçülen dolum maliyeti.
 - **📌 Çıkış nedenleri (C):** her çıkış için işlem sayısı ve payı, net ortalama (komisyon, kayma ve fonlama dahil fiyat
   hareketi), toplam kârdaki payı, ROE ve süre. Başabaş çıkışları net ~%0'dır: kâr çıkışı değil, dönüşü sönen işlemi zarar
   kese gitmeden kapatır (bkz. "Rapor 15").

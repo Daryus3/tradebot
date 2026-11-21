@@ -3763,7 +3763,7 @@ def summary_lines(p: SimParams, res: FutResult, ev: Evaluation, levs, live: Opti
     ch = res
     a = (f"eridi {_date(ch.ruined_ms)}" if ch.ruined_ms else f"{_num(ch.final_equity, 0)} USDT ({_pct(ch.net_pct)})")
     L.append(f"  A) {_num(p.start_capital, 0)} USDT → {a} | en büyük düşüş %{max_drawdown(ch.curve)[0]:.1f} | "
-             f"kârlı yıl {ev.profitable_years}/{len(ev.years)}"
+             f"B'de kârlı yıl {ev.profitable_years}/{len(ev.years)}"
              + (f" | ⚠️ kill-switch {_date(ch.kill_ms)}'de durdururdu" if ch.kill_ms else ""))
     rows = [r if isinstance(r, LevRow) else LevRow(*r) for r in (levs or [])]
     roll = next((r.roll for r in rows if r.lev == p.leverage and r.roll), None)
