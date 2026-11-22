@@ -251,4 +251,4 @@ def test_wave_page_rows_buttons_and_text(fcfg, tmp_path):
     assert all(len(d.encode()) <= 64 for d in data)
     press(bot, "kv:fw:FUTURES_BASIS_SIZE_PCT:130")
     assert bot.cfg.futures_basis_size_pct == 130.0 and "FUTURES_BASIS_SIZE_PCT=130" in env.read_text()
-    assert "spotun %0.5'sinden fazla altındaysa (zorla satış izi) pozisyon <b>%130</b>" in notes.menus[-1][0]
+    assert "spotun %0.5'ten fazla altındaysa (zorla satış izi) pozisyon <b>%130</b>" in notes.menus[-1][0]

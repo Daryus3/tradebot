@@ -1883,9 +1883,9 @@ def basis_pct(fut_price: float, spot_price: float, mult: float = 1.0) -> float:
 
 
 def basis_size_factor(size_pct: float, deep_pct: float, basis: Optional[float]) -> float:
-    """Vadeli-spot farkına göre boy (FUTURES_BASIS_SIZE_PCT): girişte vadeli fiyat spotun deep_pct'sinden fazla altındaysa
-    (fark ≤ −deep_pct) size_pct / 100, değilse (ya da fark ölçülemediyse) 1. Canlı bot ve backtest aynı çarpanı
-    kullanır (sinyal ölçüsü metrics["basis"])."""
+    """Vadeli-spot farkına göre boy (FUTURES_BASIS_SIZE_PCT): girişte vadeli fiyat spotun deep_pct (%) değerinden
+    fazla altındaysa (fark ≤ −deep_pct) size_pct / 100, değilse (ya da fark ölçülemediyse) 1. Canlı bot ve backtest
+    aynı çarpanı kullanır (sinyal ölçüsü metrics["basis"])."""
     if size_pct == 100 or basis is None or basis != basis or basis > -abs(float(deep_pct)):
         return 1.0
     return max(0.0, float(size_pct)) / 100

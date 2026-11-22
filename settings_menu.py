@@ -997,7 +997,7 @@ class SettingsMenu:
         else:
             lines.append("⏱️ Durulmuş çöküş (son 15 dk'da az düşen coin) küçültülmüyor.")
         if cfg.futures_basis_size_pct != 100:
-            lines.append(f"⚖️ Vadeli-spot farkı: girişte vadeli fiyat spotun %{cfg.futures_basis_deep_pct:g}'sinden fazla "
+            lines.append(f"⚖️ Vadeli-spot farkı: girişte vadeli fiyat spotun %{tr_from_num(cfg.futures_basis_deep_pct)} fazla "
                          f"altındaysa (zorla satış izi) pozisyon <b>%{cfg.futures_basis_size_pct:g}</b> büyüklükte.")
         else:
             lines.append("⚖️ Vadeli-spot farkına göre boy kapalı.")

@@ -663,7 +663,7 @@ class SimParams:
     recent_size_pct: float = 100.0
     recent_drop_pct: float = 2.4
     # Vadeli-spot farkı (FUTURES_BASIS_SIZE_PCT; canlı: FuturesBot._entry_margin): girişte vadeli fiyat spotun
-    # basis_deep_pct'sinden fazla altındaysa (sinyal ölçüsü metrics["basis"], attach_basis) pozisyon basis_size_pct (%)
+    # basis_deep_pct (%) değerinden fazla altındaysa (sinyal ölçüsü metrics["basis"], attach_basis) pozisyon basis_size_pct (%)
     basis_size_pct: float = 100.0
     basis_deep_pct: float = 0.5
     # Faz 6: ek pozisyonların büyüklüğü (ilk pozisyonun %'si; 100 = eşit, Faz 5) ve dalgada yeniden giriş (genişlik
@@ -1104,7 +1104,7 @@ def capacity_order(signals: Sequence["FutSignal"], p: SimParams, data: "FutData"
 def size_factor(p: SimParams, s: "FutSignal") -> float:
     """Sinyalin boy çarpanı (canlı: FuturesBot._entry_margin ile aynı): yalnız çöküşte (genişlik < isolated_breadth)
     × isolated_size_pct; çöküş durulmuşsa (son 15 dk düşüş < recent_drop_pct) × recent_size_pct; vadeli spotun
-    basis_deep_pct'sinden fazla altındaysa × basis_size_pct."""
+    basis_deep_pct (%) değerinden fazla altındaysa × basis_size_pct."""
     return (isolated_factor(p.isolated_size_pct, p.isolated_breadth, s.breadth)
             * recent_size_factor(p.recent_size_pct, p.recent_drop_pct, s.metrics.get("drop15"))
             * basis_size_factor(p.basis_size_pct, p.basis_deep_pct, s.metrics.get("basis")))
@@ -3903,7 +3903,7 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
     if p.basis_size_pct != 100:
         big = sum(1 for tr in res.trades if tr.basis == tr.basis and tr.basis <= -p.basis_deep_pct)
         known = sum(1 for tr in res.trades if tr.basis == tr.basis)
-        L.append(f"⚖️ Vadeli-spot farkı: girişte vadeli fiyat spotun %{p.basis_deep_pct:g}'sinden fazla altındaysa "
+        L.append(f"⚖️ Vadeli-spot farkı: girişte vadeli fiyat spotun %{tr_from_num(p.basis_deep_pct)} fazla altındaysa "
                  f"(zorla satış izi) pozisyon %{p.basis_size_pct:g} boy (boştaki teminatla sınırlı). A'da {big} / "
                  f"{len(res.trades)} işlem bu boyla açıldı" + (f"; {len(res.trades) - known} işlemde spot fiyatı "
                                                                  f"bulunamadı (boy değişmedi)" if known < len(res.trades)

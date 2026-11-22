@@ -951,8 +951,8 @@ class Config:
     # (çöküş durulmuş) pozisyon büyüklüğü FUTURES_RECENT_SIZE_PCT (%; 100 = kapalı, eskisi gibi)
     futures_recent_size_pct: float = 100.0
     futures_recent_drop_pct: float = 2.4
-    # Vadeli-spot farkı (rapor 17 araştırması, 22 Kasım): girişte vadeli fiyat spotun FUTURES_BASIS_DEEP_PCT'sinden fazla
-    # altındaysa (zorla satış izi) pozisyon büyüklüğü FUTURES_BASIS_SIZE_PCT (%; 100 = kapalı, eskisi gibi)
+    # Vadeli-spot farkı (rapor 17 araştırması, 22 Kasım): girişte vadeli fiyat spotun FUTURES_BASIS_DEEP_PCT (%) değerinden
+    # fazla altındaysa (zorla satış izi) pozisyon büyüklüğü FUTURES_BASIS_SIZE_PCT (%; 100 = kapalı, eskisi gibi)
     futures_basis_size_pct: float = 100.0
     futures_basis_deep_pct: float = 0.5
     # Faz 6 (bkz. FUTURES_PHASE6_PRESET üstündeki açıklama; varsayılanlar = kapalı, eskisi gibi)
@@ -1931,7 +1931,7 @@ def _setting_notes(cfg: Config) -> List[str]:
                          f"Önce test modunda deneyin.")
         if cfg.futures_basis_size_pct != 100:
             notes.append(f"FUTURES_BASIS_SIZE_PCT={cfg.futures_basis_size_pct:g} (vadeli-spot farkı): girişte vadeli fiyat "
-                         f"spotun %{cfg.futures_basis_deep_pct:g}'sinden fazla altındaysa (likidasyon zincirinde zorla "
+                         f"spotun %{tr_from_num(cfg.futures_basis_deep_pct)} fazla altındaysa (likidasyon zincirinde zorla "
                          f"satış izi) pozisyon %{cfg.futures_basis_size_pct:g} büyüklükte (boştaki teminatla sınırlı). "
                          f"Rapor 17 araştırması (22 Kasım; 2020-2026, 6x, 10 çekiliş): fark −%0.5'ten derinken açılan "
                          f"işlemler her yıl ortalamanın çok üstünde (işlem başı +%0.89 / +%1.59, tümü +%0.25). %0.5 / "
