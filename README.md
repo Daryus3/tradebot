@@ -2260,6 +2260,33 @@ daha sakin işlem isteyen için bir seçenek (`FUTURES_MAX_POSITIONS=5`), kâr i
 kalan kalem canlı giriş dolumu: rapordaki "Canlı giriş dolumuyla" satırı (9 girişte ortalama +%0.084) A'yı +%86.497'den
 +%64.728'e indiriyor; tek bir kötü dolum ortalamayı ikiye katladığı için girişler biriktikçe izlenmeli.
 
+#### Rapor 17 araştırması, ikinci tur: yeni yapılar (Kasım 2026)
+Aynı baz. Bu turda ayar değerleri ya da giriş kuralları değil, pozisyonun yaşam döngüsüne dokunan yeni yapılar denendi.
+Önce botun açtığı işlemler (C, sabit tutar) üzerinde eleme yapıldı, umut veren her fikir yuva simülasyonunda ölçüldü
+(araştırma kancalı motor, kanca kapalıyken resmi motorla birebir aynı; 10 çekiliş, 71 aylık başlangıç). Rakamlar 71
+hesabın 12 ay ortancası (şimdiki: +%940) ve %60'ı aşan düşüş yaşayan hesap sayısı (şimdiki: 8).
+
+| Fikir | Ön eleme (işlem başı net) | Yuva simülasyonu | Sonuç |
+|---|---|---|---|
+| **Dalgada ters işlem:** zarar kes dolunca o coinde short | 36 çıkış ayarının hepsi zararda (−%0.03 … −%0.18; doğrulamada −%0.19 … −%0.30) | - | Elendi: zarar kesten sonra fiyat genelde dönüyor (zarar sonrası yeniden girişler +%0.58) |
+| **Kademeli ikinci alım:** ana pozisyon açıkken fiyat girişin %2-4 altına inerse aynı coine limit alış | +%0.49 … +%0.86 (iki dönemde de) | Önce +%947 … +%1.030; aynı dakikada dolan emirler sayılınca +%167 … +%297, kill-switch 12-23 hesap | Elendi (aşağıdaki not) |
+| Kademe, aynı pozisyona ekleme (ortalama girişe göre çıkış) | - | +%834 … +%919, son 12 ay +%47 … +%110 | Elendi |
+| **Çöküş şiddetine göre Kâr Al:** düşüş eşiğin 1.7 katını aşınca Kâr Al %8 / %10 | +%0.68 → +%0.72 / +%0.78 (o işlemlerde) | +%830 / +%859, kill-switch 1-2 | Elendi: uzun kalan pozisyonlar yuvaları tıkıyor |
+| **Kâr Al sonrası devam:** çöküş şartı bitmiş olsa da hemen yeniden long | +%0.10 (seçim +%0.18 / doğrulama −%0.14) | - | Elendi. Şart sürerken bot zaten yeniden giriyor ve bu girişler +%1.1 kazanıyor |
+| **Kazananı büyütme:** ek pozisyon girişinin +%1-2 üstüne çıkınca (başabaş devredeyken) o pozisyona ekleme, ana pozisyonla birlikte kapanır | Ek pozisyonda +%0.26 … +%0.35; ana pozisyonda −%0.15 … +%0.03 | Önce +%1.000 … +%1.152 (10 çekilişin 10'unda iyi); gerçekçi mum içi sırayla +%941 … +%984 (5-6 / 10), seçim dönemi yıllık getirisi +%412 → +%371 … +%408, düşüş arttı | Eklenmedi: kazanç gürültü içinde |
+
+**Aynı dakikada dolan emirler.** İki fikir ilk ölçümde sağlam göründü, ama ikisi de ana pozisyonun kapandığı dakikadaki
+dolumları dışarıda bırakıyordu. Kademeli alımda fiyat seviyeyi delip aynı dakikada ana pozisyonun zarar kesine kadar
+inince limit emir de dolar; bu "düşen bıçak" dolumları (719 işlem) ortalama −%0.23 kaybetti (üçte biri zarar keste),
+ana pozisyon açıkken dolanlar (455) +%1.09 kazandı. Canlıda hangisinin olacağı önceden bilinemez, ikisi de dolar.
+Kazananı büyütmede fiyat aynı dakikada önce tetiğe çıkıp sonra başabaş tabanına düşerse ekleme yapılır ve zararla kapanır;
+bunları sayınca (düşen mumda önce tepe, sonra stop; yükselen mumda stop tetikten önce) eklemelerin işlem başı neti
++%0.3'ten +%0.12'ye indi. Bu tür kurallarda dakika içi sıra her zaman hesaba katılmalı.
+
+**Sonuç: yeni ayar eklenmedi.** Bu tur ve ilk tur (açık pozisyon verisi) dahil ~1.000 denemeden sonra bu stratejinin
+işlem sayısı piyasaya bağlı kalıyor: çöküş yoksa işlem yok, sakin dönemde kârlı başka bir yol bulunamadı. Kârı ölçülebilir
+biçimde artırabilecek kalan kalemler canlıda kaçan işlemler ve giriş dolumu.
+
 ### 🏆 Strateji turnuvası (`--turnuva`)
 Hangi strateji türünün sizin dönemde işe yaradığını **tek komutla** görmek için:
 ```bash
