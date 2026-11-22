@@ -42,11 +42,10 @@ from config import (DATA_DIR, dd_scale_factor, format_crash_rules, futures_coin_
                     tr_from_num)
 from futures_data import FuturesArchive, concat, resample, slice_range
 from futures_depth import DEPTH_CHECK_MIN_NOTIONAL, DepthBook, daily_volume_fn
-from strategy import (FUT_BAR_MS, FUT_HOUR_MS, basis_pct, basis_size_factor, breadth_flags, btc_trend_1h, crash_state,
-                      spot_pairs,
-                      funding_per_bar,
-                      futures_candidates, futures_entries, futures_features, isolated_factor, pick_signal,
-                      recent_size_factor, trend_at)
+from strategy import (FUT_BAR_MS, FUT_HOUR_MS, QUALITY_CUTS, basis_pct, basis_size_factor, breadth_flags, btc_trend_1h,
+                      crash_state, funding_per_bar, futures_candidates, futures_entries, futures_features,
+                      isolated_factor, pick_signal, quality_score, quality_size_factor, recent_size_factor, spot_pairs,
+                      trend_at)
 
 DAY_MS = 86_400_000
 MIN_MS = 60_000
@@ -666,6 +665,10 @@ class SimParams:
     # basis_deep_pct (%) değerinden fazla altındaysa (sinyal ölçüsü metrics["basis"], attach_basis) pozisyon basis_size_pct (%)
     basis_size_pct: float = 100.0
     basis_deep_pct: float = 0.5
+    # Sinyal kalitesi (FUTURES_QUALITY_SIZE_PCT; canlı: FuturesBot._entry_margin): strategy.quality_score sinyallerin en
+    # zayıf quality_cut_pct yüzdesindeyse (strategy.QUALITY_CUTS) pozisyon quality_size_pct (%; 100 = kapalı)
+    quality_size_pct: float = 100.0
+    quality_cut_pct: float = 60.0
     # Faz 6: ek pozisyonların büyüklüğü (ilk pozisyonun %'si; 100 = eşit, Faz 5) ve dalgada yeniden giriş (genişlik
     # ≥ reentry_breadth iken zarar sonrası bekleme atlanır; 0 = kapalı)
     extra_size_pct: float = 100.0
@@ -722,6 +725,8 @@ def params_from_cfg(cfg, **over) -> SimParams:
                   recent_drop_pct=float(getattr(cfg, "futures_recent_drop_pct", 2.4)),
                   basis_size_pct=float(getattr(cfg, "futures_basis_size_pct", 100.0)),
                   basis_deep_pct=float(getattr(cfg, "futures_basis_deep_pct", 0.5)),
+                  quality_size_pct=float(getattr(cfg, "futures_quality_size_pct", 100.0)),
+                  quality_cut_pct=float(getattr(cfg, "futures_quality_cut_pct", 60.0)),
                   extra_size_pct=float(getattr(cfg, "futures_extra_size_pct", 100.0)),
                   reentry_breadth=int(getattr(cfg, "futures_reentry_breadth", 0)),
                   extra_be_trigger_pct=float(getattr(cfg, "futures_extra_be_trigger_pct", 0.0)),
@@ -794,6 +799,7 @@ class FutTrade:
     impact_pct: float = 0.0  # Emir defteri kayması, giriş + çıkış (fiyat %; FUTURES_BACKTEST_DEPTH)
     drop15: float = float("nan")  # Girişten önceki 15 dk'daki düşüş (%; sinyal ölçüsü, FUTURES_RECENT_SIZE_PCT)
     basis: float = float("nan")   # Girişte vadeli / spot fiyat farkı (%; FUTURES_BASIS_SIZE_PCT, attach_basis)
+    quality: float = float("nan")  # Sinyal kalitesi puanı (0-1; FUTURES_QUALITY_SIZE_PCT, strategy.quality_score)
 
 
 @dataclass
@@ -1104,10 +1110,14 @@ def capacity_order(signals: Sequence["FutSignal"], p: SimParams, data: "FutData"
 def size_factor(p: SimParams, s: "FutSignal") -> float:
     """Sinyalin boy çarpanı (canlı: FuturesBot._entry_margin ile aynı): yalnız çöküşte (genişlik < isolated_breadth)
     × isolated_size_pct; çöküş durulmuşsa (son 15 dk düşüş < recent_drop_pct) × recent_size_pct; vadeli spotun
-    basis_deep_pct (%) değerinden fazla altındaysa × basis_size_pct."""
-    return (isolated_factor(p.isolated_size_pct, p.isolated_breadth, s.breadth)
-            * recent_size_factor(p.recent_size_pct, p.recent_drop_pct, s.metrics.get("drop15"))
-            * basis_size_factor(p.basis_size_pct, p.basis_deep_pct, s.metrics.get("basis")))
+    basis_deep_pct (%) değerinden fazla altındaysa × basis_size_pct; kalite puanı en zayıf quality_cut_pct yüzdesindeyse
+    × quality_size_pct."""
+    out = (isolated_factor(p.isolated_size_pct, p.isolated_breadth, s.breadth)
+           * recent_size_factor(p.recent_size_pct, p.recent_drop_pct, s.metrics.get("drop15"))
+           * basis_size_factor(p.basis_size_pct, p.basis_deep_pct, s.metrics.get("basis")))
+    if p.quality_size_pct < 100 and s.metrics.get("tactic", 1.0) == 1.0:
+        out *= quality_size_factor(p.quality_size_pct, p.quality_cut_pct, quality_score(s.score, s.metrics))
+    return out
 
 
 def slot_share(p: SimParams, n_open: int) -> float:
@@ -1239,6 +1249,7 @@ def simulate(p: SimParams, data: FutData, signals: Sequence[FutSignal], windows:
         tr.wave_rule = bool(s.metrics.get("wave_rule"))
         tr.drop15 = float(s.metrics.get("drop15", float("nan")))
         tr.basis = float(s.metrics.get("basis", float("nan")))
+        tr.quality = quality_score(s.score, s.metrics) if s.metrics.get("tactic", 1.0) == 1.0 else float("nan")
         tr.dd_scaled = ddf < 1
         peak = max(peak, equity)
         trades.append(tr)
@@ -1416,6 +1427,7 @@ def simulate_slots(p: SimParams, data: FutData, signals: Sequence[FutSignal], wi
         tr.wave_rule = bool(s.metrics.get("wave_rule"))
         tr.drop15 = float(s.metrics.get("drop15", float("nan")))
         tr.basis = float(s.metrics.get("basis", float("nan")))
+        tr.quality = quality_score(s.score, s.metrics) if s.metrics.get("tactic", 1.0) == 1.0 else float("nan")
         tr.dd_scaled = ddf < 1
         trades.append(tr)
         free_at = tr.exit_ms if tr.reason == "TIME" else tr.exit_ms + tr.bar_ms
@@ -1929,6 +1941,7 @@ def size_variant_rows(cfg, ev, depth: bool = False, has_basis: bool = False) -> 
                  for b in ISOLATED_BREADTH_TRIES if b != base.isolated_breadth]
     rows += recent_variant_rows(base, ev)
     rows += basis_variant_rows(base, ev, has_basis)
+    rows += quality_variant_rows(base, ev)
     if base.reentry_breadth > 0:
         rows += [(f"Dalgada yeniden giriş ≥{b} coin (şimdi ≥{base.reentry_breadth})", ev(reentry_breadth=b))
                  for b in REENTRY_TRIES if b != base.reentry_breadth]
@@ -1940,6 +1953,22 @@ def size_variant_rows(cfg, ev, depth: bool = False, has_basis: bool = False) -> 
                  for z in DD_SIZE_TRIES if not _same(z, base.dd_scale_size_pct)]
     else:
         rows.append(("Düşüşte küçültme: zirveden %30 düşünce %60 boy", ev(dd_scale_pct=30.0, dd_scale_size_pct=60.0)))
+    return rows
+
+
+QUALITY_SIZE_TRIES = (40.0, 60.0)       # Kalite puanına göre boy (%; rapor 18 araştırması, 22 Kasım)
+QUALITY_CUT_TRIES = (40.0, 60.0)        # Zayıf sayılan sinyallerin yüzdesi
+
+
+def quality_variant_rows(base: SimParams, ev) -> List[Tuple[str, "Evaluation"]]:
+    """Sinyal kalitesi (FUTURES_QUALITY_SIZE_PCT): açıksa kapalı + boy / eşik çevresi, kapalıysa en zayıf %60 → %60."""
+    if base.quality_size_pct >= 100:
+        return [("Kalite puanı en zayıf %60 → boy %60", ev(quality_size_pct=60.0, quality_cut_pct=60.0))]
+    rows = [("Kalite puanına göre boy kapalı", ev(quality_size_pct=100.0))]
+    rows += [(f"Kalite puanı boyu %{v:g} (şimdi %{base.quality_size_pct:g})", ev(quality_size_pct=v))
+             for v in QUALITY_SIZE_TRIES if not _same(v, base.quality_size_pct)]
+    rows += [(f"Kalite puanı: en zayıf %{c:g} (şimdi %{base.quality_cut_pct:g})", ev(quality_cut_pct=c))
+             for c in QUALITY_CUT_TRIES if not _same(c, base.quality_cut_pct)]
     return rows
 
 
@@ -3120,6 +3149,29 @@ def basis_breakdown_line(trades: Sequence[FutTrade], p: SimParams) -> Optional[s
     return f"Girişteki vadeli / spot farkına göre (sabit tutar; {size}): " + " | ".join(parts)
 
 
+QUALITY_BUCKETS = ((None, 40), (40, 60), (60, 80), (80, None))   # Kalite puanının 2020-2023 sinyallerindeki dilimi (%)
+QUALITY_EDGES = {20: 0.3397, 40: QUALITY_CUTS[40], 60: QUALITY_CUTS[60], 80: 0.6583}
+
+
+def quality_breakdown_line(trades: Sequence[FutTrade], p: SimParams) -> Optional[str]:
+    """Sinyal kalitesi puanına göre işlem başı sonuç (sabit tutar). Rapor 18 araştırması (22 Kasım): en zayıf %60'taki
+    işlemler ortalamada ~%0, en güçlü %20 her yıl +%0.37 … +%0.54 (FUTURES_QUALITY_SIZE_PCT ile küçültülebilir)."""
+    known = [t for t in trades if t.quality == t.quality]
+    if not known:
+        return None
+    parts = []
+    for a, b in QUALITY_BUCKETS:
+        lo = QUALITY_EDGES[a] if a is not None else -1.0
+        hi = QUALITY_EDGES[b] if b is not None else 2.0
+        mv = [net_move_pct(t) for t in known if lo < t.quality <= hi]
+        if mv:
+            name = (f"en zayıf %{b}" if a is None else f"en güçlü %{100 - a}" if b is None else f"%{a}-{b}")
+            parts.append(f"{name}: {len(mv)} işlem, ort. {np.mean(mv):+.3f}%")
+    size = (f"en zayıf %{p.quality_cut_pct:g}'ta boy %{p.quality_size_pct:g}" if p.quality_size_pct < 100
+            else "hepsi aynı boy")
+    return f"Sinyal kalitesi puanına göre (sabit tutar; {size}): " + " | ".join(parts)
+
+
 # ===================================================================== canlı bot karşılaştırması
 def read_scan_log(path: Path, start_ms: int, end_ms: int) -> List[dict]:
     """Canlı botun tarama kaydı (FuturesBot, futures_scans_<mod>.jsonl): [start, end) aralığındaki satırlar. Evren ('u')
@@ -3910,6 +3962,13 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
                  f"{len(res.trades)} işlem bu boyla açıldı" + (f"; {len(res.trades) - known} işlemde spot fiyatı "
                                                                  f"bulunamadı (boy değişmedi)" if known < len(res.trades)
                                                                  else ""))
+    if p.quality_size_pct < 100:
+        cut = QUALITY_CUTS.get(int(round(p.quality_cut_pct)), QUALITY_CUTS[60])
+        small = sum(1 for tr in res.trades if tr.quality == tr.quality and tr.quality <= cut)
+        L.append(f"🧮 Sinyal kalitesi: yedi ölçülü puan (çöküş şiddeti, vadeli-spot farkı, son 15 dk piyasa alış "
+                 f"payı, son 5 / 15 dk düşüş, hacim ve satış hacmi oranı) 2020-2023 sinyallerinin en zayıf "
+                 f"%{p.quality_cut_pct:g}'ındaysa pozisyon %{p.quality_size_pct:g} boy. A'da {small} / "
+                 f"{len(res.trades)} işlem bu boyla açıldı")
     L.append(f"Kâr Al +%{p.tp_pct:g} ({'limit, maker' if p.tp_limit else 'piyasa'}) | Zarar Kes -%{p.sl_pct:g} | "
              + (f"başabaş +%{p.be_trigger_pct:g} → stop +%{p.be_floor_pct:g}" if p.be_enabled else "başabaş kapalı")
              + (f" | izleyen stop +%{p.trail_act_pct:g}'de, tepenin %{p.trail_gap_pct:g} gerisinden"
@@ -4002,6 +4061,9 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
     basis_line = basis_breakdown_line(fixed, p) if crash and fixed else None
     if basis_line:
         L.append("  " + basis_line)
+    quality_line = quality_breakdown_line(fixed, p) if crash and fixed else None
+    if quality_line:
+        L.append("  " + quality_line)
     if res.kill_ms:
         L.append(f"  ⚠️ Kill-switch (-%{p.kill_pct:g}) canlıda {_date(res.kill_ms)} tarihinde botu durdururdu")
     if res.ruined_ms:

@@ -70,6 +70,7 @@ _Simulator._rotation_step aynı rotation.plan_rotation fonksiyonunu kullanır:
 """
 from __future__ import annotations
 
+import bisect
 import math
 import time
 from collections import Counter
@@ -1781,7 +1782,7 @@ def futures_features(k: Dict[str, "np.ndarray"], cfg) -> Dict[str, "np.ndarray"]
     # Faz 4: mum zamanları, mum başına son ödenen fonlama (k["fr"] → f["funding"]) ve 1 saatlik mumlar
     extra = {name: k[key] for key, name in (("t", "t"), ("fr", "funding"), ("h1", "h1")) if key in k}
     return {**extra, "o": o, "h": h, "l": l, "c": c, "v": v, "crash": crash,
-            "vol_ratio": vol_ratio, "sell_ratio": sell_ratio, "buy_ratio": buy_ratio,
+            "vol_ratio": vol_ratio, "sell_ratio": sell_ratio, "buy_ratio": buy_ratio, "tb": tb,
             "atr": atr_prev, "low_prev": low_prev, "high_prev": high_prev, "rsi": np_rsi(c, cfg.rsi_period),
             "piv_low": piv_low, "piv_high": piv_high,
             "liq_long": (sell_ratio >= cfg.futures_liq_ratio) & (l < low_prev) & ((o - l) >= atr_prev),
@@ -1849,6 +1850,24 @@ def recent_drop_pct(f: Dict[str, "np.ndarray"], minutes: int = FUT_RECENT_DROP_M
     return _memo(f, ("recent", int(minutes)), calc)
 
 
+def taker_share(f: Dict[str, "np.ndarray"], minutes: int = 15):
+    """Son `minutes` dakikada piyasa emriyle ALIŞ hacminin toplam hacme oranı (0-1; düşük = satıcılar baskın, zorla
+    satış izi). 5 dk mumlarda minutes / 5 mum (bu mum dahil); hacim yoksa NaN. Sinyal kalitesi puanının ölçüsü."""
+    def calc():
+        v, tb = f["v"], f.get("tb")
+        out = np.full(len(v), np.nan)
+        bars = max(1, int(minutes) // 5)
+        if tb is None or len(v) < bars:
+            return out
+        cv = np.concatenate(([0.0], np.cumsum(v)))
+        ct = np.concatenate(([0.0], np.cumsum(np.asarray(tb, dtype=np.float64))))
+        vv = cv[bars:] - cv[:-bars]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            out[bars - 1:] = np.where(vv > 0, (ct[bars:] - ct[:-bars]) / vv, np.nan)
+        return out
+    return _memo(f, ("taker", int(minutes)), calc)
+
+
 def recent_size_factor(size_pct: float, min_drop_pct: float, drop: Optional[float]) -> float:
     """Çöküş durulmuşsa küçük boy (FUTURES_RECENT_SIZE_PCT): girişten önceki FUT_RECENT_DROP_MINUTES dakikadaki düşüş
     `min_drop_pct`'nin altındaysa size_pct / 100, değilse (ya da ölçü yoksa) 1. Canlı bot ve backtest aynı çarpanı
@@ -1889,6 +1908,136 @@ def basis_size_factor(size_pct: float, deep_pct: float, basis: Optional[float]) 
     if size_pct == 100 or basis is None or basis != basis or basis > -abs(float(deep_pct)):
         return 1.0
     return max(0.0, float(size_pct)) / 100
+
+
+# Sinyal kalitesi puanı (FUTURES_QUALITY_SIZE_PCT; rapor 18 araştırması, 22 Kasım). Yedi ölçünün her biri 2020-01 →
+# 2023-10 dönemindeki çöküş sinyallerinin dağılımına göre yüzdelik sıraya çevrilir (aşağıdaki 101 noktalı tablolar:
+# %0, %1, ..., %100), işaretlenir (yüksek = iyi) ve ortalaması alınır: 0 (en zayıf) … 1 (en güçlü). İşaretler ve
+# tablolar yalnız o dönemden; 2023-11 → 2026-11 doğrulama. Ölçüsü olmayan özellik 0.5 sayılır. Canlı bot ve backtest
+# ortak.
+QUALITY_SIGNS = {"score": 1, "basis": -1, "taker15": -1, "drop5": 1, "drop15": 1, "vol_ratio": 1, "liq_ratio": 1}
+QUALITY_TABLES = {
+    "score": (10, 10.0323, 10.0682, 10.1024, 10.1388, 10.1738, 10.2078, 10.2463, 10.2822, 10.3196, 10.3574, 10.3959,
+              10.4307, 10.469, 10.505, 10.5437, 10.5831, 10.6218, 10.6643, 10.707, 10.7515, 10.7974, 10.8413, 10.8858,
+              10.9314, 10.976, 11.0246, 11.0702, 11.1175, 11.1678, 11.2167, 11.2678, 11.3199, 11.372, 11.424, 11.4787,
+              11.539, 11.5958, 11.6537, 11.715, 11.7756, 11.8378, 11.9048, 11.9661, 12.0323, 12.1012, 12.1719,
+              12.2426, 12.315, 12.3888, 12.4691, 12.5455, 12.6318, 12.7177, 12.8047, 12.8986, 12.9903, 13.0871,
+              13.1836, 13.2782, 13.3863, 13.4993, 13.6102, 13.7195, 13.8395, 13.9583, 14.0809, 14.1993, 14.3395,
+              14.4787, 14.6365, 14.8004, 14.9628, 15.14, 15.3246, 15.522, 15.728, 15.9517, 16.2021, 16.4505, 16.7185,
+              17.0146, 17.3278, 17.6597, 18.054, 18.441, 18.8396, 19.297, 19.864, 20.4699, 21.1245, 21.7889, 22.4893,
+              23.3036, 24.377, 25.6294, 27.1814, 29.3312, 32.4271, 38.0529, 96.0991),
+    "basis": (-44.0448, -2.96539, -1.83458, -1.32143, -1.01398, -0.827267, -0.695667, -0.601356, -0.532662, -0.480177,
+              -0.43367, -0.398124, -0.364854, -0.337752, -0.313844, -0.293697, -0.275, -0.255652, -0.240983,
+              -0.228541, -0.215037, -0.204028, -0.193951, -0.183675, -0.174755, -0.166467, -0.159882, -0.152284,
+              -0.145208, -0.138805, -0.132705, -0.12605, -0.121253, -0.116414, -0.110915, -0.105474, -0.101229,
+              -0.0972796, -0.0927644, -0.0883497, -0.0839764, -0.0803535, -0.076742, -0.0726473, -0.0688705,
+              -0.0651042, -0.0617694, -0.0583007, -0.0539748, -0.0503795, -0.046648, -0.0426554, -0.0391191,
+              -0.0354426, -0.0316745, -0.0275423, -0.0239688, -0.0205069, -0.0166395, -0.0128694, -0.00830672,
+              -0.003563, 0, 0, 0.0042818, 0.00857975, 0.0130413, 0.0170648, 0.0214718, 0.0256501, 0.0298716,
+              0.0343986, 0.0386812, 0.0429699, 0.0474651, 0.0521739, 0.0572156, 0.061977, 0.0668075, 0.0717012,
+              0.0771714, 0.0830254, 0.0888985, 0.0948341, 0.101333, 0.107712, 0.115516, 0.1231, 0.132321, 0.141839,
+              0.151939, 0.163736, 0.176075, 0.19141, 0.209849, 0.232999, 0.263805, 0.310445, 0.381411, 0.521388,
+              20.0633),
+    "taker15": (0.0844347, 0.295992, 0.325019, 0.343084, 0.354433, 0.363977, 0.372188, 0.378964, 0.384848, 0.38991,
+                0.394703, 0.399044, 0.403142, 0.406599, 0.410276, 0.413509, 0.416383, 0.419243, 0.421905, 0.424388,
+                0.426721, 0.428943, 0.431189, 0.433256, 0.435389, 0.43724, 0.439134, 0.440969, 0.442802, 0.444566,
+                0.44621, 0.447781, 0.449452, 0.451042, 0.452617, 0.4542, 0.45578, 0.457213, 0.458642, 0.459981,
+                0.461314, 0.462679, 0.464111, 0.465422, 0.466711, 0.467934, 0.469155, 0.470345, 0.47154, 0.472715,
+                0.473938, 0.475098, 0.476303, 0.47748, 0.478634, 0.479733, 0.480875, 0.481967, 0.48309, 0.484126,
+                0.485201, 0.486258, 0.487356, 0.488466, 0.489585, 0.490716, 0.491812, 0.49295, 0.494082, 0.495222,
+                0.496384, 0.497471, 0.498668, 0.499878, 0.501146, 0.502403, 0.503652, 0.505009, 0.506316, 0.507675,
+                0.509069, 0.510556, 0.512118, 0.513769, 0.515472, 0.517338, 0.519287, 0.521376, 0.523745, 0.526225,
+                0.529076, 0.532102, 0.53574, 0.539646, 0.544231, 0.550057, 0.557049, 0.566665, 0.582255, 0.615028,
+                0.857787),
+    "drop5": (-45.9362, -5.91835, -4.10362, -3.32312, -2.83822, -2.50762, -2.23831, -2.02684, -1.86558, -1.71065,
+              -1.58267, -1.47671, -1.37428, -1.27932, -1.19307, -1.11458, -1.04041, -0.968472, -0.906561, -0.84841,
+              -0.791093, -0.7354, -0.683927, -0.635022, -0.587432, -0.543198, -0.502646, -0.459546, -0.419605,
+              -0.379212, -0.34121, -0.305372, -0.270871, -0.235351, -0.201773, -0.169498, -0.13628, -0.103829,
+              -0.0724386, -0.0415248, -0.00361624, 0.0158415, 0.0460194, 0.0748388, 0.102678, 0.131059, 0.162208,
+              0.191945, 0.221399, 0.252313, 0.282933, 0.313602, 0.346021, 0.376284, 0.409721, 0.441534, 0.476225,
+              0.508462, 0.542087, 0.57804, 0.614288, 0.650069, 0.687446, 0.724753, 0.764049, 0.803634, 0.84421,
+              0.887422, 0.931964, 0.980087, 1.02987, 1.07894, 1.13099, 1.183, 1.23671, 1.29108, 1.35154, 1.41668,
+              1.48341, 1.5516, 1.61812, 1.68953, 1.76956, 1.85382, 1.94156, 2.04017, 2.14249, 2.25641, 2.38422,
+              2.51926, 2.67518, 2.86117, 3.07596, 3.33135, 3.64065, 4.04068, 4.57807, 5.35015, 6.57925, 9.06718,
+              34.2822),
+    "drop15": (-94.5934, -8.35932, -5.79565, -4.68269, -3.96508, -3.48619, -3.11215, -2.81677, -2.56507, -2.33062,
+               -2.14919, -1.96521, -1.80723, -1.66541, -1.53673, -1.41405, -1.29626, -1.1873, -1.08437, -0.990445,
+               -0.897062, -0.811607, -0.732897, -0.65436, -0.575402, -0.499103, -0.431449, -0.361011, -0.294821,
+               -0.229585, -0.167349, -0.106496, -0.0470285, 0.00244619, 0.0681033, 0.123581, 0.181564, 0.239253,
+               0.293374, 0.34749, 0.406016, 0.462617, 0.518658, 0.573776, 0.632173, 0.691884, 0.748877, 0.803885,
+               0.863987, 0.927003, 0.988552, 1.05237, 1.12345, 1.19445, 1.26412, 1.33527, 1.40398, 1.47228, 1.54807,
+               1.61834, 1.69354, 1.76634, 1.84047, 1.91682, 1.99234, 2.07518, 2.15871, 2.24441, 2.33331, 2.42426,
+               2.51572, 2.60981, 2.70387, 2.80235, 2.90135, 3.01202, 3.12186, 3.2343, 3.35587, 3.4856, 3.61541,
+               3.74954, 3.89083, 4.04478, 4.20136, 4.38007, 4.56893, 4.77164, 4.98421, 5.22662, 5.48757, 5.78043,
+               6.12833, 6.51496, 6.97353, 7.52871, 8.25584, 9.28698, 10.9167, 13.6632, 51.4223),
+    "vol_ratio": (0, 0.191626, 0.245981, 0.282864, 0.309727, 0.333531, 0.353842, 0.373222, 0.390325, 0.405689,
+                  0.421486, 0.436639, 0.451887, 0.467063, 0.481301, 0.495281, 0.509508, 0.523173, 0.536678, 0.549482,
+                  0.563293, 0.578094, 0.590548, 0.603975, 0.617489, 0.630305, 0.644137, 0.657664, 0.671032, 0.684757,
+                  0.698612, 0.713384, 0.727461, 0.742457, 0.757597, 0.772923, 0.788484, 0.804382, 0.82022, 0.836059,
+                  0.852352, 0.86902, 0.886146, 0.902278, 0.920188, 0.938288, 0.956384, 0.975619, 0.994428, 1.01407,
+                  1.03443, 1.05613, 1.07646, 1.09871, 1.122, 1.14469, 1.1689, 1.19488, 1.22084, 1.24653, 1.27418,
+                  1.30167, 1.33144, 1.36184, 1.39268, 1.42469, 1.45901, 1.49309, 1.53098, 1.57179, 1.6124, 1.65128,
+                  1.69644, 1.74451, 1.79473, 1.84777, 1.90284, 1.96102, 2.01927, 2.08647, 2.15613, 2.23787, 2.31872,
+                  2.41207, 2.511, 2.61964, 2.74084, 2.88087, 3.03331, 3.19685, 3.38953, 3.60997, 3.86654, 4.16946,
+                  4.53607, 5.03358, 5.72739, 6.74599, 8.43838, 12.0627, 165.372),
+    "liq_ratio": (0, 0.157556, 0.21247, 0.252413, 0.283067, 0.305768, 0.3265, 0.345547, 0.363843, 0.380524, 0.397166,
+                  0.413079, 0.428037, 0.442499, 0.45693, 0.471054, 0.484307, 0.498044, 0.510803, 0.523741, 0.538616,
+                  0.55119, 0.563279, 0.577328, 0.590368, 0.603906, 0.61739, 0.630296, 0.644682, 0.658415, 0.671602,
+                  0.685866, 0.699867, 0.714388, 0.729374, 0.743816, 0.759258, 0.77438, 0.790042, 0.804666, 0.820435,
+                  0.83657, 0.85336, 0.870009, 0.886967, 0.904335, 0.921102, 0.940296, 0.95893, 0.977907, 0.997492,
+                  1.01716, 1.03903, 1.06059, 1.08263, 1.10461, 1.12845, 1.15264, 1.17601, 1.20298, 1.22963, 1.25707,
+                  1.28571, 1.31726, 1.34796, 1.38215, 1.41752, 1.45428, 1.48986, 1.52822, 1.56819, 1.61369, 1.65903,
+                  1.70675, 1.75877, 1.81243, 1.87317, 1.93473, 1.99886, 2.06445, 2.14154, 2.22632, 2.31342, 2.41137,
+                  2.52025, 2.64017, 2.77252, 2.91874, 3.0904, 3.27159, 3.48409, 3.72559, 4.00585, 4.37489, 4.80889,
+                  5.34438, 6.10582, 7.24512, 9.19676, 13.5221, 146.297),
+}
+
+
+def quality_rank(name: str, value) -> float:
+    """Ölçünün 2020-01 → 2023-10 çöküş sinyallerindeki yüzdelik sırası (0-1; tablo arası doğrusal); yoksa 0.5."""
+    try:
+        x = float(value)
+    except (TypeError, ValueError):
+        return 0.5
+    if x != x:
+        return 0.5
+    tab = QUALITY_TABLES[name]
+    if x <= tab[0]:
+        return 0.0
+    if x >= tab[-1]:
+        return 1.0
+    i = bisect.bisect_right(tab, x) - 1               # tab[i] <= x < tab[i + 1]
+    while i > 0 and tab[i - 1] == tab[i]:            # eşit değerli dilim: başına
+        i -= 1
+    j = i + 1
+    while j < len(tab) - 1 and tab[j] == tab[i]:
+        j += 1
+    lo, hi = tab[i], tab[j]
+    frac = (x - lo) / (hi - lo) if hi > lo else 0.0
+    return (i + frac * (j - i)) / (len(tab) - 1)
+
+
+def quality_score(score, metrics: Optional[Dict[str, float]]) -> float:
+    """Birleşik sinyal kalitesi (0-1): sinyal puanı (çöküş şiddeti), vadeli-spot farkı, son 15 dk piyasa alış payı,
+    son 5 / 15 dk düşüş, hacim ve satış hacmi oranının işaretli yüzdelik sıralarının ortalaması."""
+    m = metrics or {}
+    total = 0.0
+    for name, sign in QUALITY_SIGNS.items():
+        r = quality_rank(name, score if name == "score" else m.get(name))
+        total += r if sign > 0 else 1 - r
+    return total / len(QUALITY_SIGNS)
+
+
+QUALITY_CUTS = {40: 0.433, 60: 0.5311}      # 2020-01 → 2023-10 çöküş sinyallerinde puanın %40 / %60'lık değeri
+
+
+def quality_size_factor(size_pct: float, cut_pct: float, quality: Optional[float]) -> float:
+    """Sinyal kalitesine göre boy (FUTURES_QUALITY_SIZE_PCT): puan, sinyallerin en zayıf `cut_pct` yüzdesindeyse
+    (QUALITY_CUTS) size_pct / 100, değilse (ya da puan yoksa) 1. Canlı bot ve backtest aynı çarpanı kullanır."""
+    if size_pct >= 100 or quality is None or quality != quality:
+        return 1.0
+    cut = QUALITY_CUTS.get(int(round(float(cut_pct))), QUALITY_CUTS[60])
+    return max(0.0, float(size_pct)) / 100 if quality <= cut else 1.0
 
 
 def window_sigma(c, bars: int, lookback: int = FUT_Z_LOOKBACK_BARS):
@@ -2435,6 +2584,12 @@ def futures_signal_at(f: Dict[str, "np.ndarray"], i: int, side: str, cfg, liq_lo
         d15 = float(recent_drop_pct(f)[i])                    # Çöküş sürüyor mu: son 15 dk düşüş (FUTURES_RECENT_*)
         if d15 == d15:
             out["drop15"] = d15
+        d5 = float(recent_drop_pct(f, 5)[i])                  # Sinyal kalitesi (FUTURES_QUALITY_*): son 5 dk düşüş
+        if d5 == d5:
+            out["drop5"] = d5
+        t15 = float(taker_share(f)[i])                        # ve son 15 dk piyasa alış payı
+        if t15 == t15:
+            out["taker15"] = t15
         if getattr(cfg, "futures_crash_z", 0.0):
             out["z"] = float(cfg.futures_crash_z)
         if mode != "close":
@@ -2541,6 +2696,9 @@ class FuturesSignal:
         if m.get("basis_size_pct") and m["basis_size_pct"] != 100:
             parts.append(f"Vadeli spotun %{-m.get('basis', 0.0):.2f} altında (zorla satış izi): pozisyon "
                          f"%{m['basis_size_pct']:g}")
+        if m.get("quality_size_pct") is not None and m["quality_size_pct"] < 100:
+            parts.append(f"Sinyal kalitesi zayıf (puan {m.get('quality', 0.0):.2f}, en zayıf "
+                         f"%{m.get('quality_cut_pct', 60):g}): pozisyon %{m['quality_size_pct']:g}")
         if m.get("depth_cap"):
             parts.append((f"Derinliğe göre boy: pozisyon {m['depth_cap']:,.0f} USDT ile sınırlı (±%1 içinde alış "
                           f"{m.get('depth_bid', 0):,.0f} / satış {m.get('depth_ask', 0):,.0f} USDT)").replace(",", "."))

@@ -2451,6 +2451,58 @@ dk → olay başı +%2.8 / +%2.7 (yılda ~38 olay), %10 altı → +%3.6 / +%2.9 
 bekleyen emirler borsada teminat ayırttığı için ana stratejiyle çakışıyor (24 USDT'de 20 coine emir koymak teminatın
 çoğunu bağlar), dakika içi sıra bilinmiyor (saniyelik veriyle sınanmalı), ani çöküşte stop çok kötü dolabilir.
 
+#### Rapor 18 araştırması, üçüncü tur: birleşik kalite puanı ve hibritler (Kasım 2026)
+Tek tek ölçüler boyu büyütüp küçültmekte zayıf kaldı; birleşince güçlü bir ayırıcı oluyor. **Kalite puanı:** yedi ölçünün
+her biri 2020-01 → 2023-10 çöküş sinyallerine göre yüzdelik sıraya çevrilir, işaretlenir (yüksek = iyi) ve ortalaması
+alınır: çöküş şiddeti (sinyal puanı), vadeli-spot farkı, son 15 dk piyasa alış payı, son 5 ve 15 dk düşüş, hacim oranı,
+satış hacmi oranı. İşaretler, tablolar ve kesimler yalnız seçim döneminden; doğrulama dönemi hiç kullanılmadı.
+
+| Puan beşliği (2020-2023 sinyallerine göre) | İşlem başı: seçim (2020-01 → 2023-10) | Doğrulama (2023-11 → 2026-11) |
+|---|---|---|
+| 1 (en zayıf) | −%0.21 (341 işlem) | −%0.23 (202) |
+| 2 | +%0.03 (503) | +%0.07 (268) |
+| 3 | +%0.06 (948) | −%0.12 (354) |
+| 4 | +%0.16 (1.606) | +%0.08 (609) |
+| 5 (en güçlü) | +%0.44 (3.029) | +%0.54 (1.100); 7 yılın 7'sinde +%0.40 … +%0.64 |
+
+Alt üç beşlik (en zayıf %60) ortalamada +%0.00 / −%0.08, üst iki +%0.34 / +%0.38. Tam protokol (10 çekiliş, 71 aylık
+başlangıç; 12 ay ortanca / %60'ı aşan düşüş / kill-switch):
+
+| Kural | 4.000 USDT | 24 USDT |
+|---|---|---|
+| Şimdiki | +%1.034 / 8 / 0 | +%1.480 / 25 / 6 |
+| **En zayıf %60 → boy %60** | **+%1.097 / 7 / 0** (10 çekilişin 9'unda iyi) | **+%1.554 / 25 / 6** (8'inde iyi) |
+| En zayıf %60 → boy %50 / %40 | +%1.110 / 8 / 0 · +%1.082 / 8 / 0 | +%1.549 / 26 / 6 |
+| En zayıf %40 → boy %50 / en zayıf %80 → boy %70 | +%1.077 / 8 / 0 · +%967 / 8 / 0 | |
+| 9 ölçülü (+ fark değişimi, çöküş öncesi oynaklık) / 5 ölçülü puan, en zayıf %60 → %50 | +%1.081 / 8 / 0 · +%1.028 / 6 / 0 | +%1.463 / 26 / 6 (9 ölçü) |
+| Zayıflara hiç girmeme (en zayıf %60 / %40 / %20) | +%1.068 / 13 · +%943 / 8 · +%975 / 8 | |
+| Yalnız puan (eski üç boy kuralı kapalı) | +%1.087 / 36 / 4 | |
+| Puana göre sıra (şiddet yerine) | +%792 / 6 / 0 | |
+
+Zayıf işlemleri küçültmek riski azaltıp yuvaları ve teminatı güçlülere bırakıyor; hiç girmemek ise ilk pozisyon yerini
+güçlülere açıp toplam riski büyütüyor. Resmi motorla (sinyaller yeniden üretildi) iki çekilişte A: 3,84 → 4,07 milyon
+(düşüş %42.0 → %40.5) ve 3,24 → 3,47 milyon.
+
+**Hibritler (puan ×0.5-0.6 ile birlikte; 4.000 USDT):**
+
+| Hibrit | 12 ay ortanca / %60+ düşüş / kill-switch | Sonuç |
+|---|---|---|
+| + vadeli-spot farkı %150 | +%1.132 / 10 / 0 | Düşüş artıyor |
+| + en güçlü beşlik ×1.15 | +%1.193 / 15 / 2 | Kaldıraç gibi |
+| + yavaş çöküş ×0.5 / + son 10 işlem zararda ×0.7 | +%999 / 4 · +%922 / 1 | Risk ve kâr birlikte düşüyor |
+| + son 10 işlem ×0.7 + 8x | +%1.578 / 16 / 2 | Düşüş iki katı |
+| + 7x + düşüşte küçültme 20 / 50 | +%1.136 / 6 / 0 | |
+| + 7x + küçültme 20 / 50 + aynı dakikada önce son 5 dk'da en çok düşen | +%1.338 / 9 / 1 | Kırılgan: küçültme 25 / 50 → +%1.045, 20 / 60 → +%1.114 (17), 30 / 60 → +%1.052 (20); 24 USDT +%1.324 / 14 / 5 |
+| + fitil avcısı (%8 / %10, boy ×0.25-0.5, boşken / her yuvada) | +%797 … +%952 | Fitil dolumu çöküşün başında ilk pozisyon yerini kapıyor; kapmasa da kötü |
+| Kural yokken 7x + küçültme 20 / 50 (+ sıra) | +%1.022 / 10 · +%1.024 / 10 | Kazanç puandan geliyor |
+| + aynı dakikada önce son 5 / 10 dk'da en çok düşen (6x) | +%1.160 / 6 / 0 · +%1.135 / 7 / 0 (10 çekilişin 7-8'inde iyi) | Eklenmedi: kural yokken etkisiz (+%1.071), 15 dk'ya göre sıra kötü (+%894); 24 USDT +%1.670 / 16 / 5 ama en kötü çeyrek +%314 → +%234 |
+
+- **Eklenen ayar:** `FUTURES_QUALITY_SIZE_PCT` (varsayılan 100 = kapalı; önerilen 60) ve `FUTURES_QUALITY_CUT_PCT` (60;
+  40 seçilebilir). Telegram: 🌊 Dalga modu → 🧮 Kalite puanı. Puan canlı botta ve backtestte aynı fonksiyonla (strategy.
+  quality_score) ve aynı sabit tablolarla hesaplanır; yeni ölçüler (son 5 dk düşüş, son 15 dk piyasa alış payı) zaten
+  çekilen 5 dk mumlardan gelir, vadeli-spot farkı için spot fiyatı alınır (alınamazsa o ölçü orta sayılır).
+- **Sınırlar:** kazanç küçük (+%5-7) ama düşüşü artırmıyor; puan 2020-2023'e göre ayarlı, piyasa değişirse zayıflayabilir.
+
 ### 🏆 Strateji turnuvası (`--turnuva`)
 Hangi strateji türünün sizin dönemde işe yaradığını **tek komutla** görmek için:
 ```bash
@@ -2549,6 +2601,9 @@ karar için ortancaya ve en kötüye bakın. Çıkış taraması her gün dengel
   göre işlem başı sonucu (−%0.5'ten derin, −%0.5 … −%0.1, −%0.1 … 0, 0 ve üstü). Derin farklı işlemler
   `FUTURES_BASIS_SIZE_PCT` ile büyütülebilir; açıksa başlıkta "⚖️ Vadeli-spot farkı" satırı A'da kaç işlemin büyük boyla
   açıldığını yazar. Spot fiyatları backtestin ilk çalıştırmasında arşivden indirilir.
+- **Sinyal kalitesi puanına göre** (aynı yerde; sabit tutar): yedi ölçülü kalite puanının 2020-2023 sinyallerindeki
+  dilimine göre işlem başı sonuç (en zayıf %40, %40-60, %60-80, en güçlü %20). Zayıf dilimler `FUTURES_QUALITY_SIZE_PCT`
+  ile küçültülebilir; açıksa başlıkta "🧮 Sinyal kalitesi" satırı A'da kaç işlemin küçük boyla açıldığını yazar.
 - **📆 AYLIK İŞLEM YIĞILMASI** (yıl yıl): ayın günlük işlem hızı o yılın ortalamasının en az 1.5 katıysa o ay yığılma
   sayılır. Her yıl için yığılma ayları (işlem sayısı ve kaç kat), bu ayların yılın işlemlerinden ve C'deki net kârından
   payı; yığılma ayları olmadan C'nin toplamı, işlem başı sonucu ve B'nin "bu aylar yatay geçseydi" sonucu. Yığılma yoksa yılın en yoğun ayı yazılır. Son

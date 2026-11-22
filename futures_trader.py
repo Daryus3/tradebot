@@ -53,7 +53,8 @@ from risk import ExitReason, Position, cooldown_minutes, kill_switch_hit
 from strategy import (FUT_BAR_MS, FUT_BREADTH_DROP_PCT, FUT_BREADTH_HOURS, FUT_BTC_1H_LIMIT, FUT_H1_LIMIT, FUT_HOUR_MS,
                       FuturesSignal,
                       ScanResult, funding_per_bar, futures_kline_limit, isolated_factor, market_breadth,
-                      recent_size_factor, basis_pct, basis_size_factor, spot_pairs)
+                      recent_size_factor, basis_pct, basis_size_factor, quality_score, quality_size_factor,
+                      spot_pairs)
 from telegram_bot import CRITICAL_EXITS, Messages, esc, fmt_duration, fmt_price, fmt_signed, fmt_usdt, futures_tag
 from trader import ALIVE_SAVE_SEC, POSITION_LOG_SEC, RULES_REFRESH_SEC, Mark, TradingBot
 
@@ -1093,7 +1094,9 @@ class FuturesBot(TradingBot):
 
     # ================================================================ vadeli-spot farkı (FUTURES_BASIS_SIZE_PCT)
     def _basis_on(self) -> bool:
-        return self.cfg.futures_tactic == "crash" and float(self.cfg.futures_basis_size_pct) != 100
+        """Spot fiyatı gerekiyor mu: vadeli-spot farkına göre boy ya da kalite puanı (fark puanın ölçüsü) açıksa."""
+        return self.cfg.futures_tactic == "crash" and (float(self.cfg.futures_basis_size_pct) != 100
+                                                       or float(self.cfg.futures_quality_size_pct) < 100)
 
     def _spot_job(self) -> Optional[Future]:
         """Spot fiyatlarını ayrı iş parçacığında iste (anlık taramada vadeli fiyatlarla aynı anda; kapalıysa None)."""
@@ -1679,7 +1682,8 @@ class FuturesBot(TradingBot):
         """Girişin teminatı (USDT). Tek pozisyonda serbest bakiye × FUTURES_MARGIN_USAGE_PCT (eskisi gibi); dalga
         modunda (serbest + açık pozisyon teminatları) × kullanım / FUTURES_MAX_POSITIONS, serbest bakiyeyi aşmadan.
         Yalnız çöküşte (genişlik < FUTURES_ISOLATED_BREADTH) × FUTURES_ISOLATED_SIZE_PCT; çöküş durulmuşsa (son 15 dk
-        düşüş FUTURES_RECENT_DROP_PCT'nin altında) × FUTURES_RECENT_SIZE_PCT; sermaye zirvesinin FUTURES_DD_SCALE_PCT
+        düşüş FUTURES_RECENT_DROP_PCT'nin altında) × FUTURES_RECENT_SIZE_PCT; vadeli spotun altındaysa ×
+        FUTURES_BASIS_SIZE_PCT; kalite puanı zayıfsa × FUTURES_QUALITY_SIZE_PCT; sermaye zirvesinin FUTURES_DD_SCALE_PCT
         altındayken × FUTURES_DD_SCALE_SIZE_PCT (backtest: simulate / simulate_slots)."""
         cfg = self.cfg
         usage = cfg.futures_margin_usage_pct / 100
@@ -1696,6 +1700,14 @@ class FuturesBot(TradingBot):
         if basis != 1:
             sig.metrics["basis_size_pct"] = round(basis * 100, 1)
             factor *= basis
+        if cfg.futures_quality_size_pct < 100 and sig.metrics.get("tactic", 1.0) == 1.0:
+            q = quality_score(sig.score, sig.metrics)
+            quality = quality_size_factor(cfg.futures_quality_size_pct, cfg.futures_quality_cut_pct, q)
+            sig.metrics["quality"] = round(q, 3)
+            if quality != 1:
+                sig.metrics["quality_size_pct"] = round(quality * 100, 1)
+                sig.metrics["quality_cut_pct"] = cfg.futures_quality_cut_pct
+                factor *= quality
         dd = self._dd_factor(sig)
         slots = self.slots()
         if slots <= 1:
@@ -2311,6 +2323,9 @@ class FuturesBot(TradingBot):
             if cfg.futures_basis_size_pct != 100:
                 extra += (f", vadeli spotun %{cfg.futures_basis_deep_pct:g} altındayken boy "
                           f"%{cfg.futures_basis_size_pct:g}")
+            if cfg.futures_quality_size_pct < 100:
+                extra += (f", kalite puanı en zayıf %{cfg.futures_quality_cut_pct:g}'taysa boy "
+                          f"%{cfg.futures_quality_size_pct:g}")
             lines.append(f"🌊 Genişlik: {self.last_breadth} coin son 1 saatte %3+ düştü (dalga ≥"
                          f"{cfg.futures_extra_breadth}, yalnız çöküş <{cfg.futures_isolated_breadth}{extra})")
         tm = self.last_timing
