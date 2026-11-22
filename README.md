@@ -2425,6 +2425,32 @@ ETH hariç).** Piyasa alış emrinin dolumu = mum kapanışından 0.6 sn sonraki
 
 Rapordaki "+1.0e+05%" gösterimi kaldırıldı: büyük yüzdeler artık tam sayı ("+100512%"), satırlar karşılaştırılabiliyor.
 
+**İkinci tur: yapı ve çıkış fikirleri (aynı protokol; 12 ay ortanca / %60'ı aşan düşüş / kill-switch; şimdiki +%1.034 /
+8 / 0).** Yine kural eklenmedi:
+
+| Fikir | Sonuç | Neden elendi |
+|---|---|---|
+| Yavaş çöküş (en güçlü pencere 4 saat; işlem başı +%0.18 / +%0.01, 1 saatlikler +%0.27 / +%0.29): boy %50 / %33 | +%900 / +%849, düşüş 4 / 4 | Kâr ve risk birlikte düşüyor: kuralsız teminat %88 ile aynı (+%931, 5) |
+| Yavaş çöküşte ek pozisyon açma / hiç girme | +%966 (7) / +%754 (4) | Aynı eğri üstünde ya da kötü |
+| Ek pozisyonlarda Kâr Al +%8 / +%10 | +%1.026 (10, 2) / +%1.057 (11, 1) | Fark yok, düşüş artıyor |
+| Son 10 işlem zararda → boy ×0.7 / kârda → ×1.3 | +%879 (4) / +%1.085 (19, 1) | Teminatı azaltıp artırmakla aynı |
+| Küçük boylu (durulmuş / yalnız çöküş) pozisyon ilk pozisyonun yerini ve ek pozisyon kapısını kilitlemesin | +%860 (35, 8); 24 USDT +%956 (42, 8) | Açık riski büyütüyor: küçük pozisyonun yuvayı tutması koruyucu |
+| Çöküş öncesi oynaklığa göre başabaş (sakin / orta coinlerde tetik +%2, işlem başı +0.13 / +0.32 puan) | +%686 … +%921, düşüş 14-18 | Uzun kalan pozisyonlar yuvaları tutuyor |
+| Saat (2 saatlik dilimler), sinyal yaşı (çöküş kaç dakikadır sürüyor), 30 günlük eğilim | — | İki dönemde tutarsız |
+| Vadeli-spot farkının son 5 dk'da açılması (en hızlı beşlik +%0.71 / +%1.37, 7 yılın 7'si) | — | Büyük ölçüde farkın kendisi; şimdiki %130 kuralı bunu zaten alıyor |
+
+İşlem başı "ya şöyle çıksaydı" denemeleri (yuva etkisi olmadan) uzun tutmayı hep iyi gösteriyor; tam sistemde ise
+pozisyonlar yuvaları kilitleyip zarar keslerini üst üste bindirdiği için hep kaybettiriyor (rapor 15'teki başabaş bulgusuyla
+aynı).
+
+**Fitil avcısı (yeni strateji fikri, eklenmedi).** Her coinde bir önceki dakika kapanışının %d altına bekleyen alış emri:
+dakika içinde iğne atıp aynı dakikada geri dönen fiyatı (kapanışta sinyal çıkmaz) yakalar. 1 dk mumlarla, coin başına tek
+pozisyon, felaket zarar kesi ve Kâr Al / süre çıkışıyla (kaldıraçsız, net): %8 altı + Kâr Al +%10 + zarar kes −%15 + 60
+dk → olay başı +%2.8 / +%2.7 (yılda ~38 olay), %10 altı → +%3.6 / +%2.9 (~22 olay); yıllar 6/7 artı ama 2025 −%4 … −%7
+(10 Ekim 2025'te iğneler %50'ye indi), zarar kesi olmadan 60 dk içinde en kötü %10'luk dilim −%23 … −%40. Eksikleri:
+bekleyen emirler borsada teminat ayırttığı için ana stratejiyle çakışıyor (24 USDT'de 20 coine emir koymak teminatın
+çoğunu bağlar), dakika içi sıra bilinmiyor (saniyelik veriyle sınanmalı), ani çöküşte stop çok kötü dolabilir.
+
 ### 🏆 Strateji turnuvası (`--turnuva`)
 Hangi strateji türünün sizin dönemde işe yaradığını **tek komutla** görmek için:
 ```bash
