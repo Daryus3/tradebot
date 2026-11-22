@@ -400,3 +400,10 @@ def test_year_and_period_tables_line_up_with_their_headers(fcfg):
                                     "Kayıp serisi"])
     _right_aligned(lines, "📒 A'NIN 6 AYLIK", ["Dönem sonu bakiye", "6 ayda", "Dönem içi en düşük", "Dönem içi düşüş",
                                                "İşlem"])
+
+
+def test_large_percentages_stay_comparable_instead_of_exponent():
+    # "+1.0e+05%" farkı gizliyordu (rapor 18: beş ayrı satır aynı görünüyordu)
+    assert [fb._pct(v) for v in (96001.4, 100512.3, 123456.7, -74.4)] == ["+96001.4%", "+100512%", "+123457%", "-74.4%"]
+    assert fb._pct(100512.3, sign=False) == "100512%"
+    assert fb._pct(2.5e9) == "+2.5e+09%" and fb._pct(None) == "—"

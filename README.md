@@ -2361,6 +2361,70 @@ daha çok artırıyor.
   çöküşleri fark derinse almak (eklenen işlemler +%0.10-0.14, ortancayı düşürüyor), boyu 2 katına çıkarmak.
 - **Sınırlar:** fark son yıllarda seyrek; ölçü 1 dk açılışlarından, canlıda son işlem fiyatlarından. Önce test modunda deneyin.
 
+#### Rapor 18 (22 Kasım) araştırması: yeni ölçüler, seçim sırası, gerçek giriş maliyeti (Kasım 2026)
+Baz: rapor 18'in ayarı (rapor 17 + vadeli-spot farkı %130 / %0.5), 4.000 USDT, 10 çekiliş, her ayın 1'inde başlayan 71
+hesap. **Sonuç: yeni kural eklenmedi**; şimdiki ayar, denenen her şeyden iyi ya da aynı riskte onlara eşit.
+
+**Yeni ölçüler (C, 8.960 işlem).** Girişten önceki 1 dk mumlardan (piyasa emriyle alışların payı, son 1 / 3 / 5 dk
+getirisi, hacim ve işlem sayısı sıçraması, mumun aralıktaki yeri, 1 / 4 saatlik tepeye ve dibe uzaklık, ortalama işlem
+büyüklüğü), spot mumlardan (spot / vadeli hacim, spot alış payı), emir defterinden (2023+: alış / satış derinliği oranı)
+ve saat / günden. En güçlüsü **son 15 dk'da piyasa emriyle alışların hacimdeki payı** (düşükse satıcılar baskın: zorla
+satış izi, vadeli-spot farkının akrabası):
+
+| Son 15 dk'da piyasa alış payı | İşlem başı net: seçim (2020-01 → 2023-10) | Doğrulama (2023-11 → 2026-11) |
+|---|---|---|
+| ≤ 0.38 | +%0.47 (1.054 işlem) | +%0.80 (284) |
+| 0.38 - 0.42 | +%0.33 (1.110) | +%0.49 (488) |
+| 0.42 - 0.47 | +%0.23 (2.165) | +%0.07 (1.034) |
+| 0.47 - 0.50 | +%0.11 (1.261) | +%0.12 (458) |
+| > 0.50 | +%0.10 (837) | −%0.10 (269) |
+
+Ayrım 7 yılın 7'sinde aynı yönde ve 15 dk düşüşü ile vadeli-spot farkı sabitken de sürüyor (tam boy, fark > −%0.5: alt
+üçte bir +%0.25 / +%0.54, üst üçte bir +%0.04 / +%0.20). Son 5 dk'da %4+ düşüş (+%0.76 / +%1.14) ve hacim sıçraması da
+güçlü ama büyük ölçüde 15 dk düşüşüyle (rapor 14) örtüşüyor; emir defteri oranı, mum şekli, saat ve gün tutarsız.
+
+**Boy kuralı olarak (tam protokol):**
+
+| Kural | 71 hesap: 12 ay ortanca | %60'ı aşan düşüş | Kill-switch |
+|---|---|---|---|
+| Şimdiki (teminat %95) | +%1.034 | 8 | 0 |
+| Alış payı ≤ 0.40 → boy ×1.3 (yalnız tam boy, fark derinse ek yok) | +%1.189 (10 çekilişin 10'unda iyi) | 15 | 3 |
+| Aynısı, teminat %80 / %85 / %88 / %90 | +%1.001 / +%1.069 / +%1.190 / +%1.156 | 2 / 10 / 11 / 14 | 0 / 0 / 0 / 1 |
+| Kıyas, kuralsız: teminat %88 / %100, tüm boy ×1.1 / ×1.15 | +%931 / +%1.097 / +%1.111 / +%1.184 | 5 / 9 / 12 / 18 | 0 / 1 / 2 / 4 |
+| 24 USDT: şimdiki / alış ≤ 0.40 ×1.3 / tüm boy ×1.3 | +%1.480 / +%2.016 / +%2.027 | 25 / 33 / 39 | 6 / 6 / 10 |
+| Son 5 dk ≥ %4 → ×1.3 / ≥ %2.6 → ×1.3 | +%1.056 / +%1.142 | 14 / 20 | 2 / 3 |
+| Fark derinse Kâr Al +%10 | +%951 | 9 | 2 |
+
+Kural kârı artırıyor ama düşüşü de neredeyse aynı oranda: aynı riskte düz büyütmeden yalnızca %0-8 iyi ve bu fark
+çekilişler arasında oynuyor (teminat %85'te kuralsızla aynı). 24 USDT'de minimum emir tutarı yüzünden sonuçlar sıçramalı
+(tüm boy ×1.15 ortancayı düşürüp düşüşü 25 → 42'ye çıkarıyor). Ek risk karşılığı kâr, kaldıraç / teminatla da alınabiliyor;
+bu yüzden ayar olarak eklenmedi.
+
+**Seçim sırası (aynı dakikada birden çok sinyal; sinyallerin %82'si böyle gelir).** Şimdiki sıra (çöküş şiddeti) +%1.034,
+rastgele sıra +%411: seçim kârın büyük kısmını belirliyor. Alış payına göre +%570, vadeli-spot farkına göre +%857, 15 dk
+düşüşüne göre +%894, son 5 dk düşüşüne göre +%1.071 (10 çekilişin 5'inde iyi), şiddet × alış payı / fark / 5 dk karışımları
++%963 … +%1.074. Şimdiki sıra korunuyor.
+
+**Rapor 18'in tek-kural satırları (A'da şimdikinden yüksek görünenler) 71 hesapta:** ek pozisyon başabaşı +%0.6 → +%871
+(%60'ı aşan düşüş 14), zaman stopu 120 dk → +%881, zarardan sonra bekleme 8 saat → +%1.044 (10), durulmuşsa boy %50 →
++%1.036 (10), durulmuş eşiği %3 → +%918, düşüşte küçültme kapalı → +%1.139 ama düşüş 33 / kill-switch 6, küçültme eşiği
+%40 → +%1.035 (14), ek pozisyon ilkinin %8 / %25 / %33'ü → +%1.086 (24) / +%965 / +%867. Tek çekilişli A farkı şanstı;
+şimdiki ayarlar en iyisi.
+
+**Gerçek giriş maliyeti (aggTrades: alıcı / satıcı başlatan işlem ayrımıyla; 350 coin-gün, 40 coin, 3.435 işlem, BTC /
+ETH hariç).** Piyasa alış emrinin dolumu = mum kapanışından 0.6 sn sonraki ilk alıcı başlatan işlem:
+
+- **Backtest varsayımı doğru:** dolum kapanışa göre ortalama +%0.043 (ortanca +%0.018); backtest +%0.04 sayıyor. Yıl yıl
+  2020 +%0.101, 2021 +%0.024, 2022 +%0.010, 2023 +%0.007, 2024 +%0.023, 2025 +%0.016, 2026 +%0.055; fark derinken
+  +%0.109 (çöküş sertken alış-satış aralığı geniş). Canlıdaki 9 girişin +%0.084'ü 2026 ortalamasına yakın; örnek az.
+- **Bekleyen (maker) alış emri alış tarafında:** 1-3 sn'de işlemlerin %62-73'ünde doluyor (altına işlem düşerse), ama
+  dolanlar zayıf işlemler (+%0.06), dolmayanlar güçlüler (+%0.17-0.23). Dolmazsa piyasa emriyle girmek işlem başı
+  +%0.03 (seçim +%0.04, doğrulama ~0); dolmazsa vazgeçmek ~0. Karmaşıklığına değmiyor.
+- **Fiyat tavanı zararlı:** dolum kapanışın %0.1-0.5 üstündeyse girmemek işlem başı −%0.02 … −%0.06; pahalı dolan işlemler
+  en iyileri (+%0.5 … +%1.7: dönüş başlamış).
+
+Rapordaki "+1.0e+05%" gösterimi kaldırıldı: büyük yüzdeler artık tam sayı ("+100512%"), satırlar karşılaştırılabiliyor.
+
 ### 🏆 Strateji turnuvası (`--turnuva`)
 Hangi strateji türünün sizin dönemde işe yaradığını **tek komutla** görmek için:
 ```bash

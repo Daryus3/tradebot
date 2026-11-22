@@ -2927,8 +2927,10 @@ def run_phase4_grid_cli(cfg, days: Optional[int], end_ms: Optional[int], out_dir
 def _pct(v: Optional[float], sign: bool = True) -> str:
     if v is None or (isinstance(v, float) and math.isnan(v)):
         return "—"
-    if abs(v) >= 1e5:
+    if abs(v) >= 1e9:
         return f"{v:+.1e}%" if sign else f"{v:.1e}%"
+    if abs(v) >= 1e5:                       # "+100512%": satırlar karşılaştırılabilsin (eski "+1.0e+05%" farkı gizliyordu)
+        return f"{v:+.0f}%" if sign else f"{v:.0f}%"
     return f"{v:+.1f}%" if sign else f"{v:.1f}%"
 
 
