@@ -2287,6 +2287,35 @@ bunları sayınca (düşen mumda önce tepe, sonra stop; yükselen mumda stop te
 işlem sayısı piyasaya bağlı kalıyor: çöküş yoksa işlem yok, sakin dönemde kârlı başka bir yol bulunamadı. Kârı ölçülebilir
 biçimde artırabilecek kalan kalemler canlıda kaçan işlemler ve giriş dolumu.
 
+#### Küçük hesap: 24 USDT ile aynı ayarlar (Kasım 2026)
+Canlı hesap ~24 USDT. Bu bakiyede ilk pozisyon ~91 USDT (bakiyenin %63'ü teminat × 6x), ek pozisyonlar ~15 USDT; Binance'in
+en küçük emir tutarı BTC'de 100, ETH'de 20, diğerlerinde 5 USDT olduğu için BTC hiç, ETH ek pozisyon olarak açılamıyor;
+"yalnız çöküş %50" ve "durulmuş çöküş %33" küçültmeleri de pozisyonu 5 USDT'nin altına indirebiliyor. Backtest bunu modelliyor
+(atlanan sinyal: "minimum emir tutarının altında"). 10 çekiliş, her ayın 1'inde o bakiyeyle başlayan 71 hesap:
+
+| Bakiye, ayar | 12 ay ortanca | %60'ı aşan düşüş | Kill-switch | 12 ay sonra zararda | En küçük tutar yüzünden atlanan (7 yıl) |
+|---|---|---|---|---|---|
+| 4.000 USDT, şimdiki (4 pozisyon, 6x) | +%940 | 8 | 0 | 2 | 18 |
+| **24 USDT, şimdiki** | +%1.345 | 20 | 4 | 6 | 554 |
+| 24 USDT, en küçük tutara yuvarla (hesaplananın en çok 1.5 / 3 katı / sınırsız) | +%1.297 / +%1.298 / +%1.298 | 22 | 4 | 7 | 108 / 78 / 21 |
+| 24 USDT, 4 pozisyon 5x | +%893 | 12 | 2 | 4 | 425 |
+| 24 USDT, 4 pozisyon 7x | +%1.930 | 26 | 7 | 9 | 186 |
+| 24 USDT, 2 pozisyon 6x | +%2.221 | 29 | 6 | 8 | 48 |
+| 24 USDT, 2 pozisyon 5x | +%1.240 | 22 | 4 | 6 | 54 |
+| 24 USDT, 2 pozisyon 4x | +%952 | 12 | 2 | 4 | 60 |
+| 24 USDT, tek pozisyon 6x | +%2.006 | 56 | 14 | 16 | 33 |
+| 100 USDT, şimdiki / 2 pozisyon 6x | +%1.427 / +%2.224 | 20 / 30 | 5 / 6 | 8 / 7 | 64 / 24 |
+| 4.000 USDT, 2 pozisyon 6x / 5x | +%1.382 / +%958 | 18 / 6 | 3 / 0 | 5 / 2 | 18 / 18 |
+
+- **En küçük tutara yuvarlamak işe yaramıyor.** Atlanan işlemler çoğunlukla botun zaten küçülttüğü zayıf sinyaller (yalnız
+  çöküş, durulmuş çöküş); onları büyütmek sonucu biraz kötüleştiriyor. Ek ayar eklenmedi.
+- **Küçük hesap aynı kaldıraçta daha riskli.** 4.000 USDT'de hesap büyüyünce emir defteri kayması ve derinliğe göre boy büyük
+  pozisyonları törpülüyor; 24 USDT'de bu törpü yok. Şimdiki ayar 24 USDT'de daha çok kazandırıyor ama %60'ı aşan düşüş
+  yaşayan hesap 8 yerine 20, kill-switch 0 yerine 4. 4.000 USDT'deki risk düzeyi 24 USDT'de 5x ile elde ediliyor.
+- **Pozisyon sayısı bir kaldıraç düğmesi.** 2 pozisyon ilk pozisyonu büyütüyor (bakiyenin %81'i teminat): 2 pozisyon 6x ile 4
+  pozisyon 7x aynı yerde, 2 pozisyon 5x ile 4 pozisyon 6x aynı yerde. Şimdikini hem getiride hem riskte geçen bir ayar yok;
+  daha çok kâr ancak daha çok riskle geliyor.
+
 ### 🏆 Strateji turnuvası (`--turnuva`)
 Hangi strateji türünün sizin dönemde işe yaradığını **tek komutla** görmek için:
 ```bash
