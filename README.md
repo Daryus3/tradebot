@@ -2186,6 +2186,80 @@ kalırsa, kötü dolumları sınırlayan bir giriş emri (fiyat tavanlı) araşt
 - 7x en fazla düşünülebilecek adım: ortanca +%15, ama %60'ı aşan düşüş 8 → 14, kill-switch toplamı 4 → 13. 8x ve üstü
   önerilmiyor.
 
+#### Rapor 17 (22 Kasım) araştırması: daha çok kâr ve işlem için yeni yol var mı? Açık pozisyon (OI) verisi (Kasım 2026)
+Baz: rapor 17'nin ayarı (6x, 4.000 USDT, dakikalık + anlık tarama, kural %33, düşüşte küçültme 30 / 60), 2020-01 →
+2026-11, seçim / doğrulama dönemi 2023-11'de ayrılır.
+
+**Canlıda kaçan işlemler.** 9-22 Kasım'da backtest 9 işlem açtı, canlı bot 4. Kaçanlar: 2'si hesabın Çoklu Varlık modunda
+olması (-4168; bot artık hesabı kendiliğinden Tek Varlık moduna alıp yeniden deniyor), 1'i o sırada dakikalık taramanın
+kapalı olması, 1'i coin beklemesi (canlı ile backtestin durumu farklıydı), 1'i minimum emir tutarı (ETH; Binance ETH'de en
+az 20, BTC'de 100 USDT ister). İlk üç neden artık olmamalı. İşlem sayısının asıl belirleyicisi piyasa: C'de 2026'da 412
+işlem var (2021'de 3.509), bunların %58'i üç ayda (Şubat, Haziran, Ekim). Sakin günler için ayrı strateji araştırmasında
+378 denemenin hepsi zararda çıkmıştı (bkz. "Sakin günler için ayrı strateji var mı?").
+
+**Yeni veri: açık pozisyon (OI).** Binance'in 5 dk "metrics" arşivi (Eylül 2020'den beri; açık pozisyon, genel ve üst
+trader long/short oranı, taker alış / satış hacim oranı) 8.535 coin-gün için indirildi. Fikir: çöküşte açık pozisyon hızla
+eriyorsa düşüş zorla kapanan pozisyonlardan (likidasyon) geliyordur, dönüş güçlü olur; böylece eşiği altındaki çöküşler
+de alınabilir. Ölçüm her zaman girişten önceki son 5 dk ölçümüyle (canlıda kesin elde olan) yapıldı.
+
+1) Botun açtığı işlemlerde (C, sabit tutar; OI ölçümü olan 3.625 işlem) girişteki OI değişimi sonucu öngörmüyor (işlem başı
+   net, işlem sayısı):
+
+   | Son 1 saatte OI değişimi | Seçim | Doğrulama |
+   |---|---|---|
+   | −%10'dan çok | +%0.32 (76) | −%0.37 (36) |
+   | −%10 … −%6 | +%0.19 (157) | +%0.38 (163) |
+   | −%6 … −%4 | −%0.24 (110) | +%0.31 (212) |
+   | −%4 … −%2 | +%0.36 (155) | +%0.38 (453) |
+   | −%2 … 0 | +%0.34 (243) | +%0.19 (741) |
+   | 0 … +%2 | +%0.21 (207) | +%0.13 (454) |
+   | +%2'den çok | −%0.04 (158) | +%0.22 (460) |
+
+   15, 30 ve 240 dk'lık pencerelerde de kovalar iki dönemde düzensiz.
+2) Eşik altı çöküşleri OI şartıyla eklemek (4 sa %7 | 1 sa %4 sinyalleri, yalnızca girişten önce OI yeterince düştüyse;
+   eklenenler eşzamanlı ana kural sinyallerinin arkasında sıralanır; 4 çekiliş):
+
+   | Ek sinyal | Eklenen işlem (C) | Eklenenlerin işlem başı neti | 71 hesap: 12 ay ortanca | %60'ı aşan düşüş | Kill-switch |
+   |---|---|---|---|---|---|
+   | Şimdiki (ek yok) | - | - | +%1.020 | 10 | 0 |
+   | Eşik altı, OI şartı yok | 9.872 | −%0.06 | +%106 | 36 | 7 |
+   | OI 60 dk'da −%10'dan çok | 72 | −%0.06 | +%977 | 10 | 0 |
+   | OI 240 dk'da −%10'dan çok | 226 | +%0.01 | +%971 | 8 | 0 |
+   | OI 30 dk'da −%6'dan çok | 160 | −%0.14 | +%896 | 16 | 2 |
+   | OI 15 dk'da −%6'dan çok | 86 | −%0.22 | +%922 | 14 | 1 |
+   | OI 60 dk'da −%6'dan çok | 322 | −%0.21 | +%936 | 16 | 1 |
+   | OI 240 dk'da −%6'dan çok | 731 | −%0.12 | +%826 | 8 | 0 |
+
+3) Diğer ölçüler. Genel long/short hesap oranı son 1 saatte %10'dan çok artmışken (kalabalık dibi alırken) açılan ek
+   pozisyonlar biraz zayıf (iki çekilişte seçim −%0.12 / −%0.19, doğrulama +%0.12 / +%0.08; ölçümlü tüm işlemlerin
+   ortalaması seçimde +%0.18, doğrulamada +%0.23), ama ara kovalar düzensiz ve fark işlem başı ~%0.1-0.2: kural yapılacak
+   kadar sağlam değil. Taker oranı ve üst trader oranı düzensiz. Günün saatine (4 saatlik dilimler) ve hafta içi / sonuna
+   göre her kova iki dönemde de kârlı: elenecek saat ya da gün yok.
+
+Tek tek işlemler de yanıltıcı: her coin her çıkıştan sonra hemen yeniden girse şimdiki kuralın işlemleri bile ortalama
+−%0.15'te kalıyor. Kâr botun seçiciliğinden geliyor (dalgada önce en derin çöküş, ek pozisyon yalnızca dalgada, zarardan
+sonra bekleme); bu yüzden her aday yuva simülasyonuyla ölçüldü.
+
+**İşlem sayısını artıran mevcut ayarlar** (şimdiki sinyallerle, 10 çekilişin ortancası):
+
+| Ayar | Tek hesap işlem | 71 hesap: 12 ay ortanca | %60'ı aşan düşüş | Yıllık getiri seçim / doğr. | Kayma ×3 doğr. | Son 12 ay | C: işlem başı |
+|---|---|---|---|---|---|---|---|
+| **Şimdiki (en fazla 4 pozisyon)** | 8.572 | **+%940** | 8 | +%412 / +%391 | +%237 | +%288 | +%0.235 |
+| En fazla 5 pozisyon (ilk pozisyon bakiyenin %57'si) | 9.940 (+%16) | +%851 | 4 | +%397 / +%394 | +%263 | +%216 | +%0.225 |
+| En fazla 6 pozisyon | 11.164 (+%30) | +%785 | 2 | +%392 / +%383 | +%198 | +%284 | +%0.215 |
+| Ek pozisyon kapısı ≥8 coin | 8.962 (+%5) | +%931 | 6 | +%410 / +%397 | +%260 | +%254 | +%0.221 |
+| Zaman stopu 60 dk | 8.531 | +%899 | 8 | +%413 / +%402 | +%247 | +%224 | +%0.236 |
+| Ek pozisyon başabaşı +%0.6 | 7.368 (−%14) | +%824 | 6 | +%416 / +%408 | +%210 | +%135 | +%0.280 |
+| Ek pozisyon ilkinin %25'i | 8.564 | +%855 | 7 | +%402 / +%407 | +%285 | +%217 | +%0.231 |
+
+**Sonuç: yeni ayar eklenmedi.** OI ve pozisyonlanma verisi, fiyattan türetilen mevcut kuralların bildiğinden fazlasını
+söylemiyor; eşik altı çöküşler OI şartıyla da kâr getirmiyor. İşlem sayısını artıran her ayar 12 aylık ortanca getiriyi
+düşürüyor (önceki ~900 denemeyle aynı sonuç). Tek gerçek ödünleşim 5 pozisyon: işlem %16 artıyor, %60'ı aşan düşüş yaşayan
+hesap 8'den 4'e iniyor, uzun dönem yıllık getiri aynı, ama ortanca 12 ay getirisi ~%9 düşük ve son 12 ay geride; daha sık ve
+daha sakin işlem isteyen için bir seçenek (`FUTURES_MAX_POSITIONS=5`), kâr için değil. Kârı ölçülebilir biçimde etkileyen
+kalan kalem canlı giriş dolumu: rapordaki "Canlı giriş dolumuyla" satırı (9 girişte ortalama +%0.084) A'yı +%86.497'den
++%64.728'e indiriyor; tek bir kötü dolum ortalamayı ikiye katladığı için girişler biriktikçe izlenmeli.
+
 ### 🏆 Strateji turnuvası (`--turnuva`)
 Hangi strateji türünün sizin dönemde işe yaradığını **tek komutla** görmek için:
 ```bash
