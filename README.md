@@ -2316,6 +2316,51 @@ en küçük emir tutarı BTC'de 100, ETH'de 20, diğerlerinde 5 USDT olduğu iç
   pozisyon 7x aynı yerde, 2 pozisyon 5x ile 4 pozisyon 6x aynı yerde. Şimdikini hem getiride hem riskte geçen bir ayar yok;
   daha çok kâr ancak daha çok riskle geliyor.
 
+#### Rapor 17 araştırması, üçüncü tur: vadeli-spot farkı (Kasım 2026)
+Likidasyon zincirinde zorla satış vadeli piyasada olur: vadeli fiyat spotun altına düşer, arbitrajcılar onu geri çeker.
+Bu fark (`vadeli / spot − 1`) şimdiye kadar hiç kullanılmamıştı. Binance spot 1 dk arşivi (giriş anı: sinyal mumunun
+kapanışı, iki piyasada aynı dakikanın açılışı) botun 7 yıldaki işlemleriyle (C, sabit tutar, 8.861 işlem) karşılaştırıldı:
+
+| Girişte vadeli / spot farkı | Seçim (2020-01 → 2023-10) | Doğrulama (2023-11 → 2026-11) |
+|---|---|---|
+| −%0.5'ten derin | +%0.89 (1.035 işlem) | +%1.59 (102) |
+| −%0.5 … −%0.3 | +%0.29 (436) | +%1.16 (69) |
+| −%0.3 … −%0.05 | +%0.04 … +%0.28 | +%0.09 … +%0.34 |
+| −%0.05 ve üstü | +%0.03 … +%0.13 | +%0.01 … +%0.20 |
+| Tüm işlemler | +%0.25 | +%0.24 |
+
+Fark −%0.3'ten derin olan işlemler 7 yılın 7'sinde öbürlerinden çok kârlı (2020 +%0.38, 2021 +%1.08, 2022 +%0.67, 2023
++%0.80, 2024 +%1.53, 2025 +%1.12, 2026 +%1.70); Mayıs 2021 çıkarılınca −%0.5'ten derinde yine +%0.77 (900 işlem), kâr 108
+güne ve çok sayıda coine yayılıyor. Bu fırsatlar seyreliyor (2024'te 72, 2026'da 17 işlem): piyasa verimlileşiyor.
+Saniyelik işlem verisiyle (350 derin farklı işlem) fiyat ilk 0.6 sn'de neredeyse kıpırdamıyor (+%0.008), toparlanma 1-5
+sn'de başlıyor (+%0.07 → +%0.19): botun anlık taramayla 0.6 sn'lik girişi farkı yakalıyor.
+
+Yuva simülasyonu (10 çekiliş, 71 aylık başlangıç, 4.000 USDT):
+
+| Kural | 71 hesap: 12 ay ortanca | %60'ı aşan düşüş | Kill-switch | A son bakiye / düşüş | Seçim / doğr. yıllık | Kayma ×3 doğr. |
+|---|---|---|---|---|---|---|
+| Şimdiki | +%940 | 8 | 0 | 3,32 M / %44.8 | +%412 / +%391 | +%237 |
+| **Fark −%0.5'ten derinse boy %130** (10 çekilişin 9'unda iyi) | **+%1.034** | **8** | **0** | 3,47 M / %44.8 | +%418 / +%409 | +%305 |
+| −%0.4, %130 / −%0.3, %130 / −%0.6, %130 | +%1.086 / +%1.097 / +%1.034 | 10 / 11 / 10 | 1 / 1 / 0 | | | |
+| −%0.5, %150 / −%0.4, %150 / −%0.3, %150 | +%1.077 / +%1.149 / +%1.105 | 12 / 12 / 14 | 1 / 1 / 2 | | | |
+| −%0.5, %200 | +%1.073 | 18 | 4 | | | |
+| Fark −%0.05'ten sığsa boy %50 | +%769 | 0 | 0 | 3,31 M / %44.2 | +%408 / +%325 | +%232 |
+| Derinse %150 + sığsa %50 / %70 | +%835 / +%921 | 4 / 6 | 0 | | | |
+| Eşik altı çöküş (4 sa %7 \| 1 sa %4), yalnız fark −%0.5 / −%0.3'ten derinse | +%904 / +%896 | 8 | 0 | | | |
+
+24 USDT'de (canlı bakiye): şimdiki +%1.345 (%60'ı aşan düşüş 20, kill-switch 4); −%0.5 / %130 +%1.480 (25 / 6, 10
+çekilişin 10'unda iyi); −%0.4 / %150 +%1.038 (41 / 10): küçük hesapta emir defteri freni olmadığı için büyütme riski
+daha çok artırıyor.
+
+- **Eklenen ayar:** `FUTURES_BASIS_SIZE_PCT` (varsayılan 100 = kapalı; önerilen 130) ve `FUTURES_BASIS_DEEP_PCT` (0.5):
+  girişte vadeli fiyat spotun eşikten fazla altındaysa pozisyon o büyüklükte (boştaki teminatla sınırlı; tek pozisyon
+  modunda etkisiz). Telegram: 🌊 Dalga modu → ⚖️ Vadeli-spot farkı. Canlı bot spot fiyatlarını anlık taramada vadeli
+  fiyatlarla aynı anda ayrı bir istekle alır (giriş gecikmesi artmaz); öbür tarama yollarında sinyal çıkınca ister.
+  Spot fiyatı alınamazsa boy değişmez. 1000'li vadeliler spotta 1000'siz eşlenir (1000PEPE ↔ PEPE × 1000).
+- **Elenenler:** farksız işlemleri küçültmek (derin düşüşü sıfırlıyor ama 12 ay ortancasını %18 düşürüyor), eşik altı
+  çöküşleri fark derinse almak (eklenen işlemler +%0.10-0.14, ortancayı düşürüyor), boyu 2 katına çıkarmak.
+- **Sınırlar:** fark son yıllarda seyrek; ölçü 1 dk açılışlarından, canlıda son işlem fiyatlarından. Önce test modunda deneyin.
+
 ### 🏆 Strateji turnuvası (`--turnuva`)
 Hangi strateji türünün sizin dönemde işe yaradığını **tek komutla** görmek için:
 ```bash
@@ -2410,6 +2455,10 @@ karar için ortancaya ve en kötüye bakın. Çıkış taraması her gün dengel
   girişten önceki 15 dakikadaki düşüşe göre işlem başı sonucu (%1'den az, %1-2.4, %2.4-5.5, %5.5+). Çöküş durulmuşken
   açılan işlemler zayıfsa `FUTURES_RECENT_SIZE_PCT` ile küçültülebilir (bkz. "Rapor 14 araştırması"); açıksa kural
   başlıktaki 🌊 satırında da yazar.
+- **Girişteki vadeli / spot farkına göre** (aynı yerde; sabit tutar): işlemlerin girişteki vadeli / spot fiyat farkına
+  göre işlem başı sonucu (−%0.5'ten derin, −%0.5 … −%0.1, −%0.1 … 0, 0 ve üstü). Derin farklı işlemler
+  `FUTURES_BASIS_SIZE_PCT` ile büyütülebilir; açıksa başlıkta "⚖️ Vadeli-spot farkı" satırı A'da kaç işlemin büyük boyla
+  açıldığını yazar. Spot fiyatları backtestin ilk çalıştırmasında arşivden indirilir.
 - **📆 AYLIK İŞLEM YIĞILMASI** (yıl yıl): ayın günlük işlem hızı o yılın ortalamasının en az 1.5 katıysa o ay yığılma
   sayılır. Her yıl için yığılma ayları (işlem sayısı ve kaç kat), bu ayların yılın işlemlerinden ve C'deki net kârından
   payı; yığılma ayları olmadan C'nin toplamı, işlem başı sonucu ve B'nin "bu aylar yatay geçseydi" sonucu. Yığılma yoksa yılın en yoğun ayı yazılır. Son

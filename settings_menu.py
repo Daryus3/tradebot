@@ -76,6 +76,8 @@ WAVE_HOLD_CHOICES = (0, 60, 70)
 # ve tam boy için gereken düşüş (%)
 RECENT_SIZE_CHOICES = (100, 65, 50, 33)
 RECENT_DROP_CHOICES = (2, 2.4, 3)
+BASIS_SIZE_CHOICES = (100, 130, 150)       # Vadeli-spot farkına göre boy (rapor 17 araştırması, 22 Kasım)
+BASIS_DEEP_CHOICES = (0.3, 0.5, 0.7)
 # Düşüşte küçültme (rapor 24 araştırması; varsayılan kapalı): sermaye zirvesinden düşüş eşiği ve düşüşteki boy
 DD_SCALE_CHOICES = (0, 20, 30, 40)
 DD_SIZE_CHOICES = (40, 50, 60, 75)
@@ -415,6 +417,11 @@ PAGES: Dict[str, Page] = {
         Row("FUTURES_RECENT_DROP_PCT", icon="📉", values=RECENT_DROP_CHOICES,
             fmt=lambda v: f"son 15 dk < %{float(v):g}",
             show=lambda cfg: _crash(cfg) and cfg.futures_recent_size_pct < 100, per_row=3),
+        Row("FUTURES_BASIS_SIZE_PCT", icon="⚖️", values=BASIS_SIZE_CHOICES,
+            fmt=lambda v: "Vadeli-spot farkı: kapalı" if float(v) == 100 else f"Vadeli-spot farkı: %{float(v):g}",
+            show=_crash, per_row=3),
+        Row("FUTURES_BASIS_DEEP_PCT", icon="📐", values=BASIS_DEEP_CHOICES, fmt=lambda v: f"vadeli spotun %{float(v):g} altı",
+            show=lambda cfg: _crash(cfg) and cfg.futures_basis_size_pct != 100, per_row=3),
         Row("FUTURES_REENTRY_BREADTH", icon="🔁", values=(0, 3, 8), fmt=lambda v: "yeniden giriş: kapalı" if int(v) == 0
             else f"yeniden giriş: ≥{v} coin", show=_crash, per_row=3),
         Row("FUTURES_WAVE_RULES", values=WAVE_RULE_CHOICES, fmt=lambda v: _wave_label(v), show=_crash, per_row=2),
@@ -989,6 +996,11 @@ class SettingsMenu:
                          f"coinde tam boy).")
         else:
             lines.append("⏱️ Durulmuş çöküş (son 15 dk'da az düşen coin) küçültülmüyor.")
+        if cfg.futures_basis_size_pct != 100:
+            lines.append(f"⚖️ Vadeli-spot farkı: girişte vadeli fiyat spotun %{cfg.futures_basis_deep_pct:g}'sinden fazla "
+                         f"altındaysa (zorla satış izi) pozisyon <b>%{cfg.futures_basis_size_pct:g}</b> büyüklükte.")
+        else:
+            lines.append("⚖️ Vadeli-spot farkına göre boy kapalı.")
         if cfg.futures_reentry_breadth > 0:
             lines.append(f"🔁 Dalgada yeniden giriş: son 1 saatte ≥{cfg.futures_reentry_breadth} coin %3+ düşerken zarar "
                          f"sonrası bekleme ({cfg.loss_cooldown_minutes} dk) atlanır."

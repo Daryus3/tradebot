@@ -22,6 +22,7 @@ TP / SL duyarlılığı. Grafik: sermaye eğrisi, düşüş, yıllık getiri ve 
 from __future__ import annotations
 
 import csv
+from concurrent.futures import ThreadPoolExecutor
 import heapq
 import json
 import math
@@ -41,7 +42,9 @@ from config import (DATA_DIR, dd_scale_factor, format_crash_rules, futures_coin_
                     tr_from_num)
 from futures_data import FuturesArchive, concat, resample, slice_range
 from futures_depth import DEPTH_CHECK_MIN_NOTIONAL, DepthBook, daily_volume_fn
-from strategy import (FUT_BAR_MS, FUT_HOUR_MS, breadth_flags, btc_trend_1h, crash_state, funding_per_bar,
+from strategy import (FUT_BAR_MS, FUT_HOUR_MS, basis_pct, basis_size_factor, breadth_flags, btc_trend_1h, crash_state,
+                      spot_pairs,
+                      funding_per_bar,
                       futures_candidates, futures_entries, futures_features, isolated_factor, pick_signal,
                       recent_size_factor, trend_at)
 
@@ -659,6 +662,10 @@ class SimParams:
     # recent_drop_pct'nin altındaysa (sinyal ölçüsü metrics["drop15"]) pozisyon recent_size_pct (%; 100 = kapalı)
     recent_size_pct: float = 100.0
     recent_drop_pct: float = 2.4
+    # Vadeli-spot farkı (FUTURES_BASIS_SIZE_PCT; canlı: FuturesBot._entry_margin): girişte vadeli fiyat spotun
+    # basis_deep_pct'sinden fazla altındaysa (sinyal ölçüsü metrics["basis"], attach_basis) pozisyon basis_size_pct (%)
+    basis_size_pct: float = 100.0
+    basis_deep_pct: float = 0.5
     # Faz 6: ek pozisyonların büyüklüğü (ilk pozisyonun %'si; 100 = eşit, Faz 5) ve dalgada yeniden giriş (genişlik
     # ≥ reentry_breadth iken zarar sonrası bekleme atlanır; 0 = kapalı)
     extra_size_pct: float = 100.0
@@ -713,6 +720,8 @@ def params_from_cfg(cfg, **over) -> SimParams:
                   isolated_breadth=int(getattr(cfg, "futures_isolated_breadth", 2)),
                   recent_size_pct=float(getattr(cfg, "futures_recent_size_pct", 100.0)),
                   recent_drop_pct=float(getattr(cfg, "futures_recent_drop_pct", 2.4)),
+                  basis_size_pct=float(getattr(cfg, "futures_basis_size_pct", 100.0)),
+                  basis_deep_pct=float(getattr(cfg, "futures_basis_deep_pct", 0.5)),
                   extra_size_pct=float(getattr(cfg, "futures_extra_size_pct", 100.0)),
                   reentry_breadth=int(getattr(cfg, "futures_reentry_breadth", 0)),
                   extra_be_trigger_pct=float(getattr(cfg, "futures_extra_be_trigger_pct", 0.0)),
@@ -784,6 +793,7 @@ class FutTrade:
     depth_capped: bool = False  # Derinliğe göre boy sınırına takıldı (FUTURES_DEPTH_CAP_PCT)
     impact_pct: float = 0.0  # Emir defteri kayması, giriş + çıkış (fiyat %; FUTURES_BACKTEST_DEPTH)
     drop15: float = float("nan")  # Girişten önceki 15 dk'daki düşüş (%; sinyal ölçüsü, FUTURES_RECENT_SIZE_PCT)
+    basis: float = float("nan")   # Girişte vadeli / spot fiyat farkı (%; FUTURES_BASIS_SIZE_PCT, attach_basis)
 
 
 @dataclass
@@ -1093,9 +1103,11 @@ def capacity_order(signals: Sequence["FutSignal"], p: SimParams, data: "FutData"
 
 def size_factor(p: SimParams, s: "FutSignal") -> float:
     """Sinyalin boy çarpanı (canlı: FuturesBot._entry_margin ile aynı): yalnız çöküşte (genişlik < isolated_breadth)
-    × isolated_size_pct; çöküş durulmuşsa (son 15 dk düşüş < recent_drop_pct) × recent_size_pct."""
+    × isolated_size_pct; çöküş durulmuşsa (son 15 dk düşüş < recent_drop_pct) × recent_size_pct; vadeli spotun
+    basis_deep_pct'sinden fazla altındaysa × basis_size_pct."""
     return (isolated_factor(p.isolated_size_pct, p.isolated_breadth, s.breadth)
-            * recent_size_factor(p.recent_size_pct, p.recent_drop_pct, s.metrics.get("drop15")))
+            * recent_size_factor(p.recent_size_pct, p.recent_drop_pct, s.metrics.get("drop15"))
+            * basis_size_factor(p.basis_size_pct, p.basis_deep_pct, s.metrics.get("basis")))
 
 
 def slot_share(p: SimParams, n_open: int) -> float:
@@ -1198,7 +1210,7 @@ def simulate(p: SimParams, data: FutData, signals: Sequence[FutSignal], windows:
             notional = fixed_notional * factor
             margin = notional / p.leverage
         else:
-            margin = equity * usage * factor * ddf
+            margin = equity * usage * min(factor, 1.0) * ddf      # Tek pozisyonda büyütülecek boş teminat yok
             notional = min(margin * p.leverage, p.max_notional)
             notional, capped = apply_depth(p, data, s, notional)
             margin = notional / p.leverage
@@ -1226,6 +1238,7 @@ def simulate(p: SimParams, data: FutData, signals: Sequence[FutSignal], windows:
         tr.reentry = reentry
         tr.wave_rule = bool(s.metrics.get("wave_rule"))
         tr.drop15 = float(s.metrics.get("drop15", float("nan")))
+        tr.basis = float(s.metrics.get("basis", float("nan")))
         tr.dd_scaled = ddf < 1
         peak = max(peak, equity)
         trades.append(tr)
@@ -1402,6 +1415,7 @@ def simulate_slots(p: SimParams, data: FutData, signals: Sequence[FutSignal], wi
         tr.reentry = reentry
         tr.wave_rule = bool(s.metrics.get("wave_rule"))
         tr.drop15 = float(s.metrics.get("drop15", float("nan")))
+        tr.basis = float(s.metrics.get("basis", float("nan")))
         tr.dd_scaled = ddf < 1
         trades.append(tr)
         free_at = tr.exit_ms if tr.reason == "TIME" else tr.exit_ms + tr.bar_ms
@@ -1877,7 +1891,7 @@ def exit_variant_rows(cfg, ev) -> List[Tuple[str, "Evaluation"]]:
     return rows
 
 
-def size_variant_rows(cfg, ev, depth: bool = False) -> List[Tuple[str, "Evaluation"]]:
+def size_variant_rows(cfg, ev, depth: bool = False, has_basis: bool = False) -> List[Tuple[str, "Evaluation"]]:
     """Pozisyon büyüklüğü ve dalga modu: teminat kullanımı, en fazla pozisyon, ek pozisyon boyu ve kapısı, yalnız çöküş
     boyu, dalgada yeniden giriş eşiği, düşüşte küçültme (açıksa çevresi, kapalıysa %30 / %60), derinlik verisi varsa
     derinliğe göre boy (açıksa çevresi, kapalıysa %10 + kapasite önceliği)."""
@@ -1914,6 +1928,7 @@ def size_variant_rows(cfg, ev, depth: bool = False) -> List[Tuple[str, "Evaluati
         rows += [(f"Yalnız çöküş eşiği <{b} coin (şimdi <{base.isolated_breadth})", ev(isolated_breadth=b))
                  for b in ISOLATED_BREADTH_TRIES if b != base.isolated_breadth]
     rows += recent_variant_rows(base, ev)
+    rows += basis_variant_rows(base, ev, has_basis)
     if base.reentry_breadth > 0:
         rows += [(f"Dalgada yeniden giriş ≥{b} coin (şimdi ≥{base.reentry_breadth})", ev(reentry_breadth=b))
                  for b in REENTRY_TRIES if b != base.reentry_breadth]
@@ -1925,6 +1940,25 @@ def size_variant_rows(cfg, ev, depth: bool = False) -> List[Tuple[str, "Evaluati
                  for z in DD_SIZE_TRIES if not _same(z, base.dd_scale_size_pct)]
     else:
         rows.append(("Düşüşte küçültme: zirveden %30 düşünce %60 boy", ev(dd_scale_pct=30.0, dd_scale_size_pct=60.0)))
+    return rows
+
+
+BASIS_SIZE_TRIES = (130.0, 150.0)       # Vadeli-spot farkına göre boy (%; rapor 17 araştırması, 22 Kasım)
+BASIS_DEEP_TRIES = (0.3, 0.5, 0.7)      # Eşik: vadelinin spota göre iskontosu (%)
+
+
+def basis_variant_rows(base: SimParams, ev, has_basis: bool) -> List[Tuple[str, "Evaluation"]]:
+    """Vadeli-spot farkı (FUTURES_BASIS_SIZE_PCT): açıksa kapalı + boy / eşik çevresi, kapalıysa %0.5 / %130 denemesi.
+    Sinyallerde fark ölçüsü yoksa (spot verisi alınamadı) satır yok."""
+    if not has_basis:
+        return []
+    if base.basis_size_pct == 100:
+        return [("Vadeli spotun %0.5 altındayken boy %130", ev(basis_size_pct=130.0, basis_deep_pct=0.5))]
+    rows = [("Vadeli-spot farkına göre boy kapalı", ev(basis_size_pct=100.0))]
+    rows += [(f"Vadeli-spot boyu %{v:g} (şimdi %{base.basis_size_pct:g})", ev(basis_size_pct=v))
+             for v in BASIS_SIZE_TRIES if not _same(v, base.basis_size_pct)]
+    rows += [(f"Vadeli-spot eşiği %{d:g} (şimdi %{base.basis_deep_pct:g})", ev(basis_deep_pct=d))
+             for d in BASIS_DEEP_TRIES if not _same(d, base.basis_deep_pct)]
     return rows
 
 
@@ -2028,7 +2062,8 @@ def _crash_variant_rows(cfg, signals, minute: bool, tag: str, ev, other,
     return ([("Çıkışlar ve başabaş", None), shield] + trail
             + exit_variant_rows(cfg, ev) + [tp_order] + phase8_rows(cfg, ev) + phase9_rows(cfg, ev)
             + [("Pozisyon büyüklüğü ve dalga modu", None)]
-            + size_variant_rows(cfg, ev, depth) + cascade_rows(cfg, ev, signals) + phase6_rows(cfg, ev, signals)
+            + size_variant_rows(cfg, ev, depth, any("basis" in s.metrics for s in signals))
+            + cascade_rows(cfg, ev, signals) + phase6_rows(cfg, ev, signals)
             + [("Giriş kuralı, tarama ve bekleme", None)] + scan5
             + [(f"Çöküş eşiği %{cfg.futures_crash_drop_pct - 2:g}{tag}",
                 other(futures_crash_drop_pct=cfg.futures_crash_drop_pct - 2)),
@@ -2060,6 +2095,7 @@ def variant_rows(cfg, data: FutData, signals, windows,
             load_windows(data, sigs, window_minutes(cfg), cache=windows)
             if data.depth is not None:
                 data.depth.prefetch([(x.symbol, x.close_ms) for x in sigs])
+            attach_basis(c2, data, sigs)
             return evaluate(params_from_cfg(c2), data, sigs, windows)
         def stub(*_a, **_k):
             return 0
@@ -3060,6 +3096,28 @@ def recent_drop_line(trades: Sequence[FutTrade], p: SimParams) -> Optional[str]:
     return f"Girişten önceki 15 dk'daki düşüşe göre (sabit tutar; {size}): " + " | ".join(parts)
 
 
+BASIS_BUCKETS = ((None, -0.5), (-0.5, -0.1), (-0.1, 0.0), (0.0, None))     # Girişte vadeli / spot farkı kovaları (%)
+
+
+def basis_breakdown_line(trades: Sequence[FutTrade], p: SimParams) -> Optional[str]:
+    """Girişteki vadeli / spot farkına göre işlem başı sonuç (sabit tutar). Rapor 17 araştırması (22 Kasım): vadeli spotun
+    belirgin altındayken (likidasyon zincirinde zorla satış) açılan işlemler her yıl ortalamanın çok üstündeydi
+    (FUTURES_BASIS_SIZE_PCT ile büyütülebilir). Fark ölçülemediyse (spot verisi yok) satır yok."""
+    known = [t for t in trades if t.basis == t.basis]
+    if not known:
+        return None
+    parts = []
+    for a, b in BASIS_BUCKETS:
+        mv = [net_move_pct(t) for t in known if (a is None or t.basis >= a) and (b is None or t.basis < b)]
+        if mv:
+            name = (f"−%{-b:g}'ten derin" if a is None else "0 ve üstü" if b is None
+                    else f"−%{-a:g} … {'0' if b == 0 else f'−%{-b:g}'}")
+            parts.append(f"{name}: {len(mv)} işlem, ort. {np.mean(mv):+.3f}%")
+    size = (f"−%{p.basis_deep_pct:g}'ten derinde boy %{p.basis_size_pct:g}" if p.basis_size_pct != 100
+            else "hepsi aynı boy")
+    return f"Girişteki vadeli / spot farkına göre (sabit tutar; {size}): " + " | ".join(parts)
+
+
 # ===================================================================== canlı bot karşılaştırması
 def read_scan_log(path: Path, start_ms: int, end_ms: int) -> List[dict]:
     """Canlı botun tarama kaydı (FuturesBot, futures_scans_<mod>.jsonl): [start, end) aralığındaki satırlar. Evren ('u')
@@ -3842,6 +3900,14 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
         L.append(f"📉 Düşüşte küçültme: bakiye zirvesinin %{p.dd_scale_pct:g} altındayken yeni pozisyonlar "
                  f"%{p.dd_scale_size_pct:g} boy (A ve B'de; C sabit tutarla). A'da {small} / {len(res.trades)} işlem "
                  f"küçük boyla açıldı")
+    if p.basis_size_pct != 100:
+        big = sum(1 for tr in res.trades if tr.basis == tr.basis and tr.basis <= -p.basis_deep_pct)
+        known = sum(1 for tr in res.trades if tr.basis == tr.basis)
+        L.append(f"⚖️ Vadeli-spot farkı: girişte vadeli fiyat spotun %{p.basis_deep_pct:g}'sinden fazla altındaysa "
+                 f"(zorla satış izi) pozisyon %{p.basis_size_pct:g} boy (boştaki teminatla sınırlı). A'da {big} / "
+                 f"{len(res.trades)} işlem bu boyla açıldı" + (f"; {len(res.trades) - known} işlemde spot fiyatı "
+                                                                 f"bulunamadı (boy değişmedi)" if known < len(res.trades)
+                                                                 else ""))
     L.append(f"Kâr Al +%{p.tp_pct:g} ({'limit, maker' if p.tp_limit else 'piyasa'}) | Zarar Kes -%{p.sl_pct:g} | "
              + (f"başabaş +%{p.be_trigger_pct:g} → stop +%{p.be_floor_pct:g}" if p.be_enabled else "başabaş kapalı")
              + (f" | izleyen stop +%{p.trail_act_pct:g}'de, tepenin %{p.trail_gap_pct:g} gerisinden"
@@ -3931,6 +3997,9 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
     recent_line = recent_drop_line(fixed, p) if crash and fixed else None
     if recent_line:
         L.append("  " + recent_line)
+    basis_line = basis_breakdown_line(fixed, p) if crash and fixed else None
+    if basis_line:
+        L.append("  " + basis_line)
     if res.kill_ms:
         L.append(f"  ⚠️ Kill-switch (-%{p.kill_pct:g}) canlıda {_date(res.kill_ms)} tarihinde botu durdururdu")
     if res.ruined_ms:
@@ -4201,6 +4270,53 @@ def attach_depth(cfg, data: FutData, signals: Sequence[FutSignal],
     return data.depth
 
 
+BASIS_WORKERS = 8          # Spot 1 dk günlük dosyaları paralel indirilir (ilk çalıştırmada)
+
+
+def attach_basis(cfg, data: FutData, signals: Sequence[FutSignal],
+                 progress: Optional[Callable[[str], None]] = None) -> int:
+    """Çöküş taktiğinde her sinyalin giriş anındaki vadeli / spot fiyat farkı (%) → metrics["basis"] (vadeli: sinyalden
+    sonraki mumun açılışı, spot: aynı dakikanın 1 dk açılışı; spot arşivi, ilk seferde indirilir). Spot karşılığı ya da
+    o dakika yoksa ölçü yazılmaz (boy çarpanı 1). Ölçülen sinyal sayısı döner."""
+    if getattr(cfg, "futures_tactic", "crash") != "crash" or data.archive is None or not signals:
+        return 0
+    groups: Dict[Tuple[str, int], List[FutSignal]] = {}
+    for s in signals:
+        if "basis" not in s.metrics:
+            groups.setdefault((s.symbol, s.close_ms // DAY_MS), []).append(s)
+    if not groups:
+        return 0
+    if progress:
+        progress(f"⚖️ Vadeli-spot farkı: {len(groups)} gün için spot fiyatları okunuyor (ilk seferde indirilir)...")
+
+    def load(key: Tuple[str, int]) -> Tuple[Tuple[str, int], Optional[Tuple[np.ndarray, np.ndarray, float]]]:
+        symbol, day = key
+        when = datetime.fromtimestamp(day * DAY_MS / 1000, tz=timezone.utc)
+        for spot, mult in spot_pairs(symbol):
+            try:
+                arr = data.archive.spot_day(spot, when)
+            except Exception:  # noqa: BLE001 - spot verisi alınamadı: ölçü yok, boy çarpanı 1
+                continue
+            if len(arr["t"]):
+                return key, (arr["t"], arr["o"], mult)
+        return key, None
+
+    done = 0
+    with ThreadPoolExecutor(BASIS_WORKERS) as pool:
+        for key, got in pool.map(load, list(groups)):
+            if got is None:
+                continue
+            t, o, mult = got
+            for s in groups[key]:
+                i = int(np.searchsorted(t, s.close_ms))
+                if i < len(t) and int(t[i]) == s.close_ms:
+                    b = basis_pct(s.entry_open, float(o[i]), mult)
+                    if b == b:
+                        s.metrics["basis"] = b
+                        done += 1
+    return done
+
+
 def run_cli(cfg, days: Optional[int], end_ms: Optional[int], out_dir: Path, chart: bool = True,
             full_history: bool = False, exit_interval: str = "1m", sensitivity: bool = True,
             progress: Callable[[str], None] = print) -> Tuple[str, Optional[Path], Evaluation]:
@@ -4220,6 +4336,7 @@ def run_cli(cfg, days: Optional[int], end_ms: Optional[int], out_dir: Path, char
     progress(f"   {len(signals)} sinyal; çıkışlar için mumlar okunuyor...")
     windows = load_windows(data, signals, window_minutes(cfg), progress)
     attach_depth(cfg, data, signals, progress)
+    attach_basis(cfg, data, signals, progress)
     ev = evaluate(params_from_cfg(cfg), data, signals, windows)
     levs = grid = variants = None
     if sensitivity:

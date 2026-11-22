@@ -951,6 +951,10 @@ class Config:
     # (çöküş durulmuş) pozisyon büyüklüğü FUTURES_RECENT_SIZE_PCT (%; 100 = kapalı, eskisi gibi)
     futures_recent_size_pct: float = 100.0
     futures_recent_drop_pct: float = 2.4
+    # Vadeli-spot farkı (rapor 17 araştırması, 22 Kasım): girişte vadeli fiyat spotun FUTURES_BASIS_DEEP_PCT'sinden fazla
+    # altındaysa (zorla satış izi) pozisyon büyüklüğü FUTURES_BASIS_SIZE_PCT (%; 100 = kapalı, eskisi gibi)
+    futures_basis_size_pct: float = 100.0
+    futures_basis_deep_pct: float = 0.5
     # Faz 6 (bkz. FUTURES_PHASE6_PRESET üstündeki açıklama; varsayılanlar = kapalı, eskisi gibi)
     futures_extra_size_pct: float = 100.0  # Ek pozisyonların büyüklüğü, ilk pozisyonun %'si (100 = eşit, Faz 5)
     futures_reentry_breadth: int = 0       # Genişlik ≥ bu iken zarar sonrası bekleme atlanır (0 = kapalı)
@@ -1307,6 +1311,9 @@ class Config:
             errors.append("FUTURES_ISOLATED_SIZE_PCT 10-100 arasında olmalı (%; 100 = tam büyüklük)")
         if not 10 <= self.futures_recent_size_pct <= 100 or not 0.1 <= self.futures_recent_drop_pct <= 20:
             errors.append("FUTURES_RECENT_SIZE_PCT 10-100 (%; 100 = kapalı), FUTURES_RECENT_DROP_PCT 0.1-20 (%) olmalı")
+        if not 100 <= self.futures_basis_size_pct <= 200 or not 0.1 <= self.futures_basis_deep_pct <= 3:
+            errors.append("FUTURES_BASIS_SIZE_PCT 100-200 (%; 100 = kapalı), FUTURES_BASIS_DEEP_PCT 0.1-3 (vadelinin "
+                          "spota göre iskontosu, %) olmalı")
         if not 5 <= self.futures_extra_size_pct <= 100:
             errors.append("FUTURES_EXTRA_SIZE_PCT 5-100 arasında olmalı (%; ilk pozisyona göre, 100 = eşit)")
         if not 0 <= self.futures_reentry_breadth <= 100 or not 1 <= self.futures_wave_breadth <= 100:
@@ -1602,6 +1609,8 @@ def load_config(env_file: Optional[str] = None, mode_override: Optional[str] = N
         futures_isolated_breadth=_env_int("FUTURES_ISOLATED_BREADTH", 2),
         futures_recent_size_pct=_env_float("FUTURES_RECENT_SIZE_PCT", 100.0),
         futures_recent_drop_pct=_env_float("FUTURES_RECENT_DROP_PCT", 2.4),
+        futures_basis_size_pct=_env_float("FUTURES_BASIS_SIZE_PCT", 100.0),
+        futures_basis_deep_pct=_env_float("FUTURES_BASIS_DEEP_PCT", 0.5),
         futures_extra_size_pct=_env_float("FUTURES_EXTRA_SIZE_PCT", 100.0),
         futures_reentry_breadth=_env_int("FUTURES_REENTRY_BREADTH", 0),
         futures_wave_rules=canonical_crash_extra(_env_str("FUTURES_WAVE_RULES", "")),
@@ -1920,6 +1929,15 @@ def _setting_notes(cfg: Config) -> List[str]:
                          f"hesap 14 → 4 / 5, A'nın en büyük düşüşü %57 → %46 / %43, kayma 3 katında düşüş %74 → %61 / "
                          f"%50. %33 + 6x + düşüşte küçültme 30 / 60 ile +%927, %60'ı aşan düşüş 8, A düşüşü %45. "
                          f"Önce test modunda deneyin.")
+        if cfg.futures_basis_size_pct != 100:
+            notes.append(f"FUTURES_BASIS_SIZE_PCT={cfg.futures_basis_size_pct:g} (vadeli-spot farkı): girişte vadeli fiyat "
+                         f"spotun %{cfg.futures_basis_deep_pct:g}'sinden fazla altındaysa (likidasyon zincirinde zorla "
+                         f"satış izi) pozisyon %{cfg.futures_basis_size_pct:g} büyüklükte (boştaki teminatla sınırlı). "
+                         f"Rapor 17 araştırması (22 Kasım; 2020-2026, 6x, 10 çekiliş): fark −%0.5'ten derinken açılan "
+                         f"işlemler her yıl ortalamanın çok üstünde (işlem başı +%0.89 / +%1.59, tümü +%0.25). %0.5 / "
+                         f"%130 ile 4.000 USDT'de 71 hesabın 12 ay ortancası +%940 → +%1.034, %60'ı aşan düşüş aynı "
+                         f"(8); 24 USDT'de +%1.345 → +%1.480 ama %60'ı aşan düşüş 20 → 25. Canlıda spot fiyatı vadeli "
+                         f"fiyatla aynı anda alınır (Binance spot ucu). Önce test modunda deneyin.")
         if cfg.futures_reentry_breadth > 0:
             if cfg.loss_cooldown_minutes <= cfg.symbol_cooldown_minutes:
                 notes.append(f"FUTURES_REENTRY_BREADTH={cfg.futures_reentry_breadth}: LOSS_COOLDOWN_MINUTES="

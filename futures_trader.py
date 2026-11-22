@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import json
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Set, Tuple
@@ -53,7 +53,7 @@ from risk import ExitReason, Position, cooldown_minutes, kill_switch_hit
 from strategy import (FUT_BAR_MS, FUT_BREADTH_DROP_PCT, FUT_BREADTH_HOURS, FUT_BTC_1H_LIMIT, FUT_H1_LIMIT, FUT_HOUR_MS,
                       FuturesSignal,
                       ScanResult, funding_per_bar, futures_kline_limit, isolated_factor, market_breadth,
-                      recent_size_factor)
+                      recent_size_factor, basis_pct, basis_size_factor, spot_pairs)
 from telegram_bot import CRITICAL_EXITS, Messages, esc, fmt_duration, fmt_price, fmt_signed, fmt_usdt, futures_tag
 from trader import ALIVE_SAVE_SEC, POSITION_LOG_SEC, RULES_REFRESH_SEC, Mark, TradingBot
 
@@ -131,6 +131,8 @@ SNAP_FULL_REFRESH_SEC = 1800       # Coin başına tam geçmiş en geç bu aral�
 SNAP_CHECK_KEEP = 3                # Doğrulanmayı bekleyen en fazla bu kadar anlık tarama tutulur
 SNAP_CHECK_MAX_AGE_MS = 3 * FUT_BAR_MS   # ...ve bundan eskisi doğrulanmadan bırakılır
 CLOCK_WARN_MS = 750                # Sunucu saati Binance'ten bu kadar farklıysa uyarı (günlükte, saatte bir)
+SPOT_WAIT_SEC = 1.0                # Vadeli-spot farkı: spot fiyatları için en fazla bu kadar beklenir (sonra fark yok)
+SPOT_FRESH_SEC = 5.0               # Anlık taramada alınan spot fiyatları bundan eskiyse yeniden istenir
 ACCOUNT_WARN_EVERY_SEC = 3600      # Hesap modu engeli (Çoklu Varlık, -4168) Telegram'a en fazla bu aralıkla yazılır
 MAX_LAG_MS = 10 * 60_000           # Bundan büyük "gecikme" ölçüm sayılmaz (saat atlaması / elle çağrı)
 
@@ -210,6 +212,8 @@ class FuturesBot(TradingBot):
         self._snap_live = False                    # Bu taramanın sinyalleri anlık fiyatla üretildi (girişte kısa yol)
         self._snap_info: List[int] = []            # [fiyatlar kapanıştan kaç ms sonra alındı, en yeni fiyat − kapanış ms]
         self._snap_used: Optional[dict] = None     # Süren anlık taramanın fiyatları (sinyaller eklenince doğrulamaya)
+        self._spot_now: Optional[Tuple[float, Dict[str, float]]] = None   # Bu taramanın spot fiyatları (zaman, fiyatlar)
+        self._spot_pool: Optional[ThreadPoolExecutor] = None
         self._snap_pending: List[dict] = []        # Kesinleşmiş mumlarla doğrulanmayı bekleyen anlık taramalar
         self._snap_checks: List[dict] = []         # Doğrulama sonuçları (sıradaki tarama kaydına yazılır)
         self._snap_note = ""                       # Son taramada anlık fiyat neden kullanılamadı (/tarama, kayıt)
@@ -691,6 +695,7 @@ class FuturesBot(TradingBot):
         for sig in signals:
             if sig.symbol in reentry:
                 sig.metrics["reentry"] = 1.0
+        self._attach_basis(signals)
         if errors:
             log.warning("Vadeli tarama: %d coinin mumları alınamadı (%s)", len(errors), "; ".join(errors[:3]))
             rejects["veri alınamadı"] += len(errors)
@@ -1086,6 +1091,47 @@ class FuturesBot(TradingBot):
             self._snap_note_logged = (why, now)
             log.info("Anlık tarama bu mumda kullanılamadı (%s): olağan hızlı yol", why)
 
+    # ================================================================ vadeli-spot farkı (FUTURES_BASIS_SIZE_PCT)
+    def _basis_on(self) -> bool:
+        return self.cfg.futures_tactic == "crash" and float(self.cfg.futures_basis_size_pct) != 100
+
+    def _spot_job(self) -> Optional[Future]:
+        """Spot fiyatlarını ayrı iş parçacığında iste (anlık taramada vadeli fiyatlarla aynı anda; kapalıysa None)."""
+        fn = getattr(self.exchange, "spot_prices", None)
+        if not self._basis_on() or fn is None:
+            return None
+        if self._spot_pool is None:
+            self._spot_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="spot")
+        return self._spot_pool.submit(fn)
+
+    def _spot_result(self, job: Optional[Future]) -> Optional[Dict[str, float]]:
+        if job is None:
+            return None
+        try:
+            return job.result(timeout=SPOT_WAIT_SEC)
+        except Exception as exc:  # noqa: BLE001 - spot fiyatı yoksa fark ölçülmez, boy değişmez
+            log.info("Spot fiyatları alınamadı (vadeli-spot farkı bu taramada ölçülmedi): %s", exc)
+            return None
+
+    def _attach_basis(self, signals: List[FuturesSignal]) -> None:
+        """Sinyallerin vadeli / spot fiyat farkı (%) → metrics["basis"] (backtest: attach_basis). Anlık taramada spot
+        fiyatları vadeli fiyatlarla aynı anda alınmıştır; öbür yollarda sinyal varsa şimdi istenir."""
+        snap, self._spot_now = self._spot_now, None
+        if not signals or not self._basis_on():
+            return
+        spot = snap[1] if snap and self.time_fn() - snap[0] <= SPOT_FRESH_SEC else None
+        if spot is None:
+            spot = self._spot_result(self._spot_job())
+        if not spot:
+            return
+        for sig in signals:
+            for pair, mult in spot_pairs(sig.symbol):
+                if pair in spot:
+                    b = basis_pct(sig.price, spot[pair], mult)
+                    if b == b:
+                        sig.metrics["basis"] = round(b, 4)
+                    break
+
     def _take_snapshot(self, targets: List[str], closed_ms: int,
                        shift: int) -> Optional[Tuple[Dict[str, dict], List[str]]]:
         """Anlık tarama: kapanıştan önce alınan geçmiş mumlar + şu anki son işlem fiyatları (tek istek) → (parite →
@@ -1100,11 +1146,15 @@ class FuturesBot(TradingBot):
         if self.time_fn() - closed_ms / 1000 - self._scan_delay() > SNAP_MAX_LATE_SEC:
             return self._no_snapshot("tarama geç başladı")
         ex = self.exchange
+        spot_job = self._spot_job()                  # Vadeli-spot farkı: spot fiyatları aynı anda istenir (açıksa)
         try:
             with ex.unthrottled():
                 prices = ex.last_prices()
         except (FuturesError, requests.ConnectionError) as exc:
             return self._no_snapshot(f"anlık fiyatlar alınamadı: {exc}")
+        finally:
+            got = self._spot_result(spot_job)
+            self._spot_now = (self.time_fn(), got) if got else None
         newest = max((t for _p, t in prices.values()), default=0)
         rel = int(newest - closed_ms) if newest else None       # En yeni işlem kapanıştan kaç ms sonra (Binance saati)
         if rel is not None and rel < -SNAP_EARLY_MS:
@@ -1642,10 +1692,14 @@ class FuturesBot(TradingBot):
             sig.metrics["recent_size_pct"] = round(recent * 100, 1)
             sig.metrics["recent_min_pct"] = cfg.futures_recent_drop_pct
             factor *= recent
+        basis = basis_size_factor(cfg.futures_basis_size_pct, cfg.futures_basis_deep_pct, sig.metrics.get("basis"))
+        if basis != 1:
+            sig.metrics["basis_size_pct"] = round(basis * 100, 1)
+            factor *= basis
         dd = self._dd_factor(sig)
         slots = self.slots()
         if slots <= 1:
-            return free * usage * factor * dd
+            return free * usage * min(factor, 1.0) * dd       # Tek pozisyonda büyütülecek boş teminat yok
         opened = [p for p in self.state.positions.values() if p.futures]
         used = sum(p.margin_usdt for p in opened)
         share = futures_slot_share(cfg, len(opened))        # Faz 5: 1/N; Faz 6: ilk büyük, ekler küçük
@@ -2254,6 +2308,9 @@ class FuturesBot(TradingBot):
             if cfg.futures_recent_size_pct < 100:
                 extra += (f", son 15 dk'da %{tr_from_num(cfg.futures_recent_drop_pct)} az düşende boy "
                           f"%{cfg.futures_recent_size_pct:g}")
+            if cfg.futures_basis_size_pct != 100:
+                extra += (f", vadeli spotun %{cfg.futures_basis_deep_pct:g} altındayken boy "
+                          f"%{cfg.futures_basis_size_pct:g}")
             lines.append(f"🌊 Genişlik: {self.last_breadth} coin son 1 saatte %3+ düştü (dalga ≥"
                          f"{cfg.futures_extra_breadth}, yalnız çöküş <{cfg.futures_isolated_breadth}{extra})")
         tm = self.last_timing

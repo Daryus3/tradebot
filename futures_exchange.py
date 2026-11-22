@@ -157,6 +157,10 @@ def _code_of(exc: Exception) -> str:
     return ""
 
 
+SPOT_TICKER_URL = "https://api.binance.com/api/v3/ticker/price"   # Vadeli-spot farkı: tüm spot fiyatları (ağırlık 4)
+SPOT_TICKER_TIMEOUT = 2.0
+
+
 class FuturesExchange:
     """Canlı Binance USDⓈ-M bağlantısı (CCXT)."""
     is_paper = False
@@ -170,6 +174,7 @@ class FuturesExchange:
         self.time_fn = time_fn
         self.markets_loaded_at = 0.0
         self.time_offset_ms = 0
+        self._spot_session: Optional[requests.Session] = None     # Spot fiyatları (spot_prices) için ayrı oturum
 
     # TradingBot / Telegram menüsüyle uyumluluk (spot'a özgü çağrılar vadeli işlemde anlamsızdır)
     @property
@@ -602,6 +607,28 @@ class FuturesExchange:
                     out[str(row["symbol"])] = (price, int(float(row.get("time") or 0)))
             except (KeyError, TypeError, ValueError, AttributeError):
                 continue
+        return out
+
+    def spot_prices(self, timeout: float = SPOT_TICKER_TIMEOUT) -> Dict[str, float]:
+        """Tüm spot paritelerin son işlem fiyatı (Binance spot ucu, tek istek; vadeli-spot farkı için,
+        FUTURES_BASIS_SIZE_PCT). Kendi HTTP oturumuyla: anlık taramada vadeli fiyatlarla aynı anda, ayrı iş parçacığında
+        istenir. Alınamazsa FuturesError (çağıran farkı ölçmeden devam eder: boy değişmez)."""
+        if self._spot_session is None:
+            self._spot_session = requests.Session()
+        try:
+            resp = self._spot_session.get(SPOT_TICKER_URL, timeout=timeout)
+            resp.raise_for_status()
+            rows = resp.json()
+        except (requests.RequestException, ValueError) as exc:
+            raise FuturesError(f"Spot fiyatları alınamadı: {exc}", "SPOT_TICKER") from exc
+        out: Dict[str, float] = {}
+        for row in rows if isinstance(rows, list) else []:
+            try:
+                price = float(row["price"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if price > 0:
+                out[str(row.get("symbol"))] = price
         return out
 
     def eligible_symbols(self, min_age_days: float = 0.0) -> List[str]:

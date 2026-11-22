@@ -1858,6 +1858,39 @@ def recent_size_factor(size_pct: float, min_drop_pct: float, drop: Optional[floa
     return max(0.0, float(size_pct)) / 100
 
 
+def spot_pairs(symbol: str) -> List[Tuple[str, float]]:
+    """Vadeli paritenin spot karşılığı adayları (spot parite, çarpan), sırayla denenir: 1000PEPEUSDT gibi 1000'li
+    vadeliler spotta 1000'siz işlem görür (vadeli fiyat = spot × 1000); bazıları (1000SATSUSDT) spotta da 1000'li.
+    Canlı bot ve backtest ortak (FUTURES_BASIS_SIZE_PCT)."""
+    out: List[Tuple[str, float]] = []
+    head = len(symbol) - len(symbol.lstrip("0123456789"))
+    digits = symbol[:head]
+    if head >= 4 and digits.startswith("1000") and set(digits[1:]) == {"0"} and len(symbol) > head + 4:
+        out.append((symbol[head:], float(digits)))
+    out.append((symbol, 1.0))
+    return out
+
+
+def basis_pct(fut_price: float, spot_price: float, mult: float = 1.0) -> float:
+    """Vadeli fiyatın spot fiyatına göre farkı (%): negatif = vadeli spotun altında (çöküşte zorla satış izi). Fiyat
+    yoksa NaN."""
+    try:
+        if not (fut_price > 0 and spot_price > 0 and mult > 0):
+            return float("nan")
+        return (float(fut_price) / (float(spot_price) * float(mult)) - 1) * 100
+    except (TypeError, ValueError):
+        return float("nan")
+
+
+def basis_size_factor(size_pct: float, deep_pct: float, basis: Optional[float]) -> float:
+    """Vadeli-spot farkına göre boy (FUTURES_BASIS_SIZE_PCT): girişte vadeli fiyat spotun deep_pct'sinden fazla altındaysa
+    (fark ≤ −deep_pct) size_pct / 100, değilse (ya da fark ölçülemediyse) 1. Canlı bot ve backtest aynı çarpanı
+    kullanır (sinyal ölçüsü metrics["basis"])."""
+    if size_pct == 100 or basis is None or basis != basis or basis > -abs(float(deep_pct)):
+        return 1.0
+    return max(0.0, float(size_pct)) / 100
+
+
 def window_sigma(c, bars: int, lookback: int = FUT_Z_LOOKBACK_BARS):
     """`bars` mumluk pencerenin olağan hareketi (log, 1 standart sapma): pencere başlangıcından önceki `lookback`
     mumun 5 dk log getirilerinin standart sapması × √bars. Çöküşün kendisi ölçüye karışmaz."""
@@ -2505,6 +2538,9 @@ class FuturesSignal:
         if m.get("recent_size_pct") is not None and m["recent_size_pct"] < 100:
             parts.append(f"Çöküş durulmuş (son {FUT_RECENT_DROP_MINUTES} dk {-m.get('drop15', 0.0):+.1f}%, gereken "
                          f"−%{m.get('recent_min_pct', 0):g}): pozisyon %{m['recent_size_pct']:g}")
+        if m.get("basis_size_pct") and m["basis_size_pct"] != 100:
+            parts.append(f"Vadeli spotun %{-m.get('basis', 0.0):.2f} altında (zorla satış izi): pozisyon "
+                         f"%{m['basis_size_pct']:g}")
         if m.get("depth_cap"):
             parts.append((f"Derinliğe göre boy: pozisyon {m['depth_cap']:,.0f} USDT ile sınırlı (±%1 içinde alış "
                           f"{m.get('depth_bid', 0):,.0f} / satış {m.get('depth_ask', 0):,.0f} USDT)").replace(",", "."))

@@ -306,6 +306,15 @@ class FuturesArchive:
             y, m = nxt.year, nxt.month
         return jobs
 
+    def spot_day(self, symbol: str, day: datetime) -> Dict[str, np.ndarray]:
+        """Spot paritenin o günkü 1 dk mumları (FIELDS biçiminde; vadeli-spot farkı için, FUTURES_BASIS_SIZE_PCT). 2025'ten
+        itibaren spot arşivi zamanı mikrosaniye yazar (parse_csv çevirir). Dosya yoksa boş (yayımlanması gereken bir günse
+        bir daha sorulmaz)."""
+        name = f"{symbol}-1m-{day:%Y-%m-%d}"
+        url = f"{self.base_url}/data/spot/daily/klines/{symbol}/1m/{name}.zip"
+        settled = self.now_fn() - (day.timestamp() + 86400) > MISSING_GRACE_DAYS * 86400
+        return self._cached(self.cache_dir / "spot" / symbol / "1m" / f"{name}.npz", url, settled)
+
     def book_depth(self, symbol: str, day: datetime) -> Dict[str, np.ndarray]:
         """Günlük emir defteri derinliği (bookDepth, 2023'ten beri): parse_book_depth biçiminde; önbelleğe .npz yazılır.
         Dosya yoksa boş (yayımlanması gereken bir günse bir daha sorulmaz)."""
