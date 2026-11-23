@@ -1019,9 +1019,8 @@ class SettingsMenu:
         else:
             lines.append("🧮 Kalite puanına göre boy kapalı.")
         if cfg.futures_big_account_usdt > 0:
-            lines.append((f"🏦 Büyük hesap kuralları: bakiye ≥{cfg.futures_big_account_usdt:,.0f} USDT iken en güçlü "
-                          f"sinyaller 2 ek pozisyon açabilir, zayıf sinyale son fonlama ≤ 0 ise girilmez.")
-                         .replace(",", "."))
+            lines.append(f"🏦 Büyük hesap kuralları: bakiye ≥{_thousands(cfg.futures_big_account_usdt)} USDT iken en "
+                         f"güçlü sinyaller 2 ek pozisyon açabilir, zayıf sinyale son fonlama ≤ 0 ise girilmez.")
         else:
             lines.append("🏦 Büyük hesap kuralları kapalı.")
         if cfg.futures_reentry_breadth > 0:

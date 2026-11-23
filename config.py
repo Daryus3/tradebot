@@ -1963,15 +1963,16 @@ def _setting_notes(cfg: Config) -> List[str]:
                          f"+%0.54. %60 / %60 ile 4.000 USDT'de 71 hesabın 12 ay ortancası +%1.034 → +%1.097, %60'ı aşan "
                          f"düşüş 8 → 7; 24 USDT'de +%1.480 → +%1.554, düşüş aynı (25). Önce test modunda deneyin.")
         if cfg.futures_big_account_usdt > 0:
-            notes.append((f"FUTURES_BIG_ACCOUNT_USDT={cfg.futures_big_account_usdt:,.0f} (büyük hesap kuralları): "
-                          f"gerçekleşen bakiye bu tutarı aşınca kalite puanı en güçlü %20'lik sinyaller "
-                          f"FUTURES_MAX_POSITIONS'a ek 2 pozisyon açabilir, zayıf sinyale (en zayıf %60) son ödenen "
-                          f"fonlama ≤ 0 ise girilmez (açıklar kalabalık). Büyük hesapta pozisyonlar emir defteri "
-                          f"derinliğiyle sınırlanır ve teminat boşta kalır; küçük hesapta kurallar zararlıdır, bu yüzden "
-                          f"eşikle açılır. Rapor 19 araştırması (23 Kasım; 2020-2026, 6x, 10 çekiliş): 5.000 eşiğiyle "
-                          f"4.000 USDT'de 71 hesabın 12 ay ortancası +%1.097 → +%1.423, %60'ı aşan düşüş 7 → 8, "
-                          f"kill-switch 0; 24 USDT'de ilk yıl değişmez (hesap eşiğe ulaşmaz). Tek pozisyon modunda "
-                          f"etkisiz. Önce test modunda deneyin.").replace(",", "."))
+            big = f"{cfg.futures_big_account_usdt:,.0f}".replace(",", ".")
+            notes.append(f"FUTURES_BIG_ACCOUNT_USDT={big} (büyük hesap kuralları): "
+                         f"gerçekleşen bakiye bu tutarı aşınca kalite puanı en güçlü %20'lik sinyaller "
+                         f"FUTURES_MAX_POSITIONS'a ek 2 pozisyon açabilir, zayıf sinyale (en zayıf %60) son ödenen "
+                         f"fonlama ≤ 0 ise girilmez (açıklar kalabalık). Büyük hesapta pozisyonlar emir defteri "
+                         f"derinliğiyle sınırlanır ve teminat boşta kalır; küçük hesapta kurallar zararlıdır, bu yüzden "
+                         f"eşikle açılır. Rapor 19 araştırması (23 Kasım; 2020-2026, 6x, 10 çekiliş): 5.000 eşiğiyle "
+                         f"4.000 USDT'de 71 hesabın 12 ay ortancası +%1.097 → +%1.423, %60'ı aşan düşüş 7 → 8, "
+                         f"kill-switch 0; 24 USDT'de ilk yıl değişmez (hesap eşiğe ulaşmaz). Tek pozisyon modunda "
+                         f"etkisiz. Önce test modunda deneyin.")
         if cfg.futures_reentry_breadth > 0:
             if cfg.loss_cooldown_minutes <= cfg.symbol_cooldown_minutes:
                 notes.append(f"FUTURES_REENTRY_BREADTH={cfg.futures_reentry_breadth}: LOSS_COOLDOWN_MINUTES="

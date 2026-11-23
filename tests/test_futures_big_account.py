@@ -156,6 +156,7 @@ def test_big_account_settings_defaults_validation_env_runtime_and_notes(fcfg, mo
     assert EDITABLE["FUTURES_BIG_ACCOUNT_USDT"].attr == "futures_big_account_usdt"
     notes = " ".join(_setting_notes(replace(fcfg, strategy="futures", futures_big_account_usdt=5000.0)))
     assert "FUTURES_BIG_ACCOUNT_USDT=5.000" in notes and "+%1.097 → +%1.423" in notes
+    assert "açabilir, zayıf sinyale" in notes                                          # Metindeki virgül korunur
     assert not any("FUTURES_BIG_ACCOUNT_USDT" in n for n in _setting_notes(replace(fcfg, strategy="futures")))
     assert fb.params_from_cfg(replace(fcfg, futures_big_account_usdt=5000.0)).big_account_usdt == 5000.0
 
@@ -178,4 +179,5 @@ def test_wave_page_big_account_row_button_and_text(fcfg, tmp_path):
     assert all(len(d.encode()) <= 64 for d in data)
     press(bot, "kv:fw:FUTURES_BIG_ACCOUNT_USDT:5000")
     assert bot.cfg.futures_big_account_usdt == 5000.0 and "FUTURES_BIG_ACCOUNT_USDT=5000" in env.read_text()
-    assert "🏦 Büyük hesap kuralları: bakiye ≥5.000 USDT iken en güçlü sinyaller 2 ek pozisyon" in notes.menus[-1][0]
+    assert ("🏦 Büyük hesap kuralları: bakiye ≥5.000 USDT iken en güçlü sinyaller 2 ek pozisyon açabilir, zayıf sinyale"
+            in notes.menus[-1][0])

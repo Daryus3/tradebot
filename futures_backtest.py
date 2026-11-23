@@ -1999,7 +1999,7 @@ def big_variant_rows(base: SimParams, ev, has_funding: bool) -> List[Tuple[str, 
     if base.big_account_usdt <= 0:
         return [("Büyük hesap kuralları: bakiye ≥5.000 USDT", ev(big_account_usdt=5000.0))]
     rows = [("Büyük hesap kuralları kapalı", ev(big_account_usdt=0.0))]
-    rows += [(f"Büyük hesap kuralları: bakiye ≥{v:,.0f} USDT (şimdi ≥{base.big_account_usdt:,.0f})".replace(",", "."),
+    rows += [(f"Büyük hesap kuralları: bakiye ≥{_num(v, 0)} USDT (şimdi ≥{_num(base.big_account_usdt, 0)})",
               ev(big_account_usdt=v)) for v in BIG_ACCOUNT_TRIES if not _same(v, base.big_account_usdt)]
     return rows
 
@@ -4006,11 +4006,10 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
     if p.big_account_usdt > 0 and p.max_positions > 1:
         extra = sum(1 for tr in res.trades if tr.slot > p.max_positions)
         skipped = res.skipped.get("büyük hesap: zayıf sinyal, son fonlama ≤ 0", 0)
-        L.append((f"🏦 Büyük hesap kuralları: gerçekleşen bakiye ≥{p.big_account_usdt:,.0f} USDT iken kalite puanı "
-                  f"en güçlü %20'lik sinyaller {BIG_EXTRA_SLOTS} ek pozisyon açabilir (en fazla "
-                  f"{p.max_positions + BIG_EXTRA_SLOTS}); zayıf sinyale (en zayıf %60) son ödenen fonlama ≤ 0 ise "
-                  f"girilmez. A'da {extra} işlem ek yuvadan açıldı, {skipped} sinyal fonlama yüzünden atlandı")
-                 .replace(",", "."))
+        L.append(f"🏦 Büyük hesap kuralları: gerçekleşen bakiye ≥{_num(p.big_account_usdt, 0)} USDT iken kalite puanı "
+                 f"en güçlü %20'lik sinyaller {BIG_EXTRA_SLOTS} ek pozisyon açabilir (en fazla "
+                 f"{p.max_positions + BIG_EXTRA_SLOTS}); zayıf sinyale (en zayıf %60) son ödenen fonlama ≤ 0 ise "
+                 f"girilmez. A'da {extra} işlem ek yuvadan açıldı, {skipped} sinyal fonlama yüzünden atlandı")
     L.append(f"Kâr Al +%{p.tp_pct:g} ({'limit, maker' if p.tp_limit else 'piyasa'}) | Zarar Kes -%{p.sl_pct:g} | "
              + (f"başabaş +%{p.be_trigger_pct:g} → stop +%{p.be_floor_pct:g}" if p.be_enabled else "başabaş kapalı")
              + (f" | izleyen stop +%{p.trail_act_pct:g}'de, tepenin %{p.trail_gap_pct:g} gerisinden"

@@ -2367,8 +2367,8 @@ class FuturesBot(TradingBot):
                 extra += (f", kalite puanı en zayıf %{cfg.futures_quality_cut_pct:g}'taysa boy "
                           f"%{cfg.futures_quality_size_pct:g}")
             if cfg.futures_big_account_usdt > 0:
-                extra += (f", büyük hesap kuralları bakiye ≥{cfg.futures_big_account_usdt:,.0f} USDT"
-                          f" ({'açık' if self._big_on() else 'henüz kapalı'})").replace(",", ".")
+                big = f"{cfg.futures_big_account_usdt:,.0f}".replace(",", ".")
+                extra += f", büyük hesap kuralları bakiye ≥{big} USDT ({'açık' if self._big_on() else 'henüz kapalı'})"
             lines.append(f"🌊 Genişlik: {self.last_breadth} coin son 1 saatte %3+ düştü (dalga ≥"
                          f"{cfg.futures_extra_breadth}, yalnız çöküş <{cfg.futures_isolated_breadth}{extra})")
         tm = self.last_timing
