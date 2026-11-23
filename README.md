@@ -2503,6 +2503,44 @@ güçlülere açıp toplam riski büyütüyor. Resmi motorla (sinyaller yeniden 
   çekilen 5 dk mumlardan gelir, vadeli-spot farkı için spot fiyatı alınır (alınamazsa o ölçü orta sayılır).
 - **Sınırlar:** kazanç küçük (+%5-7) ama düşüşü artırmıyor; puan 2020-2023'e göre ayarlı, piyasa değişirse zayıflayabilir.
 
+#### Rapor 19 araştırması: kalite puanını yapıya bağlamak, fonlama oranı, büyük hesap kuralları (Kasım 2026)
+Baz: rapor 19'un ayarı (vadeli-spot farkı %130 + kalite puanı %60 / %60), 10 çekiliş, 71 aylık başlangıç (12 ay ortanca /
+%60'ı aşan düşüş / kill-switch). 4.000 USDT'de şimdiki +%1.097 / 7 / 0, 24 USDT'de +%1.554 / 25 / 6.
+
+| Hibrit (kalite puanı + …) | 4.000 USDT | 24 USDT |
+|---|---|---|
+| Ek pozisyon kapısı: en güçlü %40 için ≥8 coin (şimdi ≥10) | +%1.092 / 4 / 0 | |
+| En güçlülerde zarar sonrası bekleme yok | +%765 … +%938 / 17-20 | |
+| Zayıfta hızlı çıkış (zaman stopu 25 dk / başabaş +%0.8), güçlüde uzun (zaman stopu ×1.5) | +%1.072 / +%1.001 / +%893 | |
+| 5. pozisyon yalnız en güçlü %20 | +%1.116 / 7 / 0 (8/10) | |
+| **5. ve 6. pozisyon yalnız en güçlü %20** | **+%1.317 / 8 / 0 (9/10)**, işlem +%17 | +%1.474 / 23 / 7 (kötü) |
+| **Zayıf sinyal + son fonlama ≤ 0 → girme** | **+%1.194 / 6 / 0 (10/10)** | +%1.285 / 26 / 6 (kötü) |
+| Fonlamadan bağımsız (her sinyal) fonlama ≤ 0 → girme | +%675 | |
+
+**Fonlama oranı:** girişten önceki son ödenmiş fonlama (Binance arşivi). Negatif ya da düşük fonlamada (açıklar kalabalık:
+likidasyon zinciri değil, düşüş trendi) dönüşler zayıf; kalite puanı zayıf ve fonlama düşükken işlem başı iki dönemde de
+eksi (−%0.06 / −%0.06). Tek başına süzgeç olarak kötü, kalite puanıyla birlikte iyi.
+
+**Neden hesap büyüklüğüne bağlı:** 4.000 USDT'de pozisyonlar hesap büyüdükçe emir defteri derinliğiyle sınırlanır
+(`FUTURES_DEPTH_CAP_PCT`) ve teminatın bir kısmı boşta kalır: ek yuvalar onu en güçlü sinyallere verir, zayıf sinyali
+atlamak yuvayı güçlüye bırakır. 24 USDT'de sınır yok; ek yuva yalnızca toplam riski büyütür. Bu yüzden iki kural
+gerçekleşen bakiye eşiğiyle açılır:
+
+| Büyük hesap kuralları (ikisi birden) | 4.000 USDT | 24 USDT: 12 ay / yıllık getiri seçim / doğrulama / A |
+|---|---|---|
+| Kapalı | +%1.097 / 7 / 0 | +%1.554 / 25 · +%1.785 / +%1.069 · 3,00 milyon |
+| Bakiye ≥2.000 / ≥5.000 / ≥10.000 USDT | +%1.349 / 10 / 1 · **+%1.423 / 8 / 0** · +%1.389 / 10 / 0 (hepsi 10/10) | ≥2.000: +%1.554 / 22 · +%1.902 / +%1.210 · 3,59 milyon |
+| ≥5.000: yalnız ek yuva / yalnız fonlama / +1 yuva / ek yuva en güçlü %40'a | +%1.278 · +%1.199 · +%1.219 · +%1.255 | |
+
+24 USDT ile başlayan hesap ilk yıl eşiğe ulaşmaz (12 ay ortancası değişmez); büyüdükçe kurallar devreye girer ve çok
+yıllık getiriyi artırır.
+
+- **Eklenen ayar:** `FUTURES_BIG_ACCOUNT_USDT` (varsayılan 0 = kapalı; önerilen 5000). Telegram: 🌊 Dalga modu → 🏦 Büyük
+  hesap. Canlıda: dört yuva doluyken de taranır ama yalnız en güçlü %20'lik sinyal ek yuvaya girer (en fazla 2 ek
+  pozisyon, boştaki teminatla sınırlı); zayıf sinyalde son ödenmiş fonlama Binance'ten istenir (alınamazsa girilir).
+  Backtest fonlama oranlarını aylık arşivden okur (ilk çalıştırmada indirilir). Tek pozisyon modunda etkisiz.
+- **Sınırlar:** kazanç büyük hesapta; 24 USDT'de ancak hesap 5.000 USDT'yi geçince etkili olur.
+
 ### 🏆 Strateji turnuvası (`--turnuva`)
 Hangi strateji türünün sizin dönemde işe yaradığını **tek komutla** görmek için:
 ```bash
@@ -2604,6 +2642,8 @@ karar için ortancaya ve en kötüye bakın. Çıkış taraması her gün dengel
 - **Sinyal kalitesi puanına göre** (aynı yerde; sabit tutar): yedi ölçülü kalite puanının 2020-2023 sinyallerindeki
   dilimine göre işlem başı sonuç (en zayıf %40, %40-60, %60-80, en güçlü %20). Zayıf dilimler `FUTURES_QUALITY_SIZE_PCT`
   ile küçültülebilir; açıksa başlıkta "🧮 Sinyal kalitesi" satırı A'da kaç işlemin küçük boyla açıldığını yazar.
+- **🏦 Büyük hesap kuralları** (`FUTURES_BIG_ACCOUNT_USDT` açıksa başlıkta): A'da kaç işlemin ek yuvadan açıldığını ve
+  kaç sinyalin fonlama yüzünden atlandığını yazar; atlanan sinyaller "Atlanan sinyal" satırında da görünür.
 - **📆 AYLIK İŞLEM YIĞILMASI** (yıl yıl): ayın günlük işlem hızı o yılın ortalamasının en az 1.5 katıysa o ay yığılma
   sayılır. Her yıl için yığılma ayları (işlem sayısı ve kaç kat), bu ayların yılın işlemlerinden ve C'deki net kârından
   payı; yığılma ayları olmadan C'nin toplamı, işlem başı sonucu ve B'nin "bu aylar yatay geçseydi" sonucu. Yığılma yoksa yılın en yoğun ayı yazılır. Son

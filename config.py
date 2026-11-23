@@ -959,6 +959,9 @@ class Config:
     # zayıf FUTURES_QUALITY_CUT_PCT yüzdesindeyse pozisyon büyüklüğü FUTURES_QUALITY_SIZE_PCT (%; 100 = kapalı, eskisi gibi)
     futures_quality_size_pct: float = 100.0
     futures_quality_cut_pct: float = 60.0
+    # Büyük hesap kuralları (rapor 19 araştırması, 23 Kasım): gerçekleşen bakiye bu tutarı (USDT) aşınca kalite puanı en
+    # güçlü %20'lik sinyaller 2 ek pozisyon açabilir, zayıf sinyale son fonlama ≤ 0 ise girilmez (0 = kapalı, eskisi gibi)
+    futures_big_account_usdt: float = 0.0
     # Faz 6 (bkz. FUTURES_PHASE6_PRESET üstündeki açıklama; varsayılanlar = kapalı, eskisi gibi)
     futures_extra_size_pct: float = 100.0  # Ek pozisyonların büyüklüğü, ilk pozisyonun %'si (100 = eşit, Faz 5)
     futures_reentry_breadth: int = 0       # Genişlik ≥ bu iken zarar sonrası bekleme atlanır (0 = kapalı)
@@ -1318,6 +1321,8 @@ class Config:
         if not 100 <= self.futures_basis_size_pct <= 200 or not 0.1 <= self.futures_basis_deep_pct <= 3:
             errors.append("FUTURES_BASIS_SIZE_PCT 100-200 (%; 100 = kapalı), FUTURES_BASIS_DEEP_PCT 0.1-3 (vadelinin "
                           "spota göre iskontosu, %) olmalı")
+        if not (self.futures_big_account_usdt == 0 or 100 <= self.futures_big_account_usdt <= 100_000_000):
+            errors.append("FUTURES_BIG_ACCOUNT_USDT 0 (kapalı) ya da 100 USDT ve üstü olmalı")
         if not 20 <= self.futures_quality_size_pct <= 100 or self.futures_quality_cut_pct not in (40, 60):
             errors.append("FUTURES_QUALITY_SIZE_PCT 20-100 (%; 100 = kapalı), FUTURES_QUALITY_CUT_PCT 40 ya da 60 (en "
                           "zayıf sinyallerin yüzdesi) olmalı")
@@ -1620,6 +1625,7 @@ def load_config(env_file: Optional[str] = None, mode_override: Optional[str] = N
         futures_basis_deep_pct=_env_float("FUTURES_BASIS_DEEP_PCT", 0.5),
         futures_quality_size_pct=_env_float("FUTURES_QUALITY_SIZE_PCT", 100.0),
         futures_quality_cut_pct=_env_float("FUTURES_QUALITY_CUT_PCT", 60.0),
+        futures_big_account_usdt=_env_float("FUTURES_BIG_ACCOUNT_USDT", 0.0),
         futures_extra_size_pct=_env_float("FUTURES_EXTRA_SIZE_PCT", 100.0),
         futures_reentry_breadth=_env_int("FUTURES_REENTRY_BREADTH", 0),
         futures_wave_rules=canonical_crash_extra(_env_str("FUTURES_WAVE_RULES", "")),
@@ -1956,6 +1962,16 @@ def _setting_notes(cfg: Config) -> List[str]:
                          f"zayıf %60'taki işlemler ortalamada ~%0 (2023-2026'da eksi), en güçlü %20 her yıl +%0.37 … "
                          f"+%0.54. %60 / %60 ile 4.000 USDT'de 71 hesabın 12 ay ortancası +%1.034 → +%1.097, %60'ı aşan "
                          f"düşüş 8 → 7; 24 USDT'de +%1.480 → +%1.554, düşüş aynı (25). Önce test modunda deneyin.")
+        if cfg.futures_big_account_usdt > 0:
+            notes.append((f"FUTURES_BIG_ACCOUNT_USDT={cfg.futures_big_account_usdt:,.0f} (büyük hesap kuralları): "
+                          f"gerçekleşen bakiye bu tutarı aşınca kalite puanı en güçlü %20'lik sinyaller "
+                          f"FUTURES_MAX_POSITIONS'a ek 2 pozisyon açabilir, zayıf sinyale (en zayıf %60) son ödenen "
+                          f"fonlama ≤ 0 ise girilmez (açıklar kalabalık). Büyük hesapta pozisyonlar emir defteri "
+                          f"derinliğiyle sınırlanır ve teminat boşta kalır; küçük hesapta kurallar zararlıdır, bu yüzden "
+                          f"eşikle açılır. Rapor 19 araştırması (23 Kasım; 2020-2026, 6x, 10 çekiliş): 5.000 eşiğiyle "
+                          f"4.000 USDT'de 71 hesabın 12 ay ortancası +%1.097 → +%1.423, %60'ı aşan düşüş 7 → 8, "
+                          f"kill-switch 0; 24 USDT'de ilk yıl değişmez (hesap eşiğe ulaşmaz). Tek pozisyon modunda "
+                          f"etkisiz. Önce test modunda deneyin.").replace(",", "."))
         if cfg.futures_reentry_breadth > 0:
             if cfg.loss_cooldown_minutes <= cfg.symbol_cooldown_minutes:
                 notes.append(f"FUTURES_REENTRY_BREADTH={cfg.futures_reentry_breadth}: LOSS_COOLDOWN_MINUTES="

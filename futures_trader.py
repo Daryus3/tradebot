@@ -54,7 +54,7 @@ from strategy import (FUT_BAR_MS, FUT_BREADTH_DROP_PCT, FUT_BREADTH_HOURS, FUT_B
                       FuturesSignal,
                       ScanResult, funding_per_bar, futures_kline_limit, isolated_factor, market_breadth,
                       recent_size_factor, basis_pct, basis_size_factor, quality_score, quality_size_factor,
-                      spot_pairs)
+                      spot_pairs, BIG_EXTRA_SLOTS, QUALITY_CUTS, big_extra_slots, big_funding_skip, big_rules_on)
 from telegram_bot import CRITICAL_EXITS, Messages, esc, fmt_duration, fmt_price, fmt_signed, fmt_usdt, futures_tag
 from trader import ALIVE_SAVE_SEC, POSITION_LOG_SEC, RULES_REFRESH_SEC, Mark, TradingBot
 
@@ -510,9 +510,36 @@ class FuturesBot(TradingBot):
             return f"alımlar donduruldu ({state.freeze_reason})"
         if state.pending_entry:
             return "limit giriş emri bekliyor"
-        if self.free_slots() <= 0:
+        if self.free_slots() <= 0 and not (self._big_on() and len(state.positions) < self.slots() + BIG_EXTRA_SLOTS):
             return f"boş yer yok ({len(state.positions)}/{self.slots()} pozisyon açık)"
         return None
+
+    # ================================================================ büyük hesap kuralları (FUTURES_BIG_ACCOUNT_USDT)
+    def _big_on(self) -> bool:
+        """Gerçekleşen bakiye (başlangıç + gerçekleşen K/Z, düşüşte küçültmeyle aynı ölçü) eşiğin üstünde mi."""
+        cfg = self.cfg
+        return (cfg.futures_tactic == "crash" and self.slots() > 1
+                and big_rules_on(cfg.futures_big_account_usdt, self.state.capital))
+
+    def _big_quality(self, sig: FuturesSignal) -> float:
+        return quality_score(sig.score, sig.metrics) if sig.metrics.get("tactic", 1.0) == 1.0 else float("nan")
+
+    def _big_funding_skip(self, sig: FuturesSignal) -> bool:
+        """Zayıf sinyalde son ödenen fonlama oranı ≤ 0 mı (yalnız zayıf sinyalde istenir; alınamazsa girilir)."""
+        if not self._big_on():
+            return False
+        q = self._big_quality(sig)
+        if not q <= QUALITY_CUTS[60]:                       # Güçlü sinyal (ya da puan yok): fonlamaya bakılmaz
+            return False
+        try:
+            _times, rates = self.exchange.funding_history(sig.symbol, 1)
+        except (FuturesError, requests.ConnectionError) as exc:
+            log.warning("%s fonlama oranı alınamadı (büyük hesap kuralı uygulanmadı): %s", sig.symbol, exc)
+            return False
+        if not rates:
+            return False
+        sig.metrics["last_funding"] = round(float(rates[-1]) * 100, 5)
+        return big_funding_skip(self.cfg.futures_big_account_usdt, self.state.capital, q, sig.metrics["last_funding"])
 
     # ================================================================ canlı tarama kaydı
     def _journal(self, entry: dict) -> None:
@@ -713,9 +740,17 @@ class FuturesBot(TradingBot):
         while pending:                   # En güçlüden: boş yer oldukça (dalga modunda ek pozisyon yalnızca dalgada)
             sig = self._next_signal(pending)       # Derinliğe göre boy açıksa kapasite önceliği
             pending.remove(sig)
-            if self.free_slots() <= 0 or self.state.pending_entry:
-                stop = "boş yer yok" if self.free_slots() <= 0 else "limit giriş emri bekliyor"
+            if self.state.pending_entry:
+                stop = "limit giriş emri bekliyor"
                 break
+            if self.free_slots() <= 0:
+                big = self._big_on() and len(self.state.positions) < self.slots() + BIG_EXTRA_SLOTS
+                if not big:
+                    stop = "boş yer yok"
+                    break
+                if big_extra_slots(self.cfg.futures_big_account_usdt, self.state.capital, self._big_quality(sig)) <= 0:
+                    outcome[sig.symbol] = "boş yer yok (ek yuva yalnız en güçlü sinyallere)"
+                    continue
             if sig.symbol in self.state.positions:
                 outcome[sig.symbol] = "bu coinde pozisyon zaten açık"
                 continue
@@ -724,6 +759,11 @@ class FuturesBot(TradingBot):
                          self.cfg.futures_extra_breadth)
                 stop = f"ek pozisyon için dalga yok ({breadth} coin düşüyor, gereken {self.cfg.futures_extra_breadth})"
                 break
+            if self._big_funding_skip(sig):
+                log.info("Büyük hesap kuralı: %s zayıf sinyal, son fonlama %%%s ≤ 0, girilmedi", sig.symbol,
+                         sig.metrics.get("last_funding"))
+                outcome[sig.symbol] = "büyük hesap: zayıf sinyal, son fonlama ≤ 0"
+                continue
             log.info("Vadeli sinyal: %s %s | %s", sig.symbol, sig.side, sig.note())
             try:
                 self.open_futures(sig, now)
@@ -2326,6 +2366,9 @@ class FuturesBot(TradingBot):
             if cfg.futures_quality_size_pct < 100:
                 extra += (f", kalite puanı en zayıf %{cfg.futures_quality_cut_pct:g}'taysa boy "
                           f"%{cfg.futures_quality_size_pct:g}")
+            if cfg.futures_big_account_usdt > 0:
+                extra += (f", büyük hesap kuralları bakiye ≥{cfg.futures_big_account_usdt:,.0f} USDT"
+                          f" ({'açık' if self._big_on() else 'henüz kapalı'})").replace(",", ".")
             lines.append(f"🌊 Genişlik: {self.last_breadth} coin son 1 saatte %3+ düştü (dalga ≥"
                          f"{cfg.futures_extra_breadth}, yalnız çöküş <{cfg.futures_isolated_breadth}{extra})")
         tm = self.last_timing

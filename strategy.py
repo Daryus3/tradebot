@@ -2028,7 +2028,7 @@ def quality_score(score, metrics: Optional[Dict[str, float]]) -> float:
     return total / len(QUALITY_SIGNS)
 
 
-QUALITY_CUTS = {40: 0.433, 60: 0.5311}      # 2020-01 → 2023-10 çöküş sinyallerinde puanın %40 / %60'lık değeri
+QUALITY_CUTS = {40: 0.433, 60: 0.5311, 80: 0.6583}   # 2020-01 → 2023-10 çöküş sinyallerinde puanın %40 / %60 / %80'i
 
 
 def quality_size_factor(size_pct: float, cut_pct: float, quality: Optional[float]) -> float:
@@ -2038,6 +2038,36 @@ def quality_size_factor(size_pct: float, cut_pct: float, quality: Optional[float
         return 1.0
     cut = QUALITY_CUTS.get(int(round(float(cut_pct))), QUALITY_CUTS[60])
     return max(0.0, float(size_pct)) / 100 if quality <= cut else 1.0
+
+
+# Büyük hesap kuralları (FUTURES_BIG_ACCOUNT_USDT; rapor 19 araştırması, 23 Kasım). Hesap büyüyünce pozisyonlar emir
+# defteri derinliğiyle sınırlanır (FUTURES_DEPTH_CAP_PCT) ve teminatın bir kısmı boşta kalır; gerçekleşen bakiye eşiği
+# aşınca iki kural devreye girer: kalite puanı en güçlü %20'deki sinyal FUTURES_MAX_POSITIONS'a ek BIG_EXTRA_SLOTS
+# pozisyon açabilir; zayıf sinyale (en zayıf %60) son ödenen fonlama ≤ 0 ise (açıklar kalabalık) girilmez.
+BIG_EXTRA_SLOTS = 2
+BIG_FUNDING_MAX_PCT = 0.0
+
+
+def big_rules_on(big_usdt: float, capital: float) -> bool:
+    """Büyük hesap kuralları açık ve gerçekleşen bakiye eşiğin üstünde mi."""
+    return bool(big_usdt) and float(big_usdt) > 0 and float(capital) >= float(big_usdt)
+
+
+def big_extra_slots(big_usdt: float, capital: float, quality: Optional[float]) -> int:
+    """Kalite puanı en güçlü %20'deki sinyalin açabileceği ek pozisyon sayısı (eşik altında ya da puan yoksa 0)."""
+    if not big_rules_on(big_usdt, capital) or quality is None or quality != quality:
+        return 0
+    return BIG_EXTRA_SLOTS if quality > QUALITY_CUTS[80] else 0
+
+
+def big_funding_skip(big_usdt: float, capital: float, quality: Optional[float], funding_pct: Optional[float]) -> bool:
+    """Zayıf sinyal (puan en zayıf %60'ta) ve son ödenen fonlama oranı (%) ≤ 0 ise True: girilmez. Fonlama
+    bilinmiyorsa False (eskisi gibi girilir)."""
+    if not big_rules_on(big_usdt, capital) or quality is None or quality != quality:
+        return False
+    if funding_pct is None or funding_pct != funding_pct:
+        return False
+    return quality <= QUALITY_CUTS[60] and float(funding_pct) <= BIG_FUNDING_MAX_PCT
 
 
 def window_sigma(c, bars: int, lookback: int = FUT_Z_LOOKBACK_BARS):

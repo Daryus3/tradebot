@@ -80,6 +80,7 @@ BASIS_SIZE_CHOICES = (100, 130, 150)       # Vadeli-spot farkına göre boy (rap
 BASIS_DEEP_CHOICES = (0.3, 0.5, 0.7)
 QUALITY_SIZE_CHOICES = (100, 60, 50, 40)  # Sinyal kalitesine göre boy (rapor 18 araştırması, 22 Kasım)
 QUALITY_CUT_CHOICES = (40, 60)
+BIG_ACCOUNT_CHOICES = (0, 2000, 5000, 10000)   # Büyük hesap kuralları (rapor 19 araştırması, 23 Kasım)
 # Düşüşte küçültme (rapor 24 araştırması; varsayılan kapalı): sermaye zirvesinden düşüş eşiği ve düşüşteki boy
 DD_SCALE_CHOICES = (0, 20, 30, 40)
 DD_SIZE_CHOICES = (40, 50, 60, 75)
@@ -429,6 +430,9 @@ PAGES: Dict[str, Page] = {
             show=_crash, per_row=2),
         Row("FUTURES_QUALITY_CUT_PCT", icon="🎯", values=QUALITY_CUT_CHOICES, fmt=lambda v: f"en zayıf %{float(v):g}",
             show=lambda cfg: _crash(cfg) and cfg.futures_quality_size_pct < 100, per_row=2),
+        Row("FUTURES_BIG_ACCOUNT_USDT", icon="🏦", values=BIG_ACCOUNT_CHOICES,
+            fmt=lambda v: "Büyük hesap: kapalı" if float(v) <= 0 else f"Büyük hesap: ≥{float(v) / 1000:g} bin",
+            show=lambda cfg: _crash(cfg) and cfg.futures_max_positions > 1, per_row=2),
         Row("FUTURES_REENTRY_BREADTH", icon="🔁", values=(0, 3, 8), fmt=lambda v: "yeniden giriş: kapalı" if int(v) == 0
             else f"yeniden giriş: ≥{v} coin", show=_crash, per_row=3),
         Row("FUTURES_WAVE_RULES", values=WAVE_RULE_CHOICES, fmt=lambda v: _wave_label(v), show=_crash, per_row=2),
@@ -1014,6 +1018,12 @@ class SettingsMenu:
                          f"pozisyon <b>%{cfg.futures_quality_size_pct:g}</b> büyüklükte.")
         else:
             lines.append("🧮 Kalite puanına göre boy kapalı.")
+        if cfg.futures_big_account_usdt > 0:
+            lines.append((f"🏦 Büyük hesap kuralları: bakiye ≥{cfg.futures_big_account_usdt:,.0f} USDT iken en güçlü "
+                          f"sinyaller 2 ek pozisyon açabilir, zayıf sinyale son fonlama ≤ 0 ise girilmez.")
+                         .replace(",", "."))
+        else:
+            lines.append("🏦 Büyük hesap kuralları kapalı.")
         if cfg.futures_reentry_breadth > 0:
             lines.append(f"🔁 Dalgada yeniden giriş: son 1 saatte ≥{cfg.futures_reentry_breadth} coin %3+ düşerken zarar "
                          f"sonrası bekleme ({cfg.loss_cooldown_minutes} dk) atlanır."

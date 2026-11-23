@@ -42,10 +42,10 @@ from config import (DATA_DIR, dd_scale_factor, format_crash_rules, futures_coin_
                     tr_from_num)
 from futures_data import FuturesArchive, concat, resample, slice_range
 from futures_depth import DEPTH_CHECK_MIN_NOTIONAL, DepthBook, daily_volume_fn
-from strategy import (FUT_BAR_MS, FUT_HOUR_MS, QUALITY_CUTS, basis_pct, basis_size_factor, breadth_flags, btc_trend_1h,
-                      crash_state, funding_per_bar, futures_candidates, futures_entries, futures_features,
-                      isolated_factor, pick_signal, quality_score, quality_size_factor, recent_size_factor, spot_pairs,
-                      trend_at)
+from strategy import (BIG_EXTRA_SLOTS, FUT_BAR_MS, FUT_HOUR_MS, QUALITY_CUTS, basis_pct, basis_size_factor,
+                      big_extra_slots, big_funding_skip, big_rules_on, breadth_flags, btc_trend_1h, crash_state,
+                      funding_per_bar, futures_candidates, futures_entries, futures_features, isolated_factor,
+                      pick_signal, quality_score, quality_size_factor, recent_size_factor, spot_pairs, trend_at)
 
 DAY_MS = 86_400_000
 MIN_MS = 60_000
@@ -669,6 +669,9 @@ class SimParams:
     # zayıf quality_cut_pct yüzdesindeyse (strategy.QUALITY_CUTS) pozisyon quality_size_pct (%; 100 = kapalı)
     quality_size_pct: float = 100.0
     quality_cut_pct: float = 60.0
+    # Büyük hesap kuralları (FUTURES_BIG_ACCOUNT_USDT; canlı: FuturesBot._scan_and_enter): gerçekleşen bakiye bu tutarı
+    # aşınca en güçlü %20'lik sinyaller BIG_EXTRA_SLOTS ek pozisyon açabilir, zayıf sinyale son fonlama ≤ 0 ise girilmez
+    big_account_usdt: float = 0.0
     # Faz 6: ek pozisyonların büyüklüğü (ilk pozisyonun %'si; 100 = eşit, Faz 5) ve dalgada yeniden giriş (genişlik
     # ≥ reentry_breadth iken zarar sonrası bekleme atlanır; 0 = kapalı)
     extra_size_pct: float = 100.0
@@ -727,6 +730,7 @@ def params_from_cfg(cfg, **over) -> SimParams:
                   basis_deep_pct=float(getattr(cfg, "futures_basis_deep_pct", 0.5)),
                   quality_size_pct=float(getattr(cfg, "futures_quality_size_pct", 100.0)),
                   quality_cut_pct=float(getattr(cfg, "futures_quality_cut_pct", 60.0)),
+                  big_account_usdt=float(getattr(cfg, "futures_big_account_usdt", 0.0)),
                   extra_size_pct=float(getattr(cfg, "futures_extra_size_pct", 100.0)),
                   reentry_breadth=int(getattr(cfg, "futures_reentry_breadth", 0)),
                   extra_be_trigger_pct=float(getattr(cfg, "futures_extra_be_trigger_pct", 0.0)),
@@ -1107,6 +1111,11 @@ def capacity_order(signals: Sequence["FutSignal"], p: SimParams, data: "FutData"
         i = j
 
 
+def signal_quality(s: "FutSignal") -> float:
+    """Çöküş sinyalinin kalite puanı (strategy.quality_score); ek modül sinyallerinde NaN."""
+    return quality_score(s.score, s.metrics) if s.metrics.get("tactic", 1.0) == 1.0 else float("nan")
+
+
 def size_factor(p: SimParams, s: "FutSignal") -> float:
     """Sinyalin boy çarpanı (canlı: FuturesBot._entry_margin ile aynı): yalnız çöküşte (genişlik < isolated_breadth)
     × isolated_size_pct; çöküş durulmuşsa (son 15 dk düşüş < recent_drop_pct) × recent_size_pct; vadeli spotun
@@ -1368,7 +1377,9 @@ def simulate_slots(p: SimParams, data: FutData, signals: Sequence[FutSignal], wi
         if s.close_ms == limit_bar:
             skipped["aynı mumda limit emir denendi"] += 1
             continue
-        if len(heap) >= slots:
+        big_on = slots > 1 and big_rules_on(p.big_account_usdt, equity)
+        if len(heap) >= slots and not (big_on and len(heap) < slots + BIG_EXTRA_SLOTS
+                                       and big_extra_slots(p.big_account_usdt, equity, signal_quality(s)) > 0):
             skipped["açık pozisyon vardı"] += 1
             continue
         if s.symbol in open_syms:
@@ -1384,6 +1395,9 @@ def simulate_slots(p: SimParams, data: FutData, signals: Sequence[FutSignal], wi
         reentry = s.close_ms < cooldown.get(s.symbol, -1)      # Faz 6: dalgada zarar sonrası beklemesi atlandı
         if s.close_ms < freeze_until:
             skipped["risk sigortası (zarar serisi / günlük limit)"] += 1
+            continue
+        if big_on and big_funding_skip(p.big_account_usdt, equity, signal_quality(s), s.metrics.get("last_funding")):
+            skipped["büyük hesap: zayıf sinyal, son fonlama ≤ 0"] += 1
             continue
         factor = size_factor(p, s)
         share = slot_share(p, len(heap))
@@ -1903,7 +1917,8 @@ def exit_variant_rows(cfg, ev) -> List[Tuple[str, "Evaluation"]]:
     return rows
 
 
-def size_variant_rows(cfg, ev, depth: bool = False, has_basis: bool = False) -> List[Tuple[str, "Evaluation"]]:
+def size_variant_rows(cfg, ev, depth: bool = False, has_basis: bool = False,
+                      has_funding: bool = False) -> List[Tuple[str, "Evaluation"]]:
     """Pozisyon büyüklüğü ve dalga modu: teminat kullanımı, en fazla pozisyon, ek pozisyon boyu ve kapısı, yalnız çöküş
     boyu, dalgada yeniden giriş eşiği, düşüşte küçültme (açıksa çevresi, kapalıysa %30 / %60), derinlik verisi varsa
     derinliğe göre boy (açıksa çevresi, kapalıysa %10 + kapasite önceliği)."""
@@ -1942,6 +1957,7 @@ def size_variant_rows(cfg, ev, depth: bool = False, has_basis: bool = False) -> 
     rows += recent_variant_rows(base, ev)
     rows += basis_variant_rows(base, ev, has_basis)
     rows += quality_variant_rows(base, ev)
+    rows += big_variant_rows(base, ev, has_funding)
     if base.reentry_breadth > 0:
         rows += [(f"Dalgada yeniden giriş ≥{b} coin (şimdi ≥{base.reentry_breadth})", ev(reentry_breadth=b))
                  for b in REENTRY_TRIES if b != base.reentry_breadth]
@@ -1969,6 +1985,22 @@ def quality_variant_rows(base: SimParams, ev) -> List[Tuple[str, "Evaluation"]]:
              for v in QUALITY_SIZE_TRIES if not _same(v, base.quality_size_pct)]
     rows += [(f"Kalite puanı: en zayıf %{c:g} (şimdi %{base.quality_cut_pct:g})", ev(quality_cut_pct=c))
              for c in QUALITY_CUT_TRIES if not _same(c, base.quality_cut_pct)]
+    return rows
+
+
+BIG_ACCOUNT_TRIES = (2000.0, 5000.0, 10000.0)   # Büyük hesap kurallarının bakiye eşiği (USDT; rapor 19 araştırması)
+
+
+def big_variant_rows(base: SimParams, ev, has_funding: bool) -> List[Tuple[str, "Evaluation"]]:
+    """Büyük hesap kuralları (FUTURES_BIG_ACCOUNT_USDT): açıksa kapalı + eşik çevresi, kapalıysa ≥5.000 USDT denemesi.
+    Tek pozisyon modunda ya da fonlama verisi yoksa satır yok."""
+    if base.max_positions <= 1 or not has_funding:
+        return []
+    if base.big_account_usdt <= 0:
+        return [("Büyük hesap kuralları: bakiye ≥5.000 USDT", ev(big_account_usdt=5000.0))]
+    rows = [("Büyük hesap kuralları kapalı", ev(big_account_usdt=0.0))]
+    rows += [(f"Büyük hesap kuralları: bakiye ≥{v:,.0f} USDT (şimdi ≥{base.big_account_usdt:,.0f})".replace(",", "."),
+              ev(big_account_usdt=v)) for v in BIG_ACCOUNT_TRIES if not _same(v, base.big_account_usdt)]
     return rows
 
 
@@ -2091,7 +2123,8 @@ def _crash_variant_rows(cfg, signals, minute: bool, tag: str, ev, other,
     return ([("Çıkışlar ve başabaş", None), shield] + trail
             + exit_variant_rows(cfg, ev) + [tp_order] + phase8_rows(cfg, ev) + phase9_rows(cfg, ev)
             + [("Pozisyon büyüklüğü ve dalga modu", None)]
-            + size_variant_rows(cfg, ev, depth, any("basis" in s.metrics for s in signals))
+            + size_variant_rows(cfg, ev, depth, any("basis" in s.metrics for s in signals),
+                                any("last_funding" in s.metrics for s in signals))
             + cascade_rows(cfg, ev, signals) + phase6_rows(cfg, ev, signals)
             + [("Giriş kuralı, tarama ve bekleme", None)] + scan5
             + [(f"Çöküş eşiği %{cfg.futures_crash_drop_pct - 2:g}{tag}",
@@ -2125,6 +2158,7 @@ def variant_rows(cfg, data: FutData, signals, windows,
             if data.depth is not None:
                 data.depth.prefetch([(x.symbol, x.close_ms) for x in sigs])
             attach_basis(c2, data, sigs)
+            attach_funding(c2, data, sigs)
             return evaluate(params_from_cfg(c2), data, sigs, windows)
         def stub(*_a, **_k):
             return 0
@@ -3150,7 +3184,7 @@ def basis_breakdown_line(trades: Sequence[FutTrade], p: SimParams) -> Optional[s
 
 
 QUALITY_BUCKETS = ((None, 40), (40, 60), (60, 80), (80, None))   # Kalite puanının 2020-2023 sinyallerindeki dilimi (%)
-QUALITY_EDGES = {20: 0.3397, 40: QUALITY_CUTS[40], 60: QUALITY_CUTS[60], 80: 0.6583}
+QUALITY_EDGES = {20: 0.3397, 40: QUALITY_CUTS[40], 60: QUALITY_CUTS[60], 80: QUALITY_CUTS[80]}
 
 
 def quality_breakdown_line(trades: Sequence[FutTrade], p: SimParams) -> Optional[str]:
@@ -3969,6 +4003,14 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
                  f"payı, son 5 / 15 dk düşüş, hacim ve satış hacmi oranı) 2020-2023 sinyallerinin en zayıf "
                  f"%{p.quality_cut_pct:g}'ındaysa pozisyon %{p.quality_size_pct:g} boy. A'da {small} / "
                  f"{len(res.trades)} işlem bu boyla açıldı")
+    if p.big_account_usdt > 0 and p.max_positions > 1:
+        extra = sum(1 for tr in res.trades if tr.slot > p.max_positions)
+        skipped = res.skipped.get("büyük hesap: zayıf sinyal, son fonlama ≤ 0", 0)
+        L.append((f"🏦 Büyük hesap kuralları: gerçekleşen bakiye ≥{p.big_account_usdt:,.0f} USDT iken kalite puanı "
+                  f"en güçlü %20'lik sinyaller {BIG_EXTRA_SLOTS} ek pozisyon açabilir (en fazla "
+                  f"{p.max_positions + BIG_EXTRA_SLOTS}); zayıf sinyale (en zayıf %60) son ödenen fonlama ≤ 0 ise "
+                  f"girilmez. A'da {extra} işlem ek yuvadan açıldı, {skipped} sinyal fonlama yüzünden atlandı")
+                 .replace(",", "."))
     L.append(f"Kâr Al +%{p.tp_pct:g} ({'limit, maker' if p.tp_limit else 'piyasa'}) | Zarar Kes -%{p.sl_pct:g} | "
              + (f"başabaş +%{p.be_trigger_pct:g} → stop +%{p.be_floor_pct:g}" if p.be_enabled else "başabaş kapalı")
              + (f" | izleyen stop +%{p.trail_act_pct:g}'de, tepenin %{p.trail_gap_pct:g} gerisinden"
@@ -4381,6 +4423,48 @@ def attach_basis(cfg, data: FutData, signals: Sequence[FutSignal],
     return done
 
 
+FUNDING_STALE_MS = 12 * 3_600_000      # Son ödenmiş fonlama bundan eskiyse (arşiv boşluğu) ölçü yazılmaz
+
+
+def attach_funding(cfg, data: FutData, signals: Sequence[FutSignal],
+                   progress: Optional[Callable[[str], None]] = None) -> int:
+    """Çöküş taktiğinde her sinyalin girişten önceki son ödenmiş fonlama oranı (%) → metrics["last_funding"] (büyük
+    hesap kuralları, FUTURES_BIG_ACCOUNT_USDT; canlı: FuturesExchange.funding_history). Aylık fonlama arşivi ilk
+    seferde indirilir. Ölçülen sinyal sayısı döner."""
+    if getattr(cfg, "futures_tactic", "crash") != "crash" or data.archive is None or not signals:
+        return 0
+    by_symbol: Dict[str, List[FutSignal]] = {}
+    for s in signals:
+        if "last_funding" not in s.metrics:
+            by_symbol.setdefault(s.symbol, []).append(s)
+    if not by_symbol:
+        return 0
+    if progress:
+        progress(f"🏦 Fonlama oranları: {len(by_symbol)} coin okunuyor (ilk seferde indirilir)...")
+
+    def load(symbol: str) -> Tuple[str, Optional[Tuple[np.ndarray, np.ndarray]]]:
+        group = by_symbol[symbol]
+        try:
+            t, r = data.archive.funding(symbol, min(x.close_ms for x in group) - 2 * DAY_MS,
+                                        max(x.close_ms for x in group) + 1)
+        except Exception:  # noqa: BLE001 - fonlama alınamadı: ölçü yok, kural uygulanmaz
+            return symbol, None
+        return symbol, (t, r) if len(t) else None
+
+    done = 0
+    with ThreadPoolExecutor(BASIS_WORKERS) as pool:
+        for symbol, got in pool.map(load, list(by_symbol)):
+            if got is None:
+                continue
+            t, r = got
+            for s in by_symbol[symbol]:
+                i = int(np.searchsorted(t, s.close_ms, side="left")) - 1
+                if i >= 0 and s.close_ms - int(t[i]) <= FUNDING_STALE_MS:
+                    s.metrics["last_funding"] = float(r[i]) * 100
+                    done += 1
+    return done
+
+
 def run_cli(cfg, days: Optional[int], end_ms: Optional[int], out_dir: Path, chart: bool = True,
             full_history: bool = False, exit_interval: str = "1m", sensitivity: bool = True,
             progress: Callable[[str], None] = print) -> Tuple[str, Optional[Path], Evaluation]:
@@ -4401,6 +4485,7 @@ def run_cli(cfg, days: Optional[int], end_ms: Optional[int], out_dir: Path, char
     windows = load_windows(data, signals, window_minutes(cfg), progress)
     attach_depth(cfg, data, signals, progress)
     attach_basis(cfg, data, signals, progress)
+    attach_funding(cfg, data, signals, progress)
     ev = evaluate(params_from_cfg(cfg), data, signals, windows)
     levs = grid = variants = None
     if sensitivity:
