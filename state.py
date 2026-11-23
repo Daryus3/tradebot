@@ -76,6 +76,9 @@ class BotState:
     # Sermayenin (başlangıç + gerçekleşen K/Z) ulaştığı en yüksek değer: düşüşte küçültme (FUTURES_DD_SCALE_PCT) bununla
     # ölçülür. 0 = henüz kaydedilmedi (ilk kayıtta o anki sermaye); /sermayeekle ile eklenen para buna da eklenir.
     peak_capital: float = 0.0
+    # 24 saat freni (FUTURES_DAY_BRAKE_PCT): kapanışlardaki sermaye [zaman, sermaye]; pencereden (24 saat) eski kayıtlardan
+    # yalnızca en yenisi (pencere başındaki sermaye) tutulur. /sermayeekle ile eklenen para kayıtlara da eklenir.
+    capital_marks: List[List[float]] = field(default_factory=list)
 
     @property
     def capital(self) -> float:
@@ -86,6 +89,17 @@ class BotState:
         """Sermaye zirvesini günceller ve döndürür (ilk çağrıda o anki sermaye, sonra görülen en yüksek değer)."""
         self.peak_capital = round(max(self.peak_capital, self.capital), 8)
         return self.peak_capital
+
+    def note_capital(self, now: float, keep_sec: float, before: Optional[float] = None) -> None:
+        """24 saat freni: kapanıştan sonraki sermayeyi kaydeder. İlk kayıtta `before` (kapanıştan önceki sermaye) da
+        yazılır: ilk zarar da son 24 saatin zirvesine göre ölçülsün (backtest eğrisi başlangıç bakiyesiyle başlar).
+        Pencereden (keep_sec) eski kayıtlardan yalnızca en yenisi (pencere başındaki sermaye) tutulur."""
+        if not self.capital_marks and before is not None:
+            self.capital_marks.append([round(now, 3), round(before, 8)])
+        self.capital_marks.append([round(now, 3), round(self.capital, 8)])
+        start = now - keep_sec
+        while len(self.capital_marks) >= 2 and self.capital_marks[1][0] < start:
+            self.capital_marks.pop(0)
 
     @property
     def committed(self) -> float:

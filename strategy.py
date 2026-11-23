@@ -2743,6 +2743,9 @@ class FuturesSignal:
         if m.get("dd_size_pct") and m["dd_size_pct"] < 100:
             parts.append(f"Düşüşte küçültme: sermaye zirvenin %{m.get('dd_pct', 0):g} altında, pozisyon "
                          f"%{m['dd_size_pct']:g} boy")
+        if m.get("brake_size_pct") and m["brake_size_pct"] < 100:
+            parts.append(f"24 saat freni: sermaye son 24 saatin zirvesinin %{m.get('brake_pct', 0):g} altında, pozisyon "
+                         f"%{m['brake_size_pct']:g} boy")
         return (" | " + " | ".join(parts)) if parts else ""
 
     def _legacy_note(self) -> str:

@@ -40,7 +40,8 @@ import math
 
 import requests
 
-from config import (MINUTE_SCAN_STEP_MS, futures_be_trigger, tr_from_num, futures_breadth_on, futures_close_only, futures_coin_list,
+from config import (DAY_BRAKE_HOURS, MINUTE_SCAN_STEP_MS, futures_be_trigger, tr_from_num, futures_breadth_on,
+                    futures_brake_factor, futures_close_only, futures_coin_list, window_peak,
                     futures_dd_factor, futures_hold_minutes, scan_log_path,
                     futures_crash_rules, futures_funding_rules,
                     futures_liq_distance_pct, futures_minute_limit, futures_modules, futures_pump_rules, futures_scan_shifts,
@@ -1773,9 +1774,11 @@ class FuturesBot(TradingBot):
                 sig.metrics["quality_cut_pct"] = cfg.futures_quality_cut_pct
                 factor *= quality
         dd = self._dd_factor(sig)
+        brake = self._brake_factor(sig)
         slots = self.slots()
         if slots <= 1:
-            return free * usage * min(factor, 1.0) * dd       # Tek pozisyonda büyütülecek boş teminat yok
+            return free * usage * min(factor, 1.0) * dd * brake   # Tek pozisyonda büyütülecek boş teminat yok
+        factor *= brake                                     # 24 saat freni (backtest: simulate_slots ile aynı yer)
         opened = [p for p in self.state.positions.values() if p.futures]
         used = sum(p.margin_usdt for p in opened)
         share = futures_slot_share(cfg, len(opened))        # Faz 5: 1/N; Faz 6: ilk büyük, ekler küçük
@@ -1793,6 +1796,21 @@ class FuturesBot(TradingBot):
         if factor < 1 and sig is not None:
             sig.metrics["dd_size_pct"] = round(factor * 100, 1)
             sig.metrics["dd_pct"] = round((1 - state.capital / peak) * 100, 1)
+        return factor
+
+    def _brake_factor(self, sig: Optional[FuturesSignal] = None) -> float:
+        """24 saat freni çarpanı (FUTURES_DAY_BRAKE_PCT; kapalıysa 1): sermaye (başlangıç + gerçekleşen K/Z) son 24
+        saatin kapanışlardaki en yüksek değerinin eşik kadar altındaysa FUTURES_DAY_BRAKE_SIZE_PCT / 100 (backtest:
+        futures_backtest.brake_factor). Uygulanınca sinyale yazılır (pozisyon mesajı)."""
+        cfg, state = self.cfg, self.state
+        if cfg.futures_day_brake_pct <= 0:
+            return 1.0
+        capital = state.capital
+        peak = window_peak(state.capital_marks, self.time_fn(), DAY_BRAKE_HOURS * 3600, capital)
+        factor = futures_brake_factor(cfg, capital, peak)
+        if factor < 1 and sig is not None:
+            sig.metrics["brake_size_pct"] = round(factor * 100, 1)
+            sig.metrics["brake_pct"] = round((1 - capital / peak) * 100, 1)
         return factor
 
     def _place_limit_entry(self, sig: FuturesSignal, now: float, lev: int, margin: float, bid: float,
@@ -2253,8 +2271,10 @@ class FuturesBot(TradingBot):
             self.exchange.close_paper(pos.symbol, exit_price, pos.qty, exit_fee)
         state = self.state
         state.note_peak()                       # Düşüşte küçültme: zirve kaydı yoksa bu zarardan önceki sermaye
+        before = state.capital
         state.realized_pnl += pnl
         state.note_peak()
+        state.note_capital(now, DAY_BRAKE_HOURS * 3600, before)    # 24 saat freni: kapanıştaki sermaye
         state.trades += 1
         if pnl >= 0:
             state.wins += 1

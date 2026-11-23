@@ -36,10 +36,10 @@ from typing import Callable, Dict, Iterable, List, NamedTuple, Optional, Sequenc
 
 import numpy as np
 
-from config import (DATA_DIR, dd_scale_factor, format_crash_rules, futures_coin_list, futures_crash_rules, futures_funding_rules,
-                    futures_liq_distance_pct, futures_long_windows, futures_modules, futures_scan_shifts,
-                    futures_snapshot_on, futures_wave_cfg, futures_wave_rules, parse_crash_rules, scan_log_path, tr_from,
-                    tr_from_num)
+from config import (DATA_DIR, DAY_BRAKE_HOURS, dd_scale_factor, format_crash_rules, futures_coin_list,
+                    futures_crash_rules, futures_funding_rules, futures_liq_distance_pct, futures_long_windows,
+                    futures_modules, futures_scan_shifts, futures_snapshot_on, futures_wave_cfg, futures_wave_rules,
+                    parse_crash_rules, scan_log_path, tr_from, tr_from_num, window_peak)
 from futures_data import FuturesArchive, concat, resample, slice_range
 from futures_depth import DEPTH_CHECK_MIN_NOTIONAL, DepthBook, daily_volume_fn
 from strategy import (BIG_EXTRA_SLOTS, FUT_BAR_MS, FUT_HOUR_MS, QUALITY_CUTS, basis_pct, basis_size_factor,
@@ -692,6 +692,11 @@ class SimParams:
     # (0 = kapalı; sabit tutarlı C senaryosunda uygulanmaz)
     dd_scale_pct: float = 0.0
     dd_scale_size_pct: float = 60.0
+    # 24 saat freni (FUTURES_DAY_BRAKE_PCT; canlı: FuturesBot._entry_margin): gerçekleşen bakiye son 24 saatin zirvesinin
+    # day_brake_pct (%) ya da daha fazla altındayken yeni pozisyonun boyu × day_brake_size_pct / 100 (0 = kapalı; sabit
+    # tutarlı C senaryosunda uygulanmaz)
+    day_brake_pct: float = 0.0
+    day_brake_size_pct: float = 70.0
     # Emir defteri derinliği (futures_depth; veri FutData.depth'te, yoksa ikisi de uygulanmaz): depth_cap_pct > 0 ise giriş
     # tutarı girişten önceki 2 dk'da ±%1 içindeki alış / satış emirlerinin küçüğünün bu yüzdesiyle sınırlı ve aynı mumdaki
     # sinyallerde sınıra takılınca kapasitesi büyük olan önce (FUTURES_DEPTH_CAP_PCT); depth_impact: piyasa emrinin defteri
@@ -744,6 +749,8 @@ def params_from_cfg(cfg, **over) -> SimParams:
                   wave_hold_breadth=int(getattr(cfg, "futures_wave_hold_breadth", 8)),
                   dd_scale_pct=float(getattr(cfg, "futures_dd_scale_pct", 0.0) or 0.0),
                   dd_scale_size_pct=float(getattr(cfg, "futures_dd_scale_size_pct", 60.0)),
+                  day_brake_pct=float(getattr(cfg, "futures_day_brake_pct", 0.0) or 0.0),
+                  day_brake_size_pct=float(getattr(cfg, "futures_day_brake_size_pct", 70.0)),
                   depth_cap_pct=float(getattr(cfg, "futures_depth_cap_pct", 0.0) or 0.0),
                   depth_impact=bool(getattr(cfg, "futures_backtest_depth", False)),
                   entry_lag_pct=entry_lag_for(cfg)[0], stop_slip_pct=STOP_SLIP_PCT)
@@ -804,6 +811,7 @@ class FutTrade:
     be_bar: tuple = ()      # Başabaşın tetiklendiği mumda taban da görüldüyse o mum (açılış, lehte uç, ters uç, kapanış)
     be_q: float = -1.0      # O mumda tabana geri dönüş olasılığı (be_retouch_prob; -1 = böyle bir mum olmadı)
     dd_scaled: bool = False  # Düşüşte küçültmeyle (FUTURES_DD_SCALE_PCT) küçük boyla açıldı
+    braked: bool = False     # 24 saat freniyle (FUTURES_DAY_BRAKE_PCT) küçük boyla açıldı
     depth_capped: bool = False  # Derinliğe göre boy sınırına takıldı (FUTURES_DEPTH_CAP_PCT)
     impact_pct: float = 0.0  # Emir defteri kayması, giriş + çıkış (fiyat %; FUTURES_BACKTEST_DEPTH)
     drop15: float = float("nan")  # Girişten önceki 15 dk'daki düşüş (%; sinyal ölçüsü, FUTURES_RECENT_SIZE_PCT)
@@ -1145,6 +1153,18 @@ def slot_share(p: SimParams, n_open: int) -> float:
     return (1.0 if n_open <= 0 else x) / (1 + (slots - 1) * x)
 
 
+DAY_BRAKE_MS = DAY_BRAKE_HOURS * 3600 * 1000
+
+
+def brake_factor(p: SimParams, curve: Sequence[Tuple[int, float]], now_ms: int, equity: float) -> float:
+    """24 saat freni çarpanı (canlı: FuturesBot._brake_factor): gerçekleşen bakiye son 24 saatin zirvesinin
+    (config.window_peak; curve = kapanışlardaki bakiye) day_brake_pct altındaysa day_brake_size_pct / 100."""
+    if p.day_brake_pct <= 0:
+        return 1.0
+    return dd_scale_factor(p.day_brake_pct, p.day_brake_size_pct, equity,
+                           window_peak(curve, now_ms, DAY_BRAKE_MS, equity))
+
+
 def cooldown_block(p: SimParams, s: FutSignal, cooldown: Dict[str, int], reentry_at: Dict[str, int]) -> Optional[str]:
     """Sinyalin coini beklemede mi: atlama nedeni ya da None. Faz 6 (reentry_breadth > 0): zarar sonrası beklemedeki
     coin, genişlik ≥ reentry_breadth iken (ve SYMBOL_COOLDOWN bittiyse) yeniden alınabilir (canlı: FuturesBot)."""
@@ -1230,12 +1250,13 @@ def simulate(p: SimParams, data: FutData, signals: Sequence[FutSignal], windows:
             continue
         factor = size_factor(p, s)          # Yalnız çöküş / çöküş durulmuş: küçük
         ddf = 1.0 if fixed_notional else dd_scale_factor(p.dd_scale_pct, p.dd_scale_size_pct, equity, peak)
+        bf = 1.0 if fixed_notional else brake_factor(p, curve, s.close_ms, equity)
         capped = False
         if fixed_notional:
             notional = fixed_notional * factor
             margin = notional / p.leverage
         else:
-            margin = equity * usage * min(factor, 1.0) * ddf      # Tek pozisyonda büyütülecek boş teminat yok
+            margin = equity * usage * min(factor, 1.0) * ddf * bf  # Tek pozisyonda büyütülecek boş teminat yok
             notional = min(margin * p.leverage, p.max_notional)
             notional, capped = apply_depth(p, data, s, notional)
             margin = notional / p.leverage
@@ -1266,6 +1287,7 @@ def simulate(p: SimParams, data: FutData, signals: Sequence[FutSignal], windows:
         tr.basis = float(s.metrics.get("basis", float("nan")))
         tr.quality = quality_score(s.score, s.metrics) if s.metrics.get("tactic", 1.0) == 1.0 else float("nan")
         tr.dd_scaled = ddf < 1
+        tr.braked = bf < 1
         peak = max(peak, equity)
         trades.append(tr)
         curve.append((tr.exit_ms, equity))
@@ -1406,6 +1428,8 @@ def simulate_slots(p: SimParams, data: FutData, signals: Sequence[FutSignal], wi
             skipped["büyük hesap: zayıf sinyal, son fonlama ≤ 0"] += 1
             continue
         factor = size_factor(p, s)
+        bf = 1.0 if fixed_notional else brake_factor(p, curve, s.close_ms, equity)
+        factor *= bf                        # 24 saat freni (canlıda da diğer boy çarpanlarıyla birlikte)
         share = slot_share(p, len(heap))
         ddf = 1.0 if fixed_notional else dd_scale_factor(p.dd_scale_pct, p.dd_scale_size_pct, equity, peak)
         capped = False
@@ -1455,6 +1479,7 @@ def simulate_slots(p: SimParams, data: FutData, signals: Sequence[FutSignal], wi
         tr.basis = float(s.metrics.get("basis", float("nan")))
         tr.quality = quality_score(s.score, s.metrics) if s.metrics.get("tactic", 1.0) == 1.0 else float("nan")
         tr.dd_scaled = ddf < 1
+        tr.braked = bf < 1
         tr.rounded = not fixed_notional and rounded
         trades.append(tr)
         free_at = tr.exit_ms if tr.reason == "TIME" else tr.exit_ms + tr.bar_ms
@@ -1647,6 +1672,7 @@ class LevRow(NamedTuple):
     ev: Optional["Evaluation"]
     note: str
     roll: Optional[dict] = None
+    label: str = ""             # Ek satırın adı (ör. "7x + 24 sa freni"); boşsa "Nx"
 
 
 def rolling_summary(p: SimParams, data: FutData, signals, windows) -> Optional[dict]:
@@ -1686,7 +1712,27 @@ def leverage_table(cfg, data: FutData, signals, windows,
         rows.append(LevRow(lev, evaluate(p, data, signals, windows), note,
                            rolling_summary(p, data, signals, windows) if data is not None else None))
         bar.step()
-    return rows
+    return rows + brake_lev_rows(cfg, data, signals, windows, rooms)
+
+
+def brake_lev_rows(cfg, data: FutData, signals, windows, rooms: Dict[int, float]) -> List[LevRow]:
+    """24 saat freninin kaldıraçla birlikte etkisi (frenin asıl ölçüsü her ayın 1'inde başlayan hesaplar): fren kapalıysa
+    şimdiki kaldıraç ve bir üstü frenle (%10 → %70), açıksa şimdiki ve bir altı frensiz. Dalga modunda (çöküş taktiği)."""
+    base = params_from_cfg(cfg)
+    if base.max_positions <= 1 or cfg.futures_tactic != "crash":
+        return []
+    on = base.day_brake_pct > 0
+    out: List[LevRow] = []
+    for lev in ((base.leverage - 1, base.leverage) if on else (base.leverage, base.leverage + 1)):
+        room = rooms.get(lev, futures_liq_distance_pct(lev, cfg.futures_mmr_pct)) if lev >= 1 else 0.0
+        if lev < 1 or cfg.stop_loss_pct >= room - LIVE_SL_MARGIN:
+            continue
+        over = {"day_brake_pct": 0.0} if on else {"day_brake_pct": 10.0, "day_brake_size_pct": 70.0}
+        p = params_from_cfg(cfg, leverage=lev, **over)
+        label = f"{lev}x, fren yok" if on else f"{lev}x + 24 sa fren"
+        out.append(LevRow(lev, evaluate(p, data, signals, windows), "", rolling_summary(p, data, signals, windows)
+                          if data is not None else None, label))
+    return out
 
 
 def exit_grid(cfg, data: FutData, signals, windows) -> List[Tuple[float, float, Evaluation]]:
@@ -1984,6 +2030,25 @@ def size_variant_rows(cfg, ev, depth: bool = False, has_basis: bool = False,
                  for z in DD_SIZE_TRIES if not _same(z, base.dd_scale_size_pct)]
     else:
         rows.append(("Düşüşte küçültme: zirveden %30 düşünce %60 boy", ev(dd_scale_pct=30.0, dd_scale_size_pct=60.0)))
+    rows += brake_variant_rows(base, ev)
+    return rows
+
+
+DAY_BRAKE_TRIES = (10.0, 15.0)          # 24 saat freni eşiği (%; rapor 22 araştırması, 23 Kasım)
+DAY_BRAKE_SIZE_TRIES = (50.0, 70.0)     # Frendeki boy (%)
+
+
+def brake_variant_rows(base: SimParams, ev) -> List[Tuple[str, "Evaluation"]]:
+    """24 saat freni (FUTURES_DAY_BRAKE_PCT): açıksa kapalı + eşik / boy çevresi, kapalıysa %10 → %70. Freni kaldıraçla
+    birlikte değerlendirmek için asıl ölçü kaldıraç tablosundaki frenli satırlardır (her ay başlayan hesaplar)."""
+    if base.day_brake_pct <= 0:
+        return [("24 saat freni: son 24 saatin zirvesinden %10 düşünce %70 boy",
+                 ev(day_brake_pct=10.0, day_brake_size_pct=70.0))]
+    rows = [("24 saat freni kapalı", ev(day_brake_pct=0.0))]
+    rows += [(f"24 saat freni eşiği %{t:g} (şimdi %{base.day_brake_pct:g})", ev(day_brake_pct=t))
+             for t in DAY_BRAKE_TRIES if not _same(t, base.day_brake_pct)]
+    rows += [(f"24 saat freni boyu %{z:g} (şimdi %{base.day_brake_size_pct:g})", ev(day_brake_size_pct=z))
+             for z in DAY_BRAKE_SIZE_TRIES if not _same(z, base.day_brake_size_pct)]
     return rows
 
 
@@ -3047,7 +3112,7 @@ def _eval_line(ev: Evaluation) -> str:
             f"{ev.avg_move:+.3f}%")
 
 
-LEV_LABEL_W = 13
+LEV_LABEL_W = 17
 LEV_HEAD = (f"  {'Kaldıraç':{LEV_LABEL_W}s}{'12 ay ortanca':>14s}{'%60+ düşüş':>12s}{'kill-switch':>13s}  │  "
             f"{'A) tek hesap':<20s}{'A düşüş':>8s}  B en kötü yıl")
 
@@ -4003,6 +4068,11 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
         L.append(f"📉 Düşüşte küçültme: bakiye zirvesinin %{p.dd_scale_pct:g} altındayken yeni pozisyonlar "
                  f"%{p.dd_scale_size_pct:g} boy (A ve B'de; C sabit tutarla). A'da {small} / {len(res.trades)} işlem "
                  f"küçük boyla açıldı")
+    if p.day_brake_pct > 0:
+        braked = sum(1 for tr in res.trades if tr.braked)
+        L.append(f"🚦 24 saat freni: bakiye son 24 saatteki en yüksek değerinin %{p.day_brake_pct:g} altındayken yeni "
+                 f"pozisyonlar %{p.day_brake_size_pct:g} boy (A ve B'de; C sabit tutarla). A'da {braked} / "
+                 f"{len(res.trades)} işlem frenle açıldı")
     if p.basis_size_pct != 100:
         big = sum(1 for tr in res.trades if tr.basis == tr.basis and tr.basis <= -p.basis_deep_pct)
         known = sum(1 for tr in res.trades if tr.basis == tr.basis)
@@ -4238,11 +4308,14 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
                  + f"A tek bir başlangıç tarihidir; hesap büyüyünce {limit} kaldıraçtan neredeyse bağımsızdır.")
         L.append(LEV_HEAD)
         for r in rows:
-            label = f"{r.lev}x" + (" ◀ şimdiki" if r.lev == p.leverage else "")
+            label = r.label or (f"{r.lev}x" + (" ◀ şimdiki" if r.lev == p.leverage else ""))
             if r.ev is None:
                 L.append(f"  {label:{LEV_LABEL_W}s}  — ({r.note})")
             else:
                 L.append(f"  {label:{LEV_LABEL_W}s}" + _lev_line(r.ev, r.roll) + (f"  {r.note}" if r.note else ""))
+        if any(r.label for r in rows):
+            L.append("  (fren satırları: 24 saat freni (FUTURES_DAY_BRAKE_PCT) açık / kapalı aynı hesap; fren tek başına "
+                     "kârı biraz düşürür, düşüşü azaltır; bir kademe yüksek kaldıraçla aynı düşüşte daha çok kâr verir)")
     if risk:
         L.append("")
         L.extend(leverage_risk_lines(risk))

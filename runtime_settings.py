@@ -206,6 +206,11 @@ EDITABLE: Dict[str, Setting] = {
                                     "Düşüşte küçültme: sermaye zirvesinden bu kadar % düşünce küçült (0 = kapalı)"),
     "FUTURES_DD_SCALE_SIZE_PCT": Setting("futures_dd_scale_size_pct", "float",
                                          "Düşüşte küçültme: düşüşteki pozisyon büyüklüğü (%; 100 = tam)"),
+    "FUTURES_DAY_BRAKE_PCT": Setting("futures_day_brake_pct", "float",
+                                     "24 saat freni: sermaye son 24 saatin zirvesinden bu kadar % düşünce küçült "
+                                     "(0 = kapalı)"),
+    "FUTURES_DAY_BRAKE_SIZE_PCT": Setting("futures_day_brake_size_pct", "float",
+                                          "24 saat freni: frendeki pozisyon büyüklüğü (%; 100 = tam)"),
     "FUTURES_DEPTH_CAP_PCT": Setting("futures_depth_cap_pct", "float",
                                      "Derinliğe göre boy: ±%1 içindeki alış / satış emirlerinin küçüğünün %'si (0 = kapalı)"),
     "FUTURES_BACKTEST_DEPTH": Setting("futures_backtest_depth", "bool",

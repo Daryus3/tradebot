@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import FrozenSet, List, Optional, Tuple
+from typing import FrozenSet, List, Optional, Sequence, Tuple
 
 from dotenv import load_dotenv
 
@@ -603,6 +603,36 @@ def dd_scale_factor(threshold_pct: float, size_pct: float, capital: float, peak:
     return size_pct / 100 if (1 - capital / peak) * 100 >= threshold_pct - 1e-9 else 1.0
 
 
+# 24 saat freni (rapor 22 araştırması, 23 Kasım; varsayılan kapalı):
+#   FUTURES_DAY_BRAKE_PCT = botun sermayesi (başlangıç + gerçekleşen K/Z) son 24 saatteki en yüksek değerinin bu kadar %
+#       (ya da daha fazla) altındayken yeni pozisyonlar FUTURES_DAY_BRAKE_SIZE_PCT büyüklükte açılır (0 = kapalı).
+#       Düşüşte küçültmenin (tüm zamanların zirvesi) hızlı akrabası: aynı gün art arda gelen zararları (çöküş dalgası
+#       derinleşirken) küçük boyla karşılar, sermaye son 24 saatin zirvesine yaklaşınca ya da 24 saat geçince kendiliğinden
+#       tam boya döner. Yalnızca kapanan işlemler sayılır; ikisi birden açıksa çarpanlar çarpılır. Kaldıraç ve çıkışlar
+#       değişmez. Kazancı tek başına değil, bir kademe yüksek kaldıraçla birlikte verir (aynı düşüşte daha çok kâr).
+DAY_BRAKE_HOURS = 24
+
+
+def window_peak(marks: Sequence[Tuple[float, float]], now: float, span: float, current: float) -> float:
+    """Son `span` süresinin gerçekleşen sermaye zirvesi (canlı bot ve backtest aynı kural; zaman birimi marks ile aynı:
+    canlıda saniye, backtestte ms). marks = [(zaman, sermaye)] zamana göre sıralı kapanış kayıtları: penceredeki kayıtlar,
+    pencereden önceki son kayıt (pencere başındaki sermaye) ve şimdiki sermaye."""
+    start = now - span
+    peak = current
+    for t, cap in reversed(marks):
+        peak = max(peak, cap)
+        if t < start:
+            break
+    return peak
+
+
+def futures_brake_factor(cfg, capital: float, peak24: float) -> float:
+    """24 saat freni çarpanı: dd_scale_factor, FUTURES_DAY_BRAKE_PCT / FUTURES_DAY_BRAKE_SIZE_PCT ve son 24 saatin
+    zirvesiyle."""
+    return dd_scale_factor(float(getattr(cfg, "futures_day_brake_pct", 0.0) or 0.0),
+                           float(getattr(cfg, "futures_day_brake_size_pct", 70.0)), capital, peak24)
+
+
 # Derinliğe göre boy (Kasım 2026, likidite araştırması; varsayılan kapalı; README "Likidite tavanı"):
 #   FUTURES_DEPTH_CAP_PCT = pozisyon tutarı, girişten hemen önce emir defterinde fiyatın ±%1 içindeki alış ve satış
 #       emirlerinden küçük olanın bu yüzdesiyle sınırlı (0 = kapalı). Aynı anda birden çok coin sinyal verdiğinde,
@@ -979,6 +1009,9 @@ class Config:
     # Düşüşte küçültme (bkz. dd_scale_factor üstündeki açıklama): sermaye zirvenin %X altındayken pozisyon boyu %Y
     futures_dd_scale_pct: float = 0.0      # Zirveden düşüş eşiği (%; 0 = kapalı)
     futures_dd_scale_size_pct: float = 60.0   # Eşik aşılınca yeni pozisyonların büyüklüğü (%)
+    # 24 saat freni (bkz. window_peak üstündeki açıklama): sermaye son 24 saatin zirvesinin %X altındayken boy %Y
+    futures_day_brake_pct: float = 0.0     # Son 24 saatin zirvesinden düşüş eşiği (%; 0 = kapalı)
+    futures_day_brake_size_pct: float = 70.0  # Eşik aşılınca yeni pozisyonların büyüklüğü (%)
     # Derinliğe göre boy (bkz. futures_dd_factor üstündeki açıklama): ±%1 içindeki küçük tarafın yüzdesi (0 = kapalı)
     futures_depth_cap_pct: float = 0.0
     futures_backtest_depth: bool = True    # Backtest: büyük pozisyonların emir defteri kayması (ölçülen derinlik)
@@ -1352,6 +1385,11 @@ class Config:
             errors.append("FUTURES_DD_SCALE_PCT 0-90 arasında olmalı (sermayenin zirveden düşüşü %; 0 = kapalı)")
         if not 5 <= self.futures_dd_scale_size_pct <= 100:
             errors.append("FUTURES_DD_SCALE_SIZE_PCT 5-100 arasında olmalı (düşüşteki pozisyon büyüklüğü %; 100 = tam)")
+        if not 0 <= self.futures_day_brake_pct <= 50:
+            errors.append("FUTURES_DAY_BRAKE_PCT 0-50 arasında olmalı (sermayenin son 24 saatin zirvesinden düşüşü %; "
+                          "0 = kapalı)")
+        if not 10 <= self.futures_day_brake_size_pct <= 100:
+            errors.append("FUTURES_DAY_BRAKE_SIZE_PCT 10-100 arasında olmalı (frendeki pozisyon büyüklüğü %; 100 = tam)")
         if not (self.futures_depth_cap_pct == 0 or 1 <= self.futures_depth_cap_pct <= 50):
             errors.append("FUTURES_DEPTH_CAP_PCT 0 (kapalı) ya da 1-50 olmalı (emir defterinde ±%1 içindeki küçük tarafın %'si)")
         if self.futures_universe_mode not in FUTURES_UNIVERSE_MODES:
@@ -1640,6 +1678,8 @@ def load_config(env_file: Optional[str] = None, mode_override: Optional[str] = N
         futures_wave_hold_breadth=_env_int("FUTURES_WAVE_HOLD_BREADTH", 8),
         futures_dd_scale_pct=_env_float("FUTURES_DD_SCALE_PCT", 0.0),
         futures_dd_scale_size_pct=_env_float("FUTURES_DD_SCALE_SIZE_PCT", 60.0),
+        futures_day_brake_pct=_env_float("FUTURES_DAY_BRAKE_PCT", 0.0),
+        futures_day_brake_size_pct=_env_float("FUTURES_DAY_BRAKE_SIZE_PCT", 70.0),
         futures_depth_cap_pct=_env_float("FUTURES_DEPTH_CAP_PCT", 0.0),
         futures_backtest_depth=_env_bool("FUTURES_BACKTEST_DEPTH", True),
         futures_leverage=_env_int("FUTURES_LEVERAGE", 2),
@@ -2118,6 +2158,15 @@ def _setting_notes(cfg: Config) -> List[str]:
                          f"ortanca 12 ay getirisi +%10.271 → +%9.976, %90'ı aşan düşüş yaşayan hesap 49 → 0, kayma 4 "
                          f"katında hesap ayakta kaldı. Kötümser stop dolumunda yine eriyor, kill-switch sık devreye "
                          f"girebilir (71 hesabın 34'ü).")
+        if cfg.futures_day_brake_pct > 0:
+            notes.append(f"FUTURES_DAY_BRAKE_PCT={cfg.futures_day_brake_pct:g}, FUTURES_DAY_BRAKE_SIZE_PCT="
+                         f"{cfg.futures_day_brake_size_pct:g} (24 saat freni): botun sermayesi son 24 saatteki en yüksek "
+                         f"değerinin %{cfg.futures_day_brake_pct:g} altındayken yeni pozisyonlar "
+                         f"%{cfg.futures_day_brake_size_pct:g} büyüklükte açılır; sermaye toparlanınca ya da 24 saat "
+                         f"geçince tam boy. Testte (rapor 22 ayarı, 2020-2026, her ayın 1'inde başlayan 71 hesap) %10 / %70 "
+                         f"bir kademe yüksek kaldıraçla (7x) frensiz 6x'e göre: 24 USDT'de 12 ay ortancası +%1.653 → "
+                         f"+%1.791, %60'ı aşan düşüş 20 → 15; 4.000 USDT'de +%1.426 → +%1.642 (düşüş 8 → 12). Kaldıraç "
+                         f"aynı kalırsa kâr düşer, düşüş azalır. Tek hesapta (2020 başından) son bakiye daha düşük.")
         if cfg.futures_depth_cap_pct > 0:
             notes.append(f"FUTURES_DEPTH_CAP_PCT={cfg.futures_depth_cap_pct:g} (derinliğe göre boy): pozisyon 1.000 USDT'yi "
                          f"geçecekse girişten hemen önce emir defteri okunur (~0.1 sn) ve tutar, fiyatın ±%1 içindeki alış "

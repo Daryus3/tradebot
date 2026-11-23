@@ -31,7 +31,7 @@ from config import (futures_scan_shifts, futures_snapshot_on, tr_from_num, DEFAU
                     futures_coin_list, futures_crash_rules,
                     futures_funding_rules, futures_liq_distance_pct, futures_modules, futures_pump_rules,
                     futures_dd_factor, futures_slot_share, futures_wave_rules, is_futures, is_rotation,
-                    parse_crash_rules)
+                    parse_crash_rules, DAY_BRAKE_HOURS, futures_brake_factor, window_peak)
 from runtime_settings import EDITABLE, format_value
 from telegram_bot import LINE, esc, fmt_duration, fmt_signed, fmt_usdt
 
@@ -91,6 +91,15 @@ DD_SCALE_HINT = ("Düşüşte küçültme (rapor 24 araştırması; 2020-2026, 1
                  "hesap ayakta kaldı (kapalıyken 2021'de eridi). %50 boy biraz daha temkinli (en kötü yıl %80) ama "
                  "ortanca getiri +%7.638. Kaldıraç ve çıkışlar değişmez; zarar kes fitilin ortasından dolarsa yine "
                  "eriyor, kill-switch yine sık devreye girebilir.")
+# 24 saat freni (rapor 22 araştırması, 23 Kasım; varsayılan kapalı): son 24 saatin sermaye zirvesinden düşüş eşiği ve boy
+DAY_BRAKE_CHOICES = (0, 10, 15)
+DAY_BRAKE_SIZE_CHOICES = (50, 60, 70, 80)
+DAY_BRAKE_HINT = ("24 saat freni (rapor 22 araştırması; 2020-2026, her ayın 1'inde başlayan 71 hesabın ilk 12 ayı): sermaye "
+                  "son 24 saatin zirvesinin %10 altındayken yeni pozisyonlar %70 boy; aynı gün art arda gelen zararları "
+                  "küçük boyla karşılar, 24 saat içinde kendiliğinden tam boya döner. Aynı kaldıraçta düşüşü yarıya "
+                  "indirir, kârı biraz düşürür; kazancı bir kademe yüksek kaldıraçla verir: 24 USDT'de 7x + fren, 6x "
+                  "frensize göre ortanca 12 ay getirisi +%1.653 → +%1.791, %60'ı aşan düşüş yaşayan hesap 20 → 15. "
+                  "Kaldıracı ayrıca değiştirin (🎚️).")
 # Derinliğe göre boy (likidite araştırması; varsayılan kapalı) ve backtestte emir defteri kayması
 DEPTH_CAP_CHOICES = (0, 7.5, 10, 12.5)
 DEPTH_HINT = ("Derinliğe göre boy (likidite araştırması, Binance'in ölçülen emir defteri derinliğiyle 2023-2026): "
@@ -506,6 +515,10 @@ PAGES: Dict[str, Page] = {
             fmt=_off("Küçültme yok", lambda v: f"Zirve −%{v:g}"), show=lambda cfg: is_futures(cfg.strategy)),
         Row("FUTURES_DD_SCALE_SIZE_PCT", icon="📏", values=DD_SIZE_CHOICES, fmt=lambda v: f"Boy %{v:g}",
             show=lambda cfg: is_futures(cfg.strategy) and cfg.futures_dd_scale_pct > 0),
+        Row("FUTURES_DAY_BRAKE_PCT", icon="🚦", values=DAY_BRAKE_CHOICES,
+            fmt=_off("24 sa freni yok", lambda v: f"24 sa −%{v:g}"), show=lambda cfg: is_futures(cfg.strategy)),
+        Row("FUTURES_DAY_BRAKE_SIZE_PCT", icon="📏", values=DAY_BRAKE_SIZE_CHOICES, fmt=lambda v: f"Fren boyu %{v:g}",
+            show=lambda cfg: is_futures(cfg.strategy) and cfg.futures_day_brake_pct > 0),
         Row("FUTURES_DEPTH_CAP_PCT", icon="🧱", values=DEPTH_CAP_CHOICES,
             fmt=_off("Defter sınırı yok", lambda v: f"Defter %{v:g}"), show=lambda cfg: is_futures(cfg.strategy)),
         Row("FUTURES_BACKTEST_DEPTH", name="📚 Backtestte emir defteri kayması", show=lambda cfg: is_futures(cfg.strategy)),
@@ -1238,7 +1251,7 @@ class SettingsMenu:
         frozen = bot.freeze_note()
         futures = is_futures(cfg.strategy)
         return (f"🧯 <b>Risk Sigortaları</b>\n{LINE}\n"
-                f"{self.kill_line()}\n" + (self.dd_line() + self.depth_line() if futures else "") +
+                f"{self.kill_line()}\n" + (self.dd_line() + self.brake_line() + self.depth_line() if futures else "") +
                 f"📉 Günlük zarar limiti: {daily} | bugün: {fmt_signed(day_pnl)} {q}\n"
                 f"🎯 Günlük kâr hedefi: {target}\n🔁 Zarar serisi sigortası: {streak}\n"
                 f"⏳ Her çıkıştan sonra aynı coine bekleme: "
@@ -1248,7 +1261,7 @@ class SettingsMenu:
                 f"{frozen or '▶️ Alımlar dondurulmamış'}\n{LINE}\n"
                 "<i>Sigortalar yalnızca YENİ alımları durdurur; açık pozisyonların takibi sürer. Kill-switch ise "
                 "her şeyi kapatıp botu kilitler. Diğerleri: /ayar ANAHTAR DEĞER"
-                + (f"\n{esc(DD_SCALE_HINT)}\n{esc(DEPTH_HINT)}" if futures else "") + "</i>")
+                + (f"\n{esc(DD_SCALE_HINT)}\n{esc(DAY_BRAKE_HINT)}\n{esc(DEPTH_HINT)}" if futures else "") + "</i>")
 
     def depth_line(self) -> str:
         """Risk sayfasında derinliğe göre boy ve backtestteki emir defteri kayması durumu."""
@@ -1258,6 +1271,20 @@ class SettingsMenu:
                f"sinyalde kapasitesi büyük olan önce" if cfg.futures_depth_cap_pct > 0 else "kapalı")
         bt = "açık (ölçülen derinlik)" if cfg.futures_backtest_depth else "kapalı (kayma büyüklükten bağımsız)"
         return f"🧱 Derinliğe göre boy: {cap}\n📚 Backtestte emir defteri kayması: {bt}\n"
+
+    def brake_line(self) -> str:
+        """Risk sayfasında 24 saat freni durumu: son 24 saatin sermaye zirvesi, şu anki düşüş ve sıradaki pozisyonun boyu."""
+        bot, cfg = self.bot, self.cfg
+        st, q = bot.state, cfg.quote_asset
+        peak = window_peak(st.capital_marks, bot.time_fn(), DAY_BRAKE_HOURS * 3600, st.capital)
+        down = max(0.0, (1 - st.capital / peak) * 100) if peak > 0 else 0.0
+        where = f"son 24 saatin zirvesi {fmt_usdt(peak)} {q}, şu an %{down:.1f} aşağıda"
+        if cfg.futures_day_brake_pct <= 0:
+            return f"🚦 24 saat freni: kapalı ({where})\n"
+        small = futures_brake_factor(cfg, st.capital, peak) < 1
+        return (f"🚦 24 saat freni: son 24 saatin zirvesinden %{cfg.futures_day_brake_pct:g} düşünce pozisyon "
+                f"%{cfg.futures_day_brake_size_pct:g} boy | {where} → sıradaki pozisyon "
+                + (f"<b>%{cfg.futures_day_brake_size_pct:g} boy</b>" if small else "tam boy") + "\n")
 
     def dd_line(self) -> str:
         """Risk sayfasında düşüşte küçültme durumu: kayıtlı sermaye zirvesi, şu anki düşüş ve sıradaki pozisyonun boyu."""
