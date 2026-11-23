@@ -54,7 +54,8 @@ from strategy import (FUT_BAR_MS, FUT_BREADTH_DROP_PCT, FUT_BREADTH_HOURS, FUT_B
                       FuturesSignal,
                       ScanResult, funding_per_bar, futures_kline_limit, isolated_factor, market_breadth,
                       recent_size_factor, basis_pct, basis_size_factor, quality_score, quality_size_factor,
-                      spot_pairs, BIG_EXTRA_SLOTS, QUALITY_CUTS, big_extra_slots, big_funding_skip, big_rules_on)
+                      spot_pairs, BIG_EXTRA_SLOTS, QUALITY_CUTS, big_extra_slots, big_funding_skip, big_rules_on,
+                      quality_roundup_ok)
 from telegram_bot import CRITICAL_EXITS, Messages, esc, fmt_duration, fmt_price, fmt_signed, fmt_usdt, futures_tag
 from trader import ALIVE_SAVE_SEC, POSITION_LOG_SEC, RULES_REFRESH_SEC, Mark, TradingBot
 
@@ -134,6 +135,7 @@ SNAP_CHECK_MAX_AGE_MS = 3 * FUT_BAR_MS   # ...ve bundan eskisi doğrulanmadan b�
 CLOCK_WARN_MS = 750                # Sunucu saati Binance'ten bu kadar farklıysa uyarı (günlükte, saatte bir)
 SPOT_WAIT_SEC = 1.0                # Vadeli-spot farkı: spot fiyatları için en fazla bu kadar beklenir (sonra fark yok)
 SPOT_FRESH_SEC = 5.0               # Anlık taramada alınan spot fiyatları bundan eskiyse yeniden istenir
+ROUNDUP_BUFFER = 1.05              # En küçük emre yuvarlamada tutar payı (yuvarlama ve fiyat oynaması)
 ACCOUNT_WARN_EVERY_SEC = 3600      # Hesap modu engeli (Çoklu Varlık, -4168) Telegram'a en fazla bu aralıkla yazılır
 MAX_LAG_MS = 10 * 60_000           # Bundan büyük "gecikme" ölçüm sayılmaz (saat atlaması / elle çağrı)
 
@@ -513,6 +515,27 @@ class FuturesBot(TradingBot):
         if self.free_slots() <= 0 and not (self._big_on() and len(state.positions) < self.slots() + BIG_EXTRA_SLOTS):
             return f"boş yer yok ({len(state.positions)}/{self.slots()} pozisyon açık)"
         return None
+
+    # ================================================================ en küçük emre yuvarlama (FUTURES_QUALITY_ROUNDUP)
+    def _roundup_qty(self, sig: FuturesSignal, symbol: str, qty: float, price: float, lev: int, free: float) -> float:
+        """Miktar Binance'in en küçük emir tutarının altındaysa ve sinyal güçlüyse (kalite puanı en güçlü %40) boşta
+        teminat yettiğinde en küçük tutarın biraz üstüne yükseltir (backtest: simulate_slots); yoksa miktar aynen döner."""
+        if not self.cfg.futures_quality_roundup or price <= 0:
+            return qty
+        ex = self.exchange
+        need = ex.min_notional(symbol)
+        if qty * price >= need and qty >= ex.min_qty(symbol):
+            return qty
+        if not quality_roundup_ok(True, self._big_quality(sig)):
+            return qty
+        target = need * ROUNDUP_BUFFER
+        if target / max(1, lev) > free:
+            return qty                                       # Teminat yetmiyor: eskisi gibi pas geçilir
+        new = max(ex.amount_to_precision(symbol, target / price), ex.min_qty(symbol))
+        sig.metrics["rounded_up"] = round(new * price, 2)
+        log.info("%s: güçlü sinyal, en küçük emir tutarına yuvarlandı (%.2f → %.2f USDT)", symbol, qty * price,
+                 new * price)
+        return new
 
     # ================================================================ büyük hesap kuralları (FUTURES_BIG_ACCOUNT_USDT)
     def _big_on(self) -> bool:
@@ -1525,6 +1548,7 @@ class FuturesBot(TradingBot):
                 return None
             price = ask if side == "long" else bid
             qty = ex.amount_to_precision(symbol, margin * lev / price)
+            qty = self._roundup_qty(sig, symbol, qty, price, lev, free)   # Güçlü sinyal: en küçük tutara yuvarla
             ex.check_order_size(symbol, qty, price)                  # MinNotionalError → işlem pas geçilir
             order_side = "buy" if side == "long" else "sell"
             sent = self.time_fn()

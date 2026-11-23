@@ -184,6 +184,8 @@ EDITABLE: Dict[str, Setting] = {
                                        "Zayıf sayılan sinyallerin yüzdesi (kalite puanına göre; 40 ya da 60)"),
     "FUTURES_BIG_ACCOUNT_USDT": Setting("futures_big_account_usdt", "float",
                                         "Büyük hesap kurallarının bakiye eşiği (USDT; 0 = kapalı)"),
+    "FUTURES_QUALITY_ROUNDUP": Setting("futures_quality_roundup", "bool",
+                                       "Güçlü sinyalde en küçük emir tutarına yuvarla"),
     "FUTURES_EXTRA_SIZE_PCT": Setting("futures_extra_size_pct", "float",
                                       "Faz 6: ek pozisyonların büyüklüğü (ilk pozisyonun %'si; 100 = eşit)"),
     "FUTURES_REENTRY_BREADTH": Setting("futures_reentry_breadth", "int",

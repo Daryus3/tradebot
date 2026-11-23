@@ -45,7 +45,8 @@ from futures_depth import DEPTH_CHECK_MIN_NOTIONAL, DepthBook, daily_volume_fn
 from strategy import (BIG_EXTRA_SLOTS, FUT_BAR_MS, FUT_HOUR_MS, QUALITY_CUTS, basis_pct, basis_size_factor,
                       big_extra_slots, big_funding_skip, big_rules_on, breadth_flags, btc_trend_1h, crash_state,
                       funding_per_bar, futures_candidates, futures_entries, futures_features, isolated_factor,
-                      pick_signal, quality_score, quality_size_factor, recent_size_factor, spot_pairs, trend_at)
+                      pick_signal, quality_roundup_ok, quality_score, quality_size_factor, recent_size_factor,
+                      spot_pairs, trend_at)
 
 DAY_MS = 86_400_000
 MIN_MS = 60_000
@@ -672,6 +673,9 @@ class SimParams:
     # Büyük hesap kuralları (FUTURES_BIG_ACCOUNT_USDT; canlı: FuturesBot._scan_and_enter): gerçekleşen bakiye bu tutarı
     # aşınca en güçlü %20'lik sinyaller BIG_EXTRA_SLOTS ek pozisyon açabilir, zayıf sinyale son fonlama ≤ 0 ise girilmez
     big_account_usdt: float = 0.0
+    # En küçük emre yuvarlama (FUTURES_QUALITY_ROUNDUP; canlı: FuturesBot.open_futures): kalite puanı en güçlü %40'taki
+    # sinyal en küçük emir tutarının altında kalırsa boşta teminat yetiyorsa o tutarla açılır
+    quality_roundup: bool = False
     # Faz 6: ek pozisyonların büyüklüğü (ilk pozisyonun %'si; 100 = eşit, Faz 5) ve dalgada yeniden giriş (genişlik
     # ≥ reentry_breadth iken zarar sonrası bekleme atlanır; 0 = kapalı)
     extra_size_pct: float = 100.0
@@ -731,6 +735,7 @@ def params_from_cfg(cfg, **over) -> SimParams:
                   quality_size_pct=float(getattr(cfg, "futures_quality_size_pct", 100.0)),
                   quality_cut_pct=float(getattr(cfg, "futures_quality_cut_pct", 60.0)),
                   big_account_usdt=float(getattr(cfg, "futures_big_account_usdt", 0.0)),
+                  quality_roundup=bool(getattr(cfg, "futures_quality_roundup", False)),
                   extra_size_pct=float(getattr(cfg, "futures_extra_size_pct", 100.0)),
                   reentry_breadth=int(getattr(cfg, "futures_reentry_breadth", 0)),
                   extra_be_trigger_pct=float(getattr(cfg, "futures_extra_be_trigger_pct", 0.0)),
@@ -804,6 +809,7 @@ class FutTrade:
     drop15: float = float("nan")  # Girişten önceki 15 dk'daki düşüş (%; sinyal ölçüsü, FUTURES_RECENT_SIZE_PCT)
     basis: float = float("nan")   # Girişte vadeli / spot fiyat farkı (%; FUTURES_BASIS_SIZE_PCT, attach_basis)
     quality: float = float("nan")  # Sinyal kalitesi puanı (0-1; FUTURES_QUALITY_SIZE_PCT, strategy.quality_score)
+    rounded: bool = False          # En küçük emir tutarına yuvarlanarak açıldı (FUTURES_QUALITY_ROUNDUP)
 
 
 @dataclass
@@ -1403,6 +1409,7 @@ def simulate_slots(p: SimParams, data: FutData, signals: Sequence[FutSignal], wi
         share = slot_share(p, len(heap))
         ddf = 1.0 if fixed_notional else dd_scale_factor(p.dd_scale_pct, p.dd_scale_size_pct, equity, peak)
         capped = False
+        rounded = False
         if fixed_notional:                  # fixed_notional = toplam / N (evaluate): eşit büyüklükte değişmez
             notional = fixed_notional * slots * share * factor
             margin = notional / p.leverage
@@ -1411,6 +1418,11 @@ def simulate_slots(p: SimParams, data: FutData, signals: Sequence[FutSignal], wi
             notional = min(margin * p.leverage, p.max_notional)
             notional, capped = apply_depth(p, data, s, notional)
             margin = notional / p.leverage
+            rounded = False
+            if (notional < min_notional(s.symbol) and quality_roundup_ok(p.quality_roundup, signal_quality(s))
+                    and (equity * usage - used) * p.leverage >= min_notional(s.symbol)):
+                notional = min_notional(s.symbol)               # Güçlü sinyal: en küçük tutarla açılır
+                margin, rounded = notional / p.leverage, True
             if notional < min_notional(s.symbol):
                 skipped["minimum emir tutarının altında"] += 1
                 if not heap and equity * usage * p.leverage * first_share * ddf < DEFAULT_MIN_NOTIONAL:
@@ -1443,6 +1455,7 @@ def simulate_slots(p: SimParams, data: FutData, signals: Sequence[FutSignal], wi
         tr.basis = float(s.metrics.get("basis", float("nan")))
         tr.quality = quality_score(s.score, s.metrics) if s.metrics.get("tactic", 1.0) == 1.0 else float("nan")
         tr.dd_scaled = ddf < 1
+        tr.rounded = not fixed_notional and rounded
         trades.append(tr)
         free_at = tr.exit_ms if tr.reason == "TIME" else tr.exit_ms + tr.bar_ms
         seq += 1
@@ -1958,6 +1971,8 @@ def size_variant_rows(cfg, ev, depth: bool = False, has_basis: bool = False,
     rows += basis_variant_rows(base, ev, has_basis)
     rows += quality_variant_rows(base, ev)
     rows += big_variant_rows(base, ev, has_funding)
+    rows.append(("Güçlü sinyalde en küçük emre yuvarlama " + ("kapalı" if base.quality_roundup else "açık"),
+                 ev(quality_roundup=not base.quality_roundup)))
     if base.reentry_breadth > 0:
         rows += [(f"Dalgada yeniden giriş ≥{b} coin (şimdi ≥{base.reentry_breadth})", ev(reentry_breadth=b))
                  for b in REENTRY_TRIES if b != base.reentry_breadth]
@@ -4010,6 +4025,10 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
                  f"en güçlü %20'lik sinyaller {BIG_EXTRA_SLOTS} ek pozisyon açabilir (en fazla "
                  f"{p.max_positions + BIG_EXTRA_SLOTS}); zayıf sinyale (en zayıf %60) son ödenen fonlama ≤ 0 ise "
                  f"girilmez. A'da {extra} işlem ek yuvadan açıldı, {skipped} sinyal fonlama yüzünden atlandı")
+    if p.quality_roundup:
+        n_round = sum(1 for tr in res.trades if tr.rounded)
+        L.append(f"🔼 En küçük emre yuvarlama: kalite puanı en güçlü %40'taki sinyal Binance'in en küçük emir tutarının "
+                 f"altında kalırsa boşta teminat yetiyorsa o tutarla açılır. A'da {n_round} işlem yuvarlandı")
     L.append(f"Kâr Al +%{p.tp_pct:g} ({'limit, maker' if p.tp_limit else 'piyasa'}) | Zarar Kes -%{p.sl_pct:g} | "
              + (f"başabaş +%{p.be_trigger_pct:g} → stop +%{p.be_floor_pct:g}" if p.be_enabled else "başabaş kapalı")
              + (f" | izleyen stop +%{p.trail_act_pct:g}'de, tepenin %{p.trail_gap_pct:g} gerisinden"

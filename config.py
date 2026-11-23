@@ -962,6 +962,9 @@ class Config:
     # Büyük hesap kuralları (rapor 19 araştırması, 23 Kasım): gerçekleşen bakiye bu tutarı (USDT) aşınca kalite puanı en
     # güçlü %20'lik sinyaller 2 ek pozisyon açabilir, zayıf sinyale son fonlama ≤ 0 ise girilmez (0 = kapalı, eskisi gibi)
     futures_big_account_usdt: float = 0.0
+    # En küçük emre yuvarlama (rapor 20 araştırması, 23 Kasım): kalite puanı en güçlü %40'taki sinyal Binance'in en küçük
+    # emir tutarının altında kalırsa (küçük hesapta ek pozisyonlar, ETH'de 20 USDT) boşta teminat yetiyorsa o tutarla açılır
+    futures_quality_roundup: bool = False
     # Faz 6 (bkz. FUTURES_PHASE6_PRESET üstündeki açıklama; varsayılanlar = kapalı, eskisi gibi)
     futures_extra_size_pct: float = 100.0  # Ek pozisyonların büyüklüğü, ilk pozisyonun %'si (100 = eşit, Faz 5)
     futures_reentry_breadth: int = 0       # Genişlik ≥ bu iken zarar sonrası bekleme atlanır (0 = kapalı)
@@ -1626,6 +1629,7 @@ def load_config(env_file: Optional[str] = None, mode_override: Optional[str] = N
         futures_quality_size_pct=_env_float("FUTURES_QUALITY_SIZE_PCT", 100.0),
         futures_quality_cut_pct=_env_float("FUTURES_QUALITY_CUT_PCT", 60.0),
         futures_big_account_usdt=_env_float("FUTURES_BIG_ACCOUNT_USDT", 0.0),
+        futures_quality_roundup=_env_bool("FUTURES_QUALITY_ROUNDUP", False),
         futures_extra_size_pct=_env_float("FUTURES_EXTRA_SIZE_PCT", 100.0),
         futures_reentry_breadth=_env_int("FUTURES_REENTRY_BREADTH", 0),
         futures_wave_rules=canonical_crash_extra(_env_str("FUTURES_WAVE_RULES", "")),
@@ -1973,6 +1977,13 @@ def _setting_notes(cfg: Config) -> List[str]:
                          f"4.000 USDT'de 71 hesabın 12 ay ortancası +%1.097 → +%1.423, %60'ı aşan düşüş 7 → 8, "
                          f"kill-switch 0; 24 USDT'de ilk yıl değişmez (hesap eşiğe ulaşmaz). Tek pozisyon modunda "
                          f"etkisiz. Önce test modunda deneyin.")
+        if cfg.futures_quality_roundup:
+            notes.append("FUTURES_QUALITY_ROUNDUP=true (en küçük emre yuvarlama): kalite puanı en güçlü %40'taki sinyal "
+                         "Binance'in en küçük emir tutarının (çoğu coinde 5, ETH'de 20, BTC'de 100 USDT) altında kalırsa "
+                         "boşta teminat yetiyorsa o tutarla açılır; zayıf sinyaller eskisi gibi pas geçilir. Rapor 20 "
+                         "araştırması (23 Kasım; 2020-2026, 6x, 10 çekiliş): 24 USDT'de 71 hesabın 12 ay ortancası "
+                         "+%1.554 → +%1.653, %60'ı aşan düşüş aynı (20), kill-switch 6 → 5; 4.000 USDT'de etkisiz (en "
+                         "küçük tutar nadiren sınırlıyor). Önce test modunda deneyin.")
         if cfg.futures_reentry_breadth > 0:
             if cfg.loss_cooldown_minutes <= cfg.symbol_cooldown_minutes:
                 notes.append(f"FUTURES_REENTRY_BREADTH={cfg.futures_reentry_breadth}: LOSS_COOLDOWN_MINUTES="

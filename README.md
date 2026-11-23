@@ -2541,6 +2541,35 @@ yıllık getiriyi artırır.
   Backtest fonlama oranlarını aylık arşivden okur (ilk çalıştırmada indirilir). Tek pozisyon modunda etkisiz.
 - **Sınırlar:** kazanç büyük hesapta; 24 USDT'de ancak hesap 5.000 USDT'yi geçince etkili olur.
 
+#### Rapor 20 araştırması: büyük hesapta kapasite, ağırlıklı puan, en küçük emre yuvarlama, durgunluk çıkışı (Kasım 2026)
+Baz: rapor 20'nin ayarı (fark %130 + kalite %60 + büyük hesap ≥5.000), 10 çekiliş, 71 aylık başlangıç (12 ay ortanca /
+%60'ı aşan düşüş / kill-switch). 4.000 USDT'de şimdiki +%1.423 / 8 / 0 (A 4,13 milyon); 24 USDT'de +%1.554 / 20 / 6.
+
+| Fikir | 4.000 USDT | 24 USDT | Sonuç |
+|---|---|---|---|
+| Büyük hesapta en güçlü %20'ye derinlik payı %15 / %20 (şimdi %10) | +%1.372 / +%1.381, düşüş 8 (A 4,56 / 4,73 milyon) | A 3,53 → 4,06 milyon | A büyüyor, 12 ay ortancası aynı; eklenmedi (var olan `FUTURES_DEPTH_CAP_PCT` ile denenebilir) |
+| Herkese derinlik payı %12.5 | +%1.310 | | |
+| Bakiye ≥20.000 / ≥50.000'de güçlüye +4 yuva | +%1.303 / +%1.314 | | Kötü |
+| Büyük hesapta güçlü ek pozisyon ×2 boy | +%1.513 ama düşüş 19 | | Risk |
+| Büyük hesapta zayıfları küçültmemek | +%1.399 | | |
+| Ağırlıklı kalite puanı (şiddet 0.31, fark 0.22, 5 dk 0.21, 15 dk 0.18 …) | +%1.058 / 10 / 1 | +%1.336 | İşlem başı ayrım keskin ama eşikler kayınca sistem bozuluyor |
+| Coin hafızası (son 5 / 10 işlemin ortalaması) | | | U biçimli: iki uç da iyi (oynaklık), işe yaramaz |
+| Çöküşün hızlanması (son 5 dk / son 15 dk) | | | 2020-2023'te tutarsız |
+| Durgunluk çıkışı: M dk'da +%X görmediyse çık (10-20 dk, %0.3-0.8; yalnız ilk / ek) | +%917 … +%1.306 | +%1.088 / +%1.527 | Kötü |
+| **Güçlü sinyalde en küçük emre yuvarlama** (en güçlü %40 / %20) | +%1.426 (etkisiz) | **+%1.653 / 20 / 5** (9/10) · +%1.622 (8/10) | **Eklendi** |
+
+**En küçük emre yuvarlama:** küçük hesapta ek pozisyonlar ve küçültülmüş pozisyonlar Binance'in en küçük emir tutarının
+(çoğu coinde 5, ETH'de 20 USDT) altında kalıp pas geçiliyor (canlıda 20 Kasım'daki ETH sinyali böyle kaçtı). Önceki
+araştırmada herkesi en küçük tutara yuvarlamak sonucu biraz kötüleştirmişti, çünkü atlananlar çoğunlukla zaten
+küçültülmüş zayıf sinyallerdi. Yalnız kalite puanı en güçlü %40'taki sinyalleri yuvarlamak 24 USDT'de 12 ay ortancasını
++%1.554 → +%1.653 yapıyor (10 çekilişin 9'unda iyi), %60'ı aşan düşüş aynı (20), kill-switch 6 → 5. 4.000 USDT'de en
+küçük tutar nadiren sınırladığı için etkisiz.
+
+- **Eklenen ayar:** `FUTURES_QUALITY_ROUNDUP` (varsayılan false; küçük hesapta önerilen true). Telegram: 🌊 Dalga modu →
+  🔼 Güçlü sinyalde en küçük emre yuvarla. Canlıda miktar en küçük tutarın %5 üstüne çıkarılır (yuvarlama ve fiyat
+  oynaması payı); boşta teminat yetmezse eskisi gibi pas geçilir; pozisyon mesajında "en küçük emir tutarına yuvarlandı"
+  yazar. Backtest başlığında yuvarlanan işlem sayısı ve "tek kural değişince" satırı.
+
 ### 🏆 Strateji turnuvası (`--turnuva`)
 Hangi strateji türünün sizin dönemde işe yaradığını **tek komutla** görmek için:
 ```bash
@@ -2644,6 +2673,8 @@ karar için ortancaya ve en kötüye bakın. Çıkış taraması her gün dengel
   ile küçültülebilir; açıksa başlıkta "🧮 Sinyal kalitesi" satırı A'da kaç işlemin küçük boyla açıldığını yazar.
 - **🏦 Büyük hesap kuralları** (`FUTURES_BIG_ACCOUNT_USDT` açıksa başlıkta): A'da kaç işlemin ek yuvadan açıldığını ve
   kaç sinyalin fonlama yüzünden atlandığını yazar; atlanan sinyaller "Atlanan sinyal" satırında da görünür.
+- **🔼 En küçük emre yuvarlama** (`FUTURES_QUALITY_ROUNDUP` açıksa başlıkta): A'da kaç işlemin en küçük emir tutarına
+  yuvarlanarak açıldığını yazar.
 - **📆 AYLIK İŞLEM YIĞILMASI** (yıl yıl): ayın günlük işlem hızı o yılın ortalamasının en az 1.5 katıysa o ay yığılma
   sayılır. Her yıl için yığılma ayları (işlem sayısı ve kaç kat), bu ayların yılın işlemlerinden ve C'deki net kârından
   payı; yığılma ayları olmadan C'nin toplamı, işlem başı sonucu ve B'nin "bu aylar yatay geçseydi" sonucu. Yığılma yoksa yılın en yoğun ayı yazılır. Son

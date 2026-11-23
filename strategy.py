@@ -2070,6 +2070,12 @@ def big_funding_skip(big_usdt: float, capital: float, quality: Optional[float], 
     return quality <= QUALITY_CUTS[60] and float(funding_pct) <= BIG_FUNDING_MAX_PCT
 
 
+def quality_roundup_ok(enabled: bool, quality: Optional[float]) -> bool:
+    """En küçük emre yuvarlama (FUTURES_QUALITY_ROUNDUP; rapor 20 araştırması, 23 Kasım): kalite puanı en güçlü %40'taki
+    (QUALITY_CUTS[60] üstü) sinyal Binance'in en küçük emir tutarının altında kalırsa en küçük tutarla açılabilir."""
+    return bool(enabled) and quality is not None and quality == quality and quality > QUALITY_CUTS[60]
+
+
 def window_sigma(c, bars: int, lookback: int = FUT_Z_LOOKBACK_BARS):
     """`bars` mumluk pencerenin olağan hareketi (log, 1 standart sapma): pencere başlangıcından önceki `lookback`
     mumun 5 dk log getirilerinin standart sapması × √bars. Çöküşün kendisi ölçüye karışmaz."""
@@ -2726,6 +2732,8 @@ class FuturesSignal:
         if m.get("basis_size_pct") and m["basis_size_pct"] != 100:
             parts.append(f"Vadeli spotun %{-m.get('basis', 0.0):.2f} altında (zorla satış izi): pozisyon "
                          f"%{m['basis_size_pct']:g}")
+        if m.get("rounded_up"):
+            parts.append(f"Güçlü sinyal: Binance'in en küçük emir tutarına yuvarlandı ({m['rounded_up']:.2f} USDT)")
         if m.get("quality_size_pct") is not None and m["quality_size_pct"] < 100:
             parts.append(f"Sinyal kalitesi zayıf (puan {m.get('quality', 0.0):.2f}, en zayıf "
                          f"%{m.get('quality_cut_pct', 60):g}): pozisyon %{m['quality_size_pct']:g}")

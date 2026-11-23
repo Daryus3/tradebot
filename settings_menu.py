@@ -433,6 +433,7 @@ PAGES: Dict[str, Page] = {
         Row("FUTURES_BIG_ACCOUNT_USDT", icon="🏦", values=BIG_ACCOUNT_CHOICES,
             fmt=lambda v: "Büyük hesap: kapalı" if float(v) <= 0 else f"Büyük hesap: ≥{float(v) / 1000:g} bin",
             show=lambda cfg: _crash(cfg) and cfg.futures_max_positions > 1, per_row=2),
+        Row("FUTURES_QUALITY_ROUNDUP", name="🔼 Güçlü sinyalde en küçük emre yuvarla", show=_crash),
         Row("FUTURES_REENTRY_BREADTH", icon="🔁", values=(0, 3, 8), fmt=lambda v: "yeniden giriş: kapalı" if int(v) == 0
             else f"yeniden giriş: ≥{v} coin", show=_crash, per_row=3),
         Row("FUTURES_WAVE_RULES", values=WAVE_RULE_CHOICES, fmt=lambda v: _wave_label(v), show=_crash, per_row=2),
@@ -1023,6 +1024,9 @@ class SettingsMenu:
                          f"güçlü sinyaller 2 ek pozisyon açabilir, zayıf sinyale son fonlama ≤ 0 ise girilmez.")
         else:
             lines.append("🏦 Büyük hesap kuralları kapalı.")
+        if cfg.futures_quality_roundup:
+            lines.append("🔼 Güçlü sinyal (kalite puanı en güçlü %40) Binance'in en küçük emir tutarının altında kalırsa "
+                         "boşta teminat yetiyorsa o tutarla açılır.")
         if cfg.futures_reentry_breadth > 0:
             lines.append(f"🔁 Dalgada yeniden giriş: son 1 saatte ≥{cfg.futures_reentry_breadth} coin %3+ düşerken zarar "
                          f"sonrası bekleme ({cfg.loss_cooldown_minutes} dk) atlanır."
