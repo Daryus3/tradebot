@@ -2676,6 +2676,32 @@ Komşular (4.000 USDT): 8x + fren → %50 eşik %8 / %12 / %15 +%1.743 / 9 / 1 �
   rapor başlığında 🚦 satırı, kaldıraç tablosunda fren satırları, tek kural tablosunda kapalı / eşik / boy satırları.
   Fren kaldıracı değiştirmez: önerilen kullanım `FUTURES_LEVERAGE=8` ile (daha az düşüş için 7).
 
+#### Kill-switch eşiği (rapor 23, Kasım 2026)
+**Nasıl çalışır:** botun toplam zararı (kapanan işlemler + açık pozisyonların anlık zararı) botun sermayesinin
+(başlangıç + /sermayeekle) `MAX_TOTAL_LOSS_PCT`'sine ulaşınca durum dosyasına "kill-switch" yazılır, yeni pozisyon
+açılmaz, açık pozisyonlar piyasa emriyle kapatılır (kapanmayan ~5 sn'de bir yeniden denenir) ve bot kapanır. systemd
+yeniden başlatmaz (`RestartPreventExitStatus=1 2`); elle başlatılsa da kilitli durumda açılmaz. **Kendiliğinden devam
+etmez:** `python main.py --mode live --reset-state` ile durum sıfırlanınca (eski dosya yedeklenir) bot vadeli
+cüzdandaki serbest bakiyeyi yeni başlangıç sermayesi sayar ve limiti ona göre yeniden hesaplar. Ölçü başlangıç
+sermayesidir, zirve değil: büyümüş hesap zirvesinden çok düşse de toplamda kârdaysa kill-switch çalışmaz (kârı
+düşüşte küçültme ve 24 saat freni korur).
+
+**Eşik taraması** (4.000 USDT, rapor 23 ayarı 8x + 24 saat freni %10 / %50, 10 çekiliş, her ayın 1'inde başlayan 71
+hesabın ilk 12 ayı):
+
+| Eşik | 12 ay ortanca | %60+ düşüş | Kill-switch | Zararla biten | Durdurulanlar durdurulmasaydı |
+|---|---|---|---|---|---|
+| %30 | +%747 | 5 | 26 | 27 | 251 durdurmanın 224'ü kâra dönerdi (ortanca +%883) |
+| %40 | +%1.431 | 8 | 18 | 19 | 165'in 144'ü kâra dönerdi (+%658) |
+| %50 | +%1.762 | 9 | 6 | 8 | 60'ın 48'i kâra dönerdi (+%577) |
+| **%60** | **+%1.841** | **12** | **0** | **3** | 710 hesap-çekilişte 12 durdurma; 7'si kâra dönerdi (+%21), hiçbiri daha da düşmezdi |
+| %70 / %80 / kapalı | +%1.841 | 12 | 0 | 3 | hiç devreye girmiyor |
+
+Sıkı eşik (%30-50), stratejinin olağan düşüşlerinde hesabı durdurup sonradan gelen toparlanmayı kaçırtıyor. %60
+backtestte neredeyse hiç devreye girmiyor ama backtestin görmediği felakette (borsa sorunu, LUNA / FTT gibi çöken coin,
+hata, stopun çok kötü dolması; kötümser stop dolumunda 8x + fren %10 / %60 ile 71 hesabın 33'ünde devreye giriyor)
+kaybı %60'ta tutuyor. %70-80 backtestte %60 ile aynı, felakette daha çok kaybettirir. Öneri: %60.
+
 ### 🏆 Strateji turnuvası (`--turnuva`)
 Hangi strateji türünün sizin dönemde işe yaradığını **tek komutla** görmek için:
 ```bash
