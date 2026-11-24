@@ -94,12 +94,12 @@ DD_SCALE_HINT = ("Düşüşte küçültme (rapor 24 araştırması; 2020-2026, 1
 # 24 saat freni (rapor 22 araştırması, 23 Kasım; varsayılan kapalı): son 24 saatin sermaye zirvesinden düşüş eşiği ve boy
 DAY_BRAKE_CHOICES = (0, 10, 15)
 DAY_BRAKE_SIZE_CHOICES = (50, 60, 70, 80)
-DAY_BRAKE_HINT = ("24 saat freni (rapor 22 araştırması; 2020-2026, her ayın 1'inde başlayan 71 hesabın ilk 12 ayı): sermaye "
-                  "son 24 saatin zirvesinin %10 altındayken yeni pozisyonlar %70 boy; aynı gün art arda gelen zararları "
-                  "küçük boyla karşılar, 24 saat içinde kendiliğinden tam boya döner. Aynı kaldıraçta düşüşü yarıya "
-                  "indirir, kârı biraz düşürür; kazancı bir kademe yüksek kaldıraçla verir: 24 USDT'de 7x + fren, 6x "
-                  "frensize göre ortanca 12 ay getirisi +%1.653 → +%1.791, %60'ı aşan düşüş yaşayan hesap 20 → 15. "
-                  "Kaldıracı ayrıca değiştirin (🎚️).")
+DAY_BRAKE_HINT = ("24 saat freni (rapor 22 araştırması; 4.000 USDT, 2020-2026, her ayın 1'inde başlayan 71 hesabın ilk 12 "
+                  "ayı): sermaye son 24 saatin zirvesinin %10 altındayken yeni pozisyonlar %50 boy; aynı gün art arda "
+                  "gelen zararları küçük boyla karşılar, 24 saat içinde kendiliğinden tam boya döner. Aynı kaldıraçta "
+                  "düşüşü azaltır ama kârı da düşürür; kazancı daha yüksek kaldıraçla verir: 8x + fren, 6x frensize göre "
+                  "ortanca 12 ay getirisi +%1.426 → +%1.841, %60'ı aşan düşüş yaşayan hesap 8 → 12 (7x + fren: +%1.605, "
+                  "düşüş 2). Kaldıracı ayrıca değiştirin (🎚️).")
 # Derinliğe göre boy (likidite araştırması; varsayılan kapalı) ve backtestte emir defteri kayması
 DEPTH_CAP_CHOICES = (0, 7.5, 10, 12.5)
 DEPTH_HINT = ("Derinliğe göre boy (likidite araştırması, Binance'in ölçülen emir defteri derinliğiyle 2023-2026): "

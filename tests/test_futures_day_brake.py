@@ -22,7 +22,7 @@ HOUR = 60 * MIN
 
 # ====================================================================== ayar ve ortak kural
 def test_settings_defaults_validation_env_notes_and_rule(fcfg, monkeypatch, tmp_path):
-    assert (fcfg.futures_day_brake_pct, fcfg.futures_day_brake_size_pct) == (0.0, 70.0)     # Varsayılan: kapalı
+    assert (fcfg.futures_day_brake_pct, fcfg.futures_day_brake_size_pct) == (0.0, 50.0)     # Varsayılan: kapalı
     for bad in (dict(futures_day_brake_pct=-1.0), dict(futures_day_brake_pct=60.0),
                 dict(futures_day_brake_size_pct=5.0), dict(futures_day_brake_size_pct=120.0)):
         with pytest.raises(ConfigError):
@@ -35,8 +35,8 @@ def test_settings_defaults_validation_env_notes_and_rule(fcfg, monkeypatch, tmp_
     assert EDITABLE["FUTURES_DAY_BRAKE_PCT"].attr == "futures_day_brake_pct"
     assert EDITABLE["FUTURES_DAY_BRAKE_SIZE_PCT"].attr == "futures_day_brake_size_pct"
     notes = " ".join(_setting_notes(replace(fcfg, futures_day_brake_pct=10.0)))
-    assert "FUTURES_DAY_BRAKE_PCT=10, FUTURES_DAY_BRAKE_SIZE_PCT=70 (24 saat freni)" in notes
-    assert "+%1.653 → +%1.791" in notes
+    assert "FUTURES_DAY_BRAKE_PCT=10, FUTURES_DAY_BRAKE_SIZE_PCT=50 (24 saat freni)" in notes
+    assert "+%1.426 → +%1.841" in notes
     assert not any("FUTURES_DAY_BRAKE_PCT" in n for n in _setting_notes(fcfg))
     on = replace(fcfg, futures_day_brake_pct=10.0, futures_day_brake_size_pct=70.0)
     assert futures_brake_factor(on, 90.0, 100.0) == pytest.approx(0.7)              # Tam %10 aşağıda
@@ -122,11 +122,11 @@ def test_params_report_header_and_variant_rows(fcfg):
     assert (p.day_brake_pct, p.day_brake_size_pct) == (10.0, 60.0)
     assert fb.params_from_cfg(fcfg).day_brake_pct == 0.0
     rows = [n for n, _kw in fb.brake_variant_rows(fb.params_from_cfg(fcfg), lambda **kw: kw)]
-    assert rows == ["24 saat freni: son 24 saatin zirvesinden %10 düşünce %70 boy"]
+    assert rows == ["24 saat freni: son 24 saatin zirvesinden %10 düşünce %50 boy"]
     on = fb.params_from_cfg(replace(fcfg, futures_day_brake_pct=10.0))
     got = dict(fb.brake_variant_rows(on, lambda **kw: kw))
     assert got["24 saat freni kapalı"] == {"day_brake_pct": 0.0}
-    assert "24 saat freni eşiği %15 (şimdi %10)" in got and "24 saat freni boyu %50 (şimdi %70)" in got
+    assert "24 saat freni eşiği %15 (şimdi %10)" in got and "24 saat freni boyu %70 (şimdi %50)" in got
     from test_futures_minute_scan import bt_data as m_data, k1_of, minute_closes, scan_cfg
     k1 = {"SOLUSDT": k1_of(minute_closes())}
     scan = scan_cfg(fcfg, futures_coins="SOL")
@@ -140,7 +140,7 @@ def test_params_report_header_and_variant_rows(fcfg):
     ev = fb.evaluate(fb.params_from_cfg(brake_on), data, sigs, windows)
     text = fb.format_report(brake_on, data, ev, funnel)
     n, braked = len(ev.chained.trades), sum(t.braked for t in ev.chained.trades)
-    assert n and (f"🚦 24 saat freni: bakiye son 24 saatteki en yüksek değerinin %10 altındayken yeni pozisyonlar %70 "
+    assert n and (f"🚦 24 saat freni: bakiye son 24 saatteki en yüksek değerinin %10 altındayken yeni pozisyonlar %50 "
                   f"boy (A ve B'de; C sabit tutarla). A'da {braked} / {n} işlem frenle açıldı") in text
     assert "24 saat freni" not in fb.format_report(scan, data, fb.evaluate(fb.params_from_cfg(scan), data, sigs,
                                                                              windows), funnel)
@@ -158,9 +158,10 @@ def test_leverage_table_adds_brake_rows(fcfg):
         windows[(s.symbol, s.close_ms)] = (MIN, win["t"], win["o"], win["h"], win["l"], win["c"])
     rooms = {lev: 100.0 for lev in range(1, 21)}
     off = fb.brake_lev_rows(scan, data, sigs, windows, rooms)
-    assert [r.label for r in off] == ["3x + 24 sa fren", "4x + 24 sa fren"] and all(r.ev for r in off)
+    assert [r.label for r in off] == ["3x + 24 sa fren", "4x + 24 sa fren", "5x + 24 sa fren"]
+    assert all(r.ev for r in off)                      # Kısa test verisinde aylık başlangıç özeti yok
     on = fb.brake_lev_rows(replace(scan, futures_day_brake_pct=10.0), data, sigs, windows, rooms)
-    assert [r.label for r in on] == ["2x, fren yok", "3x, fren yok"]
+    assert [r.label for r in on] == ["1x, fren yok", "2x, fren yok", "3x, fren yok"]
     assert fb.brake_lev_rows(replace(scan, futures_max_positions=1), data, sigs, windows, rooms) == []
 
 
@@ -175,8 +176,8 @@ def test_live_entry_margin_brakes_only_within_24_hours(fcfg, tmp_path):
     bot.state.capital_marks = [[clock.t - 3 * 3600, 40.0], [clock.t - 2 * 3600, 30.0]]    # 2 saat önce 40 → 30
     bot.scan_and_enter(clock.t)
     pos = bot.state.positions["SOLUSDT"]
-    assert pos.margin_usdt == pytest.approx(30 * 0.95 * 0.7, rel=0.02)
-    assert "24 saat freni: sermaye son 24 saatin zirvesinin %25 altında, pozisyon %70 boy" in pos.signal_note
+    assert pos.margin_usdt == pytest.approx(30 * 0.95 * 0.5, rel=0.02)
+    assert "24 saat freni: sermaye son 24 saatin zirvesinin %25 altında, pozisyon %50 boy" in pos.signal_note
     assert any("24 saat freni" in m for m in notes.messages)          # Pozisyon mesajında
     # Zarar 24 saatten eski, düşüş eşiğin altında ya da ayar kapalı: tam boy
     day = 24 * 3600
@@ -213,7 +214,7 @@ def test_closes_record_marks_added_capital_and_state_file(fcfg, tmp_path):
     marks = bot.state.capital_marks
     assert capital < 29.0 and [m[1] for m in marks] == pytest.approx([30.0, capital])   # Önce / sonra
     sig = signal("ETHUSDT", "long")
-    assert bot._brake_factor(sig) == pytest.approx(0.7) and sig.metrics["brake_size_pct"] == 70.0
+    assert bot._brake_factor(sig) == pytest.approx(0.5) and sig.metrics["brake_size_pct"] == 50.0
     bot.add_capital(10.0)                                               # Yatırılan para kayıtlara da eklenir
     assert [m[1] for m in bot.state.capital_marks] == pytest.approx([40.0, capital + 10.0])
     assert StateStore(tmp_path / "s.json").load().capital_marks == bot.state.capital_marks
@@ -232,15 +233,15 @@ def test_risk_page_rows_status_and_env(fut, tmp_path):
     press(bot, "kv:risk:FUTURES_DAY_BRAKE_PCT:10")
     assert bot.cfg.futures_day_brake_pct == 10.0 and "FUTURES_DAY_BRAKE_PCT=10" in env_text(bot)
     text, keyboard, _mid = notes.menus[-1]
-    assert "kv:risk:FUTURES_DAY_BRAKE_SIZE_PCT:50" in buttons(keyboard)
-    press(bot, "kv:risk:FUTURES_DAY_BRAKE_SIZE_PCT:50")
-    assert bot.cfg.futures_day_brake_size_pct == 50.0 and "FUTURES_DAY_BRAKE_SIZE_PCT=50" in env_text(bot)
+    assert "kv:risk:FUTURES_DAY_BRAKE_SIZE_PCT:70" in buttons(keyboard)
+    press(bot, "kv:risk:FUTURES_DAY_BRAKE_SIZE_PCT:70")
+    assert bot.cfg.futures_day_brake_size_pct == 70.0 and "FUTURES_DAY_BRAKE_SIZE_PCT=70" in env_text(bot)
     text = notes.menus[-1][0]
-    assert "son 24 saatin zirvesinden %10 düşünce pozisyon %50 boy" in text and "sıradaki pozisyon tam boy" in text
+    assert "son 24 saatin zirvesinden %10 düşünce pozisyon %70 boy" in text and "sıradaki pozisyon tam boy" in text
     now = bot.time_fn()
     bot.state.capital_marks = [[now - 600, 40.0], [now - 60, 30.0]]
     press(bot, "risk")
-    assert "şu an %25.0 aşağıda → sıradaki pozisyon <b>%50 boy</b>" in notes.menus[-1][0]
+    assert "şu an %25.0 aşağıda → sıradaki pozisyon <b>%70 boy</b>" in notes.menus[-1][0]
 
 
 def test_risk_page_has_no_brake_rows_for_spot(spot):

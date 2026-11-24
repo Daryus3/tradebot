@@ -2605,38 +2605,50 @@ haftalarca süren bir küçülmeyle karşılıyor. Fren son 24 saatin (kapanış
 aşağıdaysa yeni pozisyonlar %Y boy; sermaye toparlanınca ya da zarar 24 saatten eskiyince tam boy (bir sonraki dalga tam
 boyla başlar).
 
-| Kaldıraç ve fren | 4.000 USDT | 24 USDT |
-|---|---|---|
-| 5x / **6x (şimdiki)** / 7x / 8x, fren yok | +%1.029 / 2 / 0 · **+%1.426 / 8 / 0** · +%1.692 / 24 / 2 · +%1.971 / 40 / 8 | +%1.072 / 12 / 3 · **+%1.653 / 20 / 5** · +%2.450 / 36 / 8 · - |
-| 6x + fren %10 → %70 | +%1.205 / 0 / 0 | +%1.310 / 12 / 2 |
-| **7x + fren %10 → %70** | **+%1.642 / 12 / 0** (8/10) | **+%1.791 / 15 / 4** (7/10) |
-| 7x + fren %8 / %12 → %70 | +%1.582 / 10 / 0 · +%1.566 / 11 / 0 | +%1.742 / 13 / 3 · +%1.907 / 16 / 4 |
-| 7x + fren %10 → %60 / %80 | +%1.637 / 10 / 0 · +%1.592 / 12 / 1 | +%1.627 / 12 / 3 · +%2.072 / 19 / 6 |
-| 7x + fren %15 → %50 / %60 / %70 | +%1.471 / 2 / 0 · +%1.486 / 8 / 0 · +%1.503 / 10 / 0 | %60: +%1.413 / 14 / 3 |
-| 7x + fren %10 → %70, pencere 12 / 48 saat | +%1.621 / 12 / 0 · +%1.637 / 11 / 0 | +%1.694 / 17 / 4 · +%1.749 / 16 / 4 |
-| 8x + fren %10 → %70 / %60 | +%1.941 / 21 / 2 · +%2.004 / 19 / 2 | +%2.262 / 26 / 6 · **+%2.095 / 20 / 5** (10/10) |
-| 8x + fren %8 / %12 → %60, %10 → %50 | | +%2.061 / 19 / 4 · +%2.014 / 24 / 4 · +%1.910 / 19 / 4 (8-9/10) |
-| 9x + fren %10 → %50 | | +%2.165 / 26 / 6 (alt çeyrek +%357 → +%271: kötü) |
+**4.000 USDT'de (esas ölçü; 10 çekiliş, her ayın 1'inde başlayan 71 hesap: 12 ay ortanca / %60'ı aşan düşüş /
+kill-switch, parantezde 10 çekilişin kaçında şimdikinden iyi; alt çeyrek = 71 hesabın 12 ay getirisinin alt çeyreği):**
 
-- **Aynı kaldıraçta** fren %60'ı aşan düşüş yaşayan hesap sayısını yaklaşık yarıya indiriyor (4.000 USDT 7x: 24 → 10-12,
-  8x: 40 → 21; kill-switch 2 → 0, 8 → 2) ve kârdan %3-15 alıyor. Bu yüzden kazancı **bir kademe yüksek kaldıraçla**
-  veriyor: 24 USDT'de 7x + fren şimdikinden hem kârlı hem az düşüşlü (+%1.653 / 20 / 5 → +%1.791 / 15 / 4), 8x + fren
-  %10 → %60 aynı düşüşte %27 kârlı (+%2.095 / 20 / 5). Eşik %8-12, boy %60-80, pencere 12-48 saat: komşuların hepsi aynı
-  düşüş düzeyinde düz kaldıraçtan iyi; 24 saat en iyisi. 4.000 USDT'de kazanç daha küçük (hesap büyüyünce emir defteri
-  pozisyonları zaten sınırlıyor).
-- En kötü çeyrek de iyileşiyor (24 USDT 7x + fren: 12 ay getirisinin alt çeyreği +%357 → +%413). Kayma 3 katında
-  doğrulama aynı (+%854 → +%839). Son 12 ay +%265 → +%377.
-- **Bedeli:** 2020 başında başlayan tek hesap (A) frenle daha düşük bitiyor (24 USDT 7x: 3,58 → 2,87 milyon; seçim
-  dönemi yıllık getirisi +%1.913 → +%1.674, doğrulama +%1.065 → +%1.293): 2020-2021'in büyük dönüşleri zarardan hemen
-  sonra geldiğinde fren onları küçük boyla karşılıyor. Kaldıraç yükseldiği için kötümser stop dolumunda (fitilin ortası)
-  kayıp da büyür.
-- **Eklenen ayar:** `FUTURES_DAY_BRAKE_PCT` (varsayılan 0 = kapalı; önerilen 10) ve `FUTURES_DAY_BRAKE_SIZE_PCT` (70).
-  Telegram: 🧯 Risk sigortaları → 🚦 24 saat freni (sayfada son 24 saatin zirvesi, şu anki düşüş ve sıradaki pozisyonun
-  boyu yazar). Canlı bot her kapanışta sermayeyi durum dosyasına kaydeder (24 saatten eski kayıtlardan yalnızca en yenisi
-  tutulur); /sermayeekle ile eklenen para kayıtlara da eklenir; pozisyon mesajında "24 saat freni: … pozisyon %70 boy"
-  yazar. Backtest aynı kuralı kullanır (resmi motor araştırma sonuçlarını birebir verdi); rapor başlığında 🚦 satırı,
-  kaldıraç tablosunda fren satırları, tek kural tablosunda kapalı / eşik / boy satırları. Fren kaldıracı değiştirmez:
-  önerilen kullanım `FUTURES_LEVERAGE=7` ile birlikte.
+| Kaldıraç ve fren (eşik %10) | Fren yok | Fren → %40 | Fren → %50 | Fren → %60 | Fren → %70 |
+|---|---|---|---|---|---|
+| 5x | +%1.029 / 2 / 0 | | | | |
+| **6x (şimdiki)** | **+%1.426 / 8 / 0**, alt çeyrek +%490 | | +%1.062 / 0 / 0 | | +%1.205 / 0 / 0 |
+| 7x | +%1.692 / 24 / 2 | +%1.468 / 0 / 0 | **+%1.605 / 2 / 0** (7/10) | +%1.637 / 10 / 0 | +%1.642 / 12 / 0 |
+| 8x | +%1.971 / 40 / 8, alt çeyrek +%198 | +%1.694 / 9 / 0 | **+%1.841 / 12 / 0** (10/10), alt çeyrek +%617 | +%2.004 / 19 / 2 | +%1.941 / 21 / 2 |
+| 9x | +%1.949 / 46 / 13, alt çeyrek +%76 | +%1.913 / 16 / 2 | +%1.921 / 20 / 2 | | |
+
+Komşular (4.000 USDT): 8x + fren → %50 eşik %8 / %12 / %15 +%1.743 / 9 / 1 · +%1.742 / 14 / 0 · +%1.744 / 14 / 0
+(9/10); pencere 12 / 48 saat +%1.920 / 14 / 0 · +%1.706 / 13 / 0 (10/10); 7x + fren → %50 eşik %8 / %12 / %15
++%1.481 · +%1.477 · +%1.471 (düşüş 2); 6x'te hafif frenler (→ %70-80, eşik %10-20) +%1.109 … +%1.246, düşüş 0-6.
+
+- **Aynı kaldıraçta fren bir güvenlik ayarıdır:** %60'ı aşan düşüş yaşayan hesap 6x'te 8 → 0, 7x'te 24 → 0-12, 8x'te
+  40 → 9-21, kill-switch 8 → 0-2; bedeli 12 ay ortancasının %15-26'sı (6x: +%1.426 → +%1.062 … +%1.246).
+- **Kâr, daha yüksek kaldıraçla birlikte gelir.** Aynı düşüş düzeyinde frenli eğri düz kaldıraçtan ~%20 yukarıda: %60+
+  düşüş ~12 hesapta düz kaldıraç ~+%1.490, 8x + fren +%1.841; ~2 hesapta 5x +%1.029, 7x + fren +%1.605. 8x + fren
+  %10 → %50 şimdikine göre: 12 ay ortancası +%29, %60+ düşüş 8 → 12, kill-switch 0, alt çeyrek +%490 → +%617, kayma 3
+  katında doğrulama +%321 → +%348, son 12 ay +%252 → +%447. 7x + aynı fren: +%13, düşüş 8 → 2.
+- **En iyi boy 4.000 USDT'de %50** (24 USDT'de %70-80 idi): büyük hesapta emir defteri pozisyonları zaten sınırladığı için
+  daha güçlü fren gerekiyor. Varsayılan boy bu yüzden %50.
+- **Maliyet stresi** (canlı giriş dolumu +%0.084, 9 canlı girişin ortalaması; aggTrades'in 3.435 işlemlik ölçümü +%0.043
+  ve backtest varsayımı +%0.04): 6x frensiz +%866 / 24 / 4, 8x + fren +%918 / 18 / 6, 7x + fren +%687 / 10 / 3, 5x
+  frensiz +%644 / 14 / 2. Pahalı dolumda da aynı düşüşte frenli eğri yukarıda, ama şimdiki 6x'i kârda geçen yalnız 8x +
+  fren (+%6); düşüş üstünlüğü kalıcı.
+- **En kötü durum** (kötümser stop dolumu, fitilin yarısı; tek çekiliş): bütün ayarlarda hesaplar çöküyor; fren burada
+  da yardım ediyor (12 ay ortancası 6x frensiz −%60, 7x + fren %10 → %60 −%6, 8x + fren −%52; kill-switch 36 → 24-33).
+- **Bedeli:** 2020 başında başlayan tek hesap (A) frenle daha düşük biter (8x + fren: 4,14 → 3,64 milyon; 2020-2023
+  dönemi yıllık getirisi +%456 → +%428, 2023-2026 +%466 → +%483): 2020-2021'in büyük dönüşleri zarardan hemen sonra
+  geldiğinde fren onları küçük boyla karşılar. 8x'te likidasyon girişin ~%12 altında (6x'te %16.2).
+- **Raporda:** fren kapalıyken kaldıraç tablosunun sonunda "6x / 7x / 8x + 24 sa fren" satırları çıkar (tek çekiliş;
+  araştırmada 0. çekiliş +%1.045 / 0 / 0, +%1.816 / 9 / 1, +%2.410 / 14 / 3; aynı çekilişte 6x frensiz +%1.581 / 15 / 2,
+  rapor 22 ile aynı). Tek çekilişin %60+ düşüş sayısı oynaktır (6x frensiz 10 çekilişte 1-15).
+- **24 USDT'de** (küçük hesap): 6x frensiz +%1.653 / 20 / 5; 8x + fren %10 → %50 +%1.910 / 19 / 4, → %60 +%2.095 /
+  20 / 5; 7x + fren → %70 +%1.791 / 15 / 4.
+- **Eklenen ayar:** `FUTURES_DAY_BRAKE_PCT` (varsayılan 0 = kapalı; önerilen 10) ve `FUTURES_DAY_BRAKE_SIZE_PCT`
+  (varsayılan 50). Telegram: 🧯 Risk sigortaları → 🚦 24 saat freni (sayfada son 24 saatin zirvesi, şu anki düşüş ve
+  sıradaki pozisyonun boyu yazar). Canlı bot her kapanışta sermayeyi durum dosyasına kaydeder (24 saatten eski
+  kayıtlardan yalnızca en yenisi tutulur); /sermayeekle ile eklenen para kayıtlara da eklenir; pozisyon mesajında "24
+  saat freni: … pozisyon %50 boy" yazar. Backtest aynı kuralı kullanır (resmi motor araştırma sonuçlarını birebir verdi);
+  rapor başlığında 🚦 satırı, kaldıraç tablosunda fren satırları, tek kural tablosunda kapalı / eşik / boy satırları.
+  Fren kaldıracı değiştirmez: önerilen kullanım `FUTURES_LEVERAGE=8` ile (daha az düşüş için 7).
 
 ### 🏆 Strateji turnuvası (`--turnuva`)
 Hangi strateji türünün sizin dönemde işe yaradığını **tek komutla** görmek için:
@@ -2699,9 +2711,9 @@ karar için ortancaya ve en kötüye bakın. Çıkış taraması her gün dengel
   durdurduğu hesap sayısı. Kaldıraç seçiminde asıl ölçü bu. Sağ taraf A (tek başlangıç tarihi; hesap büyüyünce derinliğe
   göre boy pozisyonu sınırladığı için kaldıraçtan neredeyse bağımsız, kill-switch'in durduracağı gün yazılır) ve B'de en
   kötü yıl içi düşüş. Zarar kes likidasyona 0.5 puandan yakınsa "⛔ canlı bot açmaz"; likidasyonun ötesindeyse satır
-  hesaplanmaz. Tek çekiliştir; 10 çekilişli ölçüm README "Kaldıraç yeniden". Dalga modunda tablonun sonunda iki fren
-  satırı vardır: 24 saat freni kapalıysa şimdiki kaldıraç ve bir üstü frenle ("7x + 24 sa fren"), açıksa şimdiki ve bir
-  altı frensiz ("6x, fren yok"); frenin asıl ölçüsü bu satırlardır (bkz. "Rapor 22 araştırması").
+  hesaplanmaz. Tek çekiliştir; 10 çekilişli ölçüm README "Kaldıraç yeniden". Dalga modunda tablonun sonunda üç fren
+  satırı vardır: 24 saat freni kapalıysa şimdiki kaldıraç ve iki üstü frenle ("8x + 24 sa fren", %10 → %50), açıksa
+  şimdiki ve iki altı frensiz ("6x, fren yok"); frenin asıl ölçüsü bu satırlardır (bkz. "Rapor 22 araştırması").
 - **🧯 KALDIRAÇ RİSKİ** (ayardaki kaldıraç ve bir alt kıyas kaldıracı, 10x için 5x): her yıl 1 Ocak'tan başlayan hesabın
   yıl içindeki en büyük düşüşü (dip tarihiyle) ve en düşük bakiyesi; kill-switch (`MAX_TOTAL_LOSS_PCT`) uygulansaydı
   hangi yıllarda botu hangi gün durduracağı; en kötü günler; her ayın 1'inde başlayan hesapların ilk 12 ayı (%80 / %90'ı

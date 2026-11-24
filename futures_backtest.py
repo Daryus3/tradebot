@@ -696,7 +696,7 @@ class SimParams:
     # day_brake_pct (%) ya da daha fazla altındayken yeni pozisyonun boyu × day_brake_size_pct / 100 (0 = kapalı; sabit
     # tutarlı C senaryosunda uygulanmaz)
     day_brake_pct: float = 0.0
-    day_brake_size_pct: float = 70.0
+    day_brake_size_pct: float = 50.0
     # Emir defteri derinliği (futures_depth; veri FutData.depth'te, yoksa ikisi de uygulanmaz): depth_cap_pct > 0 ise giriş
     # tutarı girişten önceki 2 dk'da ±%1 içindeki alış / satış emirlerinin küçüğünün bu yüzdesiyle sınırlı ve aynı mumdaki
     # sinyallerde sınıra takılınca kapasitesi büyük olan önce (FUTURES_DEPTH_CAP_PCT); depth_impact: piyasa emrinin defteri
@@ -750,7 +750,7 @@ def params_from_cfg(cfg, **over) -> SimParams:
                   dd_scale_pct=float(getattr(cfg, "futures_dd_scale_pct", 0.0) or 0.0),
                   dd_scale_size_pct=float(getattr(cfg, "futures_dd_scale_size_pct", 60.0)),
                   day_brake_pct=float(getattr(cfg, "futures_day_brake_pct", 0.0) or 0.0),
-                  day_brake_size_pct=float(getattr(cfg, "futures_day_brake_size_pct", 70.0)),
+                  day_brake_size_pct=float(getattr(cfg, "futures_day_brake_size_pct", 50.0)),
                   depth_cap_pct=float(getattr(cfg, "futures_depth_cap_pct", 0.0) or 0.0),
                   depth_impact=bool(getattr(cfg, "futures_backtest_depth", False)),
                   entry_lag_pct=entry_lag_for(cfg)[0], stop_slip_pct=STOP_SLIP_PCT)
@@ -1717,17 +1717,18 @@ def leverage_table(cfg, data: FutData, signals, windows,
 
 def brake_lev_rows(cfg, data: FutData, signals, windows, rooms: Dict[int, float]) -> List[LevRow]:
     """24 saat freninin kaldıraçla birlikte etkisi (frenin asıl ölçüsü her ayın 1'inde başlayan hesaplar): fren kapalıysa
-    şimdiki kaldıraç ve bir üstü frenle (%10 → %70), açıksa şimdiki ve bir altı frensiz. Dalga modunda (çöküş taktiği)."""
+    şimdiki kaldıraç ve iki üstü frenle (%10 → %50), açıksa şimdiki ve iki altı frensiz. Dalga modunda (çöküş taktiği)."""
     base = params_from_cfg(cfg)
     if base.max_positions <= 1 or cfg.futures_tactic != "crash":
         return []
     on = base.day_brake_pct > 0
     out: List[LevRow] = []
-    for lev in ((base.leverage - 1, base.leverage) if on else (base.leverage, base.leverage + 1)):
+    for lev in ((base.leverage - 2, base.leverage - 1, base.leverage) if on else
+                (base.leverage, base.leverage + 1, base.leverage + 2)):
         room = rooms.get(lev, futures_liq_distance_pct(lev, cfg.futures_mmr_pct)) if lev >= 1 else 0.0
         if lev < 1 or cfg.stop_loss_pct >= room - LIVE_SL_MARGIN:
             continue
-        over = {"day_brake_pct": 0.0} if on else {"day_brake_pct": 10.0, "day_brake_size_pct": 70.0}
+        over = {"day_brake_pct": 0.0} if on else {"day_brake_pct": 10.0, "day_brake_size_pct": 50.0}
         p = params_from_cfg(cfg, leverage=lev, **over)
         label = f"{lev}x, fren yok" if on else f"{lev}x + 24 sa fren"
         out.append(LevRow(lev, evaluate(p, data, signals, windows), "", rolling_summary(p, data, signals, windows)
@@ -2039,11 +2040,11 @@ DAY_BRAKE_SIZE_TRIES = (50.0, 70.0)     # Frendeki boy (%)
 
 
 def brake_variant_rows(base: SimParams, ev) -> List[Tuple[str, "Evaluation"]]:
-    """24 saat freni (FUTURES_DAY_BRAKE_PCT): açıksa kapalı + eşik / boy çevresi, kapalıysa %10 → %70. Freni kaldıraçla
+    """24 saat freni (FUTURES_DAY_BRAKE_PCT): açıksa kapalı + eşik / boy çevresi, kapalıysa %10 → %50. Freni kaldıraçla
     birlikte değerlendirmek için asıl ölçü kaldıraç tablosundaki frenli satırlardır (her ay başlayan hesaplar)."""
     if base.day_brake_pct <= 0:
-        return [("24 saat freni: son 24 saatin zirvesinden %10 düşünce %70 boy",
-                 ev(day_brake_pct=10.0, day_brake_size_pct=70.0))]
+        return [("24 saat freni: son 24 saatin zirvesinden %10 düşünce %50 boy",
+                 ev(day_brake_pct=10.0, day_brake_size_pct=50.0))]
     rows = [("24 saat freni kapalı", ev(day_brake_pct=0.0))]
     rows += [(f"24 saat freni eşiği %{t:g} (şimdi %{base.day_brake_pct:g})", ev(day_brake_pct=t))
              for t in DAY_BRAKE_TRIES if not _same(t, base.day_brake_pct)]
@@ -4315,7 +4316,7 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
                 L.append(f"  {label:{LEV_LABEL_W}s}" + _lev_line(r.ev, r.roll) + (f"  {r.note}" if r.note else ""))
         if any(r.label for r in rows):
             L.append("  (fren satırları: 24 saat freni (FUTURES_DAY_BRAKE_PCT) açık / kapalı aynı hesap; fren tek başına "
-                     "kârı biraz düşürür, düşüşü azaltır; bir kademe yüksek kaldıraçla aynı düşüşte daha çok kâr verir)")
+                     "kârı düşürür, düşüşü azaltır; daha yüksek kaldıraçla aynı düşüşte daha çok kâr verir)")
     if risk:
         L.append("")
         L.extend(leverage_risk_lines(risk))
