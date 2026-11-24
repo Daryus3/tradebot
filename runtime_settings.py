@@ -216,6 +216,9 @@ EDITABLE: Dict[str, Setting] = {
     "FUTURES_BACKTEST_DEPTH": Setting("futures_backtest_depth", "bool",
                                       "Backtest: büyük pozisyonların emir defteri kayması (ölçülen derinlik)"),
     "FUTURES_LEVERAGE": Setting("futures_leverage", "int", "Vadeli kaldıraç (1-20x; sonraki işlemde uygulanır)"),
+    "STARTUP_RETRY_MINUTES": Setting("startup_retry_minutes", "int",
+                                     "Açılışta Binance'e bağlanılamazsa bekleme modunda yeniden deneme aralığı "
+                                     "(dk; 0 = kapanır)"),
     "FUTURES_COINS": Setting("futures_coins", "str", "Vadeli coinler (virgülle, ör. BTC,ETH,SOL)"),
     "FUTURES_SIDES": Setting("futures_sides", "choice", "Vadeli yön (both / long / short)", FUTURES_SIDES),
     "FUTURES_MARGIN_USAGE_PCT": Setting("futures_margin_usage_pct", "float", "Vadeli: teminata giden bakiye (%)"),

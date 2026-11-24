@@ -805,26 +805,6 @@ def _start_futures_bot(cfg, store, notifier, log, env_path=None) -> int:
         print(msg)
         notifier.send(Messages.warning(msg), critical=True)
         return EXIT_KILLED
-    try:
-        if state is None:
-            start_capital = cfg.start_capital
-            if not cfg.is_paper:
-                probe = FuturesExchange(cfg)
-                free = wait_for_network(probe.free_balance, "Vadeli bakiye okunamadı", cfg, log)
-                if free <= 0:
-                    msg = ("Binance USDⓈ-M Vadeli cüzdanınızda serbest USDT yok. Binance'te Cüzdan → Transfer ile "
-                           "Spot'tan 'USDⓈ-M Vadeli' cüzdanına aktarın (ücretsiz, anında), sonra botu yeniden başlatın.")
-                    print(f"❌ {msg}")
-                    notifier.send(Messages.error(f"Vadeli bot başlatılamadı: {msg}", fatal=True), critical=True)
-                    return EXIT_CONFIG
-                start_capital = free                 # Bot vadeli cüzdandaki serbest bakiyenin tamamını kullanır
-            state = BotState.new(cfg.trading_mode, start_capital, cfg.quote_asset)
-            store.save(state)
-        exchange = make_exchange(cfg, state)
-    except FuturesError as exc:
-        print(f"❌ {describe_error(exc)}")
-        notifier.send(Messages.error(f"Vadeli bot başlatılamadı: {describe_error(exc)}", fatal=True), critical=True)
-        return EXIT_CONFIG
     listener = None
     if cfg.telegram_commands and notifier.enabled:
         from commands import TelegramCommandListener
@@ -834,16 +814,48 @@ def _start_futures_bot(cfg, store, notifier, log, env_path=None) -> int:
         from ip_monitor import IpMonitor
         ip_monitor = IpMonitor(cfg.ip_check_minutes * 60)
     mode = cfg.trading_mode
-    bot = FuturesBot(cfg, exchange, make_strategy(None, cfg), notifier, store, state,
-                     TradeLog(DATA_DIR / f"trades_futures_{mode}.csv"),
-                     equity_log=EquityLog(DATA_DIR / f"equity_futures_{mode}.csv"), price_stream=None,
-                     command_listener=listener, settings_path=env_path, ip_monitor=ip_monitor)
-    try:
+    holder = {"state": state}
+
+    def attempt():
+        """Açılışın Binance'e bağlı kısmı (bekleme modunda tekrar tekrar denenir): ilk kurulumda vadeli bakiye,
+        bağlantı, bot ve açılış (pariteler, pozisyon mutabakatı)."""
+        st = holder["state"]
+        if st is None:
+            start_capital = cfg.start_capital
+            if not cfg.is_paper:
+                probe = FuturesExchange(cfg)
+                free = wait_for_network(probe.free_balance, "Vadeli bakiye okunamadı", cfg, log)
+                if free <= 0:
+                    raise FuturesError("Binance USDⓈ-M Vadeli cüzdanınızda serbest USDT yok. Binance'te Cüzdan → "
+                                       "Transfer ile Spot'tan 'USDⓈ-M Vadeli' cüzdanına aktarın (ücretsiz, anında).")
+                start_capital = free                 # Bot vadeli cüzdandaki serbest bakiyenin tamamını kullanır
+            st = BotState.new(cfg.trading_mode, start_capital, cfg.quote_asset)
+            store.save(st)
+            holder["state"] = st
+        exchange = make_exchange(cfg, st)
+        bot = FuturesBot(cfg, exchange, make_strategy(None, cfg), notifier, store, st,
+                         TradeLog(DATA_DIR / f"trades_futures_{mode}.csv"),
+                         equity_log=EquityLog(DATA_DIR / f"equity_futures_{mode}.csv"), price_stream=None,
+                         command_listener=listener, settings_path=env_path, ip_monitor=ip_monitor)
         wait_for_network(bot.startup, "Açılış", cfg, log)
-    except (FuturesError, requests.RequestException) as exc:
+        return bot
+
+    retry_on = (FuturesError, requests.RequestException)
+    try:
+        bot = attempt()
+    except retry_on as exc:
         print(f"❌ {describe_error(exc)}")
-        notifier.send(Messages.error(f"Vadeli bot başlatılamadı: {describe_error(exc)}", fatal=True), critical=True)
-        return EXIT_CRASH if isinstance(exc, requests.RequestException) else EXIT_CONFIG
+        if cfg.startup_retry_minutes <= 0 or listener is None:
+            notifier.send(Messages.error(f"Vadeli bot başlatılamadı: {describe_error(exc)}", fatal=True), critical=True)
+            return EXIT_CRASH if isinstance(exc, requests.RequestException) else EXIT_CONFIG
+        # Bekleme modu: kapanmak yerine Telegram açık bekler (/ip, /dene, /durum, /kapat) ve yeniden dener
+        from rescue import StartupRescue
+        print(f"🛟 Bekleme modu: Telegram açık, {cfg.startup_retry_minutes} dk'da bir yeniden denenecek "
+              f"(çıkmak için Ctrl+C).")
+        bot = StartupRescue(notifier, listener, cfg.startup_retry_minutes * 60).run(attempt, exc, describe_error,
+                                                                                  retry_on)
+        if bot is None:
+            return EXIT_OK                          # Kullanıcı Telegram'dan /kapat dedi
     _graceful_sigterm()           # systemctl stop: bekleyen limit giriş emri iptal edilsin, durum kaydedilsin
     return bot.run(do_startup=False)
 

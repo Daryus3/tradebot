@@ -1072,6 +1072,9 @@ class Config:
     notify_mode: str = "all"               # all | closes | silent (bkz. NOTIFY_MODES)
     service_name: str = "tradebot.service"  # Menüdeki "Sunucu Reset" düğmesinin yeniden başlattığı systemd servisi
     ip_check_minutes: int = 10             # Sunucunun dış IP adresi bu aralıkla kontrol edilir, değişirse alarm (0 = kapalı)
+    # Açılış bekleme modu (vadeli): Binance'e bağlanılamazsa (API anahtarı / IP / izin / ağ) kapanmak yerine Telegram açık
+    # bekler ve bu aralıkla (dk) yeniden dener; /ip, /dene, /durum, /kapat çalışır (0 = eski davranış: kapanır)
+    startup_retry_minutes: int = 2
     # 40) Ek giriş filtreleri (hepsi varsayılan kapalı; --tara-ab ile etkileri ölçülebilir)
     spread_filter: bool = True             # false: MAX_SPREAD_PCT kontrolü yapılmaz
     fakeout_filter: bool = False           # Son kapanmış mumun üst fitili gövdesinden uzunsa alma
@@ -1437,6 +1440,9 @@ class Config:
             errors.append("BNB_MIN_TRADES 0 veya daha büyük olmalı (0 = az BNB uyarısı kapalı)")
         if self.notify_mode not in NOTIFY_MODES:
             errors.append("NOTIFY_MODE şunlardan biri olmalı: " + ", ".join(NOTIFY_MODES))
+        if not 0 <= self.startup_retry_minutes <= 60:
+            errors.append("STARTUP_RETRY_MINUTES 0-60 arasında olmalı (açılışta bağlantı yoksa yeniden deneme aralığı, "
+                          "dk; 0 = bekleme modu kapalı)")
         if self.ip_check_minutes < 0:
             errors.append("IP_CHECK_MINUTES 0 (kapalı) veya pozitif olmalı")
         if not 5 <= self.vwap_bars <= 500:
@@ -1725,6 +1731,7 @@ def load_config(env_file: Optional[str] = None, mode_override: Optional[str] = N
         notify_mode=_env_str("NOTIFY_MODE", "all").lower(),
         service_name=_env_str("SERVICE_NAME", "tradebot.service"),
         ip_check_minutes=_env_int("IP_CHECK_MINUTES", 10),
+        startup_retry_minutes=_env_int("STARTUP_RETRY_MINUTES", 2),
         spread_filter=_env_bool("SPREAD_FILTER", True),
         fakeout_filter=_env_bool("FAKEOUT_FILTER", False),
         vwap_filter=_env_bool("VWAP_FILTER", False),

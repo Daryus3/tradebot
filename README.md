@@ -2908,7 +2908,7 @@ tradebot/
 | Telegram mesajı gelmiyor | Bota `/start` yazdığınızdan emin olun; `.env`'deki token ve chat ID'yi kontrol edin |
 | Telegram komutlarına cevap yok / mesajlar iki kez geliyor | Aynı token'la başka bir bot (ör. bilgisayardaki) çalışıyor; onu kapatın |
 | `Timestamp ... recvWindow` (-1021) | `timedatectl` ile saatin senkronize olduğunu kontrol edin |
-| `Invalid API-key, IP, or permissions` (-2015) | Anahtarı, izinleri ve IP kısıtlamasını (sunucu IP'si) kontrol edin |
+| `Invalid API-key, IP, or permissions` (-2015) | Çoğunlukla sunucunun dış IP'si değişmiştir (ev interneti). Vadeli bot açılışta bağlanamazsa kapanmaz, **🛟 bekleme moduna** geçer (aşağıda): Telegram'dan `/ip` ile yeni adresi görün, Binance → API Yönetimi → anahtar → Düzenle → güvenilir IP listesine ekleyin; bot 2 dk içinde (ya da 🔄 Şimdi dene ile hemen) devam eder. Anahtarın 'Vadeli işlemleri etkinleştir' izni de açık olmalı |
 | **Pozisyon açılamıyor: Çoklu Varlık modu** (`-4168`, "Unable to adjust to isolated-margin mode under the Multi-Assets mode"; Telegram'da ve `/tarama`'da ⛔, backtest raporunda "N taramada giriş reddedildi") | Binance vadeli hesabı **Çoklu Varlık (Multi-Assets)** modunda; bu modda yalıtılmış teminat kullanılamaz ve bot **hiçbir** sinyali açamaz. Açık vadeli pozisyon ve emirleri kapatıp Binance uygulaması → Vadeli → ⚙️ Tercihler → **Varlık Modu → Tek Varlık Modu** seçin; bot yeniden başlatılmadan devam eder. Bot bunu kendisi de dener; seçenek yoksa ya da değişmiyorsa hesap Kredi İşlem Modu'nda (Credits Trading Mode, BNFCR) olabilir: o modda yalıtılmış teminat yoktur, Binance desteğine danışın |
 | "Serbest USDT bakiyesi yok" | USDT'yi Binance'te **Cüzdan → Transfer** ile **Spot**'a aktarın |
 | Coinler Binance'te "kilitli" görünüyor | Normal: yedek zarar-kes emri bekliyor |
@@ -2916,5 +2916,21 @@ tradebot/
 | Bot hiç alım yapmıyor | Telegram'dan `/tarama` yazın; hangi filtrenin elediğini gösterir |
 | `Unable to adjust to isolated-margin mode under the Multi-Assets mode` (-4168) | Vadeli hesap Çoklu Varlık modunda; bu modda yalıtılmış teminat kullanılamaz. Bot açılışta ve ilk işlemde hesabı kendisi Tek Varlık moduna alır. Alamazsa: açık vadeli pozisyon ve emirleri kapatıp Binance → Vadeli → Ayarlar (Tercihler) → Varlık Modu → **Tek Varlık Modu** |
 | Backtest işlem gösteriyor, canlı bot açmadı (vadeli) | 🧪 Backtest → 7 gün: raporun başındaki 🔍 CANLI BOT KARŞILAŞTIRMASI her işlemin neden kaçtığını yazar; `/tarama`'da 🪙 Evren satırına bakın |
+
+### 🛟 Bekleme modu: açılışta Binance'e bağlanılamazsa (vadeli bot)
+Bot açılırken Binance'e bağlanamazsa (API anahtarı / IP kısıtlaması / izin hatası, bağlantı sorunu, vadeli cüzdanda
+USDT yok) eskiden "⛔ Bot durdu" deyip kapanıyordu ve Telegram komutları da çalışmıyordu; düzeltmek için sunucunun
+başında olmak gerekiyordu. Artık kapanmaz, **bekleme moduna** geçer:
+- Telegram'a "🛟 Bekleme modu" mesajı gelir: hata, ne yapılacağı ve sunucunun **şu anki dış IP adresi** (IPv4 / IPv6).
+- Telegram açık kalır, işlem açılmaz. Çalışan komutlar: **/ip** (sunucunun IP adresi), **/dene** (hemen yeniden dene),
+  **/durum**, **/kapat** (onaylı). Mesajın altındaki düğmeler de aynı işi yapar; diğer komutlar bot bağlanınca çalışır.
+- Bot `STARTUP_RETRY_MINUTES` (varsayılan 2) dakikada bir kendiliğinden yeniden dener. Sorunu telefondan düzeltince
+  (ör. yeni IP'yi Binance → API Yönetimi'nde eklemek, Spot'tan Vadeli cüzdana USDT aktarmak) bot "✅ Binance bağlantısı
+  düzeldi" der ve normal açılışa devam eder; açık pozisyonlar varsa kaldığı yerden takip eder.
+- Aynı hata sürerken mesaj yağmuru olmaz: hata değişince, /dene sonrasında ve 6 saatte bir hatırlatma gelir.
+- `/kapat` → "Evet, kapat" botu gerçekten kapatır; o zaman yalnızca sunucuda yeniden başlatılabilir.
+- Telegram ayarlı değilse ya da `STARTUP_RETRY_MINUTES=0` ise eskisi gibi kapanır. Kill-switch kilidi bekleme moduna
+  girmez (bilerek sıfırlanması gerekir, bkz. "Kill-switch eşiği").
+- Spot botta (STRATEGY=futures değilken) bekleme modu yok.
 
 **Geliştiriciler için testler:** `.venv/bin/pip install pytest && .venv/bin/python -m pytest`
