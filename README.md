@@ -2643,10 +2643,26 @@ Komşular (4.000 USDT): 8x + fren → %50 eşik %8 / %12 / %15 +%1.743 / 9 / 1 �
   geride, 2,08 / 2,88 milyon). A'da fren yalnız 2020-2021'de çalışıyor (2.194 işlem); sonra hesap o kadar büyük ki
   bir günde %10 düşmüyor, fren bir daha devreye girmiyor ve aradaki fark kapanmıyor. Frenle küçülen işlemler o iki yılın
   en iyi işlemleri: zarar kümesinden hemen sonraki dalga girişleri, işlem başı +%0.44-0.48 (diğerleri +%0.06-0.12).
-  Her yıl 4.000 USDT ile yeniden başlayan hesapta (B) ise 8x + fren 2022-2026'nın beşinde de önde (rapor 22 → 23:
-  2022 +%134 → +%208, 2023 +%350 → +%711, 2024 +%4.491 → +%4.985, 2025 +%1.830 → +%2.937, 2026 +%165 → +%231),
-  geride kaldığı yıllar 2020 ve 2021. Yani A, 2021'in olağanüstü ilk yarısının ölçüsü; bugün başlayan hesap için 71
-  hesap ve B daha iyi ölçü.
+  B'de (1 Ocak'ta başlayan hesap) 8x + fren 2022-2026'nın beşinde de önde (rapor 22 → 23: 2022 +%134 → +%208, 2023
+  +%350 → +%711, 2024 +%4.491 → +%4.985, 2025 +%1.830 → +%2.937, 2026 +%165 → +%231), ama bu her yılın tek bir
+  başlangıç tarihi.
+- **Piyasa dönemine göre** (71 aylık başlangıç başlangıç yılına göre gruplu; 10 çekiliş; 12 ay ortanca / %60'ı aşan
+  düşüş / zararla biten hesap):
+
+  | Ayar | 2020 başlangıçları (12) | 2021 (12) | 2022 (12) | 2023-2025 (35) |
+  |---|---|---|---|---|
+  | 6x, fren yok (eski) | +%45.826 / 0 / 0 | +%1.681 / 4 / 0 | +%74 / 1.5 / 2 | +%1.307 / 0 / 0 |
+  | 8x, fren yok | +%47.133 / 6 / 0 | +%1.909 / 12 / 1 | +%26 / 7 / 5 | +%1.969 / 15 / 3 |
+  | **8x + fren %10 / %50** | +%26.968 / 3 / 0 | +%1.570 / 3 / 0 | +%25 / 4 / 3 | **+%1.970 / 1 / 0** |
+  | 7x + fren %10 / %50 | +%22.527 / 0 / 0 | +%1.271 / 0.5 / 0 | +%31 / 0 / 3.5 | +%1.644 / 0 / 0 |
+  | 8x + fren %10 / %70 | +%36.535 / 4 / 0 | +%2.042 / 6 / 0 | +%39 / 6 / 3 | +%2.058 / 5 / 1 |
+
+  Çöküşlerin ardından dönüşün geldiği olağan yıllarda (2023-2025) 8x + fren, 8x frensizle aynı kârı çok daha az düşüşle
+  veriyor; eski 6x'e göre +%51. Geride kaldığı iki dönem var: 2020-2021'in pandemi çöküşü ve ardından gelen aşırı
+  yükseliş (fren zarar kümesinden sonraki büyük dönüşleri yarım boyla alıyor) ve 2022'nin aylarca süren ayı piyasası
+  (LUNA, FTX: yüksek kaldıraç zararı büyütüyor, fren bunu yalnız kısmen azaltıyor; 2022'de her ayar zayıf, en iyisi
+  eski 6x). A, 2021'in olağanüstü ilk yarısının ölçüsü; bugün başlayan hesap için 71 hesap ve bu dönem tablosu daha iyi
+  ölçü.
 - **Raporda:** fren kapalıyken kaldıraç tablosunun sonunda "6x / 7x / 8x + 24 sa fren" satırları çıkar (tek çekiliş;
   araştırmada 0. çekiliş +%1.045 / 0 / 0, +%1.816 / 9 / 1, +%2.410 / 14 / 3; aynı çekilişte 6x frensiz +%1.581 / 15 / 2,
   rapor 22 ile aynı). Tek çekilişin %60+ düşüş sayısı oynaktır (6x frensiz 10 çekilişte 1-15).
