@@ -2637,6 +2637,16 @@ Komşular (4.000 USDT): 8x + fren → %50 eşik %8 / %12 / %15 +%1.743 / 9 / 1 �
 - **Bedeli:** 2020 başında başlayan tek hesap (A) frenle daha düşük biter (8x + fren: 4,14 → 3,64 milyon; 2020-2023
   dönemi yıllık getirisi +%456 → +%428, 2023-2026 +%466 → +%483): 2020-2021'in büyük dönüşleri zarardan hemen sonra
   geldiğinde fren onları küçük boyla karşılar. 8x'te likidasyon girişin ~%12 altında (6x'te %16.2).
+- **A neden düşüyor (rapor 23, 8x + fren: A 4,52 → 3,39 milyon):** kaldıraç değil (8x frensiz A +%113.415, 6x
+  frensiz +%113.023: hesap milyonlara çıkınca emir defteri pozisyonu sınırlıyor, kaldıraç A'yı değiştirmiyor). Fark
+  tamamen 2021'in ilk yarısında açılıyor (0. çekiliş: Aralık 2020'de frenli hesap önde, 88 bin / 74 bin; Haziran 2021'de
+  geride, 2,08 / 2,88 milyon). A'da fren yalnız 2020-2021'de çalışıyor (2.194 işlem); sonra hesap o kadar büyük ki
+  bir günde %10 düşmüyor, fren bir daha devreye girmiyor ve aradaki fark kapanmıyor. Frenle küçülen işlemler o iki yılın
+  en iyi işlemleri: zarar kümesinden hemen sonraki dalga girişleri, işlem başı +%0.44-0.48 (diğerleri +%0.06-0.12).
+  Her yıl 4.000 USDT ile yeniden başlayan hesapta (B) ise 8x + fren 2022-2026'nın beşinde de önde (rapor 22 → 23:
+  2022 +%134 → +%208, 2023 +%350 → +%711, 2024 +%4.491 → +%4.985, 2025 +%1.830 → +%2.937, 2026 +%165 → +%231),
+  geride kaldığı yıllar 2020 ve 2021. Yani A, 2021'in olağanüstü ilk yarısının ölçüsü; bugün başlayan hesap için 71
+  hesap ve B daha iyi ölçü.
 - **Raporda:** fren kapalıyken kaldıraç tablosunun sonunda "6x / 7x / 8x + 24 sa fren" satırları çıkar (tek çekiliş;
   araştırmada 0. çekiliş +%1.045 / 0 / 0, +%1.816 / 9 / 1, +%2.410 / 14 / 3; aynı çekilişte 6x frensiz +%1.581 / 15 / 2,
   rapor 22 ile aynı). Tek çekilişin %60+ düşüş sayısı oynaktır (6x frensiz 10 çekilişte 1-15).
