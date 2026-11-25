@@ -42,7 +42,8 @@ from config import (DATA_DIR, DAY_BRAKE_HOURS, dd_scale_factor, format_crash_rul
                     parse_crash_rules, scan_log_path, tr_from, tr_from_num, window_peak)
 from futures_data import FuturesArchive, concat, resample, slice_range
 from futures_depth import DEPTH_CHECK_MIN_NOTIONAL, DepthBook, daily_volume_fn
-from strategy import (BIG_EXTRA_SLOTS, FUT_BAR_MS, FUT_HOUR_MS, QUALITY_CUTS, basis_pct, basis_size_factor,
+from strategy import (BEAR_SMA_CHOICES, BIG_EXTRA_SLOTS, FUT_BAR_MS, FUT_HOUR_MS, QUALITY_CUTS, basis_pct,
+                      basis_size_factor, bear_size_factor,
                       big_extra_slots, big_funding_skip, big_rules_on, breadth_flags, btc_trend_1h, crash_state,
                       funding_per_bar, futures_candidates, futures_entries, futures_features, isolated_factor,
                       pick_signal, quality_roundup_ok, quality_score, quality_size_factor, recent_size_factor,
@@ -697,6 +698,11 @@ class SimParams:
     # tutarlı C senaryosunda uygulanmaz)
     day_brake_pct: float = 0.0
     day_brake_size_pct: float = 50.0
+    # Ayı piyasası küçültmesi (FUTURES_BEAR_SIZE_PCT; canlı: FuturesBot._bear_factor): BTC'nin girişten önceki günkü
+    # kapanışı bear_sma_days günlük ortalamasının altındaysa boy × bear_size_pct / 100 (sinyal ölçüsü metrics["bearN"],
+    # attach_regime; 100 = kapalı)
+    bear_size_pct: float = 100.0
+    bear_sma_days: int = 100
     # Emir defteri derinliği (futures_depth; veri FutData.depth'te, yoksa ikisi de uygulanmaz): depth_cap_pct > 0 ise giriş
     # tutarı girişten önceki 2 dk'da ±%1 içindeki alış / satış emirlerinin küçüğünün bu yüzdesiyle sınırlı ve aynı mumdaki
     # sinyallerde sınıra takılınca kapasitesi büyük olan önce (FUTURES_DEPTH_CAP_PCT); depth_impact: piyasa emrinin defteri
@@ -751,6 +757,8 @@ def params_from_cfg(cfg, **over) -> SimParams:
                   dd_scale_size_pct=float(getattr(cfg, "futures_dd_scale_size_pct", 60.0)),
                   day_brake_pct=float(getattr(cfg, "futures_day_brake_pct", 0.0) or 0.0),
                   day_brake_size_pct=float(getattr(cfg, "futures_day_brake_size_pct", 50.0)),
+                  bear_size_pct=float(getattr(cfg, "futures_bear_size_pct", 100.0)),
+                  bear_sma_days=int(getattr(cfg, "futures_bear_sma_days", 100)),
                   depth_cap_pct=float(getattr(cfg, "futures_depth_cap_pct", 0.0) or 0.0),
                   depth_impact=bool(getattr(cfg, "futures_backtest_depth", False)),
                   entry_lag_pct=entry_lag_for(cfg)[0], stop_slip_pct=STOP_SLIP_PCT)
@@ -812,6 +820,7 @@ class FutTrade:
     be_q: float = -1.0      # O mumda tabana geri dönüş olasılığı (be_retouch_prob; -1 = böyle bir mum olmadı)
     dd_scaled: bool = False  # Düşüşte küçültmeyle (FUTURES_DD_SCALE_PCT) küçük boyla açıldı
     braked: bool = False     # 24 saat freniyle (FUTURES_DAY_BRAKE_PCT) küçük boyla açıldı
+    bear: bool = False       # Ayı piyasası küçültmesiyle (FUTURES_BEAR_SIZE_PCT) küçük boyla açıldı
     depth_capped: bool = False  # Derinliğe göre boy sınırına takıldı (FUTURES_DEPTH_CAP_PCT)
     impact_pct: float = 0.0  # Emir defteri kayması, giriş + çıkış (fiyat %; FUTURES_BACKTEST_DEPTH)
     drop15: float = float("nan")  # Girişten önceki 15 dk'daki düşüş (%; sinyal ölçüsü, FUTURES_RECENT_SIZE_PCT)
@@ -1140,7 +1149,13 @@ def size_factor(p: SimParams, s: "FutSignal") -> float:
            * basis_size_factor(p.basis_size_pct, p.basis_deep_pct, s.metrics.get("basis")))
     if p.quality_size_pct < 100 and s.metrics.get("tactic", 1.0) == 1.0:
         out *= quality_size_factor(p.quality_size_pct, p.quality_cut_pct, quality_score(s.score, s.metrics))
-    return out
+    return out * bear_size_factor(p.bear_size_pct, signal_bear(s, p.bear_sma_days))
+
+
+def signal_bear(s: "FutSignal", days: int) -> Optional[bool]:
+    """Sinyal anında ayı piyasası mı (attach_regime'in yazdığı metrics["bearN"]: 1 / 0; ölçü yoksa None)."""
+    v = s.metrics.get(f"bear{int(days)}")
+    return None if v is None or v != v else bool(v)
 
 
 def slot_share(p: SimParams, n_open: int) -> float:
@@ -1288,6 +1303,7 @@ def simulate(p: SimParams, data: FutData, signals: Sequence[FutSignal], windows:
         tr.quality = quality_score(s.score, s.metrics) if s.metrics.get("tactic", 1.0) == 1.0 else float("nan")
         tr.dd_scaled = ddf < 1
         tr.braked = bf < 1
+        tr.bear = p.bear_size_pct < 100 and bool(signal_bear(s, p.bear_sma_days))
         peak = max(peak, equity)
         trades.append(tr)
         curve.append((tr.exit_ms, equity))
@@ -1480,6 +1496,7 @@ def simulate_slots(p: SimParams, data: FutData, signals: Sequence[FutSignal], wi
         tr.quality = quality_score(s.score, s.metrics) if s.metrics.get("tactic", 1.0) == 1.0 else float("nan")
         tr.dd_scaled = ddf < 1
         tr.braked = bf < 1
+        tr.bear = p.bear_size_pct < 100 and bool(signal_bear(s, p.bear_sma_days))
         tr.rounded = not fixed_notional and rounded
         trades.append(tr)
         free_at = tr.exit_ms if tr.reason == "TIME" else tr.exit_ms + tr.bar_ms
@@ -1978,7 +1995,7 @@ def exit_variant_rows(cfg, ev) -> List[Tuple[str, "Evaluation"]]:
 
 
 def size_variant_rows(cfg, ev, depth: bool = False, has_basis: bool = False,
-                      has_funding: bool = False) -> List[Tuple[str, "Evaluation"]]:
+                      has_funding: bool = False, has_regime: bool = False) -> List[Tuple[str, "Evaluation"]]:
     """Pozisyon büyüklüğü ve dalga modu: teminat kullanımı, en fazla pozisyon, ek pozisyon boyu ve kapısı, yalnız çöküş
     boyu, dalgada yeniden giriş eşiği, düşüşte küçültme (açıksa çevresi, kapalıysa %30 / %60), derinlik verisi varsa
     derinliğe göre boy (açıksa çevresi, kapalıysa %10 + kapasite önceliği)."""
@@ -2032,6 +2049,30 @@ def size_variant_rows(cfg, ev, depth: bool = False, has_basis: bool = False,
     else:
         rows.append(("Düşüşte küçültme: zirveden %30 düşünce %60 boy", ev(dd_scale_pct=30.0, dd_scale_size_pct=60.0)))
     rows += brake_variant_rows(base, ev)
+    rows += bear_variant_rows(base, ev, has_regime)
+    return rows
+
+
+BEAR_SIZE_TRIES = (65.0, 75.0, 85.0)     # Ayı piyasasındaki boy (%; rapor 25 araştırması, 25 Kasım)
+BEAR_DAYS_TRIES = (50, 100, 150)         # BTC'nin kaç günlük ortalaması
+
+
+def bear_variant_rows(base: SimParams, ev, has_regime: bool) -> List[Tuple[str, "Evaluation"]]:
+    """Ayı piyasası küçültmesi (FUTURES_BEAR_SIZE_PCT): açıksa kapalı + boy / gün çevresi, kapalıysa %75 / 100 gün ve
+    araştırmanın önerdiği birleşim (düşüşte küçültme kapalıyla). BTC rejimi ölçülemediyse satır yok."""
+    if not has_regime:
+        return []
+    if base.bear_size_pct >= 100:
+        rows = [("Ayı piyasasında (BTC < 100 günlük ort.) boy %75", ev(bear_size_pct=75.0, bear_sma_days=100))]
+        if base.dd_scale_pct > 0:
+            rows.append(("Ayı piyasası %75 + düşüşte küçültme kapalı",
+                         ev(bear_size_pct=75.0, bear_sma_days=100, dd_scale_pct=0.0)))
+        return rows
+    rows = [("Ayı piyasası küçültmesi kapalı", ev(bear_size_pct=100.0))]
+    rows += [(f"Ayı piyasası boyu %{z:g} (şimdi %{base.bear_size_pct:g})", ev(bear_size_pct=z))
+             for z in BEAR_SIZE_TRIES if not _same(z, base.bear_size_pct)]
+    rows += [(f"Ayı piyasası: BTC {d} günlük ort. (şimdi {base.bear_sma_days})", ev(bear_sma_days=d))
+             for d in BEAR_DAYS_TRIES if d != base.bear_sma_days]
     return rows
 
 
@@ -2205,7 +2246,8 @@ def _crash_variant_rows(cfg, signals, minute: bool, tag: str, ev, other,
             + exit_variant_rows(cfg, ev) + [tp_order] + phase8_rows(cfg, ev) + phase9_rows(cfg, ev)
             + [("Pozisyon büyüklüğü ve dalga modu", None)]
             + size_variant_rows(cfg, ev, depth, any("basis" in s.metrics for s in signals),
-                                any("last_funding" in s.metrics for s in signals))
+                                any("last_funding" in s.metrics for s in signals),
+                                any("bear100" in s.metrics for s in signals))
             + cascade_rows(cfg, ev, signals) + phase6_rows(cfg, ev, signals)
             + [("Giriş kuralı, tarama ve bekleme", None)] + scan5
             + [(f"Çöküş eşiği %{cfg.futures_crash_drop_pct - 2:g}{tag}",
@@ -2240,6 +2282,7 @@ def variant_rows(cfg, data: FutData, signals, windows,
                 data.depth.prefetch([(x.symbol, x.close_ms) for x in sigs])
             attach_basis(c2, data, sigs)
             attach_funding(c2, data, sigs)
+            attach_regime(c2, data, sigs)
             return evaluate(params_from_cfg(c2), data, sigs, windows)
         def stub(*_a, **_k):
             return 0
@@ -4069,6 +4112,11 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
         L.append(f"📉 Düşüşte küçültme: bakiye zirvesinin %{p.dd_scale_pct:g} altındayken yeni pozisyonlar "
                  f"%{p.dd_scale_size_pct:g} boy (A ve B'de; C sabit tutarla). A'da {small} / {len(res.trades)} işlem "
                  f"küçük boyla açıldı")
+    if p.bear_size_pct < 100:
+        bears = sum(1 for tr in res.trades if tr.bear)
+        L.append(f"🐻 Ayı piyasası: BTC'nin girişten önceki günkü kapanışı {p.bear_sma_days} günlük ortalamasının "
+                 f"altındayken yeni pozisyonlar %{p.bear_size_pct:g} boy (A, B ve C'de). A'da {bears} / "
+                 f"{len(res.trades)} işlem bu boyla açıldı")
     if p.day_brake_pct > 0:
         braked = sum(1 for tr in res.trades if tr.braked)
         L.append(f"🚦 24 saat freni: bakiye son 24 saatteki en yüksek değerinin %{p.day_brake_pct:g} altındayken yeni "
@@ -4557,6 +4605,66 @@ def attach_funding(cfg, data: FutData, signals: Sequence[FutSignal],
     return done
 
 
+def btc_daily_closes(data: FutData, end_ms: int) -> Tuple[np.ndarray, np.ndarray]:
+    """BTCUSDT vadeli günlük kapanışları (5 dk mumların gün sonu; arşivden, Eylül 2019'dan end_ms ayına): (gün
+    numaraları, kapanışlar). Okunamayan aylar atlanır."""
+    days: List[int] = []
+    closes: List[float] = []
+    end = datetime.fromtimestamp(end_ms / 1000, tz=timezone.utc)
+    y, m = 2019, 9
+    while (y, m) <= (end.year, end.month):
+        try:
+            k = data.archive.month("BTCUSDT", "5m", y, m)
+        except Exception:  # noqa: BLE001 - o ay yok / indirilemedi
+            k = None
+        if k is not None and len(k["t"]):
+            d = (np.asarray(k["t"]) // DAY_MS).astype(np.int64)
+            last = np.r_[np.nonzero(np.diff(d))[0], len(d) - 1]
+            days.extend(int(x) for x in d[last])
+            closes.extend(float(x) for x in np.asarray(k["c"])[last])
+        y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+    order = np.argsort(np.asarray(days, dtype=np.int64), kind="stable")
+    return np.asarray(days, dtype=np.int64)[order], np.asarray(closes, dtype=float)[order]
+
+
+def attach_regime(cfg, data: FutData, signals: Sequence[FutSignal],
+                  progress: Optional[Callable[[str], None]] = None) -> int:
+    """Çöküş taktiğinde her sinyale BTC'nin günlük rejimi (ayı piyasası küçültmesi, FUTURES_BEAR_SIZE_PCT): girişten
+    önceki günün kapanışı N günlük ortalamanın altındaysa metrics["bearN"] = 1, değilse 0 (strategy.bear_regime ile aynı
+    kural; N = BEAR_SMA_CHOICES ve ayardaki gün). Yeterli geçmiş yoksa ölçü yazılmaz (boy değişmez). Ölçülen sinyal
+    sayısı döner."""
+    if getattr(cfg, "futures_tactic", "crash") != "crash" or data.archive is None or not signals:
+        return 0
+    todo = [s for s in signals if not any(k.startswith("bear") for k in s.metrics)]
+    if not todo:
+        return 0
+    if progress:
+        progress("🐻 BTC günlük rejimi (ayı piyasası) hesaplanıyor...")
+    day_no, closes = btc_daily_closes(data, max(s.close_ms for s in todo))
+    if not len(closes):
+        return 0
+    cs = np.r_[0.0, np.cumsum(closes)]
+    flags: Dict[int, np.ndarray] = {}
+    for n in sorted(set(BEAR_SMA_CHOICES) | {int(getattr(cfg, "futures_bear_sma_days", 100))}):
+        f = np.full(len(closes), np.nan)
+        if len(closes) >= n:
+            sma = (cs[n:] - cs[:-n]) / n
+            f[n - 1:] = (closes[n - 1:] < sma).astype(float)
+        flags[n] = f
+    done = 0
+    for s in todo:
+        i = int(np.searchsorted(day_no, s.close_ms // DAY_MS, side="left")) - 1     # Dünün kapanışı (bugün bilinmez)
+        if i < 0:
+            continue
+        got = False
+        for n, f in flags.items():
+            if f[i] == f[i]:
+                s.metrics[f"bear{n}"] = float(f[i])
+                got = True
+        done += got
+    return done
+
+
 def run_cli(cfg, days: Optional[int], end_ms: Optional[int], out_dir: Path, chart: bool = True,
             full_history: bool = False, exit_interval: str = "1m", sensitivity: bool = True,
             progress: Callable[[str], None] = print) -> Tuple[str, Optional[Path], Evaluation]:
@@ -4578,6 +4686,7 @@ def run_cli(cfg, days: Optional[int], end_ms: Optional[int], out_dir: Path, char
     attach_depth(cfg, data, signals, progress)
     attach_basis(cfg, data, signals, progress)
     attach_funding(cfg, data, signals, progress)
+    attach_regime(cfg, data, signals, progress)
     ev = evaluate(params_from_cfg(cfg), data, signals, windows)
     levs = grid = variants = None
     if sensitivity:

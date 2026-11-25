@@ -211,6 +211,11 @@ EDITABLE: Dict[str, Setting] = {
                                      "(0 = kapalı)"),
     "FUTURES_DAY_BRAKE_SIZE_PCT": Setting("futures_day_brake_size_pct", "float",
                                           "24 saat freni: frendeki pozisyon büyüklüğü (%; 100 = tam)"),
+    "FUTURES_BEAR_SIZE_PCT": Setting("futures_bear_size_pct", "float",
+                                     "Ayı piyasası: BTC N günlük ortalamasının altındayken pozisyon büyüklüğü "
+                                     "(%; 100 = kapalı)"),
+    "FUTURES_BEAR_SMA_DAYS": Setting("futures_bear_sma_days", "int",
+                                     "Ayı piyasası: BTC'nin kaç günlük ortalamasına bakılır"),
     "FUTURES_DEPTH_CAP_PCT": Setting("futures_depth_cap_pct", "float",
                                      "Derinliğe göre boy: ±%1 içindeki alış / satış emirlerinin küçüğünün %'si (0 = kapalı)"),
     "FUTURES_BACKTEST_DEPTH": Setting("futures_backtest_depth", "bool",

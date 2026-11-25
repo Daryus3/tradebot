@@ -94,6 +94,13 @@ DD_SCALE_HINT = ("Düşüşte küçültme (rapor 24 araştırması; 2020-2026, 1
 # 24 saat freni (rapor 22 araştırması, 23 Kasım; varsayılan kapalı): son 24 saatin sermaye zirvesinden düşüş eşiği ve boy
 DAY_BRAKE_CHOICES = (0, 10, 15)
 DAY_BRAKE_SIZE_CHOICES = (50, 60, 70, 80)
+# Ayı piyasası küçültmesi (rapor 25 araştırması, 25 Kasım; varsayılan kapalı): BTC N günlük ortalamasının altındayken boy
+BEAR_SIZE_CHOICES = (100, 85, 75, 65)
+BEAR_DAYS_CHOICES = (50, 100, 150, 200)
+BEAR_HINT = ("Ayı piyasası küçültmesi (rapor 25 araştırması; 4.000 USDT, 8x + 24 saat freni, her ayın 1'inde başlayan 71 "
+             "hesap): BTC'nin dünkü kapanışı 100 günlük ortalamasının altındayken pozisyonlar %75 boy. Düşüşte küçültme "
+             "eşiği %40 ile kâr aynı (+%1.841 → +%1.822), %60'ı aşan düşüş yaşayan hesap 12 → 2.5; düşüşte küçültme "
+             "kapalıyken +%1.921, düşüş 7.5 (pahalı dolumda kill-switch daha sık).")
 DAY_BRAKE_HINT = ("24 saat freni (rapor 22 araştırması; 4.000 USDT, 2020-2026, her ayın 1'inde başlayan 71 hesabın ilk 12 "
                   "ayı): sermaye son 24 saatin zirvesinin %10 altındayken yeni pozisyonlar %50 boy; aynı gün art arda "
                   "gelen zararları küçük boyla karşılar, 24 saat içinde kendiliğinden tam boya döner. Aynı kaldıraçta "
@@ -519,6 +526,10 @@ PAGES: Dict[str, Page] = {
             fmt=_off("24 sa freni yok", lambda v: f"24 sa −%{v:g}"), show=lambda cfg: is_futures(cfg.strategy)),
         Row("FUTURES_DAY_BRAKE_SIZE_PCT", icon="📏", values=DAY_BRAKE_SIZE_CHOICES, fmt=lambda v: f"Fren boyu %{v:g}",
             show=lambda cfg: is_futures(cfg.strategy) and cfg.futures_day_brake_pct > 0),
+        Row("FUTURES_BEAR_SIZE_PCT", icon="🐻", values=BEAR_SIZE_CHOICES,
+            fmt=lambda v: "Ayı küçültmesi yok" if v >= 100 else f"Ayıda %{v:g}", show=lambda cfg: is_futures(cfg.strategy)),
+        Row("FUTURES_BEAR_SMA_DAYS", icon="📅", values=BEAR_DAYS_CHOICES, fmt=lambda v: f"BTC {v:g} gün ort.",
+            show=lambda cfg: is_futures(cfg.strategy) and cfg.futures_bear_size_pct < 100),
         Row("FUTURES_DEPTH_CAP_PCT", icon="🧱", values=DEPTH_CAP_CHOICES,
             fmt=_off("Defter sınırı yok", lambda v: f"Defter %{v:g}"), show=lambda cfg: is_futures(cfg.strategy)),
         Row("FUTURES_BACKTEST_DEPTH", name="📚 Backtestte emir defteri kayması", show=lambda cfg: is_futures(cfg.strategy)),
@@ -1251,7 +1262,8 @@ class SettingsMenu:
         frozen = bot.freeze_note()
         futures = is_futures(cfg.strategy)
         return (f"🧯 <b>Risk Sigortaları</b>\n{LINE}\n"
-                f"{self.kill_line()}\n" + (self.dd_line() + self.brake_line() + self.depth_line() if futures else "") +
+                f"{self.kill_line()}\n" + (self.dd_line() + self.brake_line() + self.bear_line() + self.depth_line()
+                                           if futures else "") +
                 f"📉 Günlük zarar limiti: {daily} | bugün: {fmt_signed(day_pnl)} {q}\n"
                 f"🎯 Günlük kâr hedefi: {target}\n🔁 Zarar serisi sigortası: {streak}\n"
                 f"⏳ Her çıkıştan sonra aynı coine bekleme: "
@@ -1261,7 +1273,8 @@ class SettingsMenu:
                 f"{frozen or '▶️ Alımlar dondurulmamış'}\n{LINE}\n"
                 "<i>Sigortalar yalnızca YENİ alımları durdurur; açık pozisyonların takibi sürer. Kill-switch ise "
                 "her şeyi kapatıp botu kilitler. Diğerleri: /ayar ANAHTAR DEĞER"
-                + (f"\n{esc(DD_SCALE_HINT)}\n{esc(DAY_BRAKE_HINT)}\n{esc(DEPTH_HINT)}" if futures else "") + "</i>")
+                + (f"\n{esc(DD_SCALE_HINT)}\n{esc(DAY_BRAKE_HINT)}\n{esc(BEAR_HINT)}\n{esc(DEPTH_HINT)}"
+                   if futures else "") + "</i>")
 
     def depth_line(self) -> str:
         """Risk sayfasında derinliğe göre boy ve backtestteki emir defteri kayması durumu."""
@@ -1271,6 +1284,18 @@ class SettingsMenu:
                f"sinyalde kapasitesi büyük olan önce" if cfg.futures_depth_cap_pct > 0 else "kapalı")
         bt = "açık (ölçülen derinlik)" if cfg.futures_backtest_depth else "kapalı (kayma büyüklükten bağımsız)"
         return f"🧱 Derinliğe göre boy: {cap}\n📚 Backtestte emir defteri kayması: {bt}\n"
+
+    def bear_line(self) -> str:
+        """Risk sayfasında ayı piyasası küçültmesi: ayar ve son ölçülen BTC rejimi (sayfa açılırken Binance'e istek atılmaz;
+        bot ilk girişte / günde bir kez ölçer)."""
+        cfg, bot = self.cfg, self.bot
+        cached = getattr(bot, "_bear_cache", None)
+        regime = ("henüz ölçülmedi" if not cached or cached[2] is None else
+                  f"BTC şu an {cached[1]} günlük ortalamasının {'altında (ayı)' if cached[2] else 'üstünde'}")
+        if cfg.futures_bear_size_pct >= 100:
+            return f"🐻 Ayı piyasası küçültmesi: kapalı ({regime})\n"
+        return (f"🐻 Ayı piyasası küçültmesi: BTC {cfg.futures_bear_sma_days} günlük ortalamasının altındayken pozisyon "
+                f"%{cfg.futures_bear_size_pct:g} boy | {regime}\n")
 
     def brake_line(self) -> str:
         """Risk sayfasında 24 saat freni durumu: son 24 saatin sermaye zirvesi, şu anki düşüş ve sıradaki pozisyonun boyu."""

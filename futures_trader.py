@@ -56,7 +56,7 @@ from strategy import (FUT_BAR_MS, FUT_BREADTH_DROP_PCT, FUT_BREADTH_HOURS, FUT_B
                       ScanResult, funding_per_bar, futures_kline_limit, isolated_factor, market_breadth,
                       recent_size_factor, basis_pct, basis_size_factor, quality_score, quality_size_factor,
                       spot_pairs, BIG_EXTRA_SLOTS, QUALITY_CUTS, big_extra_slots, big_funding_skip, big_rules_on,
-                      quality_roundup_ok)
+                      quality_roundup_ok, bear_regime, bear_size_factor)
 from telegram_bot import CRITICAL_EXITS, Messages, esc, fmt_duration, fmt_price, fmt_signed, fmt_usdt, futures_tag
 from trader import ALIVE_SAVE_SEC, POSITION_LOG_SEC, RULES_REFRESH_SEC, Mark, TradingBot
 
@@ -177,6 +177,8 @@ class FuturesBot(TradingBot):
         self.next_scan_at = self._next_close(self.time_fn()) + self._scan_delay()
         self.last_signals: List[FuturesSignal] = []
         self._be_retry_at: Dict[str, float] = {}
+        self._bear_cache: Optional[Tuple[int, int, Optional[bool]]] = None   # (UTC günü, gün sayısı, ayı mı)
+        self._bear_retry_at = 0.0
         self._stop_passed: Set[str] = set()    # Stop taşınırken "emir hemen tetiklenir" reddi alan pariteler
         self._trail_at: Dict[str, float] = {}
         self.universe: List[str] = []          # FUTURES_UNIVERSE: en hacimli N köklü parite (sıralamanın ilk N'i)
@@ -1773,6 +1775,9 @@ class FuturesBot(TradingBot):
                 sig.metrics["quality_size_pct"] = round(quality * 100, 1)
                 sig.metrics["quality_cut_pct"] = cfg.futures_quality_cut_pct
                 factor *= quality
+        bear = self._bear_factor(sig)
+        if bear != 1:
+            factor *= bear
         dd = self._dd_factor(sig)
         brake = self._brake_factor(sig)
         slots = self.slots()
@@ -1796,6 +1801,42 @@ class FuturesBot(TradingBot):
         if factor < 1 and sig is not None:
             sig.metrics["dd_size_pct"] = round(factor * 100, 1)
             sig.metrics["dd_pct"] = round((1 - state.capital / peak) * 100, 1)
+        return factor
+
+    def bear_regime(self) -> Optional[bool]:
+        """Ayı piyasası mı (FUTURES_BEAR_SIZE_PCT): BTC'nin kesinleşmiş günlük kapanışları strategy.bear_regime'e verilir
+        (backtest: futures_backtest.attach_regime). Günde bir kez (UTC gün değişince) istenir; alınamazsa 10 dk sonra
+        yeniden denenir, o sürede None (boy değişmez)."""
+        cfg = self.cfg
+        now = self.time_fn()
+        day, days = int(now // 86400), int(cfg.futures_bear_sma_days)
+        cached = self._bear_cache
+        if cached is not None and cached[0] == day and cached[1] == days:
+            return cached[2]
+        if now < self._bear_retry_at:
+            return None
+        try:
+            kl = self.exchange.klines("BTCUSDT", "1d", days + 2)
+        except Exception as exc:  # noqa: BLE001 - rejim ölçülemedi: boy değişmez
+            log.warning("BTC günlük mumları alınamadı (ayı piyasası ölçüsü): %s", exc)
+            self._bear_retry_at = now + 600
+            return None
+        closes = [float(c) for t, c in zip(kl["t"], kl["c"]) if int(t) // 86_400_000 < day]
+        flag = bear_regime(closes, days)
+        self._bear_cache = (day, days, flag)
+        if flag is not None:
+            log.info("BTC günlük rejimi (%d günlük ortalama): %s", days, "ayı piyasası" if flag else "ayı değil")
+        return flag
+
+    def _bear_factor(self, sig: Optional[FuturesSignal] = None) -> float:
+        """Ayı piyasası küçültmesi çarpanı (kapalıysa 1). Uygulanınca sinyale yazılır (pozisyon mesajı)."""
+        cfg = self.cfg
+        if cfg.futures_bear_size_pct >= 100:
+            return 1.0
+        factor = bear_size_factor(cfg.futures_bear_size_pct, self.bear_regime())
+        if factor < 1 and sig is not None:
+            sig.metrics["bear_size_pct"] = round(factor * 100, 1)
+            sig.metrics["bear_days"] = int(cfg.futures_bear_sma_days)
         return factor
 
     def _brake_factor(self, sig: Optional[FuturesSignal] = None) -> float:

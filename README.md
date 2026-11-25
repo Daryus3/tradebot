@@ -2676,6 +2676,54 @@ Komşular (4.000 USDT): 8x + fren → %50 eşik %8 / %12 / %15 +%1.743 / 9 / 1 �
   rapor başlığında 🚦 satırı, kaldıraç tablosunda fren satırları, tek kural tablosunda kapalı / eşik / boy satırları.
   Fren kaldıracı değiştirmez: önerilen kullanım `FUTURES_LEVERAGE=8` ile (daha az düşüş için 7).
 
+#### Rapor 25 araştırması: freni inceltmek, ayı piyasası küçültmesi, yeni tabanda yeniden ayar (Kasım 2026)
+Taban: rapor 25'in ayarı (8x + 24 saat freni %10 / %50, fark %130, kalite %60, büyük hesap ≥5.000, yuvarlama), **4.000
+USDT**, 10 çekiliş, her ayın 1'inde başlayan 71 hesap (12 ay ortanca / %60'ı aşan düşüş / kill-switch / 12 ay sonunda
+zararda biten). Şimdiki: +%1.841 / 12 / 0 / 3.
+
+| Fikir | Sonuç | Karar |
+|---|---|---|
+| Frenden muafiyet: en güçlü %20 / %40, dalgada yeniden giriş | +%1.918 … +%2.002, düşüş 31-40, kill 6-9 | Kötü: frenin koruması kalkıyor |
+| Fren yalnız ilk / yalnız ek pozisyonda | +%1.882 / 20 / 1 · +%1.736 / 28 / 6 | Kötü |
+| İki kademeli fren (%10 → 70, %20 → 40 · %7 → 75, %15 → 45) | +%1.631 / +%1.665, düşüş 12 | Kötü |
+| Oynaklığa göre boy (risk eşitleme, 0.6-1.4) | +%2.060 / 22 / 10, zararla biten 12 | Kötü |
+| Yeni tabanda: zaman stopu 60 dk / ek 25 dk / en fazla 3 pozisyon / durulmuş < %3 | +%1.586 … +%1.856 | Kötü |
+| Vadeli-spot boyu %150 / düşüşte küçültme kapalı | +%2.056 / 17 / 2 · +%2.092 / 27 / 3 | Kâr ve düşüş birlikte artıyor |
+| Piyasa rejimine göre fren boyu (boğa %60-70, ayı %40) | +%2.025 … +%2.098, düşüş 18-21 | Kötü |
+| **Ayı piyasası küçültmesi** (aşağıda) | | **Eklendi** |
+
+**Ayı piyasası küçültmesi (yeni).** Önceki dönem tablosunda yeni ayar yalnız 2020-2021 coşkusunda ve 2022 ayısında
+geride kalıyordu. Ayı dönemlerinde çöküş dönüşleri zayıf. Kural: BTC'nin girişten önceki günkü kapanışı N günlük
+ortalamasının altındaysa yeni pozisyonlar küçük boy. Bir önceki günün kapanışı kullanılır (gün içinde bilinmeyen değer
+yok). Sinyallerin %24'ü BTC 200 günlük ortalamanın altındayken geliyor.
+
+| Ayar (8x + 24 saat freni) | 12 ay ortanca / %60+ / kill / zararda | 2020 / 2021 / 2022 / 2023-25 başlangıçları | Pahalı canlı dolum (+%0.084) |
+|---|---|---|---|
+| Şimdiki (düşüşte küçültme %30) | +%1.841 / 12 / 0 / 3 | +%26.968 / +%1.570 / +%25 / +%1.970 | +%918 / 18 / 5.5 / 9 |
+| + ayı100 ×0.75 (küçültme %30) | +%1.653 / 3 / 0 / 3 | | |
+| **+ ayı100 ×0.75, küçültme %40** | +%1.822 / **2.5** / 0 / 2 | +%27.119 / +%1.372 / +%71 / +%1.851 | +%899 / 14 / **3** / 7 |
+| + ayı50 ×0.75, küçültme %40 | +%1.814 / 2 / 0 / 2 | | |
+| **+ ayı100 ×0.75, küçültme kapalı (H1)** | **+%1.921** / 7.5 / 0 / 2 (7/10) | +%35.678 / +%1.640 / +%99 / +%2.000 | +%1.111 / 20 / 9 / 12 |
+| H1, ayı50 / ayı150 / ayı200 | +%1.910 / 7.5 · +%1.845 / 19 · (200: kötü) | | |
+| H1, ×0.65 / ×0.85 / ×0.5 | +%1.788 / 3.5 · +%1.946 / 15 · +%1.634 / 3 | | |
+| H1 + vadeli-spot boyu %150 (H2) | +%2.013 / 11 / 1 / 2.5 (8/10) | +%38.039 / +%1.828 / +%100 / +%2.178 | +%1.218 / 23.5 / 9 / 12 |
+
+- **Ne yapıyor:** sağlam bir risk azaltıcı. Kâr ve düşüş üzerindeki etkisi, eski "düşüşte küçültme"yle birlikte nasıl
+  kullanıldığına bağlı: düşüşte küçültme %40'ta kalırsa kâr aynı, %60'ı aşan düşüş yaşayan hesap 12 → 2.5. Pahalı canlı
+  dolumda da kill-switch 5.5 → 3. Düşüşte küçültme kapatılırsa (H1) kâr +%4, düşüş 12 → 7.5 ve dört dönemin dördünde
+  şimdikinden iyi. Ama pahalı dolumda kill-switch 5.5 → 9, çünkü o koruma kalkıyor.
+- 50 ve 100 günlük ortalama çalışıyor, 150-200 çalışmıyor. ×0.65-0.85 arası düzgün bir kâr / risk geçişi var. Doğrulama
+  döneminde yıllık getiri +%483 → +%497 (küçültme %40) / +%504 (H1); 3 kat kaymada doğrulama +%348 → +%343 (küçültme %40,
+  aynı) / +%377 (H1). Resmi motor araştırmayı birebir verdi; sinyallerin ayı işaretleri de araştırmayla aynı.
+- **Eklenen ayar:** `FUTURES_BEAR_SIZE_PCT` (varsayılan 100 = kapalı; önerilen 75) ve `FUTURES_BEAR_SMA_DAYS` (100).
+  Telegram: 🧯 Risk sigortaları → 🐻 (sayfada son ölçülen BTC rejimi yazar). Canlı bot BTC'nin günlük mumlarını günde
+  bir kez Binance'ten alır; alınamazsa 10 dk sonra yeniden dener, o sürede boy değişmez. Pozisyon mesajında "Ayı piyasası
+  (BTC 100 günlük ortalamasının altında): pozisyon %75 boy" yazar. Backtest BTC günlük kapanışlarını 5 dk arşivinden
+  çıkarır (`attach_regime`). Rapor başlığında 🐻 satırı, tek kural tablosunda kapalı / boy / gün satırları ve kapalıyken
+  "+ düşüşte küçültme kapalı" birleşimi.
+- **Öneri:** sakin seçenek `FUTURES_BEAR_SIZE_PCT=75` + `FUTURES_DD_SCALE_PCT=40` (kâr aynı, büyük düşüş çok az). Kâr
+  için `FUTURES_BEAR_SIZE_PCT=75` + `FUTURES_DD_SCALE_PCT=0` (H1).
+
 #### Kill-switch eşiği (rapor 23, Kasım 2026)
 **Nasıl çalışır:** botun toplam zararı (kapanan işlemler + açık pozisyonların anlık zararı) botun sermayesinin
 (başlangıç + /sermayeekle) `MAX_TOTAL_LOSS_PCT`'sine ulaşınca durum dosyasına "kill-switch" yazılır, yeni pozisyon
@@ -2820,6 +2868,9 @@ karar için ortancaya ve en kötüye bakın. Çıkış taraması her gün dengel
 - **📉 Düşüşte küçültme satırı** (rapor başlığında, `FUTURES_DD_SCALE_PCT` açıkken): bakiye zirvesinin eşik kadar
   altındayken açılan pozisyonların küçük boyla açıldığını ve A'daki (tek hesap) kaç işlemin küçük boyla açıldığını
   gösterir. A ve B aynı kuralı kullanır; C (sabit tutar) kullanmaz.
+- **🐻 Ayı piyasası satırı** (rapor başlığında, `FUTURES_BEAR_SIZE_PCT` açıkken): BTC'nin girişten önceki günkü
+  kapanışı N günlük ortalamasının altındayken açılan pozisyonların küçük boyla açıldığını ve A'da kaç işlemin bu boyla
+  açıldığını gösterir. A, B ve C aynı kuralı kullanır.
 - **🚦 24 saat freni satırı** (rapor başlığında, `FUTURES_DAY_BRAKE_PCT` açıkken): bakiye son 24 saatteki en yüksek
   değerinin eşik kadar altındayken açılan pozisyonların küçük boyla açıldığını ve A'da kaç işlemin frenle açıldığını
   gösterir. Fren A'nın son bakiyesini genellikle düşürür (2020 başındaki büyük dönüşleri küçük boyla karşılar); kazancı

@@ -1015,6 +1015,9 @@ class Config:
     # 24 saat freni (bkz. window_peak üstündeki açıklama): sermaye son 24 saatin zirvesinin %X altındayken boy %Y
     futures_day_brake_pct: float = 0.0     # Son 24 saatin zirvesinden düşüş eşiği (%; 0 = kapalı)
     futures_day_brake_size_pct: float = 50.0  # Eşik aşılınca yeni pozisyonların büyüklüğü (%)
+    # Ayı piyasası küçültmesi (strategy.bear_regime): BTC'nin dünkü kapanışı N günlük ortalamasının altındayken boy %X
+    futures_bear_size_pct: float = 100.0   # Ayı piyasasında yeni pozisyonların büyüklüğü (%; 100 = kapalı)
+    futures_bear_sma_days: int = 100       # Ortalama gün sayısı
     # Derinliğe göre boy (bkz. futures_dd_factor üstündeki açıklama): ±%1 içindeki küçük tarafın yüzdesi (0 = kapalı)
     futures_depth_cap_pct: float = 0.0
     futures_backtest_depth: bool = True    # Backtest: büyük pozisyonların emir defteri kayması (ölçülen derinlik)
@@ -1394,6 +1397,11 @@ class Config:
         if not 0 <= self.futures_day_brake_pct <= 50:
             errors.append("FUTURES_DAY_BRAKE_PCT 0-50 arasında olmalı (sermayenin son 24 saatin zirvesinden düşüşü %; "
                           "0 = kapalı)")
+        if not 10 <= self.futures_bear_size_pct <= 100:
+            errors.append("FUTURES_BEAR_SIZE_PCT 10-100 arasında olmalı (ayı piyasasındaki pozisyon büyüklüğü %; 100 = "
+                          "kapalı)")
+        if not 20 <= self.futures_bear_sma_days <= 400:
+            errors.append("FUTURES_BEAR_SMA_DAYS 20-400 arasında olmalı (BTC'nin kaç günlük ortalaması)")
         if not 10 <= self.futures_day_brake_size_pct <= 100:
             errors.append("FUTURES_DAY_BRAKE_SIZE_PCT 10-100 arasında olmalı (frendeki pozisyon büyüklüğü %; 100 = tam)")
         if not (self.futures_depth_cap_pct == 0 or 1 <= self.futures_depth_cap_pct <= 50):
@@ -1689,6 +1697,8 @@ def load_config(env_file: Optional[str] = None, mode_override: Optional[str] = N
         futures_dd_scale_size_pct=_env_float("FUTURES_DD_SCALE_SIZE_PCT", 60.0),
         futures_day_brake_pct=_env_float("FUTURES_DAY_BRAKE_PCT", 0.0),
         futures_day_brake_size_pct=_env_float("FUTURES_DAY_BRAKE_SIZE_PCT", 50.0),
+        futures_bear_size_pct=_env_float("FUTURES_BEAR_SIZE_PCT", 100.0),
+        futures_bear_sma_days=_env_int("FUTURES_BEAR_SMA_DAYS", 100),
         futures_depth_cap_pct=_env_float("FUTURES_DEPTH_CAP_PCT", 0.0),
         futures_backtest_depth=_env_bool("FUTURES_BACKTEST_DEPTH", True),
         futures_leverage=_env_int("FUTURES_LEVERAGE", 2),
@@ -2168,6 +2178,15 @@ def _setting_notes(cfg: Config) -> List[str]:
                          f"ortanca 12 ay getirisi +%10.271 → +%9.976, %90'ı aşan düşüş yaşayan hesap 49 → 0, kayma 4 "
                          f"katında hesap ayakta kaldı. Kötümser stop dolumunda yine eriyor, kill-switch sık devreye "
                          f"girebilir (71 hesabın 34'ü).")
+        if cfg.futures_bear_size_pct < 100:
+            notes.append(f"FUTURES_BEAR_SIZE_PCT={cfg.futures_bear_size_pct:g}, FUTURES_BEAR_SMA_DAYS="
+                         f"{cfg.futures_bear_sma_days} (ayı piyasası küçültmesi): BTC'nin dünkü kapanışı "
+                         f"{cfg.futures_bear_sma_days} günlük ortalamasının altındayken yeni pozisyonlar "
+                         f"%{cfg.futures_bear_size_pct:g} boy (BTC günlük mumları günde bir kez alınır, alınamazsa boy "
+                         f"değişmez). Testte (4.000 USDT, rapor 25 ayarı 8x + 24 saat freni, 71 hesap) %75 / 100 gün: "
+                         f"düşüşte küçültme eşiği %40 ile 12 ay ortancası aynı (+%1.841 → +%1.822), %60'ı aşan düşüş "
+                         f"12 → 2.5; düşüşte küçültme kapalıyken +%1.921, düşüş 7.5 (pahalı canlı dolumda kill-switch "
+                         f"5.5 → 9).")
         if cfg.futures_day_brake_pct > 0:
             notes.append(f"FUTURES_DAY_BRAKE_PCT={cfg.futures_day_brake_pct:g}, FUTURES_DAY_BRAKE_SIZE_PCT="
                          f"{cfg.futures_day_brake_size_pct:g} (24 saat freni): botun sermayesi son 24 saatteki en yüksek "

@@ -75,7 +75,7 @@ import math
 import time
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Set, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from binance_client import BinanceClient, RateLimitError
 from config import (STRATEGY_NAMES, fee_from_coin, futures_breadth_on, futures_crash_rules, futures_funding_rules,
@@ -2076,6 +2076,30 @@ def quality_roundup_ok(enabled: bool, quality: Optional[float]) -> bool:
     return bool(enabled) and quality is not None and quality == quality and quality > QUALITY_CUTS[60]
 
 
+# Ayı piyasası küçültmesi (FUTURES_BEAR_SIZE_PCT; rapor 25 araştırması, 25 Kasım): BTC'nin bir önceki günkü kapanışı
+# son N günlük ortalamasının altındaysa (ayı piyasası) yeni pozisyonlar küçük boyla açılır. Ayı dönemlerinde çöküş
+# dönüşleri zayıf (2022 ayısında her kaldıraç zayıftı); bu filtre eski "düşüşte küçültme"nin verdiği korumayı daha az
+# kârla öder. Canlı bot ve backtest aynı fonksiyonları kullanır; ölçü günde bir kez, kesinleşmiş günlük mumlarla.
+BEAR_SMA_CHOICES = (50, 100, 150, 200)
+
+
+def bear_regime(daily_closes: Sequence[float], days: int) -> Optional[bool]:
+    """Kesinleşmiş günlük kapanışlar (eskiden yeniye) → ayı piyasası mı: son kapanış, son `days` kapanışın
+    (kendisi dahil) ortalamasının altındaysa True. Yeterli gün yoksa None (bilinmiyor: boy değişmez)."""
+    n = int(days)
+    if n <= 0 or len(daily_closes) < n:
+        return None
+    window = [float(x) for x in daily_closes[-n:]]
+    return window[-1] < sum(window) / n
+
+
+def bear_size_factor(size_pct: float, bear: Optional[bool]) -> float:
+    """Ayı piyasasında boy çarpanı: bear True ve size_pct < 100 ise size_pct / 100, değilse 1."""
+    if not bear or size_pct >= 100:
+        return 1.0
+    return max(0.0, float(size_pct)) / 100
+
+
 def window_sigma(c, bars: int, lookback: int = FUT_Z_LOOKBACK_BARS):
     """`bars` mumluk pencerenin olağan hareketi (log, 1 standart sapma): pencere başlangıcından önceki `lookback`
     mumun 5 dk log getirilerinin standart sapması × √bars. Çöküşün kendisi ölçüye karışmaz."""
@@ -2743,6 +2767,9 @@ class FuturesSignal:
         if m.get("dd_size_pct") and m["dd_size_pct"] < 100:
             parts.append(f"Düşüşte küçültme: sermaye zirvenin %{m.get('dd_pct', 0):g} altında, pozisyon "
                          f"%{m['dd_size_pct']:g} boy")
+        if m.get("bear_size_pct") and m["bear_size_pct"] < 100:
+            parts.append(f"Ayı piyasası (BTC {m.get('bear_days', 100):g} günlük ortalamasının altında): pozisyon "
+                         f"%{m['bear_size_pct']:g} boy")
         if m.get("brake_size_pct") and m["brake_size_pct"] < 100:
             parts.append(f"24 saat freni: sermaye son 24 saatin zirvesinin %{m.get('brake_pct', 0):g} altında, pozisyon "
                          f"%{m['brake_size_pct']:g} boy")
