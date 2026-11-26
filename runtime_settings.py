@@ -223,6 +223,14 @@ EDITABLE: Dict[str, Setting] = {
                                     "Destek bölgesi: dip için kaç günlük 1 saatlik mumlar"),
     "FUTURES_SUPPORT_ZONE_PCT": Setting("futures_support_zone_pct", "float",
                                         "Destek bölgesi: dibin en fazla % kaç altı bölge sayılır"),
+    "FUTURES_BOUNCE_CALM_PCT": Setting("futures_bounce_calm_pct", "float",
+                                       "V dönüşü: fiyat son 15 dk'nın dibinden bu kadar % yukarıdaysa çöküş durulmuş "
+                                       "sayılmaz (0 = kapalı)"),
+    "FUTURES_BOUNCE_BOOST_PCT": Setting("futures_bounce_boost_pct", "float",
+                                        "Güçlü V dönüşü: fiyat son 15 dk'nın dibinden bu kadar % yukarıdaysa büyük boy "
+                                        "(0 = kapalı)"),
+    "FUTURES_BOUNCE_BOOST_SIZE_PCT": Setting("futures_bounce_boost_size_pct", "float",
+                                             "Güçlü V dönüşünde pozisyon büyüklüğü (%; 100-200)"),
     "FUTURES_CUSHION_X": Setting("futures_cushion_x", "float",
                                  "Kâr yastığı: sermaye bota verilenin bu katına çıkınca pozisyonu büyüt (0 = kapalı)"),
     "FUTURES_CUSHION_SIZE_PCT": Setting("futures_cushion_size_pct", "float",

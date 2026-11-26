@@ -43,7 +43,8 @@ from config import (DATA_DIR, DAY_BRAKE_HOURS, cushion_factor, dd_scale_factor, 
 from futures_data import FuturesArchive, concat, resample, slice_range
 from futures_depth import DEPTH_CHECK_MIN_NOTIONAL, DepthBook, daily_volume_fn
 from strategy import (BEAR_SMA_CHOICES, BIG_EXTRA_SLOTS, FUT_BAR_MS, FUT_HOUR_MS, QUALITY_CUTS, basis_pct,
-                      basis_size_factor, bear_size_factor, support_size_factor, SUPPORT_DAY_CHOICES,
+                      basis_size_factor, bear_size_factor, bounce_boost_factor, support_size_factor,
+                      SUPPORT_DAY_CHOICES,
                       big_extra_slots, big_funding_skip, big_rules_on, breadth_flags, btc_trend_1h, crash_state,
                       funding_per_bar, futures_candidates, futures_entries, futures_features, isolated_factor,
                       pick_signal, quality_roundup_ok, quality_score, quality_size_factor, recent_size_factor,
@@ -718,6 +719,12 @@ class SimParams:
     support_size_pct: float = 100.0
     support_days: int = 30
     support_zone_pct: float = 5.0
+    # V dönüşü (FUTURES_BOUNCE_*; canlı: FuturesBot._entry_margin): fiyat son 15 dk'nın dibinden (sinyal ölçüsü
+    # metrics["bounce15"]) bounce_calm_pct yukarıdaysa durulmuş küçültmesi yok; bounce_boost_pct yukarıdaysa boy ×
+    # bounce_boost_size_pct / 100 (0 = kapalı)
+    bounce_calm_pct: float = 0.0
+    bounce_boost_pct: float = 0.0
+    bounce_boost_size_pct: float = 150.0
     # Emir defteri derinliği (futures_depth; veri FutData.depth'te, yoksa ikisi de uygulanmaz): depth_cap_pct > 0 ise giriş
     # tutarı girişten önceki 2 dk'da ±%1 içindeki alış / satış emirlerinin küçüğünün bu yüzdesiyle sınırlı ve aynı mumdaki
     # sinyallerde sınıra takılınca kapasitesi büyük olan önce (FUTURES_DEPTH_CAP_PCT); depth_impact: piyasa emrinin defteri
@@ -781,6 +788,9 @@ def params_from_cfg(cfg, **over) -> SimParams:
                   support_size_pct=float(getattr(cfg, "futures_support_size_pct", 100.0)),
                   support_days=int(getattr(cfg, "futures_support_days", 30)),
                   support_zone_pct=float(getattr(cfg, "futures_support_zone_pct", 5.0)),
+                  bounce_calm_pct=float(getattr(cfg, "futures_bounce_calm_pct", 0.0) or 0.0),
+                  bounce_boost_pct=float(getattr(cfg, "futures_bounce_boost_pct", 0.0) or 0.0),
+                  bounce_boost_size_pct=float(getattr(cfg, "futures_bounce_boost_size_pct", 150.0)),
                   depth_cap_pct=float(getattr(cfg, "futures_depth_cap_pct", 0.0) or 0.0),
                   depth_impact=bool(getattr(cfg, "futures_backtest_depth", False)),
                   entry_lag_pct=entry_lag_for(cfg)[0], stop_slip_pct=STOP_SLIP_PCT)
@@ -846,6 +856,7 @@ class FutTrade:
     guarded: bool = False    # Sermaye korumasıyla (FUTURES_GUARD_PCT) küçük boyla açıldı
     cushioned: bool = False  # Kâr yastığıyla (FUTURES_CUSHION_X) büyük boyla açıldı
     support: bool = False    # Destek bölgesi kuralıyla (FUTURES_SUPPORT_SIZE_PCT) küçük boyla açıldı
+    bounced: int = 0         # V dönüşü (FUTURES_BOUNCE_*): 1 = durulmuş küçültmesi kalktı, 2 = büyük boyla açıldı
     depth_capped: bool = False  # Derinliğe göre boy sınırına takıldı (FUTURES_DEPTH_CAP_PCT)
     impact_pct: float = 0.0  # Emir defteri kayması, giriş + çıkış (fiyat %; FUTURES_BACKTEST_DEPTH)
     drop15: float = float("nan")  # Girişten önceki 15 dk'daki düşüş (%; sinyal ölçüsü, FUTURES_RECENT_SIZE_PCT)
@@ -1170,12 +1181,29 @@ def size_factor(p: SimParams, s: "FutSignal") -> float:
     basis_deep_pct (%) değerinden fazla altındaysa × basis_size_pct; kalite puanı en zayıf quality_cut_pct yüzdesindeyse
     × quality_size_pct."""
     out = (isolated_factor(p.isolated_size_pct, p.isolated_breadth, s.breadth)
-           * recent_size_factor(p.recent_size_pct, p.recent_drop_pct, s.metrics.get("drop15"))
+           * recent_size_factor(p.recent_size_pct, p.recent_drop_pct, s.metrics.get("drop15"),
+                                s.metrics.get("bounce15"), p.bounce_calm_pct)
+           * bounce_boost_factor(p.bounce_boost_pct, p.bounce_boost_size_pct, s.metrics.get("bounce15"))
            * basis_size_factor(p.basis_size_pct, p.basis_deep_pct, s.metrics.get("basis")))
     if p.quality_size_pct < 100 and s.metrics.get("tactic", 1.0) == 1.0:
         out *= quality_size_factor(p.quality_size_pct, p.quality_cut_pct, quality_score(s.score, s.metrics))
     return (out * bear_size_factor(p.bear_size_pct, signal_bear(s, p.bear_sma_days))
             * support_size_factor(p.support_size_pct, p.support_zone_pct, s.metrics.get(f"low{int(p.support_days)}h")))
+
+
+def bounce_flag(p: SimParams, s: "FutSignal") -> int:
+    """V dönüşünün bu sinyalde etkisi (rapor sayımı): 2 = büyük boy (FUTURES_BOUNCE_BOOST_PCT), 1 = durulmuş küçültmesi
+    kalktı (FUTURES_BOUNCE_CALM_PCT), 0 = yok."""
+    b = s.metrics.get("bounce15")
+    if b is None or b != b:
+        return 0
+    if bounce_boost_factor(p.bounce_boost_pct, p.bounce_boost_size_pct, b) != 1:
+        return 2
+    d = s.metrics.get("drop15")
+    if (p.bounce_calm_pct > 0 and p.recent_size_pct < 100 and d is not None and d == d and d < p.recent_drop_pct
+            and b >= p.bounce_calm_pct):
+        return 1
+    return 0
 
 
 def signal_bear(s: "FutSignal", days: int) -> Optional[bool]:
@@ -1344,6 +1372,7 @@ def simulate(p: SimParams, data: FutData, signals: Sequence[FutSignal], windows:
         tr.bear = p.bear_size_pct < 100 and bool(signal_bear(s, p.bear_sma_days))
         tr.support = support_size_factor(p.support_size_pct, p.support_zone_pct,
                                          s.metrics.get(f"low{int(p.support_days)}h")) < 1
+        tr.bounced = bounce_flag(p, s)
         peak = max(peak, equity)
         trades.append(tr)
         curve.append((tr.exit_ms, equity))
@@ -1543,6 +1572,7 @@ def simulate_slots(p: SimParams, data: FutData, signals: Sequence[FutSignal], wi
         tr.bear = p.bear_size_pct < 100 and bool(signal_bear(s, p.bear_sma_days))
         tr.support = support_size_factor(p.support_size_pct, p.support_zone_pct,
                                          s.metrics.get(f"low{int(p.support_days)}h")) < 1
+        tr.bounced = bounce_flag(p, s)
         tr.rounded = not fixed_notional and rounded
         trades.append(tr)
         free_at = tr.exit_ms if tr.reason == "TIME" else tr.exit_ms + tr.bar_ms
@@ -2092,6 +2122,7 @@ def size_variant_rows(cfg, ev, depth: bool = False, has_basis: bool = False,
         rows += [(f"Yalnız çöküş eşiği <{b} coin (şimdi <{base.isolated_breadth})", ev(isolated_breadth=b))
                  for b in ISOLATED_BREADTH_TRIES if b != base.isolated_breadth]
     rows += recent_variant_rows(base, ev)
+    rows += bounce_variant_rows(base, ev)
     rows += basis_variant_rows(base, ev, has_basis)
     rows += quality_variant_rows(base, ev)
     rows += big_variant_rows(base, ev, has_funding)
@@ -2280,6 +2311,29 @@ def recent_variant_rows(base: SimParams, ev) -> List[Tuple[str, "Evaluation"]]:
             rows.append((f"{name} (şimdi %{base.recent_size_pct:g})", ev(recent_size_pct=v)))
     rows += [(f"Durulmuş sayılan: 15 dk düşüş < %{d:g} (şimdi < %{base.recent_drop_pct:g})",
               ev(recent_drop_pct=d)) for d in RECENT_DROP_TRIES if not _same(d, base.recent_drop_pct)]
+    return rows
+
+
+BOUNCE_CALM_TRIES = (2.0, 3.0, 4.0)      # V dönüşü: durulmuş muafiyeti eşiği (%; rapor 27 araştırması, 26 Kasım)
+BOUNCE_BOOST_TRIES = (6.0, 8.0, 10.0)    # Güçlü V dönüşü eşiği (%)
+BOUNCE_SIZE_TRIES = (125.0, 150.0)       # Güçlü V dönüşündeki boy (%)
+
+
+def bounce_variant_rows(base: SimParams, ev) -> List[Tuple[str, "Evaluation"]]:
+    """V dönüşü (FUTURES_BOUNCE_*): açıksa kapalı + eşik / boy çevresi, kapalıysa %3 muafiyet + %8'de %150 (yalnız dalga
+    modunda büyütme anlamlı; tek pozisyonda büyütülecek boş teminat yok)."""
+    if base.bounce_calm_pct <= 0 and base.bounce_boost_pct <= 0:
+        return [("V dönüşü: son 15 dk'nın dibinden %3+ yukarıdaysa durulmuş sayılmaz, %8+ ise %150 boy",
+                 ev(bounce_calm_pct=3.0, bounce_boost_pct=8.0, bounce_boost_size_pct=150.0))]
+    rows = [("V dönüşü kuralları kapalı", ev(bounce_calm_pct=0.0, bounce_boost_pct=0.0))]
+    if base.bounce_calm_pct > 0:
+        rows += [(f"V dönüşünde durulmuş muafiyeti %{t:g}+ (şimdi %{base.bounce_calm_pct:g})", ev(bounce_calm_pct=t))
+                 for t in BOUNCE_CALM_TRIES if not _same(t, base.bounce_calm_pct)]
+    if base.bounce_boost_pct > 0:
+        rows += [(f"Güçlü V dönüşü %{t:g}+ (şimdi %{base.bounce_boost_pct:g})", ev(bounce_boost_pct=t))
+                 for t in BOUNCE_BOOST_TRIES if not _same(t, base.bounce_boost_pct)]
+        rows += [(f"Güçlü V dönüşünde boy %{z:g} (şimdi %{base.bounce_boost_size_pct:g})", ev(bounce_boost_size_pct=z))
+                 for z in BOUNCE_SIZE_TRIES if not _same(z, base.bounce_boost_size_pct)]
     return rows
 
 
@@ -4241,6 +4295,18 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
         L.append(f"🐻 Ayı piyasası: BTC'nin girişten önceki günkü kapanışı {p.bear_sma_days} günlük ortalamasının "
                  f"altındayken yeni pozisyonlar %{p.bear_size_pct:g} boy (A, B ve C'de). A'da {bears} / "
                  f"{len(res.trades)} işlem bu boyla açıldı")
+    if p.bounce_calm_pct > 0 or p.bounce_boost_pct > 0:
+        calm = sum(1 for tr in res.trades if tr.bounced == 1)
+        big = sum(1 for tr in res.trades if tr.bounced == 2)
+        parts = []
+        if p.bounce_calm_pct > 0 and p.recent_size_pct < 100:
+            parts.append(f"fiyat son 15 dk'nın dibinden en az %{p.bounce_calm_pct:g} yukarıdaysa çöküş durulmuş sayılmaz "
+                         f"(A'da {calm} işlem)")
+        if p.bounce_boost_pct > 0:
+            parts.append(f"en az %{p.bounce_boost_pct:g} yukarıdaysa pozisyon %{p.bounce_boost_size_pct:g} boy (boştaki "
+                         f"teminatla sınırlı; A'da {big} işlem)")
+        if parts:
+            L.append("↩️ V dönüşü: " + "; ".join(parts))
     if p.support_size_pct < 100:
         sup = sum(1 for tr in res.trades if tr.support)
         L.append(f"📐 Destek bölgesi: fiyat coinin önceki {p.support_days} günlük dibinin (sinyalden en az 1 saat önce "

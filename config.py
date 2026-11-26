@@ -1051,6 +1051,11 @@ class Config:
     # Ayı piyasası küçültmesi (strategy.bear_regime): BTC'nin dünkü kapanışı N günlük ortalamasının altındayken boy %X
     futures_bear_size_pct: float = 100.0   # Ayı piyasasında yeni pozisyonların büyüklüğü (%; 100 = kapalı)
     futures_bear_sma_days: int = 100       # Ortalama gün sayısı
+    # V dönüşü (strategy.bounce_from_low_pct): fiyat son 15 dk'nın dibinden %X yukarıdaysa durulmuş küçültmesi yok (calm),
+    # %Y yukarıdaysa boy %Z (boost)
+    futures_bounce_calm_pct: float = 0.0       # 0 = kapalı
+    futures_bounce_boost_pct: float = 0.0      # 0 = kapalı
+    futures_bounce_boost_size_pct: float = 150.0
     # Sermaye koruması (bkz. futures_guard_factor): toplam zarar bota verilen sermayenin %X'i iken pozisyon boyu %Y
     futures_guard_pct: float = 0.0         # Başlangıç sermayesine göre zarar eşiği (%; 0 = kapalı)
     futures_guard_size_pct: float = 60.0   # Eşik aşılınca yeni pozisyonların büyüklüğü (%)
@@ -1455,6 +1460,12 @@ class Config:
             errors.append("FUTURES_SUPPORT_DAYS 3-40 arasında olmalı (dip için kaç günlük 1 saatlik mumlar)")
         if not 0.5 <= self.futures_support_zone_pct <= 20:
             errors.append("FUTURES_SUPPORT_ZONE_PCT 0.5-20 arasında olmalı (dibin en fazla % kaç altı)")
+        if not (self.futures_bounce_calm_pct == 0 or 0.5 <= self.futures_bounce_calm_pct <= 20):
+            errors.append("FUTURES_BOUNCE_CALM_PCT 0 (kapalı) ya da 0.5-20 olmalı (son 15 dk'nın dibinden % yukarıda)")
+        if not (self.futures_bounce_boost_pct == 0 or 1 <= self.futures_bounce_boost_pct <= 30):
+            errors.append("FUTURES_BOUNCE_BOOST_PCT 0 (kapalı) ya da 1-30 olmalı (son 15 dk'nın dibinden % yukarıda)")
+        if not 100 <= self.futures_bounce_boost_size_pct <= 200:
+            errors.append("FUTURES_BOUNCE_BOOST_SIZE_PCT 100-200 arasında olmalı (güçlü V dönüşündeki pozisyon büyüklüğü %)")
         if not (self.futures_cushion_x == 0 or 1.2 <= self.futures_cushion_x <= 20):
             errors.append("FUTURES_CUSHION_X 0 (kapalı) ya da 1.2-20 olmalı (bota verilen sermayenin kaç katı)")
         if not 100 <= self.futures_cushion_size_pct <= 150:
@@ -1761,6 +1772,9 @@ def load_config(env_file: Optional[str] = None, mode_override: Optional[str] = N
         futures_bear_sma_days=_env_int("FUTURES_BEAR_SMA_DAYS", 100),
         futures_guard_pct=_env_float("FUTURES_GUARD_PCT", 0.0),
         futures_guard_size_pct=_env_float("FUTURES_GUARD_SIZE_PCT", 60.0),
+        futures_bounce_calm_pct=_env_float("FUTURES_BOUNCE_CALM_PCT", 0.0),
+        futures_bounce_boost_pct=_env_float("FUTURES_BOUNCE_BOOST_PCT", 0.0),
+        futures_bounce_boost_size_pct=_env_float("FUTURES_BOUNCE_BOOST_SIZE_PCT", 150.0),
         futures_cushion_x=_env_float("FUTURES_CUSHION_X", 0.0),
         futures_cushion_size_pct=_env_float("FUTURES_CUSHION_SIZE_PCT", 112.5),
         futures_support_size_pct=_env_float("FUTURES_SUPPORT_SIZE_PCT", 100.0),
@@ -2262,6 +2276,16 @@ def _setting_notes(cfg: Config) -> List[str]:
                          f"pozisyonlar %{cfg.futures_support_size_pct:g} boy (1 saatlik mumlar saatte bir alınır, "
                          f"alınamazsa boy değişmez). Testte (4.000 USDT, rapor 26 ayarı, 71 hesap) 60 / 30 gün / %5: 12 "
                          f"ay ortancası +%1.921 → +%2.004, %60'ı aşan düşüş 7.5 → 4.5, zararla biten hesap 2 → 0.5.")
+        if cfg.futures_bounce_calm_pct > 0 or cfg.futures_bounce_boost_pct > 0:
+            notes.append(f"FUTURES_BOUNCE_CALM_PCT={cfg.futures_bounce_calm_pct:g}, FUTURES_BOUNCE_BOOST_PCT="
+                         f"{cfg.futures_bounce_boost_pct:g}, FUTURES_BOUNCE_BOOST_SIZE_PCT="
+                         f"{cfg.futures_bounce_boost_size_pct:g} (V dönüşü): fiyat son 15 dk'nın en düşüğünden "
+                         f"%{cfg.futures_bounce_calm_pct:g}+ yukarıdaysa çöküş durulmuş sayılmaz (durulmuş küçültmesi "
+                         f"yok); %{cfg.futures_bounce_boost_pct:g}+ yukarıdaysa pozisyon %{cfg.futures_bounce_boost_size_pct:g} "
+                         f"boy (boştaki teminatla sınırlı; 0 = o kısım kapalı). Testte (4.000 USDT, rapor 27 ayarı, her "
+                         f"ayın 1'inde başlayan 71 hesap, 10 çekiliş) 3 / 8 / 150: 12 ay ortancası +%2.195 → +%2.531, "
+                         f"%60'ı aşan düşüş 9 → 8, zararla biten hesap 0.5 → 0; canlıda ölçülen pahalı giriş dolumunda "
+                         f"kazanç küçük (+%1.515 → +%1.561).")
         if cfg.futures_cushion_x > 0:
             notes.append(f"FUTURES_CUSHION_X={cfg.futures_cushion_x:g}, FUTURES_CUSHION_SIZE_PCT="
                          f"{cfg.futures_cushion_size_pct:g} (kâr yastığı): botun sermayesi bota verilen sermayenin "

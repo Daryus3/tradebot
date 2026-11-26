@@ -1868,11 +1868,40 @@ def taker_share(f: Dict[str, "np.ndarray"], minutes: int = 15):
     return _memo(f, ("taker", int(minutes)), calc)
 
 
-def recent_size_factor(size_pct: float, min_drop_pct: float, drop: Optional[float]) -> float:
+def bounce_from_low_pct(f: Dict[str, "np.ndarray"], minutes: int = FUT_RECENT_DROP_MINUTES):
+    """V dönüşü ölçüsü: kapanışın son `minutes` dakikanın (bu mum dahil) en düşüğünden uzaklığı (%; 0 = dipte). 5 dk
+    mumlarda minutes / 5 mumun en düşüğü (dakikalık taramada kaydırılmış mumlar: aynı 15 dakika); ilk mumlar NaN."""
+    def calc():
+        c, low = f["c"], f["l"]
+        bars = max(1, int(minutes) // 5)
+        out = np.full(len(c), np.nan)
+        if len(c) >= bars:
+            from numpy.lib.stride_tricks import sliding_window_view
+            mins = sliding_window_view(np.asarray(low, dtype=np.float64), bars).min(axis=1)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                out[bars - 1:] = (c[bars - 1:] / mins - 1) * 100
+        return out
+    return _memo(f, ("bounce", int(minutes)), calc)
+
+
+def recent_size_factor(size_pct: float, min_drop_pct: float, drop: Optional[float], bounce: Optional[float] = None,
+                       bounce_pct: float = 0.0) -> float:
     """Çöküş durulmuşsa küçük boy (FUTURES_RECENT_SIZE_PCT): girişten önceki FUT_RECENT_DROP_MINUTES dakikadaki düşüş
-    `min_drop_pct`'nin altındaysa size_pct / 100, değilse (ya da ölçü yoksa) 1. Canlı bot ve backtest aynı çarpanı
-    kullanır (sinyal ölçüsü metrics["drop15"])."""
+    `min_drop_pct`'nin altındaysa size_pct / 100, değilse (ya da ölçü yoksa) 1. V dönüşü (FUTURES_BOUNCE_CALM_PCT,
+    bounce_pct > 0): fiyat aynı sürenin en düşüğünden en az bounce_pct (%) yukarıdaysa (son dakikalarda sert satış ve
+    toparlanma) durulmuş sayılmaz, 1. Canlı bot ve backtest aynı çarpanı kullanır (sinyal ölçüleri metrics["drop15"] ve
+    metrics["bounce15"])."""
     if size_pct >= 100 or drop is None or drop != drop or drop >= min_drop_pct:
+        return 1.0
+    if bounce_pct > 0 and bounce is not None and bounce == bounce and bounce >= bounce_pct:
+        return 1.0
+    return max(0.0, float(size_pct)) / 100
+
+
+def bounce_boost_factor(boost_pct: float, size_pct: float, bounce: Optional[float]) -> float:
+    """Güçlü V dönüşünde büyük boy (FUTURES_BOUNCE_BOOST_PCT): fiyat son 15 dakikanın en düşüğünden en az boost_pct (%)
+    yukarıdaysa size_pct / 100 (> 1: büyük; boştaki teminatla sınırlı), değilse ya da ölçü yoksa 1."""
+    if boost_pct <= 0 or size_pct == 100 or bounce is None or bounce != bounce or bounce < boost_pct:
         return 1.0
     return max(0.0, float(size_pct)) / 100
 
@@ -2684,6 +2713,9 @@ def futures_signal_at(f: Dict[str, "np.ndarray"], i: int, side: str, cfg, liq_lo
         t15 = float(taker_share(f)[i])                        # ve son 15 dk piyasa alış payı
         if t15 == t15:
             out["taker15"] = t15
+        b15 = float(bounce_from_low_pct(f)[i])                # V dönüşü (FUTURES_BOUNCE_*): son 15 dk'nın dibinden uzaklık
+        if b15 == b15:
+            out["bounce15"] = b15
         if getattr(cfg, "futures_crash_z", 0.0):
             out["z"] = float(cfg.futures_crash_z)
         if mode != "close":
@@ -2813,6 +2845,12 @@ class FuturesSignal:
         if m.get("guard_size_pct") and m["guard_size_pct"] < 100:
             parts.append(f"Sermaye koruması: bota verilen sermayeye göre toplam zarar %{m.get('guard_loss_pct', 0):g}, "
                          f"pozisyon %{m['guard_size_pct']:g} boy")
+        if m.get("bounce_size_pct") and m["bounce_size_pct"] > 100:
+            parts.append(f"V dönüşü: fiyat son 15 dk'nın dibinden %{m.get('bounce15', 0.0):.1f} yukarıda, pozisyon "
+                         f"%{m['bounce_size_pct']:g} boy")
+        elif m.get("bounce_calm"):
+            parts.append(f"V dönüşü: fiyat son 15 dk'nın dibinden %{m.get('bounce15', 0.0):.1f} yukarıda, durulmuş "
+                         f"küçültmesi yok")
         if m.get("cushion_size_pct") and m["cushion_size_pct"] > 100:
             parts.append(f"Kâr yastığı: sermaye bota verilenin {m.get('cushion_x', 0):g} katı, pozisyon "
                          f"%{m['cushion_size_pct']:g} boy")

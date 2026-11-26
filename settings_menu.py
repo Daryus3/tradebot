@@ -77,6 +77,14 @@ WAVE_HOLD_CHOICES = (0, 60, 70)
 # ve tam boy için gereken düşüş (%)
 RECENT_SIZE_CHOICES = (100, 65, 50, 33)
 RECENT_DROP_CHOICES = (2, 2.4, 3)
+# V dönüşü (rapor 27 araştırması, 26 Kasım; varsayılan kapalı): fiyat son 15 dk'nın dibinden % kaç yukarıda
+BOUNCE_CALM_CHOICES = (0, 3, 4, 6)
+BOUNCE_BOOST_CHOICES = (0, 6, 8, 10)
+BOUNCE_SIZE_CHOICES = (125, 150)
+BOUNCE_HINT = ("V dönüşü (rapor 27 araştırması; 4.000 USDT, rapor 27 ayarı, her ayın 1'inde başlayan 71 hesap): fiyat son "
+               "15 dk'nın dibinden %3+ yukarıdaysa çöküş durulmuş sayılmaz, %8+ yukarıdaysa pozisyon %150 boy. 12 ay "
+               "ortancası +%2.195 → +%2.531, %60'ı aşan düşüş 9 → 8, zararla biten hesap 0.5 → 0; canlıda ölçülen pahalı "
+               "dolumda kazanç küçük (+%1.515 → +%1.561).")
 BASIS_SIZE_CHOICES = (100, 130, 150)       # Vadeli-spot farkına göre boy (rapor 17 araştırması, 22 Kasım)
 BASIS_DEEP_CHOICES = (0.3, 0.5, 0.7)
 QUALITY_SIZE_CHOICES = (100, 60, 50, 40)  # Sinyal kalitesine göre boy (rapor 18 araştırması, 22 Kasım)
@@ -458,6 +466,13 @@ PAGES: Dict[str, Page] = {
         Row("FUTURES_RECENT_DROP_PCT", icon="📉", values=RECENT_DROP_CHOICES,
             fmt=lambda v: f"son 15 dk < %{float(v):g}",
             show=lambda cfg: _crash(cfg) and cfg.futures_recent_size_pct < 100, per_row=3),
+        Row("FUTURES_BOUNCE_CALM_PCT", icon="↩️", values=BOUNCE_CALM_CHOICES,
+            fmt=_off("V muafiyeti yok", lambda v: f"V ≥%{v:g}: durulmuş değil"),
+            show=lambda cfg: _crash(cfg) and cfg.futures_recent_size_pct < 100),
+        Row("FUTURES_BOUNCE_BOOST_PCT", icon="🚀", values=BOUNCE_BOOST_CHOICES,
+            fmt=_off("V büyütmesi yok", lambda v: f"V ≥%{v:g}: büyük boy"), show=_crash),
+        Row("FUTURES_BOUNCE_BOOST_SIZE_PCT", icon="📏", values=BOUNCE_SIZE_CHOICES, fmt=lambda v: f"V boyu %{v:g}",
+            show=lambda cfg: _crash(cfg) and cfg.futures_bounce_boost_pct > 0),
         Row("FUTURES_BASIS_SIZE_PCT", icon="⚖️", values=BASIS_SIZE_CHOICES,
             fmt=lambda v: "Vadeli-spot farkı: kapalı" if float(v) == 100 else f"Vadeli-spot farkı: %{float(v):g}",
             show=_crash, per_row=3),
@@ -1069,6 +1084,18 @@ class SettingsMenu:
                          f"coinde tam boy).")
         else:
             lines.append("⏱️ Durulmuş çöküş (son 15 dk'da az düşen coin) küçültülmüyor.")
+        if cfg.futures_bounce_calm_pct > 0 or cfg.futures_bounce_boost_pct > 0:
+            parts = []
+            if cfg.futures_bounce_calm_pct > 0 and cfg.futures_recent_size_pct < 100:
+                parts.append(f"fiyat son 15 dk'nın dibinden %{cfg.futures_bounce_calm_pct:g}+ yukarıdaysa durulmuş "
+                             f"sayılmaz")
+            if cfg.futures_bounce_boost_pct > 0:
+                parts.append(f"%{cfg.futures_bounce_boost_pct:g}+ yukarıdaysa pozisyon "
+                             f"<b>%{cfg.futures_bounce_boost_size_pct:g}</b> büyüklükte")
+            if parts:
+                lines.append("↩️ V dönüşü: " + "; ".join(parts) + ".")
+        else:
+            lines.append("↩️ V dönüşüne göre boy kapalı.")
         if cfg.futures_basis_size_pct != 100:
             lines.append(f"⚖️ Vadeli-spot farkı: girişte vadeli fiyat spotun %{tr_from_num(cfg.futures_basis_deep_pct)} fazla "
                          f"altındaysa (zorla satış izi) pozisyon <b>%{cfg.futures_basis_size_pct:g}</b> büyüklükte.")
@@ -1115,7 +1142,7 @@ class SettingsMenu:
             lines.append("⚠️ Yalnızca FUTURES_COINS listesi taranıyor: eşikler ~25 coinlik evren (liste + en hacimli 20) "
                          "için seçildi, ek pozisyon çok seyrek açılır.")
         lines += [LINE, f"<i>{esc(CASCADE_HINT)}</i>", f"<i>{esc(PHASE6_HINT)}</i>", f"<i>{esc(PHASE8_HINT)}</i>",
-                  f"<i>{esc(PHASE9_HINT)}</i>"]
+                  f"<i>{esc(PHASE9_HINT)}</i>", f"<i>{esc(BOUNCE_HINT)}</i>"]
         return "\n".join(lines)
 
     def _text_fm(self) -> str:

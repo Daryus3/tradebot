@@ -2816,6 +2816,55 @@ H3 −%21, kill-switch 26; H3 + 9x −%60, 42.
 - **Öneri:** sakin seçenek H3 (`FUTURES_GUARD_PCT=30`, `FUTURES_SUPPORT_SIZE_PCT=60`): kâr aynı, risk belirgin az. Kâr için
   H3 + `FUTURES_CUSHION_X=2`. Kaldıraç 8x kalsın.
 
+#### Rapor 27 araştırması: V dönüşü ve yeni tabanda elenen fikirler (Kasım 2026)
+Taban: rapor 27'nin ayarı (H4 = rapor 26 ayarı + sermaye koruması %30 / %60 + destek bölgesi 30 gün / %5 / %60 + kâr
+yastığı 2 kat / %112.5), **4.000 USDT**, 10 çekiliş, her ayın 1'inde başlayan 71 hesap (12 ay ortanca / %60'ı aşan düşüş /
+kill-switch / 12 ay sonunda zararda biten / alt çeyrek). Şimdiki: +%2.195 / 9 / 0 (10 çekilişin hepsinde) / 0.5 / +%656.
+
+| Fikir | Sonuç | Karar |
+|---|---|---|
+| Son büyük dalgadan geçen süre (birikmiş kaldıraç), BTC 30 günlük oynaklık rejimi, ETH / BTC (altcoin sezonu), aynı coinde tekrarlanan çöküş | İşlem başı kovalar iki dönemde tutarsız | Elendi |
+| Yapısal zarar kes (son 15 dk'nın dibine göre) | Dibe uzaklık zarar kesleri öngörmüyor (ortanca %0.96 / %0.89) | Elendi |
+| Dip kırılımına (30 g dibin %10+ altı) +2 ek yuva, ek pozisyon kapısından muaf | +%2.312 / 10 / 0; V + ayı ×0.85 ile pahalı dolumda kill-switch 4 | Elendi |
+| Ayı küçültmesi ×0.85 (koruma varken gevşetmek) | +%2.347 / 10 / 0; V ile +%2.634, pahalı dolumda kill-switch 3 | Elendi (pahalı dolumda risk) |
+| Fren 10 / 70 · fren 15 / 50 | +%2.350 / 18 · +%2.037 / 12.5 | Kâr ve düşüş birlikte · kötü |
+| 7x + yastık ×1.25 · 7x + kademeli yastık · yastık yalnız ayı dışında | +%2.112 · +%2.130 · +%2.085 | Kötü |
+| BTC yatayken Kâr Al %4.5 | +%2.265 | Küçük |
+| **V dönüşü** (aşağıda) | | **Eklendi** |
+
+**V dönüşü (yeni).** İşlem başı ön elemede fiyatın son 15 dakikanın en düşüğünden uzaklığı güçlü bir ayırıcı: %5+
+yukarıdaysa +%0.57 (seçim) / +%0.55 (doğrulama), 7 yılın 7'sinde artı. Bu işlemlerin bir kısmı "çöküş durulmuş"
+sayılıp %33 boyla açılıyordu (son 15 dk'daki düşüş %2.4'ten az: fiyat 15 dk önceki yerine dönmüş). Ama durulmuşların
+hepsi aynı değil: dibe yakın olanlar ~%0 kazandırıyor (seçim −%0.07 / doğrulama −%0.04), %4-6 dönmüş olanlar +%0.37 /
++%0.88, %6+ dönmüş olanlar +%0.70 / +%0.32 (son dakikalarda sert satış ve hızlı toparlanma). Kural: fiyat son 15 dk'nın
+dibinden %X yukarıdaysa durulmuş sayılmaz; %Y yukarıdaysa pozisyon büyük boy.
+
+| Ayar | Normal maliyet: 12 ay ortanca / %60+ / kill / zararda / alt çeyrek | Pahalı canlı dolum (+%0.084) |
+|---|---|---|
+| Şimdiki (H4) | +%2.195 / 9 / 0 / 0.5 / +%656 | +%1.515 / 21 / 0 (en kötü 3) / 4 / +%405 |
+| Yalnız muafiyet %3 · %4 | +%2.315 / 8 · +%2.258 / 8.5 | |
+| Yalnız büyütme (%8+ → %125 · %150) | +%2.322 / 8 · +%2.426 / 7.5 / 0 / 0 / +%845 | · +%1.590 / 22.5 / 0 / 4.5 |
+| Muafiyet %3 + %8+ → %125 | +%2.405 / 9.5 / 0 / 0.5 / +%767 (10/10) | +%1.544 / 22.5 / 0 / 4 / +%460 |
+| **Muafiyet %3 + %8+ → %150** | **+%2.531 / 8 / 0 / 0 / +%911** (10/10) | **+%1.561 / 21.5 / 0 (en kötü 3) / 4 / +%481** |
+| Komşular (muafiyet %4; eşik %6 / %10; ×2) | +%2.449 … +%2.538 (9-10/10) | +%1.545 |
+
+Seçim / doğrulama yıllık getirisi +%437 / +%524 → +%454 / +%533; 3 kat kaymada doğrulama +%424 → +%428. Resmi motor
+araştırmayı birebir verdi.
+
+**Stres (0. çekiliş):** 3 kat kaymada 71 hesabın ortancası +%1.325 → +%1.647 (kill-switch 1 → 1). **Kötümser stop
+dolumunda (fitilin yarısı; en kötü durum) ise V dönüşü riski artırıyor:** kill-switch 71 hesabın 23'ünden 40'ına
+(muafiyet %3 + %125: 34; yalnız muafiyet %4: 26). V dönüşü işlemleri en oynak anlarda açılıyor; stoplar çok kötü
+dolarsa büyük pozisyon daha çok kaybettirir. Kaldıracı 9x yapmaya benzer bir kâr / kuyruk riski değiş tokuşu, farkı
+olağan senaryolarda düşüşü artırmaması.
+
+- **Eklenen ayarlar:** `FUTURES_BOUNCE_CALM_PCT` (varsayılan 0 = kapalı; önerilen 3), `FUTURES_BOUNCE_BOOST_PCT`
+  (varsayılan 0 = kapalı; önerilen 8) ve `FUTURES_BOUNCE_BOOST_SIZE_PCT` (150; daha az kuyruk riski için 125).
+  Telegram: 🌊 Dalga modu → ↩️ / 🚀. Ölçü botun zaten aldığı mumlardan (son 3 adet 5 dk mum, dakikalık taramada kaydırılmış
+  mumlar) hesaplanır; giriş gecikmesi artmaz. Pozisyon mesajında "V dönüşü: …" satırı. Backtest başlığında ↩️ satırı,
+  tek kural tablosunda çevre satırları.
+- **Öneri:** kâr için 3 / 8 / 150. Pahalı canlı dolumda kazanç küçük (+%3) ve en kötü durumda risk artıyor; daha temkinli
+  isteyen boyu 125 yapabilir ya da yalnız muafiyeti açabilir (`FUTURES_BOUNCE_CALM_PCT=4`).
+
 #### Kill-switch eşiği (rapor 23, Kasım 2026)
 **Nasıl çalışır:** botun toplam zararı (kapanan işlemler + açık pozisyonların anlık zararı) botun sermayesinin
 (başlangıç + /sermayeekle) `MAX_TOTAL_LOSS_PCT`'sine ulaşınca durum dosyasına "kill-switch" yazılır, yeni pozisyon
@@ -2968,6 +3017,9 @@ karar için ortancaya ve en kötüye bakın. Çıkış taraması her gün dengel
   gösterir. Fren A'nın son bakiyesini genellikle düşürür (2020 başındaki büyük dönüşleri küçük boyla karşılar); kazancı
   her ayın 1'inde başlayan hesaplarda ve bir kademe yüksek kaldıraçla birlikte görünür (kaldıraç tablosundaki fren
   satırları). "Tek kural değişince" tablosunda kapalı / eşik / boy satırları vardır.
+- **↩️ V dönüşü satırı** (rapor başlığında, `FUTURES_BOUNCE_CALM_PCT` / `FUTURES_BOUNCE_BOOST_PCT` açıkken): fiyat son 15
+  dk'nın dibinden eşik kadar yukarıdayken durulmuş sayılmayan ve büyük boyla açılan işlemlerin A'daki sayısını gösterir.
+  A ve B aynı kuralı kullanır; büyütme C'de de (sabit tutar × boy) uygulanır.
 - **📐 Destek bölgesi satırı** (rapor başlığında, `FUTURES_SUPPORT_SIZE_PCT` açıkken): fiyat coinin önceki N günlük
   dibinin (sinyalden en az 1 saat önce kapanmış 1 saatlik mumlar) en fazla %Z altındayken açılan pozisyonların küçük
   boyla açıldığını ve A'da kaç işlemin bu boyla açıldığını gösterir. A, B ve C aynı kuralı kullanır.

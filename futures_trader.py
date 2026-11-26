@@ -57,7 +57,8 @@ from strategy import (FUT_BAR_MS, FUT_BREADTH_DROP_PCT, FUT_BREADTH_HOURS, FUT_B
                       ScanResult, funding_per_bar, futures_kline_limit, isolated_factor, market_breadth,
                       recent_size_factor, basis_pct, basis_size_factor, quality_score, quality_size_factor,
                       spot_pairs, BIG_EXTRA_SLOTS, QUALITY_CUTS, big_extra_slots, big_funding_skip, big_rules_on,
-                      quality_roundup_ok, bear_regime, bear_size_factor, support_dist_pct, support_low,
+                      quality_roundup_ok, bear_regime, bear_size_factor, bounce_boost_factor, support_dist_pct,
+                      support_low,
                       support_size_factor)
 from telegram_bot import CRITICAL_EXITS, Messages, esc, fmt_duration, fmt_price, fmt_signed, fmt_usdt, futures_tag
 from trader import ALIVE_SAVE_SEC, POSITION_LOG_SEC, RULES_REFRESH_SEC, Mark, TradingBot
@@ -1767,7 +1768,16 @@ class FuturesBot(TradingBot):
                                  int(sig.metrics.get("breadth", cfg.futures_isolated_breadth)))
         if factor < 1:
             sig.metrics["size_pct"] = round(factor * 100, 1)
-        recent = recent_size_factor(cfg.futures_recent_size_pct, cfg.futures_recent_drop_pct, sig.metrics.get("drop15"))
+        b15 = sig.metrics.get("bounce15")
+        recent = recent_size_factor(cfg.futures_recent_size_pct, cfg.futures_recent_drop_pct, sig.metrics.get("drop15"),
+                                    b15, cfg.futures_bounce_calm_pct)
+        if recent == 1 and recent_size_factor(cfg.futures_recent_size_pct, cfg.futures_recent_drop_pct,
+                                              sig.metrics.get("drop15")) < 1:
+            sig.metrics["bounce_calm"] = 1.0                 # V dönüşü: durulmuş sayılmadı (pozisyon mesajı)
+        boost = bounce_boost_factor(cfg.futures_bounce_boost_pct, cfg.futures_bounce_boost_size_pct, b15)
+        if boost != 1:
+            sig.metrics["bounce_size_pct"] = round(boost * 100, 1)
+            factor *= boost
         if recent < 1:
             sig.metrics["recent_size_pct"] = round(recent * 100, 1)
             sig.metrics["recent_min_pct"] = cfg.futures_recent_drop_pct
