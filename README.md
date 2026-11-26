@@ -2865,6 +2865,39 @@ olağan senaryolarda düşüşü artırmaması.
 - **Öneri:** kâr için 3 / 8 / 150. Pahalı canlı dolumda kazanç küçük (+%3) ve en kötü durumda risk artıyor; daha temkinli
   isteyen boyu 125 yapabilir ya da yalnız muafiyeti açabilir (`FUTURES_BOUNCE_CALM_PCT=4`).
 
+#### Rapor 28 araştırması: yeni tabanda denenen fikirler ve derinlik payı (Kasım 2026)
+Taban: rapor 28'in ayarı (H5 = rapor 27 ayarı + V dönüşü 3 / 8 / 150), **4.000 USDT**, 10 çekiliş, her ayın 1'inde
+başlayan 71 hesap (12 ay ortanca / %60'ı aşan düşüş / kill-switch / zararda biten / alt çeyrek). Şimdiki: +%2.531 / 8 / 0
+(10 çekilişin hepsinde) / 0 / +%911. **Yeni kural eklenmedi; var olan bir ayarın yeni değeri önerildi.**
+
+| Fikir | Sonuç | Karar |
+|---|---|---|
+| Aynı dakikadaki sinyallerde önce güçlü V dönüşü (≥%8 / ≥%3) | +%2.417 / +%2.399 | Kötü |
+| V işlemlerinde Kâr Al %8 · başabaş +%2 | +%2.560 · +%2.672 (2020 başlangıçları +%48.498 → +%35.469, zararla biten 0 → 2) | Etkisiz · karışık |
+| Tek başına çöküş (0-1 coin) %25 boy | +%2.426 | Kötü |
+| Dalgada ilk pozisyon ×1.2 · kademeli yastık (5 katında ×1.25) | +%2.809 / 16.5 / kill 1 · +%2.706 / 11 | Kaldıraç gibi |
+| Sermaye korumasına 2. kademe (zarar %45 → ek ×0.5) | Fark yok | Etkisiz |
+| Piyasa geneli V dönüşü: 2 / 4 / 8+ coin son 15 dk dibinden %3+ dönmüşken boy ×1.25-1.5; BTC %2+ dönmüşken ×1.5 | İşlem başı güçlü (4+ coin: +%0.69 / +%0.29, coin henüz dönmemişken), ama 12 ay ortanca +%2.341 … +%2.472, düşüş 10.5-17 | Elendi: büyük dalgada riski üst üste yığıyor |
+| Fonlama oranı (piyasa geneli, BTC, coinin kendisi) | Kovalar iki dönemde tutarsız | Elendi |
+| Kâr Al %7 · zaman stopu 60 dk · zarardan sonra 8 saat · durulmuş < %3 | +%2.389 · +%2.606 · +%2.410 · +%2.168 | Kötü / gürültü |
+| Ek pozisyon ilkinin %25 / %33.3 / %100'ü · en fazla 3 pozisyon | +%2.368 / +%2.043 / +%1.207 · +%2.559 / 17 | Kötü |
+| **Derinlik payı %12.5** (şimdi %10) | | **Önerildi** |
+
+**Derinlik payı (`FUTURES_DEPTH_CAP_PCT`).** 8x'te pozisyonlar büyük; hesap büyüyünce işlemlerin çoğu emir defteri
+sınırına takılıyor (rapor 28'de A'nın %66'sı). Sınırı biraz gevşetmek büyümüş hesaplarda kârı artırıyor; daha büyük
+pozisyon emir defterinde daha çok kayma demek, bu yüzden %15-20 maliyet stresinde geriliyor.
+
+| Derinlik payı | Normal maliyet: 12 ay ortanca / %60+ / kill / zararda / alt çeyrek | Pahalı canlı dolum | 3 kat kayma (0. çekiliş) |
+|---|---|---|---|
+| %10 (şimdiki) | +%2.531 / 8 / 0 / 0 / +%911 | +%1.561 / 21.5 / 0 (en kötü 3) / 4 | +%1.647 |
+| %11 | +%2.592 / 10 / 0 / 0 / +%829 | | |
+| **%12.5** | **+%2.689 / 9 / 0 / 0 / +%858** (9/10) | **+%1.745 / 25.5 / 0 (en kötü 3) / 3.5** | **+%1.764** |
+| %15 | +%2.829 / 10 / 0 / 0 / +%951 | +%1.662 / 26.5 / 0 / 4 | +%1.469 |
+| %20 | +%2.821 / 12 / 0 / 0 / +%828 (A 4,10 → 3,91 milyon) | | |
+
+Seçim / doğrulama yıllık getirisi +%454 / +%533 → +%461 / +%555; kötümser stop dolumunda kill-switch 40 → 38. Öneri:
+`FUTURES_DEPTH_CAP_PCT=12.5` (var olan ayar; Telegram: 🧯 Risk sigortaları → 🧱).
+
 #### Kill-switch eşiği (rapor 23, Kasım 2026)
 **Nasıl çalışır:** botun toplam zararı (kapanan işlemler + açık pozisyonların anlık zararı) botun sermayesinin
 (başlangıç + /sermayeekle) `MAX_TOTAL_LOSS_PCT`'sine ulaşınca durum dosyasına "kill-switch" yazılır, yeni pozisyon
