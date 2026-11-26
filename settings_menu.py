@@ -31,7 +31,8 @@ from config import (futures_scan_shifts, futures_snapshot_on, tr_from_num, DEFAU
                     futures_coin_list, futures_crash_rules,
                     futures_funding_rules, futures_liq_distance_pct, futures_modules, futures_pump_rules,
                     futures_dd_factor, futures_slot_share, futures_wave_rules, is_futures, is_rotation,
-                    parse_crash_rules, DAY_BRAKE_HOURS, futures_brake_factor, window_peak)
+                    parse_crash_rules, DAY_BRAKE_HOURS, futures_brake_factor, futures_cushion_factor, futures_guard_factor,
+                    window_peak)
 from runtime_settings import EDITABLE, format_value
 from telegram_bot import LINE, esc, fmt_duration, fmt_signed, fmt_usdt
 
@@ -101,6 +102,27 @@ BEAR_HINT = ("Ayı piyasası küçültmesi (rapor 25 araştırması; 4.000 USDT,
              "hesap): BTC'nin dünkü kapanışı 100 günlük ortalamasının altındayken pozisyonlar %75 boy. Düşüşte küçültme "
              "eşiği %40 ile kâr aynı (+%1.841 → +%1.822), %60'ı aşan düşüş yaşayan hesap 12 → 2.5; düşüşte küçültme "
              "kapalıyken +%1.921, düşüş 7.5 (pahalı dolumda kill-switch daha sık).")
+# Destek bölgesi (rapor 26 araştırması, 26 Kasım; varsayılan kapalı): fiyat coinin önceki N günlük dibinin hemen altındayken
+SUPPORT_SIZE_CHOICES = (100, 75, 60, 45)
+SUPPORT_ZONE_CHOICES = (3, 5, 8)
+SUPPORT_DAYS_CHOICES = (14, 30)
+SUPPORT_HINT = ("Destek bölgesi (rapor 26 araştırması; aynı ölçü): fiyat coinin 30 günlük dibinin en fazla %5 "
+                "altındayken (dip yeni kırılırken dönüşler zayıf) pozisyon %60 boy. 12 ay ortancası +%1.921 → "
+                "+%2.004, %60'ı aşan düşüş 7.5 → 4.5, zararla biten hesap 2 → 0.5. Sermaye korumasıyla birlikte "
+                "canlıda ölçülen pahalı dolumda kill-switch 9 → 0.")
+# Sermaye koruması (rapor 26 araştırması, 26 Kasım; varsayılan kapalı): bota verilen sermayeye göre toplam zarar eşiği ve boy
+GUARD_CHOICES = (0, 20, 30, 40)
+GUARD_SIZE_CHOICES = (50, 60, 70)
+CUSHION_CHOICES = (0, 1.5, 2, 3)          # Kâr yastığı: bota verilen sermayenin kaç katında (0 = kapalı)
+CUSHION_SIZE_CHOICES = (112.5, 125)
+CUSHION_HINT = ("Kâr yastığı (rapor 26 araştırması; aynı ölçü, sermaye koruması ve destek bölgesiyle birlikte): sermaye "
+                "bota verilenin 2 katına çıkınca pozisyonlar %112.5 boy (8x'te ≈ 9x, yalnız kârdaki hesapta). 12 ay "
+                "ortancası +%1.938 → +%2.195, %60'ı aşan düşüş 4 → 9, kill-switch 10 çekilişin hepsinde 0; canlıda "
+                "ölçülen pahalı dolumda +%1.281 → +%1.515.")
+GUARD_HINT = ("Sermaye koruması (rapor 26 araştırması; 4.000 USDT, 8x + 24 saat freni + ayı %75, her ayın 1'inde "
+              "başlayan 71 hesap): toplam zarar bota verilen sermayenin %30'una gelince pozisyonlar %60 boy. 12 ay "
+              "ortancası aynı (+%1.921 → +%1.935), kill-switch 10 çekilişin hepsinde 0 (kapalıyken en kötü "
+              "çekilişte 9). Kârdaki hesabı etkilemez.")
 DAY_BRAKE_HINT = ("24 saat freni (rapor 22 araştırması; 4.000 USDT, 2020-2026, her ayın 1'inde başlayan 71 hesabın ilk 12 "
                   "ayı): sermaye son 24 saatin zirvesinin %10 altındayken yeni pozisyonlar %50 boy; aynı gün art arda "
                   "gelen zararları küçük boyla karşılar, 24 saat içinde kendiliğinden tam boya döner. Aynı kaldıraçta "
@@ -530,6 +552,21 @@ PAGES: Dict[str, Page] = {
             fmt=lambda v: "Ayı küçültmesi yok" if v >= 100 else f"Ayıda %{v:g}", show=lambda cfg: is_futures(cfg.strategy)),
         Row("FUTURES_BEAR_SMA_DAYS", icon="📅", values=BEAR_DAYS_CHOICES, fmt=lambda v: f"BTC {v:g} gün ort.",
             show=lambda cfg: is_futures(cfg.strategy) and cfg.futures_bear_size_pct < 100),
+        Row("FUTURES_SUPPORT_SIZE_PCT", icon="📐", values=SUPPORT_SIZE_CHOICES,
+            fmt=lambda v: "Destek kuralı yok" if v >= 100 else f"Destekte %{v:g}",
+            show=lambda cfg: is_futures(cfg.strategy)),
+        Row("FUTURES_SUPPORT_ZONE_PCT", icon="↘️", values=SUPPORT_ZONE_CHOICES, fmt=lambda v: f"Dibin 0-%{v:g} altı",
+            show=lambda cfg: is_futures(cfg.strategy) and cfg.futures_support_size_pct < 100),
+        Row("FUTURES_SUPPORT_DAYS", icon="📅", values=SUPPORT_DAYS_CHOICES, fmt=lambda v: f"{v:g} günlük dip",
+            show=lambda cfg: is_futures(cfg.strategy) and cfg.futures_support_size_pct < 100),
+        Row("FUTURES_GUARD_PCT", icon="🛡️", values=GUARD_CHOICES,
+            fmt=_off("Sermaye koruması yok", lambda v: f"Zarar %{v:g}"), show=lambda cfg: is_futures(cfg.strategy)),
+        Row("FUTURES_GUARD_SIZE_PCT", icon="📏", values=GUARD_SIZE_CHOICES, fmt=lambda v: f"Koruma boyu %{v:g}",
+            show=lambda cfg: is_futures(cfg.strategy) and cfg.futures_guard_pct > 0),
+        Row("FUTURES_CUSHION_X", icon="🛏️", values=CUSHION_CHOICES,
+            fmt=_off("Kâr yastığı yok", lambda v: f"{v:g} katında"), show=lambda cfg: is_futures(cfg.strategy)),
+        Row("FUTURES_CUSHION_SIZE_PCT", icon="📏", values=CUSHION_SIZE_CHOICES, fmt=lambda v: f"Yastık boyu %{v:g}",
+            show=lambda cfg: is_futures(cfg.strategy) and cfg.futures_cushion_x > 0),
         Row("FUTURES_DEPTH_CAP_PCT", icon="🧱", values=DEPTH_CAP_CHOICES,
             fmt=_off("Defter sınırı yok", lambda v: f"Defter %{v:g}"), show=lambda cfg: is_futures(cfg.strategy)),
         Row("FUTURES_BACKTEST_DEPTH", name="📚 Backtestte emir defteri kayması", show=lambda cfg: is_futures(cfg.strategy)),
@@ -1262,7 +1299,8 @@ class SettingsMenu:
         frozen = bot.freeze_note()
         futures = is_futures(cfg.strategy)
         return (f"🧯 <b>Risk Sigortaları</b>\n{LINE}\n"
-                f"{self.kill_line()}\n" + (self.dd_line() + self.brake_line() + self.bear_line() + self.depth_line()
+                f"{self.kill_line()}\n" + (self.dd_line() + self.brake_line() + self.bear_line() + self.support_line()
+                                           + self.guard_line() + self.cushion_line() + self.depth_line()
                                            if futures else "") +
                 f"📉 Günlük zarar limiti: {daily} | bugün: {fmt_signed(day_pnl)} {q}\n"
                 f"🎯 Günlük kâr hedefi: {target}\n🔁 Zarar serisi sigortası: {streak}\n"
@@ -1273,8 +1311,8 @@ class SettingsMenu:
                 f"{frozen or '▶️ Alımlar dondurulmamış'}\n{LINE}\n"
                 "<i>Sigortalar yalnızca YENİ alımları durdurur; açık pozisyonların takibi sürer. Kill-switch ise "
                 "her şeyi kapatıp botu kilitler. Diğerleri: /ayar ANAHTAR DEĞER"
-                + (f"\n{esc(DD_SCALE_HINT)}\n{esc(DAY_BRAKE_HINT)}\n{esc(BEAR_HINT)}\n{esc(DEPTH_HINT)}"
-                   if futures else "") + "</i>")
+                + (f"\n{esc(DD_SCALE_HINT)}\n{esc(DAY_BRAKE_HINT)}\n{esc(BEAR_HINT)}\n{esc(SUPPORT_HINT)}"
+                   f"\n{esc(GUARD_HINT)}\n{esc(CUSHION_HINT)}\n{esc(DEPTH_HINT)}" if futures else "") + "</i>")
 
     def depth_line(self) -> str:
         """Risk sayfasında derinliğe göre boy ve backtestteki emir defteri kayması durumu."""
@@ -1296,6 +1334,43 @@ class SettingsMenu:
             return f"🐻 Ayı piyasası küçültmesi: kapalı ({regime})\n"
         return (f"🐻 Ayı piyasası küçültmesi: BTC {cfg.futures_bear_sma_days} günlük ortalamasının altındayken pozisyon "
                 f"%{cfg.futures_bear_size_pct:g} boy | {regime}\n")
+
+    def support_line(self) -> str:
+        """Risk sayfasında destek bölgesi: ayar ve 1 saatlik mumları alınmış coin sayısı (sayfa açılırken Binance'e istek
+        atılmaz; bot taramalar arasında saatte bir alır)."""
+        cfg, bot = self.cfg, self.bot
+        if cfg.futures_support_size_pct >= 100:
+            return "📐 Destek bölgesi: kapalı\n"
+        got = len(getattr(bot, "_hour_lows", {}) or {})
+        return (f"📐 Destek bölgesi: fiyat coinin {cfg.futures_support_days} günlük dibinin en fazla "
+                f"%{cfg.futures_support_zone_pct:g} altındayken pozisyon %{cfg.futures_support_size_pct:g} boy | "
+                f"1 saatlik mumları alınan coin: {got}\n")
+
+    def guard_line(self) -> str:
+        """Risk sayfasında sermaye koruması: bota verilen sermayeye göre şu anki toplam zarar ve sıradaki pozisyonun boyu."""
+        bot, cfg = self.bot, self.cfg
+        st, q = bot.state, cfg.quote_asset
+        start = st.start_capital
+        loss = max(0.0, (1 - st.capital / start) * 100) if start > 0 else 0.0
+        where = f"bota verilen sermaye {fmt_usdt(start)} {q}, toplam zarar %{loss:.1f}"
+        if cfg.futures_guard_pct <= 0:
+            return f"🛡️ Sermaye koruması: kapalı ({where})\n"
+        small = futures_guard_factor(cfg, st.capital, start) < 1
+        return (f"🛡️ Sermaye koruması: toplam zarar %{cfg.futures_guard_pct:g} olunca pozisyon "
+                f"%{cfg.futures_guard_size_pct:g} boy | {where} → sıradaki pozisyon "
+                + (f"<b>%{cfg.futures_guard_size_pct:g} boy</b>" if small else "tam boy") + "\n")
+
+    def cushion_line(self) -> str:
+        """Risk sayfasında kâr yastığı: sermayenin bota verilen sermayeye oranı ve sıradaki pozisyonun boyu."""
+        bot, cfg = self.bot, self.cfg
+        st = bot.state
+        ratio = st.capital / st.start_capital if st.start_capital > 0 else 0.0
+        if cfg.futures_cushion_x <= 0:
+            return f"🛏️ Kâr yastığı: kapalı (sermaye verilenin {ratio:.2f} katı)\n"
+        big = futures_cushion_factor(cfg, st.capital, st.start_capital) > 1
+        return (f"🛏️ Kâr yastığı: sermaye verilenin {cfg.futures_cushion_x:g} katına çıkınca pozisyon "
+                f"%{cfg.futures_cushion_size_pct:g} boy | şu an {ratio:.2f} katı → sıradaki pozisyon "
+                + (f"<b>%{cfg.futures_cushion_size_pct:g} boy</b>" if big else "normal boy") + "\n")
 
     def brake_line(self) -> str:
         """Risk sayfasında 24 saat freni durumu: son 24 saatin sermaye zirvesi, şu anki düşüş ve sıradaki pozisyonun boyu."""

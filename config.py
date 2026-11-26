@@ -650,6 +650,39 @@ def futures_dd_factor(cfg, capital: float, peak: float) -> float:
                            float(getattr(cfg, "futures_dd_scale_size_pct", 60.0)), capital, peak)
 
 
+# Sermaye koruması (rapor 26 araştırması, 26 Kasım; varsayılan kapalı):
+#   FUTURES_GUARD_PCT = botun sermayesi (başlangıç + gerçekleşen K/Z) bota verilen sermayenin (ilk sermaye +
+#       /sermayeekle) bu kadar % (ya da daha fazla) altındayken, yani toplam zarar bu düzeye gelmişken yeni pozisyonlar
+#       FUTURES_GUARD_SIZE_PCT büyüklükte açılır (0 = kapalı); zarar eşiğin altına inince tam boy. Kill-switch
+#       (MAX_TOTAL_LOSS_PCT) ile aynı ölçü, ondan önce devreye girer: zarardaki hesabı küçük boyla kill-switch'ten uzak
+#       tutar. Ölçü zirve değil başlangıç sermayesi olduğu için kârdaki (büyümüş) hesabı hiç etkilemez; düşüşte
+#       küçültmeden (FUTURES_DD_SCALE_PCT) farkı bu. Yalnızca kapanan işlemler sayılır; kaldıraç ve çıkışlar değişmez.
+def futures_guard_factor(cfg, capital: float, start: float) -> float:
+    """Sermaye koruması çarpanı: dd_scale_factor, FUTURES_GUARD_PCT / FUTURES_GUARD_SIZE_PCT ve bota verilen sermayeyle
+    (zirve yerine)."""
+    return dd_scale_factor(float(getattr(cfg, "futures_guard_pct", 0.0) or 0.0),
+                           float(getattr(cfg, "futures_guard_size_pct", 60.0)), capital, start)
+
+
+# Kâr yastığı (rapor 26 araştırması, 26 Kasım; varsayılan kapalı): sermaye korumasının öbür ucu.
+#   FUTURES_CUSHION_X = botun sermayesi bota verilen sermayenin bu katına (ya da üstüne) çıkınca yeni pozisyonlar
+#       FUTURES_CUSHION_SIZE_PCT büyüklükte (> 100: daha büyük) açılır; sermaye bu katın altına inince eski boy (0 =
+#       kapalı). Kâr, kill-switch'e karşı yastık olduğu için risk yalnızca kârdaki hesapta artar; yine de yastık açıkken
+#       pozisyonlar o oranda büyüktür (8x'te %112.5 ≈ 9x). Boştaki teminatla sınırlıdır.
+def cushion_factor(multiple: float, size_pct: float, capital: float, start: float) -> float:
+    """Kâr yastığı çarpanı (canlı bot ve backtest aynı kural): sermaye başlangıcın `multiple` katı ya da üstündeyse
+    size_pct / 100, değilse 1. multiple ≤ 0 (kapalı) ya da başlangıç bilinmiyorsa 1."""
+    if multiple <= 0 or start <= 0:
+        return 1.0
+    return size_pct / 100 if capital >= start * multiple - 1e-9 else 1.0
+
+
+def futures_cushion_factor(cfg, capital: float, start: float) -> float:
+    """cushion_factor, ayarlardaki FUTURES_CUSHION_X / FUTURES_CUSHION_SIZE_PCT ile."""
+    return cushion_factor(float(getattr(cfg, "futures_cushion_x", 0.0) or 0.0),
+                          float(getattr(cfg, "futures_cushion_size_pct", 112.5)), capital, start)
+
+
 MINUTE_SCAN_BAR_MS = 300_000            # Sinyal mumu (5 dk); dakikalık taramada ara dakikalar bunun kaydırılmışı
 MINUTE_SCAN_STEP_MS = 60_000
 MINUTE_SCAN_MAX_1M = 1500               # Binance tek istekte en fazla bu kadar 1 dk mum verir
@@ -1018,6 +1051,16 @@ class Config:
     # Ayı piyasası küçültmesi (strategy.bear_regime): BTC'nin dünkü kapanışı N günlük ortalamasının altındayken boy %X
     futures_bear_size_pct: float = 100.0   # Ayı piyasasında yeni pozisyonların büyüklüğü (%; 100 = kapalı)
     futures_bear_sma_days: int = 100       # Ortalama gün sayısı
+    # Sermaye koruması (bkz. futures_guard_factor): toplam zarar bota verilen sermayenin %X'i iken pozisyon boyu %Y
+    futures_guard_pct: float = 0.0         # Başlangıç sermayesine göre zarar eşiği (%; 0 = kapalı)
+    futures_guard_size_pct: float = 60.0   # Eşik aşılınca yeni pozisyonların büyüklüğü (%)
+    # Kâr yastığı (bkz. cushion_factor): sermaye bota verilen sermayenin X katına çıkınca pozisyon boyu %Y (> 100)
+    futures_cushion_x: float = 0.0         # Kaç kat (0 = kapalı)
+    futures_cushion_size_pct: float = 112.5   # Yastık varken yeni pozisyonların büyüklüğü (%)
+    # Destek bölgesi (strategy.support_low): fiyat coinin önceki N günlük dibinin en fazla %Z altındayken boy %X
+    futures_support_size_pct: float = 100.0  # Destek bölgesinde yeni pozisyonların büyüklüğü (%; 100 = kapalı)
+    futures_support_days: int = 30           # Dip için kaç günlük 1 saatlik mumlar
+    futures_support_zone_pct: float = 5.0    # Dibin en fazla % kaç altı bölge sayılır
     # Derinliğe göre boy (bkz. futures_dd_factor üstündeki açıklama): ±%1 içindeki küçük tarafın yüzdesi (0 = kapalı)
     futures_depth_cap_pct: float = 0.0
     futures_backtest_depth: bool = True    # Backtest: büyük pozisyonların emir defteri kayması (ölçülen derinlik)
@@ -1402,6 +1445,23 @@ class Config:
                           "kapalı)")
         if not 20 <= self.futures_bear_sma_days <= 400:
             errors.append("FUTURES_BEAR_SMA_DAYS 20-400 arasında olmalı (BTC'nin kaç günlük ortalaması)")
+        if not 0 <= self.futures_guard_pct <= 90:
+            errors.append("FUTURES_GUARD_PCT 0-90 arasında olmalı (bota verilen sermayeye göre toplam zarar %; 0 = "
+                          "kapalı)")
+        if not 10 <= self.futures_support_size_pct <= 100:
+            errors.append("FUTURES_SUPPORT_SIZE_PCT 10-100 arasında olmalı (destek bölgesindeki pozisyon büyüklüğü %; "
+                          "100 = kapalı)")
+        if not 3 <= self.futures_support_days <= 40:
+            errors.append("FUTURES_SUPPORT_DAYS 3-40 arasında olmalı (dip için kaç günlük 1 saatlik mumlar)")
+        if not 0.5 <= self.futures_support_zone_pct <= 20:
+            errors.append("FUTURES_SUPPORT_ZONE_PCT 0.5-20 arasında olmalı (dibin en fazla % kaç altı)")
+        if not (self.futures_cushion_x == 0 or 1.2 <= self.futures_cushion_x <= 20):
+            errors.append("FUTURES_CUSHION_X 0 (kapalı) ya da 1.2-20 olmalı (bota verilen sermayenin kaç katı)")
+        if not 100 <= self.futures_cushion_size_pct <= 150:
+            errors.append("FUTURES_CUSHION_SIZE_PCT 100-150 arasında olmalı (kâr yastığındaki pozisyon büyüklüğü %)")
+        if not 10 <= self.futures_guard_size_pct <= 100:
+            errors.append("FUTURES_GUARD_SIZE_PCT 10-100 arasında olmalı (sermaye korumasındaki pozisyon büyüklüğü %; "
+                          "100 = tam)")
         if not 10 <= self.futures_day_brake_size_pct <= 100:
             errors.append("FUTURES_DAY_BRAKE_SIZE_PCT 10-100 arasında olmalı (frendeki pozisyon büyüklüğü %; 100 = tam)")
         if not (self.futures_depth_cap_pct == 0 or 1 <= self.futures_depth_cap_pct <= 50):
@@ -1699,6 +1759,13 @@ def load_config(env_file: Optional[str] = None, mode_override: Optional[str] = N
         futures_day_brake_size_pct=_env_float("FUTURES_DAY_BRAKE_SIZE_PCT", 50.0),
         futures_bear_size_pct=_env_float("FUTURES_BEAR_SIZE_PCT", 100.0),
         futures_bear_sma_days=_env_int("FUTURES_BEAR_SMA_DAYS", 100),
+        futures_guard_pct=_env_float("FUTURES_GUARD_PCT", 0.0),
+        futures_guard_size_pct=_env_float("FUTURES_GUARD_SIZE_PCT", 60.0),
+        futures_cushion_x=_env_float("FUTURES_CUSHION_X", 0.0),
+        futures_cushion_size_pct=_env_float("FUTURES_CUSHION_SIZE_PCT", 112.5),
+        futures_support_size_pct=_env_float("FUTURES_SUPPORT_SIZE_PCT", 100.0),
+        futures_support_days=_env_int("FUTURES_SUPPORT_DAYS", 30),
+        futures_support_zone_pct=_env_float("FUTURES_SUPPORT_ZONE_PCT", 5.0),
         futures_depth_cap_pct=_env_float("FUTURES_DEPTH_CAP_PCT", 0.0),
         futures_backtest_depth=_env_bool("FUTURES_BACKTEST_DEPTH", True),
         futures_leverage=_env_int("FUTURES_LEVERAGE", 2),
@@ -2187,6 +2254,31 @@ def _setting_notes(cfg: Config) -> List[str]:
                          f"düşüşte küçültme eşiği %40 ile 12 ay ortancası aynı (+%1.841 → +%1.822), %60'ı aşan düşüş "
                          f"12 → 2.5; düşüşte küçültme kapalıyken +%1.921, düşüş 7.5 (pahalı canlı dolumda kill-switch "
                          f"5.5 → 9).")
+        if cfg.futures_support_size_pct < 100:
+            notes.append(f"FUTURES_SUPPORT_SIZE_PCT={cfg.futures_support_size_pct:g}, FUTURES_SUPPORT_DAYS="
+                         f"{cfg.futures_support_days}, FUTURES_SUPPORT_ZONE_PCT={cfg.futures_support_zone_pct:g} (destek "
+                         f"bölgesi): fiyat coinin önceki {cfg.futures_support_days} günlük dibinin (sinyalden en az 1 saat "
+                         f"önce kapanmış 1 saatlik mumlar) en fazla %{cfg.futures_support_zone_pct:g} altındayken yeni "
+                         f"pozisyonlar %{cfg.futures_support_size_pct:g} boy (1 saatlik mumlar saatte bir alınır, "
+                         f"alınamazsa boy değişmez). Testte (4.000 USDT, rapor 26 ayarı, 71 hesap) 60 / 30 gün / %5: 12 "
+                         f"ay ortancası +%1.921 → +%2.004, %60'ı aşan düşüş 7.5 → 4.5, zararla biten hesap 2 → 0.5.")
+        if cfg.futures_cushion_x > 0:
+            notes.append(f"FUTURES_CUSHION_X={cfg.futures_cushion_x:g}, FUTURES_CUSHION_SIZE_PCT="
+                         f"{cfg.futures_cushion_size_pct:g} (kâr yastığı): botun sermayesi bota verilen sermayenin "
+                         f"{cfg.futures_cushion_x:g} katına çıkınca yeni pozisyonlar %{cfg.futures_cushion_size_pct:g} boy "
+                         f"(kaldıracı o oranda artırmak gibi, ama yalnız kârdaki hesapta). Testte (4.000 USDT, rapor 26 "
+                         f"ayarı + sermaye koruması + destek bölgesi, 71 hesap) 2 / 112.5: 12 ay ortancası +%1.938 → "
+                         f"+%2.195, %60'ı aşan düşüş 4 → 9, kill-switch 10 çekilişin hepsinde 0; canlıda ölçülen pahalı "
+                         f"dolumda +%1.281 → +%1.515.")
+        if cfg.futures_guard_pct > 0:
+            notes.append(f"FUTURES_GUARD_PCT={cfg.futures_guard_pct:g}, FUTURES_GUARD_SIZE_PCT="
+                         f"{cfg.futures_guard_size_pct:g} (sermaye koruması): botun sermayesi bota verilen sermayenin "
+                         f"(ilk sermaye + /sermayeekle) %{cfg.futures_guard_pct:g} altındayken (toplam zarar) yeni "
+                         f"pozisyonlar %{cfg.futures_guard_size_pct:g} boy, zarar eşiğin altına inince tam boy; kârdaki "
+                         f"hesabı etkilemez. Testte (4.000 USDT, rapor 26 ayarı 8x + 24 saat freni + ayı %75, her ayın 1'inde "
+                         f"başlayan 71 hesap, 10 çekiliş) %30 / %60: 12 ay ortancası aynı (+%1.921 → +%1.935), "
+                         f"kill-switch 10 çekilişin hepsinde 0 (kapalıyken en kötü çekilişte 9). Destek bölgesiyle "
+                         f"birlikte canlıda ölçülen pahalı giriş dolumunda kill-switch 9 → 0.")
         if cfg.futures_day_brake_pct > 0:
             notes.append(f"FUTURES_DAY_BRAKE_PCT={cfg.futures_day_brake_pct:g}, FUTURES_DAY_BRAKE_SIZE_PCT="
                          f"{cfg.futures_day_brake_size_pct:g} (24 saat freni): botun sermayesi son 24 saatteki en yüksek "

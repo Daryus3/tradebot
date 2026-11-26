@@ -36,14 +36,14 @@ from typing import Callable, Dict, Iterable, List, NamedTuple, Optional, Sequenc
 
 import numpy as np
 
-from config import (DATA_DIR, DAY_BRAKE_HOURS, dd_scale_factor, format_crash_rules, futures_coin_list,
+from config import (DATA_DIR, DAY_BRAKE_HOURS, cushion_factor, dd_scale_factor, format_crash_rules, futures_coin_list,
                     futures_crash_rules, futures_funding_rules, futures_liq_distance_pct, futures_long_windows,
                     futures_modules, futures_scan_shifts, futures_snapshot_on, futures_wave_cfg, futures_wave_rules,
                     parse_crash_rules, scan_log_path, tr_from, tr_from_num, window_peak)
 from futures_data import FuturesArchive, concat, resample, slice_range
 from futures_depth import DEPTH_CHECK_MIN_NOTIONAL, DepthBook, daily_volume_fn
 from strategy import (BEAR_SMA_CHOICES, BIG_EXTRA_SLOTS, FUT_BAR_MS, FUT_HOUR_MS, QUALITY_CUTS, basis_pct,
-                      basis_size_factor, bear_size_factor,
+                      basis_size_factor, bear_size_factor, support_size_factor, SUPPORT_DAY_CHOICES,
                       big_extra_slots, big_funding_skip, big_rules_on, breadth_flags, btc_trend_1h, crash_state,
                       funding_per_bar, futures_candidates, futures_entries, futures_features, isolated_factor,
                       pick_signal, quality_roundup_ok, quality_score, quality_size_factor, recent_size_factor,
@@ -703,6 +703,21 @@ class SimParams:
     # attach_regime; 100 = kapalı)
     bear_size_pct: float = 100.0
     bear_sma_days: int = 100
+    # Sermaye koruması (FUTURES_GUARD_PCT; canlı: FuturesBot._guard_factor): gerçekleşen bakiye başlangıç sermayesinin
+    # guard_pct (%) ya da daha fazla altındayken (toplam zarar) yeni pozisyonun boyu × guard_size_pct / 100 (0 = kapalı;
+    # sabit tutarlı C senaryosunda uygulanmaz)
+    guard_pct: float = 0.0
+    guard_size_pct: float = 60.0
+    # Kâr yastığı (FUTURES_CUSHION_X; canlı: FuturesBot._guard_factor): gerçekleşen bakiye başlangıç sermayesinin
+    # cushion_x katı ya da üstündeyken yeni pozisyonun boyu × cushion_size_pct / 100 (0 = kapalı; C'de uygulanmaz)
+    cushion_x: float = 0.0
+    cushion_size_pct: float = 112.5
+    # Destek bölgesi (FUTURES_SUPPORT_SIZE_PCT; canlı: FuturesBot._support_factor): fiyat coinin önceki support_days
+    # günlük dibinin (sinyalden en az 1 saat önce kapanmış 1 saatlik mumlar; sinyal ölçüsü metrics["lowNh"], attach_support)
+    # altında ama en fazla support_zone_pct (%) altındaysa boy × support_size_pct / 100 (100 = kapalı)
+    support_size_pct: float = 100.0
+    support_days: int = 30
+    support_zone_pct: float = 5.0
     # Emir defteri derinliği (futures_depth; veri FutData.depth'te, yoksa ikisi de uygulanmaz): depth_cap_pct > 0 ise giriş
     # tutarı girişten önceki 2 dk'da ±%1 içindeki alış / satış emirlerinin küçüğünün bu yüzdesiyle sınırlı ve aynı mumdaki
     # sinyallerde sınıra takılınca kapasitesi büyük olan önce (FUTURES_DEPTH_CAP_PCT); depth_impact: piyasa emrinin defteri
@@ -759,6 +774,13 @@ def params_from_cfg(cfg, **over) -> SimParams:
                   day_brake_size_pct=float(getattr(cfg, "futures_day_brake_size_pct", 50.0)),
                   bear_size_pct=float(getattr(cfg, "futures_bear_size_pct", 100.0)),
                   bear_sma_days=int(getattr(cfg, "futures_bear_sma_days", 100)),
+                  guard_pct=float(getattr(cfg, "futures_guard_pct", 0.0) or 0.0),
+                  guard_size_pct=float(getattr(cfg, "futures_guard_size_pct", 60.0)),
+                  cushion_x=float(getattr(cfg, "futures_cushion_x", 0.0) or 0.0),
+                  cushion_size_pct=float(getattr(cfg, "futures_cushion_size_pct", 112.5)),
+                  support_size_pct=float(getattr(cfg, "futures_support_size_pct", 100.0)),
+                  support_days=int(getattr(cfg, "futures_support_days", 30)),
+                  support_zone_pct=float(getattr(cfg, "futures_support_zone_pct", 5.0)),
                   depth_cap_pct=float(getattr(cfg, "futures_depth_cap_pct", 0.0) or 0.0),
                   depth_impact=bool(getattr(cfg, "futures_backtest_depth", False)),
                   entry_lag_pct=entry_lag_for(cfg)[0], stop_slip_pct=STOP_SLIP_PCT)
@@ -821,6 +843,9 @@ class FutTrade:
     dd_scaled: bool = False  # Düşüşte küçültmeyle (FUTURES_DD_SCALE_PCT) küçük boyla açıldı
     braked: bool = False     # 24 saat freniyle (FUTURES_DAY_BRAKE_PCT) küçük boyla açıldı
     bear: bool = False       # Ayı piyasası küçültmesiyle (FUTURES_BEAR_SIZE_PCT) küçük boyla açıldı
+    guarded: bool = False    # Sermaye korumasıyla (FUTURES_GUARD_PCT) küçük boyla açıldı
+    cushioned: bool = False  # Kâr yastığıyla (FUTURES_CUSHION_X) büyük boyla açıldı
+    support: bool = False    # Destek bölgesi kuralıyla (FUTURES_SUPPORT_SIZE_PCT) küçük boyla açıldı
     depth_capped: bool = False  # Derinliğe göre boy sınırına takıldı (FUTURES_DEPTH_CAP_PCT)
     impact_pct: float = 0.0  # Emir defteri kayması, giriş + çıkış (fiyat %; FUTURES_BACKTEST_DEPTH)
     drop15: float = float("nan")  # Girişten önceki 15 dk'daki düşüş (%; sinyal ölçüsü, FUTURES_RECENT_SIZE_PCT)
@@ -1149,7 +1174,8 @@ def size_factor(p: SimParams, s: "FutSignal") -> float:
            * basis_size_factor(p.basis_size_pct, p.basis_deep_pct, s.metrics.get("basis")))
     if p.quality_size_pct < 100 and s.metrics.get("tactic", 1.0) == 1.0:
         out *= quality_size_factor(p.quality_size_pct, p.quality_cut_pct, quality_score(s.score, s.metrics))
-    return out * bear_size_factor(p.bear_size_pct, signal_bear(s, p.bear_sma_days))
+    return (out * bear_size_factor(p.bear_size_pct, signal_bear(s, p.bear_sma_days))
+            * support_size_factor(p.support_size_pct, p.support_zone_pct, s.metrics.get(f"low{int(p.support_days)}h")))
 
 
 def signal_bear(s: "FutSignal", days: int) -> Optional[bool]:
@@ -1178,6 +1204,14 @@ def brake_factor(p: SimParams, curve: Sequence[Tuple[int, float]], now_ms: int, 
         return 1.0
     return dd_scale_factor(p.day_brake_pct, p.day_brake_size_pct, equity,
                            window_peak(curve, now_ms, DAY_BRAKE_MS, equity))
+
+
+def guard_factor(p: SimParams, equity: float) -> float:
+    """Sermaye koruması × kâr yastığı çarpanı (canlı: FuturesBot._guard_factor; config.futures_guard_factor /
+    futures_cushion_factor): gerçekleşen bakiye başlangıç sermayesinin guard_pct altındaysa guard_size_pct / 100,
+    cushion_x katı ya da üstündeyse cushion_size_pct / 100."""
+    return (dd_scale_factor(p.guard_pct, p.guard_size_pct, equity, p.start_capital)
+            * cushion_factor(p.cushion_x, p.cushion_size_pct, equity, p.start_capital))
 
 
 def cooldown_block(p: SimParams, s: FutSignal, cooldown: Dict[str, int], reentry_at: Dict[str, int]) -> Optional[str]:
@@ -1266,12 +1300,14 @@ def simulate(p: SimParams, data: FutData, signals: Sequence[FutSignal], windows:
         factor = size_factor(p, s)          # Yalnız çöküş / çöküş durulmuş: küçük
         ddf = 1.0 if fixed_notional else dd_scale_factor(p.dd_scale_pct, p.dd_scale_size_pct, equity, peak)
         bf = 1.0 if fixed_notional else brake_factor(p, curve, s.close_ms, equity)
+        gf = 1.0 if fixed_notional else guard_factor(p, equity)
         capped = False
         if fixed_notional:
             notional = fixed_notional * factor
             margin = notional / p.leverage
         else:
-            margin = equity * usage * min(factor, 1.0) * ddf * bf  # Tek pozisyonda büyütülecek boş teminat yok
+            # Tek pozisyonda büyütülecek boş teminat yok (kâr yastığı da kullanımı aşamaz; canlı: _entry_margin)
+            margin = equity * usage * min(min(factor, 1.0) * bf * gf, 1.0) * ddf
             notional = min(margin * p.leverage, p.max_notional)
             notional, capped = apply_depth(p, data, s, notional)
             margin = notional / p.leverage
@@ -1303,7 +1339,11 @@ def simulate(p: SimParams, data: FutData, signals: Sequence[FutSignal], windows:
         tr.quality = quality_score(s.score, s.metrics) if s.metrics.get("tactic", 1.0) == 1.0 else float("nan")
         tr.dd_scaled = ddf < 1
         tr.braked = bf < 1
+        tr.guarded = gf < 1
+        tr.cushioned = gf > 1
         tr.bear = p.bear_size_pct < 100 and bool(signal_bear(s, p.bear_sma_days))
+        tr.support = support_size_factor(p.support_size_pct, p.support_zone_pct,
+                                         s.metrics.get(f"low{int(p.support_days)}h")) < 1
         peak = max(peak, equity)
         trades.append(tr)
         curve.append((tr.exit_ms, equity))
@@ -1446,6 +1486,8 @@ def simulate_slots(p: SimParams, data: FutData, signals: Sequence[FutSignal], wi
         factor = size_factor(p, s)
         bf = 1.0 if fixed_notional else brake_factor(p, curve, s.close_ms, equity)
         factor *= bf                        # 24 saat freni (canlıda da diğer boy çarpanlarıyla birlikte)
+        gf = 1.0 if fixed_notional else guard_factor(p, equity)
+        factor *= gf                        # Sermaye koruması (başlangıç sermayesine göre zarar)
         share = slot_share(p, len(heap))
         ddf = 1.0 if fixed_notional else dd_scale_factor(p.dd_scale_pct, p.dd_scale_size_pct, equity, peak)
         capped = False
@@ -1496,7 +1538,11 @@ def simulate_slots(p: SimParams, data: FutData, signals: Sequence[FutSignal], wi
         tr.quality = quality_score(s.score, s.metrics) if s.metrics.get("tactic", 1.0) == 1.0 else float("nan")
         tr.dd_scaled = ddf < 1
         tr.braked = bf < 1
+        tr.guarded = gf < 1
+        tr.cushioned = gf > 1
         tr.bear = p.bear_size_pct < 100 and bool(signal_bear(s, p.bear_sma_days))
+        tr.support = support_size_factor(p.support_size_pct, p.support_zone_pct,
+                                         s.metrics.get(f"low{int(p.support_days)}h")) < 1
         tr.rounded = not fixed_notional and rounded
         trades.append(tr)
         free_at = tr.exit_ms if tr.reason == "TIME" else tr.exit_ms + tr.bar_ms
@@ -1729,7 +1775,7 @@ def leverage_table(cfg, data: FutData, signals, windows,
         rows.append(LevRow(lev, evaluate(p, data, signals, windows), note,
                            rolling_summary(p, data, signals, windows) if data is not None else None))
         bar.step()
-    return rows + brake_lev_rows(cfg, data, signals, windows, rooms)
+    return rows + brake_lev_rows(cfg, data, signals, windows, rooms) + guard_lev_rows(cfg, data, signals, windows)
 
 
 def brake_lev_rows(cfg, data: FutData, signals, windows, rooms: Dict[int, float]) -> List[LevRow]:
@@ -1751,6 +1797,19 @@ def brake_lev_rows(cfg, data: FutData, signals, windows, rooms: Dict[int, float]
         out.append(LevRow(lev, evaluate(p, data, signals, windows), "", rolling_summary(p, data, signals, windows)
                           if data is not None else None, label))
     return out
+
+
+def guard_lev_rows(cfg, data: FutData, signals, windows) -> List[LevRow]:
+    """Sermaye korumasının asıl ölçüsü (her ayın 1'inde başlayan hesaplarda kill-switch): şimdiki kaldıraçta koruma
+    açıksa kapalı, kapalıysa %30 → %60 ile aynı hesap. Dalga modunda (çöküş taktiği)."""
+    base = params_from_cfg(cfg)
+    if base.max_positions <= 1 or cfg.futures_tactic != "crash":
+        return []
+    on = base.guard_pct > 0
+    p = params_from_cfg(cfg, **({"guard_pct": 0.0} if on else {"guard_pct": 30.0, "guard_size_pct": 60.0}))
+    label = f"{base.leverage}x, koruma yok" if on else f"{base.leverage}x + koruma"
+    return [LevRow(base.leverage, evaluate(p, data, signals, windows), "",
+                   rolling_summary(p, data, signals, windows) if data is not None else None, label)]
 
 
 def exit_grid(cfg, data: FutData, signals, windows) -> List[Tuple[float, float, Evaluation]]:
@@ -1995,7 +2054,8 @@ def exit_variant_rows(cfg, ev) -> List[Tuple[str, "Evaluation"]]:
 
 
 def size_variant_rows(cfg, ev, depth: bool = False, has_basis: bool = False,
-                      has_funding: bool = False, has_regime: bool = False) -> List[Tuple[str, "Evaluation"]]:
+                      has_funding: bool = False, has_regime: bool = False,
+                      has_support: bool = False) -> List[Tuple[str, "Evaluation"]]:
     """Pozisyon büyüklüğü ve dalga modu: teminat kullanımı, en fazla pozisyon, ek pozisyon boyu ve kapısı, yalnız çöküş
     boyu, dalgada yeniden giriş eşiği, düşüşte küçültme (açıksa çevresi, kapalıysa %30 / %60), derinlik verisi varsa
     derinliğe göre boy (açıksa çevresi, kapalıysa %10 + kapasite önceliği)."""
@@ -2050,6 +2110,9 @@ def size_variant_rows(cfg, ev, depth: bool = False, has_basis: bool = False,
         rows.append(("Düşüşte küçültme: zirveden %30 düşünce %60 boy", ev(dd_scale_pct=30.0, dd_scale_size_pct=60.0)))
     rows += brake_variant_rows(base, ev)
     rows += bear_variant_rows(base, ev, has_regime)
+    rows += guard_variant_rows(base, ev)
+    rows += cushion_variant_rows(base, ev)
+    rows += support_variant_rows(base, ev, has_support)
     return rows
 
 
@@ -2073,6 +2136,65 @@ def bear_variant_rows(base: SimParams, ev, has_regime: bool) -> List[Tuple[str, 
              for z in BEAR_SIZE_TRIES if not _same(z, base.bear_size_pct)]
     rows += [(f"Ayı piyasası: BTC {d} günlük ort. (şimdi {base.bear_sma_days})", ev(bear_sma_days=d))
              for d in BEAR_DAYS_TRIES if d != base.bear_sma_days]
+    return rows
+
+
+SUPPORT_SIZE_TRIES = (45.0, 60.0, 75.0)  # Destek bölgesindeki boy (%; rapor 26 araştırması, 26 Kasım)
+SUPPORT_ZONE_TRIES = (3.0, 5.0, 8.0)     # Dibin en fazla % kaç altı
+SUPPORT_DAYS_TRIES = (14, 30)
+
+
+def support_variant_rows(base: SimParams, ev, has_support: bool) -> List[Tuple[str, "Evaluation"]]:
+    """Destek bölgesi (FUTURES_SUPPORT_SIZE_PCT): açıksa kapalı + boy / bölge / gün çevresi, kapalıysa 30 gün, %5, %60.
+    Destek dipleri ölçülemediyse satır yok."""
+    if not has_support:
+        return []
+    if base.support_size_pct >= 100:
+        return [("Destek bölgesinde (30 g dibin 0-%5 altı) boy %60",
+                 ev(support_size_pct=60.0, support_days=30, support_zone_pct=5.0))]
+    rows = [("Destek bölgesi kuralı kapalı", ev(support_size_pct=100.0))]
+    rows += [(f"Destek bölgesi boyu %{z:g} (şimdi %{base.support_size_pct:g})", ev(support_size_pct=z))
+             for z in SUPPORT_SIZE_TRIES if not _same(z, base.support_size_pct)]
+    rows += [(f"Destek bölgesi: dibin 0-%{z:g} altı (şimdi %{base.support_zone_pct:g})", ev(support_zone_pct=z))
+             for z in SUPPORT_ZONE_TRIES if not _same(z, base.support_zone_pct)]
+    rows += [(f"Destek bölgesi: {d} günlük dip (şimdi {base.support_days})", ev(support_days=d))
+             for d in SUPPORT_DAYS_TRIES if d != base.support_days]
+    return rows
+
+
+CUSHION_X_TRIES = (1.5, 2.0, 3.0)        # Kâr yastığı katı (rapor 26 araştırması, 26 Kasım)
+CUSHION_SIZE_TRIES = (112.5, 125.0)     # Yastıktaki boy (%)
+
+
+def cushion_variant_rows(base: SimParams, ev) -> List[Tuple[str, "Evaluation"]]:
+    """Kâr yastığı (FUTURES_CUSHION_X): açıksa kapalı + kat / boy çevresi, kapalıysa 2 kat → %112.5 (yalnız dalga modunda;
+    tek pozisyonda büyütülecek boş teminat yok)."""
+    if base.max_positions <= 1:
+        return []
+    if base.cushion_x <= 0:
+        return [("Kâr yastığı: başlangıcın 2 katında %112.5 boy", ev(cushion_x=2.0, cushion_size_pct=112.5))]
+    rows = [("Kâr yastığı kapalı", ev(cushion_x=0.0))]
+    rows += [(f"Kâr yastığı {x:g} katında (şimdi {base.cushion_x:g})", ev(cushion_x=x))
+             for x in CUSHION_X_TRIES if not _same(x, base.cushion_x)]
+    rows += [(f"Kâr yastığı boyu %{z:g} (şimdi %{base.cushion_size_pct:g})", ev(cushion_size_pct=z))
+             for z in CUSHION_SIZE_TRIES if not _same(z, base.cushion_size_pct)]
+    return rows
+
+
+GUARD_TRIES = (20.0, 30.0, 40.0)        # Sermaye koruması eşiği (%; rapor 26 araştırması, 26 Kasım)
+GUARD_SIZE_TRIES = (50.0, 60.0, 70.0)   # Korumadaki boy (%)
+
+
+def guard_variant_rows(base: SimParams, ev) -> List[Tuple[str, "Evaluation"]]:
+    """Sermaye koruması (FUTURES_GUARD_PCT): açıksa kapalı + eşik / boy çevresi, kapalıysa %30 → %60. Asıl ölçüsü kaldıraç
+    tablosundaki koruma satırı (her ayın 1'inde başlayan hesaplarda kill-switch); A ve B'de etkisi küçüktür."""
+    if base.guard_pct <= 0:
+        return [("Sermaye koruması: toplam zarar %30 iken %60 boy", ev(guard_pct=30.0, guard_size_pct=60.0))]
+    rows = [("Sermaye koruması kapalı", ev(guard_pct=0.0))]
+    rows += [(f"Sermaye koruması eşiği %{t:g} (şimdi %{base.guard_pct:g})", ev(guard_pct=t))
+             for t in GUARD_TRIES if not _same(t, base.guard_pct)]
+    rows += [(f"Sermaye koruması boyu %{z:g} (şimdi %{base.guard_size_pct:g})", ev(guard_size_pct=z))
+             for z in GUARD_SIZE_TRIES if not _same(z, base.guard_size_pct)]
     return rows
 
 
@@ -2247,7 +2369,8 @@ def _crash_variant_rows(cfg, signals, minute: bool, tag: str, ev, other,
             + [("Pozisyon büyüklüğü ve dalga modu", None)]
             + size_variant_rows(cfg, ev, depth, any("basis" in s.metrics for s in signals),
                                 any("last_funding" in s.metrics for s in signals),
-                                any("bear100" in s.metrics for s in signals))
+                                any("bear100" in s.metrics for s in signals),
+                                any("low30h" in s.metrics for s in signals))
             + cascade_rows(cfg, ev, signals) + phase6_rows(cfg, ev, signals)
             + [("Giriş kuralı, tarama ve bekleme", None)] + scan5
             + [(f"Çöküş eşiği %{cfg.futures_crash_drop_pct - 2:g}{tag}",
@@ -2283,6 +2406,7 @@ def variant_rows(cfg, data: FutData, signals, windows,
             attach_basis(c2, data, sigs)
             attach_funding(c2, data, sigs)
             attach_regime(c2, data, sigs)
+            attach_support(c2, data, sigs)
             return evaluate(params_from_cfg(c2), data, sigs, windows)
         def stub(*_a, **_k):
             return 0
@@ -4117,6 +4241,21 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
         L.append(f"🐻 Ayı piyasası: BTC'nin girişten önceki günkü kapanışı {p.bear_sma_days} günlük ortalamasının "
                  f"altındayken yeni pozisyonlar %{p.bear_size_pct:g} boy (A, B ve C'de). A'da {bears} / "
                  f"{len(res.trades)} işlem bu boyla açıldı")
+    if p.support_size_pct < 100:
+        sup = sum(1 for tr in res.trades if tr.support)
+        L.append(f"📐 Destek bölgesi: fiyat coinin önceki {p.support_days} günlük dibinin (sinyalden en az 1 saat önce "
+                 f"kapanmış 1 saatlik mumlar) en fazla %{p.support_zone_pct:g} altındayken yeni pozisyonlar "
+                 f"%{p.support_size_pct:g} boy (A, B ve C'de). A'da {sup} / {len(res.trades)} işlem bu boyla açıldı")
+    if p.cushion_x > 0:
+        big = sum(1 for tr in res.trades if tr.cushioned)
+        L.append(f"🛏️ Kâr yastığı: bakiye başlangıç sermayesinin {p.cushion_x:g} katına çıkınca yeni pozisyonlar "
+                 f"%{p.cushion_size_pct:g} boy (boştaki teminatla sınırlı; A ve B'de, C sabit tutarla). A'da {big} / "
+                 f"{len(res.trades)} işlem bu boyla açıldı")
+    if p.guard_pct > 0:
+        guarded = sum(1 for tr in res.trades if tr.guarded)
+        L.append(f"🛡️ Sermaye koruması: bakiye başlangıç sermayesinin %{p.guard_pct:g} altındayken (toplam zarar) yeni "
+                 f"pozisyonlar %{p.guard_size_pct:g} boy (A ve B'de; C sabit tutarla). A'da {guarded} / "
+                 f"{len(res.trades)} işlem bu boyla açıldı")
     if p.day_brake_pct > 0:
         braked = sum(1 for tr in res.trades if tr.braked)
         L.append(f"🚦 24 saat freni: bakiye son 24 saatteki en yüksek değerinin %{p.day_brake_pct:g} altındayken yeni "
@@ -4362,9 +4501,12 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
                 L.append(f"  {label:{LEV_LABEL_W}s}  — ({r.note})")
             else:
                 L.append(f"  {label:{LEV_LABEL_W}s}" + _lev_line(r.ev, r.roll) + (f"  {r.note}" if r.note else ""))
-        if any(r.label for r in rows):
+        if any(r.label and "fren" in r.label for r in rows):
             L.append("  (fren satırları: 24 saat freni (FUTURES_DAY_BRAKE_PCT) açık / kapalı aynı hesap; fren tek başına "
                      "kârı düşürür, düşüşü azaltır; daha yüksek kaldıraçla aynı düşüşte daha çok kâr verir)")
+        if any(r.label and "koruma" in r.label for r in rows):
+            L.append("  (koruma satırı: sermaye koruması (FUTURES_GUARD_PCT) açık / kapalı aynı hesap; yalnız zarardaki "
+                     "hesabı küçültür, farkı kill-switch sütununda görünür; tek çekilişte bu sayı oynaktır)")
     if risk:
         L.append("")
         L.extend(leverage_risk_lines(risk))
@@ -4665,6 +4807,49 @@ def attach_regime(cfg, data: FutData, signals: Sequence[FutSignal],
     return done
 
 
+def attach_support(cfg, data: FutData, signals: Sequence[FutSignal],
+                   progress: Optional[Callable[[str], None]] = None) -> int:
+    """Çöküş taktiğinde her sinyale coinin destek dibine uzaklığı (destek bölgesi, FUTURES_SUPPORT_SIZE_PCT):
+    metrics["lowNh"] = giriş fiyatı / dip − 1 (%), dip = sinyalden en az 1 saat önce kapanmış, son N gün içinde açılmış 1
+    saatlik mumların en düşüğü (strategy.support_low ile aynı kural; mumlar coinin 5 dk geçmişinden toplanır; N =
+    SUPPORT_DAY_CHOICES ve ayardaki gün). Pencerenin yarısından azı varsa ölçü yazılmaz (boy değişmez). Ölçülen sinyal
+    sayısı döner."""
+    if getattr(cfg, "futures_tactic", "crash") != "crash" or not signals:
+        return 0
+    todo = [s for s in signals if not any(k.startswith("low") and k.endswith("h") for k in s.metrics)]
+    if not todo:
+        return 0
+    if progress:
+        progress("📐 Destek dipleri (1 saatlik mumlar) hesaplanıyor...")
+    by_sym: Dict[str, List[FutSignal]] = {}
+    for s in todo:
+        by_sym.setdefault(s.symbol, []).append(s)
+    ns = sorted(set(SUPPORT_DAY_CHOICES) | {int(getattr(cfg, "futures_support_days", 30))})
+    done = 0
+    for sym, sigs in by_sym.items():
+        k = data.k5.get(sym) if data.loader is None else data.loader(sym)
+        if k is None or not len(k["t"]):
+            continue
+        t = np.asarray(k["t"], dtype=np.int64)
+        hour = t // FUT_HOUR_MS
+        hours, first = np.unique(hour, return_index=True)
+        lows = np.minimum.reduceat(np.asarray(k["l"], dtype=np.float64), first)
+        for s in sigs:
+            got = False
+            h_max = s.close_ms // FUT_HOUR_MS - 2                  # Kapanışı ≤ sinyal − 1 saat olan son mum
+            for n in ns:
+                h_min = -(-(s.close_ms - n * DAY_MS) // FUT_HOUR_MS)  # Açılışı ≥ sinyal − N gün
+                a = int(np.searchsorted(hours, h_min, side="left"))
+                b = int(np.searchsorted(hours, h_max, side="right"))
+                if b - a >= n * 12 and s.entry_open > 0:
+                    low = float(lows[a:b].min())
+                    if low > 0:                                    # Fiyat: girişteki açılış (≈ sinyal kapanışı)
+                        s.metrics[f"low{n}h"] = (s.entry_open / low - 1) * 100
+                        got = True
+            done += got
+    return done
+
+
 def run_cli(cfg, days: Optional[int], end_ms: Optional[int], out_dir: Path, chart: bool = True,
             full_history: bool = False, exit_interval: str = "1m", sensitivity: bool = True,
             progress: Callable[[str], None] = print) -> Tuple[str, Optional[Path], Evaluation]:
@@ -4687,6 +4872,7 @@ def run_cli(cfg, days: Optional[int], end_ms: Optional[int], out_dir: Path, char
     attach_basis(cfg, data, signals, progress)
     attach_funding(cfg, data, signals, progress)
     attach_regime(cfg, data, signals, progress)
+    attach_support(cfg, data, signals, progress)
     ev = evaluate(params_from_cfg(cfg), data, signals, windows)
     levs = grid = variants = None
     if sensitivity:

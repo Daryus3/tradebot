@@ -42,7 +42,8 @@ import requests
 
 from config import (DAY_BRAKE_HOURS, MINUTE_SCAN_STEP_MS, futures_be_trigger, tr_from_num, futures_breadth_on,
                     futures_brake_factor, futures_close_only, futures_coin_list, window_peak,
-                    futures_dd_factor, futures_hold_minutes, scan_log_path,
+                    futures_cushion_factor, futures_dd_factor, futures_guard_factor, futures_hold_minutes,
+                    scan_log_path,
                     futures_crash_rules, futures_funding_rules,
                     futures_liq_distance_pct, futures_minute_limit, futures_modules, futures_pump_rules, futures_scan_shifts,
                     futures_slot_share, futures_snapshot_on, futures_wave_cfg, futures_wave_rules)
@@ -56,7 +57,8 @@ from strategy import (FUT_BAR_MS, FUT_BREADTH_DROP_PCT, FUT_BREADTH_HOURS, FUT_B
                       ScanResult, funding_per_bar, futures_kline_limit, isolated_factor, market_breadth,
                       recent_size_factor, basis_pct, basis_size_factor, quality_score, quality_size_factor,
                       spot_pairs, BIG_EXTRA_SLOTS, QUALITY_CUTS, big_extra_slots, big_funding_skip, big_rules_on,
-                      quality_roundup_ok, bear_regime, bear_size_factor)
+                      quality_roundup_ok, bear_regime, bear_size_factor, support_dist_pct, support_low,
+                      support_size_factor)
 from telegram_bot import CRITICAL_EXITS, Messages, esc, fmt_duration, fmt_price, fmt_signed, fmt_usdt, futures_tag
 from trader import ALIVE_SAVE_SEC, POSITION_LOG_SEC, RULES_REFRESH_SEC, Mark, TradingBot
 
@@ -104,6 +106,8 @@ FAST_VERIFY_MAX_AGE_SEC = 30       # Doğrulama bundan eskiyse girişte teminat 
 FAST_VERIFY_EVERY_SEC = 300        # Ön hazırlık (taramalar arasında) için doğrulama aralığı
 FAST_PREPARE_BATCH = 2             # Ön hazırlık: döngü adımı başına en fazla bu kadar coin (2 istek / coin)
 FAST_PREPARE_GUARD_SEC = 20        # Taramaya bu kadar kala ön hazırlık / parite yenilemesi yapılmaz
+SUPPORT_REFRESH_BATCH = 4          # Destek bölgesi: döngü adımı başına en fazla bu kadar coinin 1 saatlik mumları
+SUPPORT_RETRY_SEC = 600            # 1 saatlik mumları alınamayan coin bu kadar sonra yeniden denenir
 FAST_PREPARE_RETRY_SEC = 3600      # Önceden ayarlanamayan coin bu kadar sonra yeniden denenir (girişte eski yol denenir)
 FAST_PREPARE_POLL_SEC = 1.0        # Hazırlanacak coin varken döngü bu aralıkla döner
 FAST_MIN_SLEEP_SEC = 0.02
@@ -179,6 +183,9 @@ class FuturesBot(TradingBot):
         self._be_retry_at: Dict[str, float] = {}
         self._bear_cache: Optional[Tuple[int, int, Optional[bool]]] = None   # (UTC günü, gün sayısı, ayı mı)
         self._bear_retry_at = 0.0
+        # Destek bölgesi (FUTURES_SUPPORT_SIZE_PCT): sembol → (alındığı UTC saati, 1 saatlik mum açılışları, en düşükleri)
+        self._hour_lows: Dict[str, Tuple[int, list, list]] = {}
+        self._hour_lows_retry: Dict[str, float] = {}
         self._stop_passed: Set[str] = set()    # Stop taşınırken "emir hemen tetiklenir" reddi alan pariteler
         self._trail_at: Dict[str, float] = {}
         self.universe: List[str] = []          # FUTURES_UNIVERSE: en hacimli N köklü parite (sıralamanın ilk N'i)
@@ -484,6 +491,8 @@ class FuturesBot(TradingBot):
                 self._journal({"t": bar_ms, "skip": blocked})
         if hold and scanned and self.running and self.state.positions:
             self._timed_manage(self.time_fn())               # Ertelenen pozisyon kontrolü: taramadan hemen sonra
+        if not scanned and not quiet:
+            self._refresh_support(now)                       # Destek bölgesi: 1 saatlik mumlar (saatte bir)
         self._periodic(now)
 
     def _timed_manage(self, now: float) -> None:
@@ -1778,12 +1787,16 @@ class FuturesBot(TradingBot):
         bear = self._bear_factor(sig)
         if bear != 1:
             factor *= bear
+        support = self._support_factor(sig)
+        if support != 1:
+            factor *= support
         dd = self._dd_factor(sig)
-        brake = self._brake_factor(sig)
+        brake = self._brake_factor(sig) * self._guard_factor(sig)   # 24 saat freni × sermaye koruması
         slots = self.slots()
         if slots <= 1:
-            return free * usage * min(factor, 1.0) * dd * brake   # Tek pozisyonda büyütülecek boş teminat yok
-        factor *= brake                                     # 24 saat freni (backtest: simulate_slots ile aynı yer)
+            # Tek pozisyonda büyütülecek boş teminat yok (kâr yastığı da kullanımı aşamaz)
+            return free * usage * min(min(factor, 1.0) * brake, 1.0) * dd
+        factor *= brake                                     # Fren ve koruma (backtest: simulate_slots ile aynı yer)
         opened = [p for p in self.state.positions.values() if p.futures]
         used = sum(p.margin_usdt for p in opened)
         share = futures_slot_share(cfg, len(opened))        # Faz 5: 1/N; Faz 6: ilk büyük, ekler küçük
@@ -1838,6 +1851,75 @@ class FuturesBot(TradingBot):
             sig.metrics["bear_size_pct"] = round(factor * 100, 1)
             sig.metrics["bear_days"] = int(cfg.futures_bear_sma_days)
         return factor
+
+    def _support_on(self) -> bool:
+        return self.cfg.futures_support_size_pct < 100 and self.cfg.futures_tactic == "crash"
+
+    def _support_symbols(self) -> List[str]:
+        cfg = self.cfg
+        return self._universe_symbols() if cfg.futures_universe > 0 else [c + "USDT" for c in futures_coin_list(cfg)]
+
+    def _refresh_support(self, now: float) -> None:
+        """Destek bölgesi (FUTURES_SUPPORT_SIZE_PCT): taramalar arasında coinlerin 1 saatlik mumları saatte bir yenilenir
+        (döngü adımı başına en fazla SUPPORT_REFRESH_BATCH coin; girişte istek beklenmez). Alınamayan coin
+        SUPPORT_RETRY_SEC sonra yeniden denenir; o sürede eski kayıt (en fazla bir saat önceki) kullanılır, o da yoksa boy
+        değişmez."""
+        if not self._support_on():
+            return
+        hour = int(now // 3600)
+        limit = int(self.cfg.futures_support_days) * 24 + 3
+        ex = self.exchange
+        todo = [s for s in self._support_symbols() if ex.has_market(s)
+                and self._hour_lows.get(s, (-1, (), ()))[0] < hour and now >= self._hour_lows_retry.get(s, 0.0)]
+        for symbol in todo[:SUPPORT_REFRESH_BATCH]:
+            try:
+                kl = ex.klines(symbol, "1h", limit)
+            except Exception as exc:  # noqa: BLE001 - dip ölçülemedi: boy değişmez
+                self._hour_lows_retry[symbol] = now + SUPPORT_RETRY_SEC
+                log.warning("%s 1 saatlik mumları alınamadı (destek bölgesi): %s", symbol, exc)
+                continue
+            self._hour_lows[symbol] = (hour, [int(t) for t in kl["t"]], [float(x) for x in kl["l"]])
+
+    def support_dist(self, sig: FuturesSignal) -> Optional[float]:
+        """Sinyal fiyatının coinin destek dibine uzaklığı (%; strategy.support_low, backtest: attach_support). Kayıt
+        yoksa ya da bir saatten eskiyse None."""
+        cached = self._hour_lows.get(sig.symbol)
+        if cached is None or cached[0] < int(self.time_fn() // 3600) - 1:
+            return None
+        close_ms = int(sig.candle_ms) + FUT_BAR_MS
+        low = support_low(cached[1], cached[2], close_ms, int(self.cfg.futures_support_days))
+        return support_dist_pct(sig.price, low)
+
+    def _support_factor(self, sig: FuturesSignal) -> float:
+        """Destek bölgesi çarpanı (kapalıysa 1): fiyat dibin altında ama en fazla FUTURES_SUPPORT_ZONE_PCT altındaysa
+        FUTURES_SUPPORT_SIZE_PCT / 100. Uygulanınca sinyale yazılır (pozisyon mesajı)."""
+        cfg = self.cfg
+        if not self._support_on() or sig.metrics.get("tactic", 1.0) != 1.0:
+            return 1.0
+        dist = self.support_dist(sig)
+        factor = support_size_factor(cfg.futures_support_size_pct, cfg.futures_support_zone_pct, dist)
+        if factor < 1:
+            sig.metrics["support_size_pct"] = round(factor * 100, 1)
+            sig.metrics["support_dist"] = round(dist, 2)
+            sig.metrics["support_days"] = int(cfg.futures_support_days)
+        return factor
+
+    def _guard_factor(self, sig: Optional[FuturesSignal] = None) -> float:
+        """Sermaye koruması çarpanı (FUTURES_GUARD_PCT; kapalıysa 1): sermaye (başlangıç + gerçekleşen K/Z) bota verilen
+        sermayenin (ilk sermaye + /sermayeekle) eşik kadar altındaysa FUTURES_GUARD_SIZE_PCT / 100 (backtest:
+        futures_backtest.guard_factor). Uygulanınca sinyale yazılır (pozisyon mesajı)."""
+        cfg, state = self.cfg, self.state
+        if (cfg.futures_guard_pct <= 0 and cfg.futures_cushion_x <= 0) or state.start_capital <= 0:
+            return 1.0
+        factor = futures_guard_factor(cfg, state.capital, state.start_capital)
+        if factor < 1 and sig is not None:
+            sig.metrics["guard_size_pct"] = round(factor * 100, 1)
+            sig.metrics["guard_loss_pct"] = round((1 - state.capital / state.start_capital) * 100, 1)
+        cushion = futures_cushion_factor(cfg, state.capital, state.start_capital)
+        if cushion > 1 and sig is not None:                   # Kâr yastığı: sermaye verilenin X katında
+            sig.metrics["cushion_size_pct"] = round(cushion * 100, 1)
+            sig.metrics["cushion_x"] = round(state.capital / state.start_capital, 2)
+        return factor * cushion
 
     def _brake_factor(self, sig: Optional[FuturesSignal] = None) -> float:
         """24 saat freni çarpanı (FUTURES_DAY_BRAKE_PCT; kapalıysa 1): sermaye (başlangıç + gerçekleşen K/Z) son 24

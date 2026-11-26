@@ -2724,6 +2724,98 @@ yok). Sinyallerin %24'ü BTC 200 günlük ortalamanın altındayken geliyor.
 - **Öneri:** sakin seçenek `FUTURES_BEAR_SIZE_PCT=75` + `FUTURES_DD_SCALE_PCT=40` (kâr aynı, büyük düşüş çok az). Kâr
   için `FUTURES_BEAR_SIZE_PCT=75` + `FUTURES_DD_SCALE_PCT=0` (H1).
 
+#### Rapor 26 araştırması: sermaye koruması, destek bölgesi, kâr yastığı ve elenen bağlam ölçüleri (Kasım 2026)
+Taban: rapor 26'nın ayarı (H1: 8x + 24 saat freni %10 / %50 + ayı piyasası %75, düşüşte küçültme kapalı; fark %130,
+kalite %60, büyük hesap 5.000, yuvarlama), **4.000 USDT**, 10 çekiliş, her ayın 1'inde başlayan 71 hesap (12 ay ortanca /
+%60'ı aşan düşüş / kill-switch / 12 ay sonunda zararda biten / alt çeyrek). Şimdiki: +%1.921 / 7.5 / 0 / 2 / +%580.
+
+**Rapordaki "kill-switch 9" neden araştırmada 0?** Rapor tek çekiliş gösterir (0. çekiliş); araştırma tablosu 10
+çekilişin ortancasıdır. H1'in 10 çekilişindeki kill-switch sayıları: 9, 2, 0, 2, 0, 0, 0, 2, 0, 0 (ortanca 0, ortalama
+1.5). 0. çekilişte 2022-07 → 2023-03 arasında başlayan 9 hesap, henüz büyümemişken Haziran 2023 düşüşüne yakalanıyor.
+Ortanca bu kuyruğu gizliyordu; bu turdan itibaren kill-switch için ortalama ve en kötü çekiliş de yazılıyor.
+
+Bu turda yeni bağlam ölçüleri denendi: girişte BTC'nin kendi hareketi (son 5 / 15 / 60 / 240 dk), dalganın yönü
+(genişliğin 15-60 dk önceki değeri), coinin önceki 1 / 7 / 30 günlük dibine uzaklığı. Ayrıca bakiyenin başlangıç
+sermayesine göre konumu ve piyasa rejimine göre çıkış denendi.
+
+| Fikir | Sonuç | Karar |
+|---|---|---|
+| BTC 15 dk'da yatayken (±%0.5; coin tek başına çöküyor) boy ×0.45-0.75 | İşlem başı güçlü ayrım (yatay +%0.02, diğerleri +%0.31; 7 yılın 7'sinde), ama 12 ay ortanca +%1.622 … +%1.865 | Elendi: zayıf ama kârlı işlemler, sakin dönemde küçültmek kârı düşürüyor |
+| İlk pozisyonda genişlik artmıyorsa boy ×0.6-0.7 | +%1.754 … +%1.899 | Elendi |
+| Dip kırılımı (7 günlük dibin %10+ altı; işlem başı +%1.0) → boy ×1.3 / ×1.6 | +%2.024 / 17 / 2 · +%1.873 / 25.5 / 11 | Kaldıraç gibi (risk birlikte artıyor) |
+| Kâr yastığı tek başına: bakiye başlangıcın 2 katını geçince boy ×1.125 | +%2.150 / 12.5 / 0 (en kötü çekilişte 9) | Kaldıraç gibi; koruma + destekle birlikte eklendi (aşağıda) |
+| Ayıda Kâr Al %5 (komşular %4.5 / %5.5) | +%1.993 (+%1.965 / +%1.894) | Küçük, komşularda tutarsız |
+| Ayıda zaman stopu 30 dk / ayıda en fazla 3 pozisyon / kademeli ayı (50 ve 100 günlük) | +%1.446 / +%1.763 / +%1.805 | Kötü |
+| **Sermaye koruması** (aşağıda) | | **Eklendi** |
+| **Destek bölgesi** (aşağıda) | | **Eklendi** |
+| **Kâr yastığı + koruma + destek (hibrit)** (aşağıda) | | **Eklendi** |
+
+**Sermaye koruması (yeni).** H1'de düşüşte küçültme kapalı; büyümemiş hesap büyük bir düşüşte kill-switch'e kadar
+inebiliyor. Kural: sermaye bota verilen sermayenin (ilk sermaye + /sermayeekle) %X altındayken (toplam zarar) yeni
+pozisyonlar %Y boy. Ölçü zirve değil başlangıç olduğu için kârdaki hesabı hiç etkilemez.
+
+| Koruma (toplam zarar → boy) | 12 ay ortanca / %60+ / zararda / alt çeyrek | Kill-switch: ortanca / ortalama / en kötü çekiliş |
+|---|---|---|
+| Yok (şimdiki) | +%1.921 / 7.5 / 2 / +%580 | 0 / 1.5 / 9 |
+| **%30 → %60** | **+%1.935** / 6.5 / 2 / +%620 | **0 / 0.0 / 0** |
+| %25 → %50 · %25 → %70 · %35 → %60 | +%1.837 · +%1.886 · +%1.912 | 0 / 0 / 0 · 0 / 0.2 / 1 · 0 / 0.2 / 2 |
+| %30 → %50 · %30 → %70 · %40 → %50 | +%1.883 · +%1.916 · +%1.918 (alt çeyrek +%683) | 0 / 0 / 0 · 0 / 0.1 / 1 · 0 / 0 / 0 |
+
+**Destek bölgesi (yeni).** İşlem başı ön elemede (C, sabit tutar) fiyatın coinin önceki 7 / 30 günlük dibine göre
+yeri güçlü bir ayırıcı: dibin %10'dan çok altındaysa (kapitülasyon) +%1.0 (iki dönemde de, yeterli işlem olan 6 yılın
+6'sında); dibin hemen altındaysa (dip yeni kırılıyor) ~0 ya da eksi (7 gün, 0-%2 altı: seçim −%0.17 / doğrulama
+−%0.05; 7 yılın 6'sında eksi). Kural: fiyat önceki N günlük dibin altında ama en fazla %Z altındaysa boy %X. Dip =
+sinyalden en az 1 saat önce kapanmış, son N gün içinde açılmış 1 saatlik mumların en düşüğü (çöküşün kendisi sayılmaz;
+canlı bot aynı mumları Binance'ten saatte bir alır).
+
+| Destek bölgesi | 12 ay ortanca / %60+ / zararda / alt çeyrek | Kill-switch (ort. / en kötü) | 3 kat kaymada doğrulama |
+|---|---|---|---|
+| Yok (şimdiki) | +%1.921 / 7.5 / 2 / +%580 | 1.5 / 9 | +%377 |
+| **30 gün, dibin 0-%5 altı → %60** | **+%2.004 / 4.5 / 0.5 / +%733** (9/10) | 0.3 / 2 | +%406 |
+| 0-%3 · 0-%8 altı (%60) | +%1.994 / 5.5 · +%1.996 / 6 | 0.3 / 2 · 0.2 / 2 | |
+| %45 · %75 boy (0-%5) | +%2.001 / 3.5 / 0 · +%1.936 / 7.5 / 2 | 0.2 / 2 · 0.5 / 2 | +%425 · +%399 |
+| 14 gün · 7 gün (0-%3, %50) | +%1.935 / 1.5 · +%1.918 / 2.5 | 0.3 / 2 · 0.8 / 5 | |
+
+**Birlikte (H3 = koruma %30 / %60 + destek 30 gün / %5 / %60) ve maliyet stresi.** Resmi motor araştırmayı birebir
+verdi (ölçüler de resmi `attach_support` ile %99.4 aynı bölge).
+
+| Ayar | Normal maliyet: 12 ay ortanca / %60+ / kill (ort. / en kötü) / zararda / alt çeyrek | Canlıda ölçülen pahalı dolum (+%0.084) |
+|---|---|---|
+| Şimdiki (H1) | +%1.921 / 7.5 / 1.5 / 9 / 2 / +%580 | +%1.111 / 20 / **kill ortanca 9** / zararda 12 |
+| **H3** | +%1.938 / **4.0 / 0 / 0 / 0** / +%765 | **+%1.281 / 13.5 / kill ortanca 0 (en kötü 3)** / zararda 4 |
+| **H3 + kâr yastığı** (2 katında %112.5) | **+%2.195** / 9.0 / 0 / 0 / 0.5 / +%656 (10/10) | **+%1.515 / 21 / kill ortanca 0 (en kötü 3)** / zararda 4 |
+| H3 + 9x | +%2.224 / 10.5 / 0.2 / 1 / 1.5 / +%748 (10/10) | +%1.422 / 28 / kill 4 / 7 |
+| H3 + fark %150 | +%2.044 / 7.5 / 0.1 / 1 / 0 / +%700 | |
+| H3 + ayıda Kâr Al %5 · + yastık | +%2.085 / 4.5 / 0 / 0 · +%2.325 / 8.5 / 0 / 0 | +%1.350 · +%1.513 (yastığa bir şey katmıyor) |
+
+Kâr yastığının komşuları (H3 ile; 12 ay ortanca / %60+ / zararda, kill-switch hepsinde 0): 1.5 katında +%2.259 / 11 /
+1.5, 3 katında +%2.146 / 7.5 / 0, 2 katında %125 boy +%2.357 / 13 / 1. 3 kat kaymada (0. çekiliş) 71 hesabın ortancası:
+şimdiki +%961 (kill 9), H3 +%1.201 (kill 1), H3 + 9x +%1.584 (kill 5).
+
+En kötü durum (kötümser stop dolumu, fitilin yarısı; 0. çekiliş): şimdiki 71 hesabın ortancası −%60, kill-switch 44;
+H3 −%21, kill-switch 26; H3 + 9x −%60, 42.
+
+- **Ne kazandırıyor:** H3 normal maliyette aynı kârı çok daha az riskle veriyor: kill-switch 10 çekilişin hepsinde 0,
+  zararla biten hesap 0, alt çeyrek +%580 → +%765. Asıl fark canlıdaki gerçek dolum maliyetinde: şimdiki ayar orada 71
+  hesabın 9'unda kill-switch'e takılıyor, H3'te ortanca 0 ve 12 ay ortancası +%15 yüksek.
+- **Kâr için hibrit (H3 + kâr yastığı):** H3'ün kazandırdığı risk payı kâra çevriliyor. Yastık pozisyonu yalnız hesap
+  bota verilen sermayenin 2 katına çıkınca büyütüyor; kâr kill-switch'e karşı yastık olduğu için kill-switch yine 0.
+  Normal maliyette 12 ay ortancası +%14 (+%1.921 → +%2.195). Pahalı canlı dolumda +%36 (+%1.111 → +%1.515), kill-switch
+  9 → 0. %60'ı aşan düşüş normal maliyette 7.5 → 9, pahalı dolumda 20 → 21 (aynı).
+- **Düz 9x** de kâr getiriyor (normal maliyette +%16), ama pahalı dolumda kill-switch 4 ve kötümser stopta koruma
+  kayboluyor; yastık aynı kârı daha güvenli veriyor. Önerilen kaldıraç 8x.
+- **Eklenen ayarlar:** `FUTURES_GUARD_PCT` (varsayılan 0 = kapalı; önerilen 30) ve `FUTURES_GUARD_SIZE_PCT` (60);
+  `FUTURES_SUPPORT_SIZE_PCT` (varsayılan 100 = kapalı; önerilen 60), `FUTURES_SUPPORT_DAYS` (30),
+  `FUTURES_SUPPORT_ZONE_PCT` (5); `FUTURES_CUSHION_X` (varsayılan 0 = kapalı; önerilen 2) ve `FUTURES_CUSHION_SIZE_PCT`
+  (112.5). Telegram: 🧯 Risk sigortaları → 📐, 🛡️ ve 🛏️ (sayfada bota verilen sermayeye göre şu anki toplam zarar /
+  kaç kat olduğu ve 1 saatlik mumları alınan coin sayısı yazar). Canlı bot 1 saatlik mumları taramalar arasında saatte bir
+  alır; alınamazsa boy değişmez. Pozisyon mesajında "Destek bölgesi: …" / "Sermaye koruması: …" / "Kâr yastığı: …"
+  satırı. Backtest: `attach_support` (dipler 5 dk arşivden), rapor başlığında 📐 / 🛡️ / 🛏️ satırları, tek kural
+  tablosunda çevre satırları, kaldıraç tablosunda "koruma yok / + koruma" satırı. Resmi motor üç kuralda da araştırmayı
+  birebir verdi.
+- **Öneri:** sakin seçenek H3 (`FUTURES_GUARD_PCT=30`, `FUTURES_SUPPORT_SIZE_PCT=60`): kâr aynı, risk belirgin az. Kâr için
+  H3 + `FUTURES_CUSHION_X=2`. Kaldıraç 8x kalsın.
+
 #### Kill-switch eşiği (rapor 23, Kasım 2026)
 **Nasıl çalışır:** botun toplam zararı (kapanan işlemler + açık pozisyonların anlık zararı) botun sermayesinin
 (başlangıç + /sermayeekle) `MAX_TOTAL_LOSS_PCT`'sine ulaşınca durum dosyasına "kill-switch" yazılır, yeni pozisyon
@@ -2876,6 +2968,16 @@ karar için ortancaya ve en kötüye bakın. Çıkış taraması her gün dengel
   gösterir. Fren A'nın son bakiyesini genellikle düşürür (2020 başındaki büyük dönüşleri küçük boyla karşılar); kazancı
   her ayın 1'inde başlayan hesaplarda ve bir kademe yüksek kaldıraçla birlikte görünür (kaldıraç tablosundaki fren
   satırları). "Tek kural değişince" tablosunda kapalı / eşik / boy satırları vardır.
+- **📐 Destek bölgesi satırı** (rapor başlığında, `FUTURES_SUPPORT_SIZE_PCT` açıkken): fiyat coinin önceki N günlük
+  dibinin (sinyalden en az 1 saat önce kapanmış 1 saatlik mumlar) en fazla %Z altındayken açılan pozisyonların küçük
+  boyla açıldığını ve A'da kaç işlemin bu boyla açıldığını gösterir. A, B ve C aynı kuralı kullanır.
+- **🛏️ Kâr yastığı satırı** (rapor başlığında, `FUTURES_CUSHION_X` açıkken): bakiye başlangıç sermayesinin X katına
+  çıktıktan sonra açılan pozisyonların büyük boyla açıldığını ve A'da kaç işlemin bu boyla açıldığını gösterir (A
+  2020'nin ortasından beri hep yastıkta). A ve B aynı kuralı kullanır; C kullanmaz.
+- **🛡️ Sermaye koruması satırı** (rapor başlığında, `FUTURES_GUARD_PCT` açıkken): bakiye başlangıç sermayesinin eşik
+  kadar altındayken (toplam zarar) açılan pozisyonların küçük boyla açıldığını ve A'da kaç işlemin bu boyla açıldığını
+  gösterir. Kazancı A'da değil her ayın 1'inde başlayan hesaplarda görünür: kaldıraç tablosundaki "koruma yok / +
+  koruma" satırında kill-switch sütunu (tek çekiliş; bu sayı çekilişten çekilişe çok oynar, bkz. "Rapor 26").
 - **Teşhis bölümü:** işlem başına fiyat hareketiyle komisyon + spread maliyetini ayırır, işlemlerin ne kadarının
   hedefe ulaştığını ve dönemin iki yarısının ayrı sonuçlarını gösterir.
 - **K/Z dağılım grafiği:** normal backtest her işlemin net K/Z'sini nokta grafiği olarak `data/backtest_grafik_*.png`

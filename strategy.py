@@ -2100,6 +2100,40 @@ def bear_size_factor(size_pct: float, bear: Optional[bool]) -> float:
     return max(0.0, float(size_pct)) / 100
 
 
+# Destek bölgesi (rapor 26 araştırması, 26 Kasım): fiyat coinin önceki N günlük dibinin hemen altına inmişse (dip
+# kırılırken; işlem başı ~0) küçük boy. Dip = sinyalden en az 1 saat önce kapanmış, son N gün içinde açılmış 1 saatlik
+# mumların en düşüğü (çöküşün kendisi sayılmaz). Canlı bot Binance'in 1 saatlik mumlarını saatte bir alır; backtest aynı
+# mumları 5 dk arşivden toplar.
+SUPPORT_DAY_CHOICES = (7, 14, 30)
+HOUR_MS = 3_600_000
+
+
+def support_low(open_ms: Sequence[int], lows: Sequence[float], close_ms: int, days: int) -> Optional[float]:
+    """1 saatlik mumlardan (açılış ms ve en düşük, eskiden yeniye) sinyalin (kapanışı close_ms) destek dibi: kapanışı
+    ≤ close_ms − 1 saat ve açılışı ≥ close_ms − days gün olan mumların en düşüğü. Pencerenin yarısından azı varsa
+    None (bilinmiyor: boy değişmez)."""
+    lo_ms, hi_ms = int(close_ms) - int(days) * 24 * HOUR_MS, int(close_ms) - 2 * HOUR_MS
+    vals = [float(x) for t, x in zip(open_ms, lows) if lo_ms <= int(t) <= hi_ms]
+    if len(vals) < int(days) * 12:
+        return None
+    return min(vals)
+
+
+def support_dist_pct(price: float, low: Optional[float]) -> Optional[float]:
+    """Fiyatın destek dibine uzaklığı (%; eksi = dibin altında)."""
+    if low is None or low <= 0 or price <= 0:
+        return None
+    return (float(price) / float(low) - 1) * 100
+
+
+def support_size_factor(size_pct: float, zone_pct: float, dist_pct: Optional[float]) -> float:
+    """Destek bölgesinde boy çarpanı: fiyat dibin altında ama en fazla zone_pct (%) altındaysa size_pct / 100, değilse 1
+    (dip çok derin kırıldıysa ya da fiyat dibin üstündeyse tam boy; ölçü yoksa 1)."""
+    if size_pct >= 100 or dist_pct is None or dist_pct != dist_pct:
+        return 1.0
+    return max(0.0, float(size_pct)) / 100 if -float(zone_pct) <= dist_pct < 0 else 1.0
+
+
 def window_sigma(c, bars: int, lookback: int = FUT_Z_LOOKBACK_BARS):
     """`bars` mumluk pencerenin olağan hareketi (log, 1 standart sapma): pencere başlangıcından önceki `lookback`
     mumun 5 dk log getirilerinin standart sapması × √bars. Çöküşün kendisi ölçüye karışmaz."""
@@ -2773,6 +2807,15 @@ class FuturesSignal:
         if m.get("brake_size_pct") and m["brake_size_pct"] < 100:
             parts.append(f"24 saat freni: sermaye son 24 saatin zirvesinin %{m.get('brake_pct', 0):g} altında, pozisyon "
                          f"%{m['brake_size_pct']:g} boy")
+        if m.get("support_size_pct") and m["support_size_pct"] < 100:
+            parts.append(f"Destek bölgesi: fiyat {m.get('support_days', 30):g} günlük dibin %{-m.get('support_dist', 0.0):.1f} "
+                         f"altında (dip kırılırken), pozisyon %{m['support_size_pct']:g} boy")
+        if m.get("guard_size_pct") and m["guard_size_pct"] < 100:
+            parts.append(f"Sermaye koruması: bota verilen sermayeye göre toplam zarar %{m.get('guard_loss_pct', 0):g}, "
+                         f"pozisyon %{m['guard_size_pct']:g} boy")
+        if m.get("cushion_size_pct") and m["cushion_size_pct"] > 100:
+            parts.append(f"Kâr yastığı: sermaye bota verilenin {m.get('cushion_x', 0):g} katı, pozisyon "
+                         f"%{m['cushion_size_pct']:g} boy")
         return (" | " + " | ".join(parts)) if parts else ""
 
     def _legacy_note(self) -> str:
