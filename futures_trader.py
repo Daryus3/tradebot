@@ -43,7 +43,7 @@ import requests
 from config import (DAY_BRAKE_HOURS, MINUTE_SCAN_STEP_MS, futures_be_trigger, tr_from_num, futures_breadth_on,
                     futures_brake_factor, futures_close_only, futures_coin_list, window_peak,
                     futures_cushion_factor, futures_dd_factor, futures_guard_factor, futures_hold_minutes,
-                    futures_tp_pct, extra_depth_skip, crash_ratio, scan_log_path,
+                    futures_tp_pct, extra_depth_skip, extra_deep_factor, crash_ratio, scan_log_path,
                     futures_crash_rules, futures_funding_rules,
                     futures_liq_distance_pct, futures_minute_limit, futures_modules, futures_pump_rules, futures_scan_shifts,
                     futures_slot_share, futures_snapshot_on, futures_wave_cfg, futures_wave_rules)
@@ -1817,6 +1817,11 @@ class FuturesBot(TradingBot):
             return free * usage * min(min(factor, 1.0) * brake, 1.0) * dd
         factor *= brake                                     # Fren ve koruma (backtest: simulate_slots ile aynı yer)
         opened = [p for p in self.state.positions.values() if p.futures]
+        deep = extra_deep_factor(cfg.futures_extra_deep_x, cfg.futures_extra_deep_size_pct, len(opened), sig.metrics)
+        if deep != 1:                                       # Derin ek pozisyon (backtest: simulate_slots)
+            sig.metrics["deep_size_pct"] = round(deep * 100, 1)
+            sig.metrics["deep_ratio"] = round(crash_ratio(sig.metrics), 2)
+            factor *= deep
         used = sum(p.margin_usdt for p in opened)
         share = futures_slot_share(cfg, len(opened))        # Faz 5: 1/N; Faz 6: ilk büyük, ekler küçük
         if opened and cfg.futures_extra_size_pct < 100:

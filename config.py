@@ -572,6 +572,17 @@ def small_crash_tp_pct(x: float, small_tp: float, tp: float, metrics) -> float:
     return small_tp if r == r and r < x else tp
 
 
+def extra_deep_factor(x: float, size_pct: float, n_open: int, metrics) -> float:
+    """Derin ek pozisyon (FUTURES_EXTRA_DEEP_X / FUTURES_EXTRA_DEEP_SIZE_PCT; rapor 31 araştırması): dalga modunda başka
+    pozisyon açıkken (n_open ≥ 1) gelen çöküş sinyalinin düşüşü çöküş eşiğinin x katı ya da fazlasıysa boy çarpanı
+    size_pct / 100 (boştaki teminatla sınırlı); değilse 1. x ≤ 0 (kapalı), ilk pozisyon, çöküş dışı sinyal ya da ölçü yoksa
+    1. Canlı bot (FuturesBot._entry_margin) ve backtest (futures_backtest.simulate_slots) ortak."""
+    if x <= 0 or n_open < 1:
+        return 1.0
+    r = crash_ratio(metrics)
+    return size_pct / 100 if r == r and r >= x else 1.0
+
+
 def extra_depth_skip(x: float, n_open: int, metrics) -> bool:
     """Ek pozisyonda küçük çöküş (FUTURES_EXTRA_MIN_X; rapor 30 araştırması): dalga modunda başka pozisyon açıkken
     (n_open ≥ 1) gelen çöküş sinyalinin düşüşü çöküş eşiğinin x katından azsa True (girilmez; yuva daha derin çöküşe
@@ -1104,6 +1115,9 @@ class Config:
     futures_small_tp_pct: float = 5.0
     # Ek pozisyonda küçük çöküş (bkz. extra_depth_skip): başka pozisyon açıkken düşüşü eşiğin X katından az olana girme
     futures_extra_min_x: float = 0.0           # 0 = kapalı
+    # Derin ek pozisyon (bkz. extra_deep_factor): başka pozisyon açıkken düşüşü eşiğin X katı ve üstündeyse boy %Y
+    futures_extra_deep_x: float = 0.0          # 0 = kapalı
+    futures_extra_deep_size_pct: float = 150.0
     # Sermaye koruması (bkz. futures_guard_factor): toplam zarar bota verilen sermayenin %X'i iken pozisyon boyu %Y
     futures_guard_pct: float = 0.0         # Başlangıç sermayesine göre zarar eşiği (%; 0 = kapalı)
     futures_guard_size_pct: float = 60.0   # Eşik aşılınca yeni pozisyonların büyüklüğü (%)
@@ -1519,6 +1533,11 @@ class Config:
                           "küçük çöküş)")
         if not 0.5 <= self.futures_small_tp_pct <= 50:
             errors.append("FUTURES_SMALL_TP_PCT 0.5-50 arasında olmalı (küçük çöküşte Kâr Al, fiyat %)")
+        if not (self.futures_extra_deep_x == 0 or 1.5 <= self.futures_extra_deep_x <= 10):
+            errors.append("FUTURES_EXTRA_DEEP_X 0 (kapalı) ya da 1.5-10 olmalı (ek pozisyonda derin çöküş: düşüş eşiğin en "
+                          "az kaç katı)")
+        if not 100 <= self.futures_extra_deep_size_pct <= 300:
+            errors.append("FUTURES_EXTRA_DEEP_SIZE_PCT 100-300 arasında olmalı (derin ek pozisyonun büyüklüğü %)")
         if not (self.futures_extra_min_x == 0 or 1.05 <= self.futures_extra_min_x <= 5):
             errors.append("FUTURES_EXTRA_MIN_X 0 (kapalı) ya da 1.05-5 olmalı (ek pozisyonda çöküş düşüşü eşiğin en az "
                           "kaç katı)")
@@ -1834,6 +1853,8 @@ def load_config(env_file: Optional[str] = None, mode_override: Optional[str] = N
         futures_small_tp_x=_env_float("FUTURES_SMALL_TP_X", 0.0),
         futures_small_tp_pct=_env_float("FUTURES_SMALL_TP_PCT", 5.0),
         futures_extra_min_x=_env_float("FUTURES_EXTRA_MIN_X", 0.0),
+        futures_extra_deep_x=_env_float("FUTURES_EXTRA_DEEP_X", 0.0),
+        futures_extra_deep_size_pct=_env_float("FUTURES_EXTRA_DEEP_SIZE_PCT", 150.0),
         futures_cushion_x=_env_float("FUTURES_CUSHION_X", 0.0),
         futures_cushion_size_pct=_env_float("FUTURES_CUSHION_SIZE_PCT", 112.5),
         futures_support_size_pct=_env_float("FUTURES_SUPPORT_SIZE_PCT", 100.0),
@@ -2360,6 +2381,14 @@ def _setting_notes(cfg: Config) -> List[str]:
                          f"ayın 1'inde başlayan 71 hesap, 10 çekiliş) 1.35: 12 ay ortancası +%2.946 → +%3.255, alt "
                          f"çeyrek +%1.019 → +%1.219, %60'ı aşan düşüş 9.5 → 9.5, kill-switch 0; canlıda ölçülen giriş "
                          f"dolumunda +%2.247 → +%2.476, alt çeyrek +%546 → +%961.")
+        if cfg.futures_extra_deep_x > 0:
+            notes.append(f"FUTURES_EXTRA_DEEP_X={cfg.futures_extra_deep_x:g}, FUTURES_EXTRA_DEEP_SIZE_PCT="
+                         f"{cfg.futures_extra_deep_size_pct:g} (derin ek pozisyon): dalga modunda başka pozisyon açıkken "
+                         f"çöküş düşüşü eşiğin {cfg.futures_extra_deep_x:g} katı ya da fazlasıysa ek pozisyon "
+                         f"%{cfg.futures_extra_deep_size_pct:g} boy (boştaki teminatla sınırlı; ilk pozisyona uygulanmaz). "
+                         f"Testte (4.000 USDT, rapor 31 ayarı, 71 hesap, 10 çekiliş) ×3 / %150: 12 ay ortancası +%3.255 → "
+                         f"+%3.578, alt çeyrek +%1.219 → +%1.331, %60'ı aşan düşüş 9.5 → 10; canlıda ölçülen dolumda "
+                         f"+%2.508 → +%2.651. Kötümser stop dolumunda (en kötü durum) kill-switch 23 → 31 (71 hesapta).")
         if cfg.futures_cushion_x > 0:
             notes.append(f"FUTURES_CUSHION_X={cfg.futures_cushion_x:g}, FUTURES_CUSHION_SIZE_PCT="
                          f"{cfg.futures_cushion_size_pct:g} (kâr yastığı): botun sermayesi bota verilen sermayenin "

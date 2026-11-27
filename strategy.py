@@ -2851,6 +2851,9 @@ class FuturesSignal:
         elif m.get("bounce_calm"):
             parts.append(f"V dönüşü: fiyat son 15 dk'nın dibinden %{m.get('bounce15', 0.0):.1f} yukarıda, durulmuş "
                          f"küçültmesi yok")
+        if m.get("deep_size_pct") and m["deep_size_pct"] > 100:
+            parts.append(f"Derin ek pozisyon: düşüş çöküş eşiğinin {m.get('deep_ratio', 0):g} katı, pozisyon "
+                         f"%{m['deep_size_pct']:g} boy")
         if m.get("cushion_size_pct") and m["cushion_size_pct"] > 100:
             parts.append(f"Kâr yastığı: sermaye bota verilenin {m.get('cushion_x', 0):g} katı, pozisyon "
                          f"%{m['cushion_size_pct']:g} boy")

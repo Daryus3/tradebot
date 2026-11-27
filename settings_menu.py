@@ -94,6 +94,9 @@ SMALL_TP_HINT = ("Küçük çöküşte Kâr Al (rapor 29 araştırması; 4.000 U
                  "ölçülen giriş dolumunda +%2.093 → +%2.247.")
 # Ek pozisyonda küçük çöküş (rapor 30 araştırması, 27 Kasım; varsayılan kapalı): ek pozisyon için düşüş / eşik en az
 EXTRA_MIN_X_CHOICES = (0, 1.2, 1.35, 1.5)
+# Derin ek pozisyon (rapor 31 araştırması, 27 Kasım; varsayılan kapalı): düşüş / eşik en az ve o pozisyonun boyu (%)
+EXTRA_DEEP_X_CHOICES = (0, 2.5, 3, 4)
+EXTRA_DEEP_SIZE_CHOICES = (150, 200)
 PAGE_TEXT_MAX = 3800        # Telegram mesajı 4096 karakter (gönderici 4000'de keser); açıklamalar sığdığı kadar eklenir
 BASIS_SIZE_CHOICES = (100, 130, 150)       # Vadeli-spot farkına göre boy (rapor 17 araştırması, 22 Kasım)
 BASIS_DEEP_CHOICES = (0.3, 0.5, 0.7)
@@ -465,6 +468,12 @@ PAGES: Dict[str, Page] = {
         Row("FUTURES_EXTRA_MIN_X", icon="🧩", values=EXTRA_MIN_X_CHOICES,
             fmt=_off("ek: her çöküş", lambda v: f"ek: düşüş ≥ eşik ×{v:g}"),
             show=lambda cfg: _crash(cfg) and cfg.futures_max_positions > 1, per_row=2),
+        Row("FUTURES_EXTRA_DEEP_X", icon="🔱", values=EXTRA_DEEP_X_CHOICES,
+            fmt=_off("derin ek: normal boy", lambda v: f"derin ek: ≥ eşik ×{v:g}"),
+            show=lambda cfg: _crash(cfg) and cfg.futures_max_positions > 1, per_row=2),
+        Row("FUTURES_EXTRA_DEEP_SIZE_PCT", icon="📏", values=EXTRA_DEEP_SIZE_CHOICES,
+            fmt=lambda v: f"derin ek boyu %{v:g}",
+            show=lambda cfg: _crash(cfg) and cfg.futures_max_positions > 1 and cfg.futures_extra_deep_x > 0, per_row=2),
         Row("FUTURES_LEVERAGE", icon="⚡", values=(2, 3, 4), fmt=lambda v: f"{v}x",
             show=lambda cfg: _crash(cfg) and cfg.futures_max_positions > 1, per_row=3),
         Row("FUTURES_EXTRA_SIZE_PCT", icon="📏", values=(100, 50, 25, 16.7), fmt=lambda v: "ek: eşit" if float(v) >= 100
@@ -1118,6 +1127,9 @@ class SettingsMenu:
                          f"(eşiği zar zor geçen çöküş yuvayı doldurmaz, yer daha derin çöküşe kalır).")
         elif k > 1:
             lines.append("🧩 Ek pozisyonda çöküş derinliği şartı yok.")
+        if k > 1 and cfg.futures_extra_deep_x > 0:
+            lines.append(f"🔱 Derin ek pozisyon: çöküş düşüşü eşiğin {cfg.futures_extra_deep_x:g} katı ya da fazlasıysa ek "
+                         f"pozisyon <b>%{cfg.futures_extra_deep_size_pct:g}</b> büyüklükte (boştaki teminatla sınırlı).")
         if cfg.futures_basis_size_pct != 100:
             lines.append(f"⚖️ Vadeli-spot farkı: girişte vadeli fiyat spotun %{tr_from_num(cfg.futures_basis_deep_pct)} fazla "
                          f"altındaysa (zorla satış izi) pozisyon <b>%{cfg.futures_basis_size_pct:g}</b> büyüklükte.")

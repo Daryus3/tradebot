@@ -3029,6 +3029,61 @@ Okuma:
   küçük çöküş" nedeniyle görünür; backtest başlığında 🧩 satırı (atlanan sinyal sayısı), tek kural tablosunda çevre satırları.
 - **Öneri:** `FUTURES_EXTRA_MIN_X=1.35`.
 
+#### Rapor 31 araştırması: derin ek pozisyon ve yeni tabanda yeniden ayar (Kasım 2026)
+Taban: rapor 31'in ayarı (H8 = rapor 30 ayarı + `FUTURES_EXTRA_MIN_X=1.35`), **4.000 USDT**, 10 çekiliş, her ayın 1'inde
+başlayan 71 hesap (12 ay ortanca / %60'ı aşan düşüş / zararda biten / alt çeyrek). Şimdiki: +%3.255 / 9.5 / 2 / +%1.219,
+kill-switch 0; canlıda ölçülen giriş dolumunda (son ölçüm +%0.067 → gecikme payı %0.047) +%2.508 / 14.5 / 2 / +%950.
+"Eşleştirmeli": aynı çekilişteki tabanla karşılaştırma (ortancası iyi çekiliş, ortanca farkı, alt çeyreği iyi çekiliş,
+%60'ı aşan düşüş farkı).
+
+Ek pozisyon kuralı ek pozisyonları değiştirdi (artık yalnız derin çöküşler: işlem başı +%0.258 → +%0.425), bu yüzden ek
+pozisyona bağlı ayarlar yeniden sınandı. Raporun A sütunu bunların birçoğunu ▲ gösteriyor ama 71 hesapta hepsi kötü:
+
+| Fikir | Eşleştirmeli | Karar |
+|---|---|---|
+| Ek pozisyon ilkinin %25 / %33.3 / %50'si / eşit (şimdi %16.7) | 0/10, −%432 · −%627 · −%1.583 · −%2.181 (A 5,7-6,0 milyon) | Kötü |
+| Ek pozisyon kapısı ≥8 / ≥6 coin (şimdi ≥10) | 3/10 −%40 · 4/10 −%43 | Etkisiz |
+| En fazla 5 pozisyon · ana Kâr Al %7 · ek pozisyon eşiği ×1.5 | −%316 · −%270 · −%112 | Kötü / etkisiz |
+| Derin ek pozisyonda (≥ eşik ×2) başabaş +%1.1 · zaman stopu 60 dk · Kâr Al %7 | −%381 · ±0 · −%20 | Kötü / etkisiz |
+| İlk pozisyonu orana göre boylamak (küçükte ×0.75 · derinde ×1.15) | −%231 (düşüş −2) · −%10 | Kaldıraç düşürmek gibi / etkisiz |
+| Dalgada ilk pozisyona da derinlik şartı (girme · ×0.5 · yalnız ≥15 coin) | −%1.989 · −%706 · −%1.422 | Çok kötü: ilk pozisyon dalgada zamanlama için şart |
+| Derin sinyale (≥ eşik ×2 / ×3) ek yuva | +%25 / −%42 | Etkisiz |
+| Girişte 1 dk yeşil mum teyidi (hepsi · yalnız zayıf) | 12 ay ortancası +%3.255 → +%76 · −%294 | Çok kötü: kâr anında girişten geliyor |
+| **Derin ek pozisyonda büyük boy (`FUTURES_EXTRA_DEEP_X`)** | | **Eklendi (varsayılan kapalı)** |
+
+**Derin ek pozisyon.** Düşüşü eşiğin 3 katını geçen ek pozisyonlar işlem başı +%1.3 kazandırıyor (ortalamanın ~4 katı);
+bunları büyütmek kârı artırıyor ama riski de (kaldıraca benzer, ondan verimli: tek çekilişte 8x → 9x +%594 kâr için 18
+hesap daha %60+ düşüş veriyor).
+
+| Derin ek pozisyon | Normal maliyet: 12 ay ortanca / %60+ / alt çeyrek | Eşleştirmeli | Canlı dolum: 12 ay ortanca / %60+ / alt çeyrek | Eşleştirmeli |
+|---|---|---|---|---|
+| Kapalı (şimdiki) | +%3.255 / 9.5 / +%1.219 | – | +%2.508 / 14.5 / +%950 | – |
+| ≥ ×2, %125 | +%3.349 / 11 / +%1.365 | 8/10, +%81, 9/10, +1.0 | | |
+| ≥ ×2, %200 | +%3.513 / 16 / +%1.486 | 10/10, +%269, 10/10, +6.5 | +%2.713 / 19.5 / +%1.121 | 9/10, +%327, 8/10, +5.5 |
+| ≥ ×2.5, %200 | +%3.733 / 16 / +%1.342 | 10/10, +%366, 7/10, +5.0 | +%2.618 / 20 / +%1.129 | 9/10, +%270, 7/10, +5.5 |
+| **≥ ×3, %150** | **+%3.578 / 10 / +%1.331** | **7/10, +%313, 8/10, +1.0** | **+%2.651 / 16 / +%1.039** | **10/10, +%132, 7/10, +2.0** |
+| ≥ ×3, %200 | +%3.833 / 14 / +%1.278 | 9/10, +%417, 7/10, +4.0 | +%2.780 / 18 / +%1.023 | 10/10, +%237, 7/10, +4.5 |
+| ≥ ×3, %250 | +%3.816 / 13.5 / +%1.447 | 10/10, +%425, 6/10, +4.0 | | |
+
+| Stres (0. çekiliş, 71 hesap) | Şimdiki | ≥ ×3, %150 | ≥ ×3, %200 |
+|---|---|---|---|
+| 3 kat kayma | +%2.639, alt çeyrek +%711, %60+ 24, kill 0 | +%2.727, +%885, 23, kill 0 | +%2.858, +%981, 30, kill 0 |
+| Canlı dolum + 3 kat kayma | +%2.528, +%399, %60+ 27, kill 5 | +%2.455, +%637, 29, kill 3 | +%2.481, +%632, 33, kill 3 |
+| Kötümser stop dolumu (en kötü durum) | ortanca +%23, zararda 31, kill 23 | −%20, 38, kill 31 | −%31, 44, kill 31 |
+
+Okuma:
+- Her varyant ortancayı çoğu çekilişte artırıyor, kill-switch normal ve canlı maliyette hiç çalışmıyor; bedeli %60'ı aşan
+  düşüşte (çekiliş başına +1 … +6.5 hesap) ve en kötü stop senaryosunda (kill-switch 23 → 31). Derin çöküş işlemleri en
+  oynak anlarda açılıyor (V dönüşü büyütmesindeki değiş tokuşun aynısı).
+- 2021-2022 başlangıçlarında ek pozisyon kuralının bıraktığı açığı kapatıyor (≥ ×3 %200: 2021 +%2.503 → +%3.340, 2022
+  +%88 → +%133).
+- Resmi motor araştırma kancasıyla birebir aynı (0. ve 3. çekilişte A kuruşu kuruşuna aynı).
+- **Eklenen ayarlar:** `FUTURES_EXTRA_DEEP_X` (varsayılan 0 = kapalı; önerilen 3) ve `FUTURES_EXTRA_DEEP_SIZE_PCT` (150;
+  daha çok kâr ve risk için 200). Telegram: 🌊 Dalga modu → 🔱 / 📏. Pozisyon mesajında "Derin ek pozisyon: …" satırı;
+  backtest başlığında 🔱 satırı, tek kural tablosunda çevre satırları.
+- **Öneri:** kâr için `FUTURES_EXTRA_DEEP_X=3`, `FUTURES_EXTRA_DEEP_SIZE_PCT=150` (ölçülü). Risk istemeyen kapalı
+  bırakabilir.
+
 #### Kill-switch eşiği (rapor 23, Kasım 2026)
 **Nasıl çalışır:** botun toplam zararı (kapanan işlemler + açık pozisyonların anlık zararı) botun sermayesinin
 (başlangıç + /sermayeekle) `MAX_TOTAL_LOSS_PCT`'sine ulaşınca durum dosyasına "kill-switch" yazılır, yeni pozisyon
@@ -3184,6 +3239,9 @@ karar için ortancaya ve en kötüye bakın. Çıkış taraması her gün dengel
 - **↩️ V dönüşü satırı** (rapor başlığında, `FUTURES_BOUNCE_CALM_PCT` / `FUTURES_BOUNCE_BOOST_PCT` açıkken): fiyat son 15
   dk'nın dibinden eşik kadar yukarıdayken durulmuş sayılmayan ve büyük boyla açılan işlemlerin A'daki sayısını gösterir.
   A ve B aynı kuralı kullanır; büyütme C'de de (sabit tutar × boy) uygulanır.
+- **🔱 Derin ek pozisyon satırı** (rapor başlığında, `FUTURES_EXTRA_DEEP_X` açıkken, dalga modunda): başka pozisyon
+  açıkken düşüşü çöküş eşiğinin X katı ya da fazlası olan çöküşte büyük boyla açılan işlem sayısını (A) gösterir. A, B ve
+  C aynı kuralı kullanır.
 - **🧩 Ek pozisyonda küçük çöküş satırı** (rapor başlığında, `FUTURES_EXTRA_MIN_X` açıkken, dalga modunda): başka
   pozisyon açıkken düşüşü çöküş eşiğinin X katından az olduğu için girilmeyen sinyal sayısını (A) gösterir. A, B ve C aynı
   kuralı kullanır.
