@@ -634,13 +634,17 @@ class Messages:
                 lag_line += "\n"
         except (TypeError, ValueError):
             lag_line = ""
+        try:                                                        # Küçük çöküşte Kâr Al: pozisyonun kendi hedefi
+            tp_pct = float(pos.metrics.get("tp_pct", cfg.take_profit_pct))
+        except (TypeError, ValueError):
+            tp_pct = float(cfg.take_profit_pct)
+        tp_note = ", küçük çöküş" if abs(tp_pct - cfg.take_profit_pct) > 1e-9 else ""
         return (
             f"{icon} <b>POZİSYON AÇILDI</b> — <b>{esc(pos.symbol)}</b> {tag}\n{LINE}\n"
             f"🏷️ Giriş: {fmt_price(pos.entry_price)} | 🪙 {fmt_qty(pos.qty)} {esc(pos.base_asset)}\n"
             f"💵 Teminat: {fmt_usdt(pos.margin_usdt)} {q} × {lev} = pozisyon {fmt_usdt(notional)} {q}\n"
             f"💸 Giriş komisyonu: {pos.buy_fee_usdt:.4f} {q}\n{lag_line}{LINE}\n"
-            f"🎯 Kâr Al: {fmt_price(pos.tp_price)} (fiyat +%{cfg.take_profit_pct:g} → ROE ~+%"
-            f"{cfg.take_profit_pct * lev:.0f})\n"
+            f"🎯 Kâr Al: {fmt_price(pos.tp_price)} (fiyat +%{tp_pct:g} → ROE ~+%{tp_pct * lev:.0f}{tp_note})\n"
             f"🛑 Zarar Kes: {fmt_price(pos.sl_price)} (fiyat -%{cfg.stop_loss_pct:g} → ROE ~-%"
             f"{cfg.stop_loss_pct * lev:.0f}) — Binance'te STOP_MARKET\n"
             f"🔒 Başabaş kalkanı: {fmt_price(be_price)} (+%{be_pct:g}"

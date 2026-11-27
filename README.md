@@ -2898,6 +2898,68 @@ pozisyon emir defterinde daha çok kayma demek, bu yüzden %15-20 maliyet stresi
 Seçim / doğrulama yıllık getirisi +%454 / +%533 → +%461 / +%555; kötümser stop dolumunda kill-switch 40 → 38. Öneri:
 `FUTURES_DEPTH_CAP_PCT=12.5` (var olan ayar; Telegram: 🧯 Risk sigortaları → 🧱).
 
+#### Rapor 29 araştırması: küçük çöküşte Kâr Al ve elenen fikirler (Kasım 2026)
+Taban: rapor 29'un ayarı (H6 = rapor 28 ayarı + derinlik payı %12.5), **4.000 USDT**, 10 çekiliş, her ayın 1'inde
+başlayan 71 hesap (12 ay ortanca / %60'ı aşan düşüş / kill-switch / zararda biten / alt çeyrek). Şimdiki: +%2.689 / 9 / 0
+(10 çekilişin hepsinde) / 0 / +%858. Canlı dolum ölçüsü güncellendi: canlıda giriş, sinyal mumunun kapanışına göre
+ortalama +%0.064 (önceki raporlarda +%0.084); pahalı dolum stresi buna göre (giriş gecikmesi payı %0.044).
+
+| Fikir | Sonuç | Karar |
+|---|---|---|
+| BTC short ile korunma (pozisyonun %25'i kadar) | İşlem başı ortalama +%0.246 → +%0.178; en kötü günler daha kötü | Elendi (ön eleme) |
+| Aynı coinde 24 saatte 2-3 zarar kesten sonra girmemek | O işlemler en iyiler arasında | Elendi (ön eleme) |
+| Çöküşten önceki gün hacim patlaması · coin hacim sınıfı · cuma · fonlama saati | Kovalar dönemler arasında tutarsız | Elendi (ön eleme) |
+| Kâr Al'dan sonra aynı coine bekleme | Kâr Al sonrası yeniden girişler güçlü | Elendi (ön eleme) |
+| 24 saat freni devredeyken yalnız güçlü / zayıf olmayan / güçlü ya da V dönüşü sinyale girmek | +%2.659 … +%2.703 | Etkisiz |
+| Zaman stopundan sonra aynı coine 30-120 dk bekleme (hepsi ya da yalnız zararlılar) | +%2.566 … +%2.664 | Kötü |
+| Faz 8 kapalı · ek pozisyon başabaşı +%0.5 | +%1.960 · +%2.718 / 14.5 | Kötü · gürültü |
+| Kalite puanı boyu %40 (şimdi %60) | +%3.018 ama 10 çekilişin yalnız 5'inde şimdikinden iyi | Gürültü |
+| Vadeli-spot boyu %150 (şimdi %130) | +%2.926 / 13, bir çekilişte kill-switch | Kaldıraç gibi |
+| Kâr Al %6.5 · zarar kes %4.5 | +%2.695 · +%2.701 | Etkisiz |
+| Herkese Kâr Al %5 · %5.5 | +%2.862 / 12.5 · +%2.821 / 9.5; 2020 başlangıçları +%51.035 → +%47.980 / +%45.691 | Karışık |
+| Küçük çöküşte %5 + büyük çöküşte (düşüş ≥ eşik ×3) %7 | +%2.727 | Kötü (büyük çöküşte %6 doğru) |
+| **Küçük çöküşte (düşüş < eşik ×1.5) Kâr Al %5** | **+%2.946 / 9.5 / 0 / 0 / +%1.019** | **Eklendi (varsayılan kapalı), önerildi** |
+
+**Küçük çöküşte Kâr Al (`FUTURES_SMALL_TP_X`, `FUTURES_SMALL_TP_PCT`).** Çöküşün düşüşü çöküş eşiğine (ör. 4 saatte %10)
+ne kadar yakınsa dönüş de genelde o kadar küçük: eşiği zar zor geçen çöküşlerde (düşüş / eşik < 1.5; sinyallerin ~%73'ü,
+ortanca oran 1.24) fiyat %6'lık hedefe daha seyrek ulaşıyor. Bu işlemlerde hedefi %5'e çekip büyük çöküşlerde %6'yı
+korumak 12 ay ortancasını yükseltiyor. Herkese %5 de kârı artırıyor ama büyük çöküşlerin bol olduğu 2020'de
+kaybettiriyor ve %60'ı aşan düşüşü artırıyor; büyük çöküşte hedefi %7'ye çıkarmak da kötü. Kâr Al girişte Binance'e bu
+fiyatla konur (açık pozisyonun emri değişmez); ek modül sinyallerinde (pompa, fonlama ...) uygulanmaz.
+
+| Ayar | 12 ay ortanca / %60+ / kill / zararda / alt çeyrek | İyi çekiliş | A (milyon) | Seçim / doğrulama · 3 kat kayma |
+|---|---|---|---|---|
+| Şimdiki (herkese %6) | +%2.689 / 9 / 0 / 0 / +%858 | – | 4,34 | +%461 / +%555 · +%427 |
+| Herkese %5 | +%2.862 / 12.5 / 0 / 0 / +%989 | 9/10 | 4,40 | +%462 / +%549 · +%400 |
+| Herkese %5.5 | +%2.821 / 9.5 / 0 / 0 / +%1.088 | 7/10 | 4,30 | +%455 / +%559 · +%426 |
+| ×1.25, %4.5 | +%2.861 / 10 / 0 / 0 / +%950 | 6/10 | 4,57 | +%473 / +%565 · +%446 |
+| ×1.25, %5 | +%2.803 / 10.5 / 0 / 0 / +%974 | 8/10 | 4,45 | +%469 / +%562 · +%454 |
+| ×1.5, %4.5 | +%2.771 / 10 / 0 / 0 / +%966 | 5/10 | 4,59 | +%474 / +%544 · +%445 |
+| **×1.5, %5** | **+%2.946 / 9.5 / 0 / 0 / +%1.019** | **7/10** | **4,48** | **+%471 / +%558 · +%445** |
+| ×1.5, %5.5 | +%2.811 / 9 / 0 / 0 / +%903 | 7/10 | 4,39 | +%464 / +%556 · +%437 |
+| ×1.75, %5 | +%2.832 / 10 / 0 / 0 / +%970 | 6/10 | 4,57 | +%472 / +%557 · +%450 |
+| ×2, %5 | +%2.970 / 11 / 0 / 0 / +%1.000 | 6/10 | 4,49 | +%471 / +%562 · +%437 |
+
+| Stres | Şimdiki | ×1.5, %5 |
+|---|---|---|
+| Canlıda ölçülen giriş dolumu (10 çekiliş) | +%2.093 / 17 / kill en kötü 1 / 2 / +%602 | +%2.247 / 17 / en kötü 1 / 2 / +%546 |
+| 3 kat kayma (0. çekiliş, 71 hesap) | +%1.764, %60+ 27, kill 1, A 2,15 milyon | +%1.777, %60+ 21, kill 1, A 2,39 milyon |
+| Canlı dolum + 3 kat kayma (0. çekiliş) | +%1.594, %60+ 26, kill 5, A 2,11 milyon | +%1.541, %60+ 23, kill 4, A 2,20 milyon |
+| Kötümser stop dolumu (0. çekiliş) | hesap eriyor (kill 38) | eriyor (kill 37) |
+
+Okuma:
+- Komşu ayarların hepsi (×1.25-2, %4.5-5.5) şimdikinden iyi (+%82 … +%281); A, seçim / doğrulama ve 3 kat kaymalı
+  doğrulama da her birinde iyi. Kazanç (+%5-10) gürültüye yakın büyüklükte ama yönü tutarlı.
+- Canlıda ölçülen dolumda 12 ay ortancası +%7, alt çeyrek biraz düşük; canlı dolum + 3 kat kaymada ortanca −%3 ama düşüş
+  ve kill-switch daha az.
+- Resmi motor araştırma kancasıyla kuruşu kuruşuna aynı (0. çekilişte A 4.900.161,59 USDT; işlemlerin %65'i küçük
+  çöküş).
+- **Eklenen ayarlar:** `FUTURES_SMALL_TP_X` (varsayılan 0 = kapalı; önerilen 1.5) ve `FUTURES_SMALL_TP_PCT` (5).
+  Telegram: 🎯 Çıkış ve emirler → 🎯. Ölçü sinyalin kendi düşüşü ve eşiği (ek istek yok, giriş gecikmesi artmaz).
+  Pozisyon mesajında Kâr Al satırı "küçük çöküş" notuyla; backtest başlığında 🎯 satırı, tek kural tablosunda çevre
+  satırları.
+- **Öneri:** `FUTURES_SMALL_TP_X=1.5`, `FUTURES_SMALL_TP_PCT=5`.
+
 #### Kill-switch eşiği (rapor 23, Kasım 2026)
 **Nasıl çalışır:** botun toplam zararı (kapanan işlemler + açık pozisyonların anlık zararı) botun sermayesinin
 (başlangıç + /sermayeekle) `MAX_TOTAL_LOSS_PCT`'sine ulaşınca durum dosyasına "kill-switch" yazılır, yeni pozisyon
@@ -3053,6 +3115,9 @@ karar için ortancaya ve en kötüye bakın. Çıkış taraması her gün dengel
 - **↩️ V dönüşü satırı** (rapor başlığında, `FUTURES_BOUNCE_CALM_PCT` / `FUTURES_BOUNCE_BOOST_PCT` açıkken): fiyat son 15
   dk'nın dibinden eşik kadar yukarıdayken durulmuş sayılmayan ve büyük boyla açılan işlemlerin A'daki sayısını gösterir.
   A ve B aynı kuralı kullanır; büyütme C'de de (sabit tutar × boy) uygulanır.
+- **🎯 Küçük çöküşte Kâr Al satırı** (rapor başlığında, `FUTURES_SMALL_TP_X` açıkken): düşüşü çöküş eşiğinin X
+  katından az olan çöküşlerde Kâr Al'ın %Y olduğunu ve A'da kaç işlemin bu hedefle açıldığını gösterir. A, B ve C aynı
+  kuralı kullanır; ayarlar satırında "Kâr Al +%6 (küçük çöküşte +%5)".
 - **📐 Destek bölgesi satırı** (rapor başlığında, `FUTURES_SUPPORT_SIZE_PCT` açıkken): fiyat coinin önceki N günlük
   dibinin (sinyalden en az 1 saat önce kapanmış 1 saatlik mumlar) en fazla %Z altındayken açılan pozisyonların küçük
   boyla açıldığını ve A'da kaç işlemin bu boyla açıldığını gösterir. A, B ve C aynı kuralı kullanır.

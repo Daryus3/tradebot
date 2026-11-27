@@ -43,7 +43,7 @@ import requests
 from config import (DAY_BRAKE_HOURS, MINUTE_SCAN_STEP_MS, futures_be_trigger, tr_from_num, futures_breadth_on,
                     futures_brake_factor, futures_close_only, futures_coin_list, window_peak,
                     futures_cushion_factor, futures_dd_factor, futures_guard_factor, futures_hold_minutes,
-                    scan_log_path,
+                    futures_tp_pct, scan_log_path,
                     futures_crash_rules, futures_funding_rules,
                     futures_liq_distance_pct, futures_minute_limit, futures_modules, futures_pump_rules, futures_scan_shifts,
                     futures_slot_share, futures_snapshot_on, futures_wave_cfg, futures_wave_rules)
@@ -1621,7 +1621,8 @@ class FuturesBot(TradingBot):
         symbol, side = sig.symbol, sig.side
         entry, qty = fill.price, fill.qty
         sign = 1 if side == "long" else -1
-        tp = ex.price_to_precision(symbol, entry * (1 + sign * cfg.take_profit_pct / 100))
+        tp_pct = futures_tp_pct(cfg, sig.metrics)    # Küçük çöküşte Kâr Al (FUTURES_SMALL_TP_X; backtest: small_tp_params)
+        tp = ex.price_to_precision(symbol, entry * (1 + sign * tp_pct / 100))
         sl = ex.price_to_precision(symbol, entry * (1 - sign * cfg.stop_loss_pct / 100))
         margin_used = qty * entry / lev
         if self._free_cache is not None:             # Aynı taramadaki sıradaki giriş: bakiye bu girişin teminatı kadar az
@@ -1638,6 +1639,8 @@ class FuturesBot(TradingBot):
                        regime=f"{side.upper()} {lev}X")      # İşlem kaydında (CSV) yön ve kaldıraç görünsün
         if cfg.breakeven_enabled and be_trigger != cfg.breakeven_trigger_pct:
             pos.metrics["be_trigger"] = be_trigger
+        if tp_pct != cfg.take_profit_pct:            # Pozisyona özel Kâr Al (mesaj; emirler tp_price ile)
+            pos.metrics["tp_pct"] = tp_pct
         # Faz 9: ek pozisyon / dalgada açılan ilk pozisyon kendi zaman stopuyla izlenir (backtest: hold_minutes)
         try:
             breadth = int(float(sig.metrics["breadth"])) if "breadth" in sig.metrics else None

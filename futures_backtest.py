@@ -39,7 +39,7 @@ import numpy as np
 from config import (DATA_DIR, DAY_BRAKE_HOURS, cushion_factor, dd_scale_factor, format_crash_rules, futures_coin_list,
                     futures_crash_rules, futures_funding_rules, futures_liq_distance_pct, futures_long_windows,
                     futures_modules, futures_scan_shifts, futures_snapshot_on, futures_wave_cfg, futures_wave_rules,
-                    parse_crash_rules, scan_log_path, tr_from, tr_from_num, window_peak)
+                    parse_crash_rules, scan_log_path, small_crash_tp_pct, tr_from, tr_from_num, window_peak)
 from futures_data import FuturesArchive, concat, resample, slice_range
 from futures_depth import DEPTH_CHECK_MIN_NOTIONAL, DepthBook, daily_volume_fn
 from strategy import (BEAR_SMA_CHOICES, BIG_EXTRA_SLOTS, FUT_BAR_MS, FUT_HOUR_MS, QUALITY_CUTS, basis_pct,
@@ -725,6 +725,11 @@ class SimParams:
     bounce_calm_pct: float = 0.0
     bounce_boost_pct: float = 0.0
     bounce_boost_size_pct: float = 150.0
+    # Küçük çöküşte Kâr Al (FUTURES_SMALL_TP_*; canlı: FuturesBot._open_from_fill, config.small_crash_tp_pct): çöküş
+    # sinyalinde düşüş (metrics["drop_pct"]) eşiğin (metrics["thr_pct"]) small_tp_x katından azsa Kâr Al small_tp_pct
+    # (0 = kapalı; bkz. small_tp_params)
+    small_tp_x: float = 0.0
+    small_tp_pct: float = 5.0
     # Emir defteri derinliği (futures_depth; veri FutData.depth'te, yoksa ikisi de uygulanmaz): depth_cap_pct > 0 ise giriş
     # tutarı girişten önceki 2 dk'da ±%1 içindeki alış / satış emirlerinin küçüğünün bu yüzdesiyle sınırlı ve aynı mumdaki
     # sinyallerde sınıra takılınca kapasitesi büyük olan önce (FUTURES_DEPTH_CAP_PCT); depth_impact: piyasa emrinin defteri
@@ -791,6 +796,8 @@ def params_from_cfg(cfg, **over) -> SimParams:
                   bounce_calm_pct=float(getattr(cfg, "futures_bounce_calm_pct", 0.0) or 0.0),
                   bounce_boost_pct=float(getattr(cfg, "futures_bounce_boost_pct", 0.0) or 0.0),
                   bounce_boost_size_pct=float(getattr(cfg, "futures_bounce_boost_size_pct", 150.0)),
+                  small_tp_x=float(getattr(cfg, "futures_small_tp_x", 0.0) or 0.0),
+                  small_tp_pct=float(getattr(cfg, "futures_small_tp_pct", 5.0)),
                   depth_cap_pct=float(getattr(cfg, "futures_depth_cap_pct", 0.0) or 0.0),
                   depth_impact=bool(getattr(cfg, "futures_backtest_depth", False)),
                   entry_lag_pct=entry_lag_for(cfg)[0], stop_slip_pct=STOP_SLIP_PCT)
@@ -857,6 +864,7 @@ class FutTrade:
     cushioned: bool = False  # Kâr yastığıyla (FUTURES_CUSHION_X) büyük boyla açıldı
     support: bool = False    # Destek bölgesi kuralıyla (FUTURES_SUPPORT_SIZE_PCT) küçük boyla açıldı
     bounced: int = 0         # V dönüşü (FUTURES_BOUNCE_*): 1 = durulmuş küçültmesi kalktı, 2 = büyük boyla açıldı
+    small_tp: bool = False   # Küçük çöküşte Kâr Al (FUTURES_SMALL_TP_X) uygulandı: Kâr Al small_tp_pct
     depth_capped: bool = False  # Derinliğe göre boy sınırına takıldı (FUTURES_DEPTH_CAP_PCT)
     impact_pct: float = 0.0  # Emir defteri kayması, giriş + çıkış (fiyat %; FUTURES_BACKTEST_DEPTH)
     drop15: float = float("nan")  # Girişten önceki 15 dk'daki düşüş (%; sinyal ölçüsü, FUTURES_RECENT_SIZE_PCT)
@@ -1191,6 +1199,22 @@ def size_factor(p: SimParams, s: "FutSignal") -> float:
             * support_size_factor(p.support_size_pct, p.support_zone_pct, s.metrics.get(f"low{int(p.support_days)}h")))
 
 
+SMALL_TP_CACHE_MAX = 64
+
+
+def small_tp_params(pp: SimParams, s: "FutSignal", cache: Dict[int, Tuple[SimParams, SimParams]]) -> SimParams:
+    """Küçük çöküşte Kâr Al (canlı: FuturesBot._open_from_fill, config.small_crash_tp_pct): bu sinyalde Kâr Al
+    small_tp_pct ise o Kâr Al'lı parametreler (önbellekli; aynı pp için tek kopya), değilse pp'nin kendisi."""
+    if pp.small_tp_x <= 0 or small_crash_tp_pct(pp.small_tp_x, pp.small_tp_pct, pp.tp_pct, s.metrics) == pp.tp_pct:
+        return pp
+    hit = cache.get(id(pp))
+    if hit is None or hit[0] is not pp:
+        if len(cache) >= SMALL_TP_CACHE_MAX:    # Tek pozisyonda zaman stopu değişen her işlem yeni pp: sınırsız büyümesin
+            cache.clear()
+        hit = cache[id(pp)] = (pp, replace(pp, tp_pct=pp.small_tp_pct))
+    return hit[1]
+
+
 def bounce_flag(p: SimParams, s: "FutSignal") -> int:
     """V dönüşünün bu sinyalde etkisi (rapor sayımı): 2 = büyük boy (FUTURES_BOUNCE_BOOST_PCT), 1 = durulmuş küçültmesi
     kalktı (FUTURES_BOUNCE_CALM_PCT), 0 = yok."""
@@ -1306,6 +1330,7 @@ def simulate(p: SimParams, data: FutData, signals: Sequence[FutSignal], windows:
     usage = p.margin_usage_pct / 100
     kill_level = p.start_capital * (1 - p.kill_pct / 100) if p.kill_pct else -1.0
     peak = p.start_capital                  # Düşüşte küçültme: gerçekleşen bakiyenin zirvesi
+    tp_cache: Dict[int, Tuple[SimParams, SimParams]] = {}
 
     def want(_t: int) -> float:             # Kapasite önceliği: sıradaki pozisyonun istenen tutarı
         return min(equity * usage * p.leverage * dd_scale_factor(p.dd_scale_pct, p.dd_scale_size_pct, equity, peak),
@@ -1350,7 +1375,9 @@ def simulate(p: SimParams, data: FutData, signals: Sequence[FutSignal], windows:
             skipped["çıkış verisi yok"] += 1
             continue
         hold = hold_minutes(p, 0, s.breadth)            # Faz 9: dalgada açılan pozisyon daha uzun tutulur
-        tr = run_trade(p if hold == p.hold_min else replace(p, hold_min=hold), s, window, margin, notional, data)
+        ph = p if hold == p.hold_min else replace(p, hold_min=hold)
+        pt = small_tp_params(ph, s, tp_cache)           # Küçük çöküşte Kâr Al (FUTURES_SMALL_TP_X)
+        tr = run_trade(pt, s, window, margin, notional, data)
         if tr is None:                                  # Limit emir süresinde dolmadı: iptal, işlem yok
             skipped[f"limit emir {p.limit_ttl_min} dk içinde dolmadı"] += 1
             busy_until = s.close_ms + p.limit_ttl_min * MIN_MS
@@ -1373,6 +1400,7 @@ def simulate(p: SimParams, data: FutData, signals: Sequence[FutSignal], windows:
         tr.support = support_size_factor(p.support_size_pct, p.support_zone_pct,
                                          s.metrics.get(f"low{int(p.support_days)}h")) < 1
         tr.bounced = bounce_flag(p, s)
+        tr.small_tp = pt is not ph
         peak = max(peak, equity)
         trades.append(tr)
         curve.append((tr.exit_ms, equity))
@@ -1444,6 +1472,7 @@ def simulate_slots(p: SimParams, data: FutData, signals: Sequence[FutSignal], wi
     # +%5 → +%2") ek tetik (+%0.5) geçersiz kalır ve ana tetik kullanılır (yoksa stop fiyatın üstüne konmuş sayılır).
     p_extra = (replace(p, be_trigger_pct=p.extra_be_trigger_pct) if phase8_active(p) else p)
     hold_cache: Dict[tuple, SimParams] = {}
+    tp_cache: Dict[int, Tuple[SimParams, SimParams]] = {}
 
     def realize(until: int) -> None:
         nonlocal equity, used, freeze_until, sl_streak, day_key, day_pnl, kill_ms, ruined, stop, peak
@@ -1551,7 +1580,8 @@ def simulate_slots(p: SimParams, data: FutData, signals: Sequence[FutSignal], wi
             if key not in hold_cache:
                 hold_cache[key] = replace(pp, hold_min=hold)
             pp = hold_cache[key]
-        tr = run_trade(pp, s, window, margin, notional, data)
+        pt = small_tp_params(pp, s, tp_cache)           # Küçük çöküşte Kâr Al (FUTURES_SMALL_TP_X)
+        tr = run_trade(pt, s, window, margin, notional, data)
         if p.entry_limit:
             limit_bar = s.close_ms
         if tr is None:
@@ -1573,6 +1603,7 @@ def simulate_slots(p: SimParams, data: FutData, signals: Sequence[FutSignal], wi
         tr.support = support_size_factor(p.support_size_pct, p.support_zone_pct,
                                          s.metrics.get(f"low{int(p.support_days)}h")) < 1
         tr.bounced = bounce_flag(p, s)
+        tr.small_tp = pt is not pp
         tr.rounded = not fixed_notional and rounded
         trades.append(tr)
         free_at = tr.exit_ms if tr.reason == "TIME" else tr.exit_ms + tr.bar_ms
@@ -2080,6 +2111,22 @@ def exit_variant_rows(cfg, ev) -> List[Tuple[str, "Evaluation"]]:
     if base.wave_hold_min > 0:
         rows += [(f"Dalgada ilk pozisyon {m} dk (şimdi {base.wave_hold_min} dk)", ev(wave_hold_min=m))
                  for m in WAVE_HOLD_TRIES if m != base.wave_hold_min]
+    return rows + small_tp_variant_rows(base, ev)
+
+
+SMALL_TP_X_TRIES = (1.25, 1.5, 2.0)      # Küçük çöküş: düşüş / eşik (rapor 29 araştırması, 27 Kasım)
+SMALL_TP_TRIES = (4.5, 5.0, 5.5)         # Küçük çöküşte Kâr Al (fiyat %)
+
+
+def small_tp_variant_rows(base: SimParams, ev) -> List[Tuple[str, "Evaluation"]]:
+    """Küçük çöküşte Kâr Al (FUTURES_SMALL_TP_*): açıksa kapalı + oran / Kâr Al çevresi, kapalıysa ×1.5 / %5."""
+    if base.small_tp_x <= 0:
+        return [("Küçük çöküşte (düşüş < eşik ×1.5) Kâr Al %5", ev(small_tp_x=1.5, small_tp_pct=5.0))]
+    rows = [("Küçük çöküşte Kâr Al kapalı", ev(small_tp_x=0.0))]
+    rows += [(f"Küçük çöküş: düşüş < eşik ×{x:g} (şimdi ×{base.small_tp_x:g})", ev(small_tp_x=x))
+             for x in SMALL_TP_X_TRIES if not _same(x, base.small_tp_x)]
+    rows += [(f"Küçük çöküşte Kâr Al %{t:g} (şimdi %{base.small_tp_pct:g})", ev(small_tp_pct=t))
+             for t in SMALL_TP_TRIES if not _same(t, base.small_tp_pct)]
     return rows
 
 
@@ -4307,6 +4354,10 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
                          f"teminatla sınırlı; A'da {big} işlem)")
         if parts:
             L.append("↩️ V dönüşü: " + "; ".join(parts))
+    if p.small_tp_x > 0:
+        small = sum(1 for tr in res.trades if tr.small_tp)
+        L.append(f"🎯 Küçük çöküşte Kâr Al: çöküş düşüşü eşiğinin {p.small_tp_x:g} katından azsa (eşik zar zor geçildi) "
+                 f"Kâr Al +%{p.small_tp_pct:g}, diğerlerinde +%{p.tp_pct:g}. A'da {small} / {len(res.trades)} işlem")
     if p.support_size_pct < 100:
         sup = sum(1 for tr in res.trades if tr.support)
         L.append(f"📐 Destek bölgesi: fiyat coinin önceki {p.support_days} günlük dibinin (sinyalden en az 1 saat önce "
@@ -4353,7 +4404,9 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
         n_round = sum(1 for tr in res.trades if tr.rounded)
         L.append(f"🔼 En küçük emre yuvarlama: kalite puanı en güçlü %40'taki sinyal Binance'in en küçük emir tutarının "
                  f"altında kalırsa boşta teminat yetiyorsa o tutarla açılır. A'da {n_round} işlem yuvarlandı")
-    L.append(f"Kâr Al +%{p.tp_pct:g} ({'limit, maker' if p.tp_limit else 'piyasa'}) | Zarar Kes -%{p.sl_pct:g} | "
+    L.append(f"Kâr Al +%{p.tp_pct:g}"
+             + (f" (küçük çöküşte +%{p.small_tp_pct:g})" if p.small_tp_x > 0 else "")
+             + f" ({'limit, maker' if p.tp_limit else 'piyasa'}) | Zarar Kes -%{p.sl_pct:g} | "
              + (f"başabaş +%{p.be_trigger_pct:g} → stop +%{p.be_floor_pct:g}" if p.be_enabled else "başabaş kapalı")
              + (f" | izleyen stop +%{p.trail_act_pct:g}'de, tepenin %{p.trail_gap_pct:g} gerisinden"
                 if p.trail_enabled else "")

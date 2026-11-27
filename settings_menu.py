@@ -85,6 +85,13 @@ BOUNCE_HINT = ("V dönüşü (rapor 27 araştırması; 4.000 USDT, rapor 27 ayar
                "15 dk'nın dibinden %3+ yukarıdaysa çöküş durulmuş sayılmaz, %8+ yukarıdaysa pozisyon %150 boy. 12 ay "
                "ortancası +%2.195 → +%2.531, %60'ı aşan düşüş 9 → 8, zararla biten hesap 0.5 → 0; canlıda ölçülen pahalı "
                "dolumda kazanç küçük (+%1.515 → +%1.561).")
+# Küçük çöküşte Kâr Al (rapor 29 araştırması, 27 Kasım; varsayılan kapalı): düşüş / çöküş eşiği ve Kâr Al (fiyat %)
+SMALL_TP_X_CHOICES = (0, 1.25, 1.5, 2)
+SMALL_TP_CHOICES = (4.5, 5, 5.5)
+SMALL_TP_HINT = ("Küçük çöküşte Kâr Al (rapor 29 araştırması; 4.000 USDT, rapor 29 ayarı, her ayın 1'inde başlayan 71 "
+                 "hesap, 10 çekiliş): çöküş düşüşü eşiğin 1.5 katından azsa (eşik zar zor geçildi) Kâr Al %5, diğerleri "
+                 "ana Kâr Al. 12 ay ortancası +%2.689 → +%2.946, %60'ı aşan düşüş 9 → 9.5, kill-switch 0; canlıda "
+                 "ölçülen giriş dolumunda +%2.093 → +%2.247.")
 BASIS_SIZE_CHOICES = (100, 130, 150)       # Vadeli-spot farkına göre boy (rapor 17 araştırması, 22 Kasım)
 BASIS_DEEP_CHOICES = (0.3, 0.5, 0.7)
 QUALITY_SIZE_CHOICES = (100, 60, 50, 40)  # Sinyal kalitesine göre boy (rapor 18 araştırması, 22 Kasım)
@@ -510,6 +517,10 @@ PAGES: Dict[str, Page] = {
         Row("STOP_LOSS_PCT", icon="🛑", values=_by_tactic((3, 4, 5), (0.8, 0.9, 1.0)), fmt=_pct),
         (Row("TAKE_PROFIT_PCT", step=_by_tactic(0.5, 0.1), name="🎯"),
          Row("STOP_LOSS_PCT", step=_by_tactic(0.5, 0.1), name="🛑")),
+        Row("FUTURES_SMALL_TP_X", icon="🎯", values=SMALL_TP_X_CHOICES,
+            fmt=_off("Küçük çöküş: ana Kâr Al", lambda v: f"küçük: düşüş < eşik ×{v:g}"), show=_crash, per_row=2),
+        Row("FUTURES_SMALL_TP_PCT", icon="🎯", values=SMALL_TP_CHOICES, fmt=lambda v: f"küçükte +%{v:g}",
+            show=lambda cfg: _crash(cfg) and cfg.futures_small_tp_x > 0, per_row=3),
         Row("MAX_HOLD_MINUTES", icon="⏱️", values=(15, 30, 60, 120, 240), fmt=_mins, per_row=5),
         Link(lambda m: m.protect_label(), "pg:fb"),
         Row("FUTURES_EXCHANGE_STOP", name="🛡️ Stop güvencesi (stop konamazsa pozisyonu kapat)"),
@@ -1210,8 +1221,11 @@ class SettingsMenu:
             snap = "açık ama bu ayarlarla kullanılamıyor (hızlı giriş + sade çöküş taktiği + piyasa emriyle giriş gerekir)"
         else:
             snap = "kapalı: mumların kesinleşmesi beklenir (kapanıştan 1-2.5 sn sonra)"
+        small = (f"🎯 Küçük çöküşte Kâr Al: düşüş çöküş eşiğinin {cfg.futures_small_tp_x:g} katından azsa fiyat "
+                 f"+%{cfg.futures_small_tp_pct:g} → ROE ~+%{cfg.futures_small_tp_pct * lev:.0f}\n"
+                 if _crash(cfg) and cfg.futures_small_tp_x > 0 else "")
         return (f"🎯 <b>Vadeli Çıkışlar ve Emirler</b>\n{LINE}\n"
-                f"🎯 Kâr Al: fiyat +%{cfg.take_profit_pct:g} → ROE ~+%{cfg.take_profit_pct * lev:.0f}\n"
+                f"🎯 Kâr Al: fiyat +%{cfg.take_profit_pct:g} → ROE ~+%{cfg.take_profit_pct * lev:.0f}\n{small}"
                 f"🛑 Zarar Kes: fiyat -%{cfg.stop_loss_pct:g} → ROE ~-%{cfg.stop_loss_pct * lev:.0f} | likidasyon "
                 f"~%{room:.1f}'te ({lev}x)\n"
                 f"🔒 Başabaş: {be}\n"
@@ -1224,7 +1238,8 @@ class SettingsMenu:
                 f"🛡️ Zarar kes emri Binance'e konamazsa: {stop}\n{timing}{LINE}\n"
                 "<i>Kâr Al / Zarar Kes değişikliği SONRAKİ işlemde geçerli (açık pozisyonun Binance emirleri "
                 "değişmez); zaman stopu ve başabaş açık pozisyona da uygulanır. Testte seçilen (çöküş dönüşü): Kâr Al "
-                f"%6, Zarar Kes %4, başabaş 1.5 → 0.3, 30 dk.\n{esc(FAST_ENTRY_HINT)}\n{esc(MINUTE_SCAN_HINT)}\n{esc(SNAPSHOT_HINT)}</i>")
+                f"%6, Zarar Kes %4, başabaş 1.5 → 0.3, 30 dk.\n{esc(SMALL_TP_HINT)}\n{esc(FAST_ENTRY_HINT)}\n"
+                f"{esc(MINUTE_SCAN_HINT)}\n{esc(SNAPSHOT_HINT)}</i>")
 
     def _timing_line(self) -> str:
         """Son taramanın ölçülen zamanlaması (FuturesBot.last_timing); ölçüm yoksa boş."""
