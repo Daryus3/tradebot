@@ -43,7 +43,7 @@ import requests
 from config import (DAY_BRAKE_HOURS, MINUTE_SCAN_STEP_MS, futures_be_trigger, tr_from_num, futures_breadth_on,
                     futures_brake_factor, futures_close_only, futures_coin_list, window_peak,
                     futures_cushion_factor, futures_dd_factor, futures_guard_factor, futures_hold_minutes,
-                    futures_tp_pct, scan_log_path,
+                    futures_tp_pct, extra_depth_skip, crash_ratio, scan_log_path,
                     futures_crash_rules, futures_funding_rules,
                     futures_liq_distance_pct, futures_minute_limit, futures_modules, futures_pump_rules, futures_scan_shifts,
                     futures_slot_share, futures_snapshot_on, futures_wave_cfg, futures_wave_rules)
@@ -799,6 +799,12 @@ class FuturesBot(TradingBot):
                 log.info("Büyük hesap kuralı: %s zayıf sinyal, son fonlama %%%s ≤ 0, girilmedi", sig.symbol,
                          sig.metrics.get("last_funding"))
                 outcome[sig.symbol] = "büyük hesap: zayıf sinyal, son fonlama ≤ 0"
+                continue
+            n_open = sum(1 for p in self.state.positions.values() if p.futures)
+            if extra_depth_skip(self.cfg.futures_extra_min_x, n_open, sig.metrics):   # backtest: simulate_slots
+                log.info("Ek pozisyon açılmadı: %s küçük çöküş (düşüş / eşik %.2f < %g)", sig.symbol,
+                         crash_ratio(sig.metrics), self.cfg.futures_extra_min_x)
+                outcome[sig.symbol] = f"ek pozisyon: küçük çöküş (düşüş < eşik ×{self.cfg.futures_extra_min_x:g})"
                 continue
             log.info("Vadeli sinyal: %s %s | %s", sig.symbol, sig.side, sig.note())
             try:

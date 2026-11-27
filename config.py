@@ -547,20 +547,40 @@ def futures_hold_minutes(cfg, n_open: int, breadth: Optional[int]) -> int:
     return base
 
 
+def crash_ratio(metrics) -> float:
+    """Çöküş sinyalinin düşüşü / çöküş eşiği (metrics["drop_pct"] / metrics["thr_pct"]; 1 = eşik zar zor geçildi).
+    Çöküş dışı sinyal (ek modül) ya da ölçü yoksa NaN."""
+    if not metrics or metrics.get("tactic", 1.0) != 1.0:
+        return float("nan")
+    try:
+        drop, thr = float(metrics["drop_pct"]), float(metrics["thr_pct"])
+    except (KeyError, TypeError, ValueError):
+        return float("nan")
+    if not thr > 0 or drop != drop:
+        return float("nan")
+    return drop / thr
+
+
 def small_crash_tp_pct(x: float, small_tp: float, tp: float, metrics) -> float:
     """Küçük çöküşte Kâr Al (FUTURES_SMALL_TP_X / FUTURES_SMALL_TP_PCT; rapor 29 araştırması): çöküş sinyalinde düşüş
     (metrics["drop_pct"]) çöküş eşiğinin (metrics["thr_pct"]) x katından azsa, yani eşik zar zor geçildiyse (dönüş de
     genelde küçük olur), Kâr Al small_tp; değilse tp. x ≤ 0 (kapalı), çöküş dışı sinyal ya da ölçü yoksa tp. Canlı bot
     (FuturesBot._open_from_fill) ve backtest (futures_backtest.small_tp_params) ortak."""
-    if x <= 0 or not metrics or metrics.get("tactic", 1.0) != 1.0:
+    if x <= 0:
         return tp
-    try:
-        drop, thr = float(metrics["drop_pct"]), float(metrics["thr_pct"])
-    except (KeyError, TypeError, ValueError):
-        return tp
-    if not thr > 0 or drop != drop:
-        return tp
-    return small_tp if drop / thr < x else tp
+    r = crash_ratio(metrics)
+    return small_tp if r == r and r < x else tp
+
+
+def extra_depth_skip(x: float, n_open: int, metrics) -> bool:
+    """Ek pozisyonda küçük çöküş (FUTURES_EXTRA_MIN_X; rapor 30 araştırması): dalga modunda başka pozisyon açıkken
+    (n_open ≥ 1) gelen çöküş sinyalinin düşüşü çöküş eşiğinin x katından azsa True (girilmez; yuva daha derin çöküşe
+    kalır). x ≤ 0 (kapalı), ilk pozisyon, çöküş dışı sinyal ya da ölçü yoksa False. Canlı bot (FuturesBot._scan_and_enter)
+    ve backtest (futures_backtest.simulate_slots) ortak."""
+    if x <= 0 or n_open < 1:
+        return False
+    r = crash_ratio(metrics)
+    return r == r and r < x
 
 
 def futures_tp_pct(cfg, metrics) -> float:
@@ -1082,6 +1102,8 @@ class Config:
     # Küçük çöküşte Kâr Al (bkz. small_crash_tp_pct): çöküş düşüşü eşiğinin X katından azsa Kâr Al fiyat +%Y
     futures_small_tp_x: float = 0.0            # 0 = kapalı
     futures_small_tp_pct: float = 5.0
+    # Ek pozisyonda küçük çöküş (bkz. extra_depth_skip): başka pozisyon açıkken düşüşü eşiğin X katından az olana girme
+    futures_extra_min_x: float = 0.0           # 0 = kapalı
     # Sermaye koruması (bkz. futures_guard_factor): toplam zarar bota verilen sermayenin %X'i iken pozisyon boyu %Y
     futures_guard_pct: float = 0.0         # Başlangıç sermayesine göre zarar eşiği (%; 0 = kapalı)
     futures_guard_size_pct: float = 60.0   # Eşik aşılınca yeni pozisyonların büyüklüğü (%)
@@ -1497,6 +1519,9 @@ class Config:
                           "küçük çöküş)")
         if not 0.5 <= self.futures_small_tp_pct <= 50:
             errors.append("FUTURES_SMALL_TP_PCT 0.5-50 arasında olmalı (küçük çöküşte Kâr Al, fiyat %)")
+        if not (self.futures_extra_min_x == 0 or 1.05 <= self.futures_extra_min_x <= 5):
+            errors.append("FUTURES_EXTRA_MIN_X 0 (kapalı) ya da 1.05-5 olmalı (ek pozisyonda çöküş düşüşü eşiğin en az "
+                          "kaç katı)")
         if not (self.futures_cushion_x == 0 or 1.2 <= self.futures_cushion_x <= 20):
             errors.append("FUTURES_CUSHION_X 0 (kapalı) ya da 1.2-20 olmalı (bota verilen sermayenin kaç katı)")
         if not 100 <= self.futures_cushion_size_pct <= 150:
@@ -1808,6 +1833,7 @@ def load_config(env_file: Optional[str] = None, mode_override: Optional[str] = N
         futures_bounce_boost_size_pct=_env_float("FUTURES_BOUNCE_BOOST_SIZE_PCT", 150.0),
         futures_small_tp_x=_env_float("FUTURES_SMALL_TP_X", 0.0),
         futures_small_tp_pct=_env_float("FUTURES_SMALL_TP_PCT", 5.0),
+        futures_extra_min_x=_env_float("FUTURES_EXTRA_MIN_X", 0.0),
         futures_cushion_x=_env_float("FUTURES_CUSHION_X", 0.0),
         futures_cushion_size_pct=_env_float("FUTURES_CUSHION_SIZE_PCT", 112.5),
         futures_support_size_pct=_env_float("FUTURES_SUPPORT_SIZE_PCT", 100.0),
@@ -2327,6 +2353,13 @@ def _setting_notes(cfg: Config) -> List[str]:
                          f"(TAKE_PROFIT_PCT). Testte (4.000 USDT, rapor 29 ayarı, her ayın 1'inde başlayan 71 hesap, "
                          f"10 çekiliş) 1.5 / %5: 12 ay ortancası +%2.689 → +%2.946, %60'ı aşan düşüş 9 → 9.5, "
                          f"kill-switch ve zararla biten hesap 0; canlıda ölçülen giriş dolumunda +%2.093 → +%2.247.")
+        if cfg.futures_extra_min_x > 0:
+            notes.append(f"FUTURES_EXTRA_MIN_X={cfg.futures_extra_min_x:g} (ek pozisyonda küçük çöküş): dalga modunda başka "
+                         f"pozisyon açıkken çöküş düşüşü eşiğin {cfg.futures_extra_min_x:g} katından azsa girilmez (yuva "
+                         f"daha derin çöküşe kalır; ilk pozisyona uygulanmaz). Testte (4.000 USDT, rapor 30 ayarı, her "
+                         f"ayın 1'inde başlayan 71 hesap, 10 çekiliş) 1.35: 12 ay ortancası +%2.946 → +%3.255, alt "
+                         f"çeyrek +%1.019 → +%1.219, %60'ı aşan düşüş 9.5 → 9.5, kill-switch 0; canlıda ölçülen giriş "
+                         f"dolumunda +%2.247 → +%2.476, alt çeyrek +%546 → +%961.")
         if cfg.futures_cushion_x > 0:
             notes.append(f"FUTURES_CUSHION_X={cfg.futures_cushion_x:g}, FUTURES_CUSHION_SIZE_PCT="
                          f"{cfg.futures_cushion_size_pct:g} (kâr yastığı): botun sermayesi bota verilen sermayenin "

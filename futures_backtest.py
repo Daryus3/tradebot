@@ -39,7 +39,8 @@ import numpy as np
 from config import (DATA_DIR, DAY_BRAKE_HOURS, cushion_factor, dd_scale_factor, format_crash_rules, futures_coin_list,
                     futures_crash_rules, futures_funding_rules, futures_liq_distance_pct, futures_long_windows,
                     futures_modules, futures_scan_shifts, futures_snapshot_on, futures_wave_cfg, futures_wave_rules,
-                    parse_crash_rules, scan_log_path, small_crash_tp_pct, tr_from, tr_from_num, window_peak)
+                    parse_crash_rules, scan_log_path, small_crash_tp_pct, extra_depth_skip, tr_from, tr_from_num,
+                    window_peak)
 from futures_data import FuturesArchive, concat, resample, slice_range
 from futures_depth import DEPTH_CHECK_MIN_NOTIONAL, DepthBook, daily_volume_fn
 from strategy import (BEAR_SMA_CHOICES, BIG_EXTRA_SLOTS, FUT_BAR_MS, FUT_HOUR_MS, QUALITY_CUTS, basis_pct,
@@ -730,6 +731,9 @@ class SimParams:
     # (0 = kapalı; bkz. small_tp_params)
     small_tp_x: float = 0.0
     small_tp_pct: float = 5.0
+    # Ek pozisyonda küçük çöküş (FUTURES_EXTRA_MIN_X; canlı: FuturesBot._scan_and_enter, config.extra_depth_skip): dalga
+    # modunda başka pozisyon açıkken düşüşü eşiğin extra_min_x katından az olan çöküş sinyaline girilmez (0 = kapalı)
+    extra_min_x: float = 0.0
     # Emir defteri derinliği (futures_depth; veri FutData.depth'te, yoksa ikisi de uygulanmaz): depth_cap_pct > 0 ise giriş
     # tutarı girişten önceki 2 dk'da ±%1 içindeki alış / satış emirlerinin küçüğünün bu yüzdesiyle sınırlı ve aynı mumdaki
     # sinyallerde sınıra takılınca kapasitesi büyük olan önce (FUTURES_DEPTH_CAP_PCT); depth_impact: piyasa emrinin defteri
@@ -798,6 +802,7 @@ def params_from_cfg(cfg, **over) -> SimParams:
                   bounce_boost_size_pct=float(getattr(cfg, "futures_bounce_boost_size_pct", 150.0)),
                   small_tp_x=float(getattr(cfg, "futures_small_tp_x", 0.0) or 0.0),
                   small_tp_pct=float(getattr(cfg, "futures_small_tp_pct", 5.0)),
+                  extra_min_x=float(getattr(cfg, "futures_extra_min_x", 0.0) or 0.0),
                   depth_cap_pct=float(getattr(cfg, "futures_depth_cap_pct", 0.0) or 0.0),
                   depth_impact=bool(getattr(cfg, "futures_backtest_depth", False)),
                   entry_lag_pct=entry_lag_for(cfg)[0], stop_slip_pct=STOP_SLIP_PCT)
@@ -1199,6 +1204,20 @@ def size_factor(p: SimParams, s: "FutSignal") -> float:
             * support_size_factor(p.support_size_pct, p.support_zone_pct, s.metrics.get(f"low{int(p.support_days)}h")))
 
 
+def extra_skip_reason(x: float) -> str:
+    """Ek pozisyonda küçük çöküş atlamasının nedeni (rapor sayımı; canlıdaki tarama kaydıyla aynı metin)."""
+    return f"ek pozisyon: küçük çöküş (düşüş < eşik ×{x:g})"
+
+
+def extra_min_line(p: SimParams, res: "FutResult") -> str:
+    """Rapor başlığında ek pozisyonda küçük çöküş satırı (kapalıysa ya da tek pozisyonda boş)."""
+    if p.extra_min_x <= 0 or p.max_positions <= 1:
+        return ""
+    n_skip = res.skipped.get(extra_skip_reason(p.extra_min_x), 0)
+    return (f"🧩 Ek pozisyonda küçük çöküş: başka pozisyon açıkken düşüşü çöküş eşiğinin {p.extra_min_x:g} katından az "
+            f"olan sinyale girilmez (yuva daha derin çöküşe kalır). A'da {n_skip} sinyal bu yüzden atlandı")
+
+
 SMALL_TP_CACHE_MAX = 64
 
 
@@ -1540,6 +1559,9 @@ def simulate_slots(p: SimParams, data: FutData, signals: Sequence[FutSignal], wi
             continue
         if big_on and big_funding_skip(p.big_account_usdt, equity, signal_quality(s), s.metrics.get("last_funding")):
             skipped["büyük hesap: zayıf sinyal, son fonlama ≤ 0"] += 1
+            continue
+        if heap and extra_depth_skip(p.extra_min_x, len(heap), s.metrics):
+            skipped[extra_skip_reason(p.extra_min_x)] += 1          # Yuva daha derin çöküşe kalır
             continue
         factor = size_factor(p, s)
         bf = 1.0 if fixed_notional else brake_factor(p, curve, s.close_ms, equity)
@@ -1945,6 +1967,22 @@ def phase6_rows(cfg, ev, signals=None) -> List[Tuple[str, "Evaluation"]]:
         rows.append(("Dalga eşikleri kapalı", ev(no_wave(signals))))
     if base.max_positions > 1 and base.extra_size_pct < 100:
         rows.append(("Ek pozisyonlar ilk pozisyonla eşit büyüklükte", ev(extra_size_pct=100.0)))
+    return rows + extra_min_rows(base, ev)
+
+
+EXTRA_MIN_X_TRIES = (1.2, 1.35, 1.5)      # Ek pozisyonda en küçük çöküş oranı (rapor 30 araştırması, 27 Kasım)
+
+
+def extra_min_rows(base: SimParams, ev) -> List[Tuple[str, "Evaluation"]]:
+    """Ek pozisyonda küçük çöküş (FUTURES_EXTRA_MIN_X; yalnız dalga modunda): açıksa kapalı + eşik çevresi, kapalıysa
+    ×1.35 (önerilen)."""
+    if base.max_positions <= 1:
+        return []
+    if base.extra_min_x <= 0:
+        return [("Ek pozisyonda küçük çöküşe (düşüş < eşik ×1.35) girme", ev(extra_min_x=1.35))]
+    rows = [("Ek pozisyonda küçük çöküş kuralı kapalı", ev(extra_min_x=0.0))]
+    rows += [(f"Ek pozisyonda çöküş ≥ eşik ×{x:g} (şimdi ×{base.extra_min_x:g})", ev(extra_min_x=x))
+             for x in EXTRA_MIN_X_TRIES if not _same(x, base.extra_min_x)]
     return rows
 
 
@@ -4354,6 +4392,9 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
                          f"teminatla sınırlı; A'da {big} işlem)")
         if parts:
             L.append("↩️ V dönüşü: " + "; ".join(parts))
+    extra_line = extra_min_line(p, res)
+    if extra_line:
+        L.append(extra_line)
     if p.small_tp_x > 0:
         small = sum(1 for tr in res.trades if tr.small_tp)
         L.append(f"🎯 Küçük çöküşte Kâr Al: çöküş düşüşü eşiğinin {p.small_tp_x:g} katından azsa (eşik zar zor geçildi) "

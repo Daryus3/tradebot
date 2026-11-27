@@ -234,6 +234,9 @@ EDITABLE: Dict[str, Setting] = {
     "FUTURES_SMALL_TP_X": Setting("futures_small_tp_x", "float",
                                   "Küçük çöküşte Kâr Al: çöküş düşüşü eşiğin bu katından azsa küçük çöküş (0 = kapalı)"),
     "FUTURES_SMALL_TP_PCT": Setting("futures_small_tp_pct", "float", "Küçük çöküşte Kâr Al (fiyat %)"),
+    "FUTURES_EXTRA_MIN_X": Setting("futures_extra_min_x", "float",
+                                   "Ek pozisyonda küçük çöküş: başka pozisyon açıkken çöküş düşüşü eşiğin en az bu katı "
+                                   "olmalı (0 = kapalı)"),
     "FUTURES_CUSHION_X": Setting("futures_cushion_x", "float",
                                  "Kâr yastığı: sermaye bota verilenin bu katına çıkınca pozisyonu büyüt (0 = kapalı)"),
     "FUTURES_CUSHION_SIZE_PCT": Setting("futures_cushion_size_pct", "float",

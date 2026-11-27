@@ -2960,6 +2960,75 @@ Okuma:
   satırları.
 - **Öneri:** `FUTURES_SMALL_TP_X=1.5`, `FUTURES_SMALL_TP_PCT=5`.
 
+#### Rapor 30 araştırması: ek pozisyonda küçük çöküş ve elenen çıkış fikirleri (Kasım 2026)
+Taban: rapor 30'un ayarı (H7 = rapor 29 ayarı + küçük çöküşte Kâr Al ×1.5 / %5), **4.000 USDT**, 10 çekiliş, her ayın
+1'inde başlayan 71 hesap (12 ay ortanca / %60'ı aşan düşüş / kill-switch / zararda biten / alt çeyrek). Şimdiki: +%2.946 /
+9.5 / 0 / 0 / +%1.019; canlıda ölçülen giriş dolumunda (+%0.064) +%2.247 / 17 / en kötü çekilişte 1 / 2 / +%546.
+
+**Bulgu: çöküşün eşiği ne kadar aştığı (düşüş / eşik) işlem başı kârı güçlü ayırıyor**, iki dönemde de aynı yönde (C:
+sabit tutarlı işlemler, 0. çekiliş):
+
+| Düşüş / eşik | İşlem | İşlem başı net (2020-23 / 2024-26) | Zarar kes / Kâr Al payı |
+|---|---|---|---|
+| 1 - 1.1 | 2.990 | +%0.058 (+0.038 / +0.092) | %8 / %4 |
+| 1.1 - 1.25 | 1.813 | −%0.010 (−0.001 / −0.034) | %9 / %5 |
+| 1.25 - 1.5 | 1.466 | +%0.164 (+0.114 / +0.317) | %8 / %8 |
+| 1.5 - 2 | 1.604 | +%0.286 (+0.214 / +0.532) | %8 / %8 |
+| 2 - 3 | 1.315 | +%0.337 (+0.300 / +0.569) | %11 / %14 |
+| 3+ | 935 | +%1.245 (+1.277 / +1.047) | %13 / %32 |
+
+Kalite puanından bağımsız (en güçlü %20'de bile oran < 1.25 olan işlemler +%0.05-0.13). Dalgadaki ek pozisyonlarda oran
+< 1.25 olan 3.080 işlem tam %0 kazandırıyor (+%0.014 / −%0.026) ve yuvaları dolduruyor; aynı dalgada sonra gelen derin
+çöküşlere yer kalmıyor.
+
+| Fikir | Sonuç | Karar |
+|---|---|---|
+| Zamanla düşen Kâr Al (20 dk sonra %4; ön elemede 15-30 dk, %2-4) | +%2.975 / 11 | Etkisiz |
+| BTC girişten sonra %1-2.5 düşünce çıkmak | Ön eleme: işlem başı +%0.243 → +%0.193 … +%0.243 | Kötü: dönüşleri kesiyor |
+| V dönüşünde yakın Kâr Al (%4-5) · ek pozisyonda yakın Kâr Al (%4-5) | Ön eleme: C toplamı +%2.460 → +%2.421 … +%2.458 · +%2.240 … +%2.399 | Kötü |
+| Küçük çöküşte zaman stopu 30 dk | +%1.955 / 14 (ön elemede +%4 görünüyordu) | Kötü |
+| Küçük çöküşte başabaş +%1.5 | +%1.974 / 14.5 | Kötü: pozisyonlar yuvaları tutuyor |
+| Çöküş büyüklüğüne göre zarar kes (%4-4.25 / %5.25-5.5), büyük çöküşte geç başabaş, kapanışa göre zarar kes | Ön eleme: etkisiz ya da kötü | Elendi |
+| Zayıf + küçük çöküşe hiç girmemek (ilk pozisyon dahil) | +%2.795 / 23.5 / kill 2 | Kötü: küçük boylu pozisyon yuvayı tutarak koruyor |
+| Küçük çöküşte boy ×0.5 · küçük ×0.6 + derin ×1.2 | +%2.221 / 4 · +%2.530 / 7 | Kaldıraç düşürmekten verimsiz |
+| Derin çöküşte (≥ eşik ×3) boy ×1.25 | +%3.125 / 12; canlıda +%2.263 / 20.5 / kill 2 | Kaldıraç gibi |
+| Zarar sonrası beklemede derin sinyale yeniden giriş · dalga kapısını derin sinyale açmak | +%2.651 / 20.5 · +%2.894 | Kötü · etkisiz |
+| **Ek pozisyonda küçük çöküşe girmemek (`FUTURES_EXTRA_MIN_X`)** | | **Eklendi (varsayılan kapalı), önerildi: 1.35** |
+
+**Ek pozisyonda küçük çöküş.** Dalga modunda başka pozisyon açıkken gelen çöküş sinyalinin düşüşü eşiğin X katından
+azsa ek pozisyon açılmaz; ilk pozisyon ve ek modül sinyalleri etkilenmez. Eşik taraması (çekiliş çekiliş aynı çekilişteki
+tabanla karşılaştırma: ortancası iyi çekiliş, ortanca farkı, alt çeyreği iyi çekiliş, %60'ı aşan düşüş farkı):
+
+| Eşik | Normal maliyet: 12 ay ortanca / %60+ / zararda / alt çeyrek | Eşleştirmeli | Canlı dolum: 12 ay ortanca / %60+ / zararda / alt çeyrek | Eşleştirmeli |
+|---|---|---|---|---|
+| Şimdiki (kapalı) | +%2.946 / 9.5 / 0 / +%1.019 | – | +%2.247 / 17 / 2 / +%546 | – |
+| 1.1 | +%3.163 / 9.5 / 0 / +%1.242 | 9/10, +%259, 9/10, +3.5 | +%2.143 / 14.5 / 0 / +%749 | 6/10, +%82, 9/10, −1.5 |
+| 1.2 | +%3.255 / 10.5 / 1 / +%1.203 | 9/10, +%297, 8/10, +2.0 | +%2.398 / 15 / 2 / +%816 | 10/10, +%530, 8/10, +3.0 |
+| 1.25 | +%3.153 / 11.5 / 2 / +%1.181 | 9/10, +%236, 8/10, +3.0 | +%2.265 / 14.5 / 2 / +%820 | 8/10, +%237, 9/10, +1.5 |
+| 1.3 | +%3.294 / 12.5 / 2 / +%1.179 | 8/10, +%227, 9/10, +3.5 | +%2.514 / 14 / 2 / +%841 | 9/10, +%402, 10/10, −1.0 |
+| **1.35** | **+%3.255 / 9.5 / 2 / +%1.219** | **10/10, +%461, 10/10, +1.0** | **+%2.476 / 15 / 2 / +%961** | **9/10, +%424, 10/10, −2.0** |
+| 1.5 | +%3.510 / 11.5 / 2 / +%1.341 | 10/10, +%519, 9/10, +3.5 | +%2.521 / 17.5 / 5 / +%888 | 10/10, +%477, 9/10, +2.5 |
+
+| Stres (0. çekiliş, 71 hesap) | Şimdiki | 1.35 |
+|---|---|---|
+| 3 kat kayma | +%1.777, alt çeyrek +%336, %60+ 21, kill 1, A 2,39 milyon | +%2.639, +%711, 24, kill 0, A 3,49 milyon |
+| Canlı dolum + 3 kat kayma | +%1.541, +%324, zararda 8, %60+ 23, kill 4 | +%2.534, +%399, zararda 8, %60+ 27, kill 5 |
+| Kötümser stop dolumu (en kötü durum) | ortanca −%60, zararda 48, kill 37 | ortanca +%23, zararda 31, kill 23 |
+
+Okuma:
+- Denenen her eşik (1.1-1.5) iki maliyette de ortancayı ve alt çeyreği çoğu çekilişte iyileştiriyor; kural biraz risk de
+  ekliyor (aynı çekilişte %60+ düşüş yaşayan hesap 71'de 1-3.5 fazla; kaldıraç 8x → 9x: +%241 için +9 hesap ve 2
+  kill-switch). 1.35 bu dengede en iyisi; 1.5 canlı dolumda zararla biten hesabı 2 → 5 yapıyor.
+- 2022 (ayı) başlangıçlarında 12 ay ortancası düşüyor (+%169 → +%88; canlı dolumda +%122 → +%58); 2020 ve 2023-25
+  başlangıçlarında artıyor (2023-25: +%3.041 → +%3.689, canlı dolumda +%2.171 → +%2.581).
+- Seçim / doğrulama yıllık getirisi +%471 / +%558 → +%514 / +%548 (doğrulama hafif geride; büyük A hesabında derinlik sınırı
+  belirleyici).
+- Resmi motor araştırma kancasıyla birebir aynı (iki maliyette, 10 çekilişin hepsinde).
+- **Eklenen ayar:** `FUTURES_EXTRA_MIN_X` (varsayılan 0 = kapalı; önerilen 1.35). Telegram: 🌊 Dalga modu → 🧩. Ölçü
+  sinyalin kendi düşüşü ve eşiği (ek istek yok, giriş gecikmesi artmaz). Canlı tarama kaydında atlanan sinyal "ek pozisyon:
+  küçük çöküş" nedeniyle görünür; backtest başlığında 🧩 satırı (atlanan sinyal sayısı), tek kural tablosunda çevre satırları.
+- **Öneri:** `FUTURES_EXTRA_MIN_X=1.35`.
+
 #### Kill-switch eşiği (rapor 23, Kasım 2026)
 **Nasıl çalışır:** botun toplam zararı (kapanan işlemler + açık pozisyonların anlık zararı) botun sermayesinin
 (başlangıç + /sermayeekle) `MAX_TOTAL_LOSS_PCT`'sine ulaşınca durum dosyasına "kill-switch" yazılır, yeni pozisyon
@@ -3115,6 +3184,9 @@ karar için ortancaya ve en kötüye bakın. Çıkış taraması her gün dengel
 - **↩️ V dönüşü satırı** (rapor başlığında, `FUTURES_BOUNCE_CALM_PCT` / `FUTURES_BOUNCE_BOOST_PCT` açıkken): fiyat son 15
   dk'nın dibinden eşik kadar yukarıdayken durulmuş sayılmayan ve büyük boyla açılan işlemlerin A'daki sayısını gösterir.
   A ve B aynı kuralı kullanır; büyütme C'de de (sabit tutar × boy) uygulanır.
+- **🧩 Ek pozisyonda küçük çöküş satırı** (rapor başlığında, `FUTURES_EXTRA_MIN_X` açıkken, dalga modunda): başka
+  pozisyon açıkken düşüşü çöküş eşiğinin X katından az olduğu için girilmeyen sinyal sayısını (A) gösterir. A, B ve C aynı
+  kuralı kullanır.
 - **🎯 Küçük çöküşte Kâr Al satırı** (rapor başlığında, `FUTURES_SMALL_TP_X` açıkken): düşüşü çöküş eşiğinin X
   katından az olan çöküşlerde Kâr Al'ın %Y olduğunu ve A'da kaç işlemin bu hedefle açıldığını gösterir. A, B ve C aynı
   kuralı kullanır; ayarlar satırında "Kâr Al +%6 (küçük çöküşte +%5)".

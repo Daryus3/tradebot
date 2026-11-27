@@ -92,6 +92,9 @@ SMALL_TP_HINT = ("Küçük çöküşte Kâr Al (rapor 29 araştırması; 4.000 U
                  "hesap, 10 çekiliş): çöküş düşüşü eşiğin 1.5 katından azsa (eşik zar zor geçildi) Kâr Al %5, diğerleri "
                  "ana Kâr Al. 12 ay ortancası +%2.689 → +%2.946, %60'ı aşan düşüş 9 → 9.5, kill-switch 0; canlıda "
                  "ölçülen giriş dolumunda +%2.093 → +%2.247.")
+# Ek pozisyonda küçük çöküş (rapor 30 araştırması, 27 Kasım; varsayılan kapalı): ek pozisyon için düşüş / eşik en az
+EXTRA_MIN_X_CHOICES = (0, 1.2, 1.35, 1.5)
+PAGE_TEXT_MAX = 3800        # Telegram mesajı 4096 karakter (gönderici 4000'de keser); açıklamalar sığdığı kadar eklenir
 BASIS_SIZE_CHOICES = (100, 130, 150)       # Vadeli-spot farkına göre boy (rapor 17 araştırması, 22 Kasım)
 BASIS_DEEP_CHOICES = (0.3, 0.5, 0.7)
 QUALITY_SIZE_CHOICES = (100, 60, 50, 40)  # Sinyal kalitesine göre boy (rapor 18 araştırması, 22 Kasım)
@@ -459,6 +462,9 @@ PAGES: Dict[str, Page] = {
             f"en fazla {v} pozisyon", show=_crash, per_row=4),
         Row("FUTURES_EXTRA_BREADTH", icon="🌊", values=(5, 8, 10, 12), fmt=lambda v: f"ek: ≥{v} coin",
             show=lambda cfg: _crash(cfg) and cfg.futures_max_positions > 1, per_row=4),
+        Row("FUTURES_EXTRA_MIN_X", icon="🧩", values=EXTRA_MIN_X_CHOICES,
+            fmt=_off("ek: her çöküş", lambda v: f"ek: düşüş ≥ eşik ×{v:g}"),
+            show=lambda cfg: _crash(cfg) and cfg.futures_max_positions > 1, per_row=2),
         Row("FUTURES_LEVERAGE", icon="⚡", values=(2, 3, 4), fmt=lambda v: f"{v}x",
             show=lambda cfg: _crash(cfg) and cfg.futures_max_positions > 1, per_row=3),
         Row("FUTURES_EXTRA_SIZE_PCT", icon="📏", values=(100, 50, 25, 16.7), fmt=lambda v: "ek: eşit" if float(v) >= 100
@@ -1107,6 +1113,11 @@ class SettingsMenu:
                 lines.append("↩️ V dönüşü: " + "; ".join(parts) + ".")
         else:
             lines.append("↩️ V dönüşüne göre boy kapalı.")
+        if k > 1 and cfg.futures_extra_min_x > 0:
+            lines.append(f"🧩 Ek pozisyon yalnızca çöküş düşüşü eşiğin en az <b>{cfg.futures_extra_min_x:g}</b> katıysa "
+                         f"(eşiği zar zor geçen çöküş yuvayı doldurmaz, yer daha derin çöküşe kalır).")
+        elif k > 1:
+            lines.append("🧩 Ek pozisyonda çöküş derinliği şartı yok.")
         if cfg.futures_basis_size_pct != 100:
             lines.append(f"⚖️ Vadeli-spot farkı: girişte vadeli fiyat spotun %{tr_from_num(cfg.futures_basis_deep_pct)} fazla "
                          f"altındaysa (zorla satış izi) pozisyon <b>%{cfg.futures_basis_size_pct:g}</b> büyüklükte.")
@@ -1152,9 +1163,14 @@ class SettingsMenu:
         if k > 1 and cfg.futures_universe <= 0:
             lines.append("⚠️ Yalnızca FUTURES_COINS listesi taranıyor: eşikler ~25 coinlik evren (liste + en hacimli 20) "
                          "için seçildi, ek pozisyon çok seyrek açılır.")
-        lines += [LINE, f"<i>{esc(CASCADE_HINT)}</i>", f"<i>{esc(PHASE6_HINT)}</i>", f"<i>{esc(PHASE8_HINT)}</i>",
-                  f"<i>{esc(PHASE9_HINT)}</i>", f"<i>{esc(BOUNCE_HINT)}</i>"]
-        return "\n".join(lines)
+        lines.append(LINE)
+        out = "\n".join(lines)
+        for hint in (CASCADE_HINT, PHASE6_HINT, PHASE8_HINT, PHASE9_HINT, BOUNCE_HINT):
+            extra = f"\n<i>{esc(hint)}</i>"
+            if len(out) + len(extra) > PAGE_TEXT_MAX:    # Sığmayan açıklama eklenmez (kesilip HTML'i bozmasın)
+                break
+            out += extra
+        return out
 
     def _text_fm(self) -> str:
         cfg = self.cfg
