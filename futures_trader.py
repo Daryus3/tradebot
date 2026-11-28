@@ -58,7 +58,9 @@ from strategy import (FUT_BAR_MS, FUT_BREADTH_DROP_PCT, FUT_BREADTH_HOURS, FUT_B
                       recent_size_factor, basis_pct, basis_size_factor, quality_score, quality_size_factor,
                       spot_pairs, BIG_EXTRA_SLOTS, QUALITY_CUTS, big_extra_slots, big_funding_skip, big_rules_on,
                       quality_roundup_ok, bear_regime, bear_size_factor, bounce_boost_factor, support_dist_pct,
-                      support_low, fall7_size_factor, ret7_pct, fall7_btc_skip, FALL7_BTC_REASON,
+                      support_low, fall7_size_factor, ret7_pct, fall7_btc_skip, FALL7_BTC_REASON, streak_avg,
+                      btc_first_skip, BTC_FIRST_REASON,
+                      streak_factor,
                       support_size_factor)
 from telegram_bot import CRITICAL_EXITS, Messages, esc, fmt_duration, fmt_price, fmt_signed, fmt_usdt, futures_tag
 from trader import ALIVE_SAVE_SEC, POSITION_LOG_SEC, RULES_REFRESH_SEC, Mark, TradingBot
@@ -814,6 +816,12 @@ class FuturesBot(TradingBot):
                          "(düşüş / eşik %.2f < %g)", sig.symbol, self.ret7_of(sig) or 0.0, self.btc7() or 0.0,
                          crash_ratio(sig.metrics), self.cfg.futures_fall7_exempt_x)
                 outcome[sig.symbol] = FALL7_BTC_REASON
+                continue
+            if self._btc_first_block(sig, n_open):          # backtest: btc_first_block (iki motorda da)
+                log.info("Girilmedi: %s ilk pozisyon, BTC haftası düşüşte (7 günde %%%.1f), hafif çöküş (düşüş / eşik "
+                         "%.2f < %g)", sig.symbol, self.btc7() or 0.0, crash_ratio(sig.metrics),
+                         self.cfg.futures_fall7_btc_first_x)
+                outcome[sig.symbol] = BTC_FIRST_REASON
                 continue
             log.info("Vadeli sinyal: %s %s | %s", sig.symbol, sig.side, sig.note())
             try:
@@ -1834,12 +1842,35 @@ class FuturesBot(TradingBot):
             sig.metrics["deep_size_pct"] = round(deep * 100, 1)
             sig.metrics["deep_ratio"] = round(crash_ratio(sig.metrics), 2)
             factor *= deep
+        if opened:
+            factor *= self._streak_factor(sig)              # Seri: son işlemlere göre ek pozisyon (backtest aynı)
         used = sum(p.margin_usdt for p in opened)
         share = futures_slot_share(cfg, len(opened))        # Faz 5: 1/N; Faz 6: ilk büyük, ekler küçük
         if opened and cfg.futures_extra_size_pct < 100:
             sig.metrics["size_pct"] = round(cfg.futures_extra_size_pct * factor, 1)
             sig.metrics["size_kind"] = "ek pozisyon, ilkinin yüzdesi"
         return min((free + used) * usage * share * factor, free * usage) * dd
+
+    def streak_recent_avg(self) -> Optional[float]:
+        """Seri (FUTURES_STREAK_*): son FUTURES_STREAK_TRADES kapanan vadeli işlemin işlem başı net ortalaması (%; yeterli
+        işlem yoksa None)."""
+        return streak_avg([r[1] for r in self.state.recent_trades], self.cfg.futures_streak_trades)
+
+    def _streak_factor(self, sig: Optional[FuturesSignal] = None) -> float:
+        """Seri çarpanı (yalnız ek pozisyonda çağrılır; kapalıysa 1; backtest: futures_backtest.streak_at): son işlemlerin
+        ortalaması soğuk eşiğin altındaysa FUTURES_STREAK_COLD_SIZE_PCT, sıcak eşikte ve üstündeyse
+        FUTURES_STREAK_HOT_SIZE_PCT. Uygulanınca sinyale yazılır (pozisyon mesajı)."""
+        cfg = self.cfg
+        if cfg.futures_streak_cold_size_pct >= 100 and cfg.futures_streak_hot_size_pct <= 100:
+            return 1.0
+        avg = self.streak_recent_avg()
+        factor = streak_factor(avg, cfg.futures_streak_cold_pct, cfg.futures_streak_cold_size_pct,
+                               cfg.futures_streak_hot_pct, cfg.futures_streak_hot_size_pct)
+        if factor != 1 and sig is not None:
+            sig.metrics["streak_size_pct"] = round(factor * 100, 1)
+            sig.metrics["streak_avg"] = round(avg, 3)
+            sig.metrics["streak_n"] = int(cfg.futures_streak_trades)
+        return factor
 
     def _dd_factor(self, sig: Optional[FuturesSignal] = None) -> float:
         """Düşüşte küçültme çarpanı (FUTURES_DD_SCALE_PCT; kapalıysa 1): sermaye (başlangıç + gerçekleşen K/Z) kayıtlı
@@ -1988,6 +2019,15 @@ class FuturesBot(TradingBot):
             return False
         return fall7_btc_skip(cfg.futures_fall7_pct, cfg.futures_fall7_btc_pct, cfg.futures_fall7_exempt_x,
                               self.ret7_of(sig), self.btc7(), crash_ratio(sig.metrics))
+
+    def _btc_first_block(self, sig: FuturesSignal, n_open: int) -> bool:
+        """BTC haftası genişletmesi (FUTURES_FALL7_BTC_FIRST_X; backtest: futures_backtest.btc_first_block): BTC son 7
+        günde FUTURES_FALL7_BTC_PCT'den fazla düştüyse ilk pozisyonda düşüşü eşiğin X katından az olan çöküşe girilmez."""
+        cfg = self.cfg
+        if cfg.futures_fall7_btc_first_x <= 0 or not self._fall7_on() or sig.metrics.get("tactic", 1.0) != 1.0:
+            return False
+        return btc_first_skip(cfg.futures_fall7_btc_pct, cfg.futures_fall7_btc_first_x, self.btc7(),
+                              crash_ratio(sig.metrics), n_open)
 
     def _fall7_factor(self, sig: FuturesSignal) -> float:
         """Düşen bıçak çarpanı (kapalıysa 1): coin son 7 günde FUTURES_FALL7_PCT'den fazla düştüyse FUTURES_FALL7_SIZE_PCT
@@ -2508,6 +2548,9 @@ class FuturesBot(TradingBot):
         else:
             state.losses += 1
         state.total_fees += exit_fee
+        notional = pos.qty * pos.entry_price
+        if notional > 0:
+            state.note_trade(now, pnl / notional * 100)     # Seri (FUTURES_STREAK_*): işlem başı net %
         state.positions.pop(pos.symbol, None)
         prev_until = state.cooldowns.get(pos.symbol, 0.0)
         state.cooldowns[pos.symbol] = now + cooldown_minutes(self.cfg, pnl) * 60

@@ -86,8 +86,9 @@ def test_variant_rows(fcfg):
     assert fb.extra_deep_rows(fb.params_from_cfg(fcfg), lambda **kw: kw) == []
     names = [n for n, _e in fb.phase6_rows(replace(wave, futures_extra_deep_x=3.0), lambda *a, **kw: kw)]
     i = names.index("Ek pozisyonda küçük çöküşe (düşüş < eşik ×1.35) girme")
-    assert names[i + 1:] == ["Derin ek pozisyon büyütmesi kapalı", "Derin ek pozisyon: düşüş ≥ eşik ×2.5 (şimdi ×3)",
-                             "Derin ek pozisyon: düşüş ≥ eşik ×4 (şimdi ×3)", "Derin ek pozisyonda boy %200 (şimdi %150)"]
+    assert names[i + 1:i + 5] == ["Derin ek pozisyon büyütmesi kapalı", "Derin ek pozisyon: düşüş ≥ eşik ×2.5 (şimdi ×3)",
+                                  "Derin ek pozisyon: düşüş ≥ eşik ×4 (şimdi ×3)", "Derin ek pozisyonda boy %200 (şimdi %150)"]
+    assert names[i + 5:] == ["Seri: son 10 işlem < −%1 → ek %50, ≥ +%0.8 → ek %125"]     # Seri satırı en sonda
 
 
 # ====================================================================== canlı / test modu

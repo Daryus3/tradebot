@@ -168,3 +168,78 @@ def test_risk_page_row(fcfg, tmp_path):
     assert bot.cfg.futures_fall7_btc_pct == 10.0 and "FUTURES_FALL7_BTC_PCT=10" in env.read_text()
     text = notes.menus[-1][0]
     assert "BTC de 7 günde %10'ten fazla düştüyse hafif çöküşe girilmez" in text and len(text) <= 4000
+    data = [d for row in notes.menus[-1][1] for _l, d in row]
+    press(bot, next(d for d in data if d.endswith("FUTURES_FALL7_BTC_FIRST_X:1.35")))
+    assert bot.cfg.futures_fall7_btc_first_x == 1.35 and "FUTURES_FALL7_BTC_FIRST_X=1.35" in env.read_text()
+    text = notes.menus[-1][0]
+    assert "o haftalarda her coinde ilk pozisyon için düşüş eşiğin en az 1.35 katı" in text and len(text) <= 4000
+
+
+# ====================================================================== BTC haftası genişletmesi (rapor 35)
+def test_first_extension_shared_rule_and_settings(fcfg, monkeypatch, tmp_path):
+    from strategy import BTC_FIRST_REASON, btc_first_skip
+    assert btc_first_skip(10.0, 1.35, -12.0, 1.2, 0)                         # BTC düşüşte, ilk pozisyon, hafif
+    assert btc_first_skip(10.0, 1.35, -12.0, NAN, 0)                         # Oran bilinmiyor: hafif
+    assert not btc_first_skip(10.0, 1.35, -12.0, 1.35, 0)                    # Tam eşik girilir
+    assert not btc_first_skip(10.0, 1.35, -12.0, 1.2, 1)                     # Ek pozisyona kural yok
+    assert not btc_first_skip(10.0, 1.35, -9.0, 1.2, 0)                      # BTC yeterince düşmedi
+    assert not btc_first_skip(10.0, 0.0, -12.0, 1.2, 0) and not btc_first_skip(0.0, 1.35, -12.0, 1.2, 0)
+    assert not btc_first_skip(10.0, 1.35, None, 1.2, 0)
+    assert BTC_FIRST_REASON == "BTC haftası düşüşte: ilk pozisyonda hafif çöküş"
+    on = replace(fcfg, futures_fall7_pct=15.0, futures_fall7_exempt_x=2.0, futures_fall7_btc_pct=10.0,
+                 futures_fall7_btc_first_x=1.35)
+    on.validate()
+    for bad in (1.0, 6.0):
+        with pytest.raises(ConfigError):
+            replace(on, futures_fall7_btc_first_x=bad).validate()
+    monkeypatch.setenv("FUTURES_FALL7_BTC_FIRST_X", "1.35")
+    assert load_config(env_file=str(tmp_path / "x.env"), mode_override="paper").futures_fall7_btc_first_x == 1.35
+    assert EDITABLE["FUTURES_FALL7_BTC_FIRST_X"].attr == "futures_fall7_btc_first_x"
+    assert not _setting_notes(on)
+    note = [n for n in _setting_notes(replace(on, futures_fall7_btc_pct=0.0)) if "FUTURES_FALL7_BTC_FIRST_X" in n]
+    assert len(note) == 1 and "etkisiz" in note[0]
+
+
+def test_first_extension_in_both_engines():
+    from strategy import BTC_FIRST_REASON
+    mild = knife("AAAUSDT", BASE_MS, 12.0, -12.0)                           # oran 1.2: ilk pozisyon olarak girilmez
+    mild.metrics["ret7"] = -5.0                                              # Bıçak değil: yalnız genişletme kuralı
+    hard = knife("BBBUSDT", BASE_MS + MIN, 14.0, -12.0)                     # oran 1.4: ilk pozisyon
+    hard.metrics["ret7"] = -5.0
+    late = knife("CCCUSDT", BASE_MS + 2 * MIN, 12.0, -12.0)                 # oran 1.2 ama ek pozisyon: girilir
+    late.metrics["ret7"] = -5.0
+    sigs = [mild, hard, late]
+    w = {(s.symbol, s.close_ms): window(FLAT, start=s.close_ms) for s in sigs}
+    p = params(tp_pct=3.0, be_enabled=False, hold_min=30, max_positions=3, fall7_pct=15.0, fall7_size_pct=60.0,
+               fall7_exempt_x=2.0, fall7_btc_pct=10.0, fall7_btc_first_x=1.35)
+    res = fb.simulate(p, bt_data(), sigs, w)
+    assert [t.symbol for t in res.trades] == ["BBBUSDT", "CCCUSDT"] and res.skipped[BTC_FIRST_REASON] == 1
+    assert [t.symbol for t in fb.simulate(replace(p, fall7_btc_first_x=0.0), bt_data(), sigs, w).trades] == [
+        "AAAUSDT", "BBBUSDT", "CCCUSDT"]
+    single = fb.simulate(replace(p, max_positions=1), bt_data(), sigs, w)
+    assert single.trades[0].symbol == "BBBUSDT" and single.skipped[BTC_FIRST_REASON] >= 1
+    calm = knife("DDDUSDT", BASE_MS, 12.0, -5.0)                            # BTC −%5: kural yok
+    assert not fb.btc_first_block(p, calm, 0) and fb.btc_first_block(p, mild, 0)
+    assert not fb.btc_first_block(replace(p, fall7_pct=0.0), mild, 0)        # Düşen bıçak kapalı: BTC ölçüsü yok sayılır
+    line = fb.fall7_line(p, res)
+    assert "o haftalarda her coinde ilk pozisyon için düşüş eşiğin en az 1.35 katı olmalı" in line
+    assert line.endswith("1 ilk pozisyon sinyali hafif çöküş yüzünden atlandı")
+
+
+def test_first_extension_paper_scan(fcfg, tmp_path):
+    def run(first_x, name):
+        closes = {"SOLUSDT": crashing(), "ADAUSDT": crashing(drop=7.0), "DOGEUSDT": flat(), "XRPUSDT": flat(),
+                  "BTCUSDT": flat()}
+        cfg = live_cfg(fcfg, futures_max_positions=2, futures_extra_breadth=2, futures_fall7_pct=15.0,
+                       futures_fall7_exempt_x=2.0, futures_fall7_btc_pct=10.0, futures_fall7_btc_first_x=first_x)
+        bot, _fake, _notes, clock = make_fbot(cfg, tmp_path / name, fake=KlineCcxt(closes))
+        day = int(clock.t // 86400)
+        for sym in ("SOLUSDT", "ADAUSDT"):
+            bot._day_closes[sym] = (day, [100.0] * 8)                        # Bıçak değil
+        bot._day_closes["BTCUSDT"] = (day, BTC_DOWN)
+        bot.scan_and_enter(clock.t)
+        return bot
+    # Düşüş / eşik (1 sa %6): SOL 8 / 6 = 1.33, ADA 7 / 6 = 1.17 → ×1.35 şartında ikisi de ilk pozisyon olamaz
+    assert not run(1.35, "x135").state.positions
+    assert "SOLUSDT" in run(1.25, "x125").state.positions                   # SOL 1.33 ≥ 1.25: ilk pozisyon
+    assert set(run(0.0, "off").state.positions) == {"SOLUSDT", "ADAUSDT"}

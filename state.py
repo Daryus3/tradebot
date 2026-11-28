@@ -23,6 +23,8 @@ from risk import Position
 log = get_logger()
 
 
+RECENT_TRADES_KEEP = 50          # Seri kuralı (FUTURES_STREAK_*) için saklanan son işlem sayısı (en çok 50)
+
 @dataclass
 class BotState:
     mode: str
@@ -79,6 +81,14 @@ class BotState:
     # 24 saat freni (FUTURES_DAY_BRAKE_PCT): kapanışlardaki sermaye [zaman, sermaye]; pencereden (24 saat) eski kayıtlardan
     # yalnızca en yenisi (pencere başındaki sermaye) tutulur. /sermayeekle ile eklenen para kayıtlara da eklenir.
     capital_marks: List[List[float]] = field(default_factory=list)
+    # Seri (FUTURES_STREAK_*): son kapanan vadeli işlemler [kapanış zamanı, işlem başı net %] (en yenisi sonda, en fazla
+    # RECENT_TRADES_KEEP kayıt)
+    recent_trades: List[List[float]] = field(default_factory=list)
+
+    def note_trade(self, now: float, net_pct: float) -> None:
+        """Seri kuralı için kapanan işlemin işlem başı netini (%) kaydeder (en fazla RECENT_TRADES_KEEP kayıt)."""
+        self.recent_trades.append([round(now, 3), round(float(net_pct), 4)])
+        del self.recent_trades[:-RECENT_TRADES_KEEP]
 
     @property
     def capital(self) -> float:

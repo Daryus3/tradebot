@@ -173,7 +173,8 @@ def test_phase6_rows_and_phase5_rows_without_phase6(fcfg):
     assert labels == ["Dalgada yeniden giriş kapalı (zarardan sonra bekler)", "Dalga eşikleri kapalı",
                       "Ek pozisyonlar ilk pozisyonla eşit büyüklükte",
                       "Ek pozisyonda küçük çöküşe (düşüş < eşik ×1.35) girme",     # Rapor 30 (yalnız dalga modunda)
-                      "Derin ek pozisyonda (düşüş ≥ eşik ×3) boy %150"]             # Rapor 31
+                      "Derin ek pozisyonda (düşüş ≥ eşik ×3) boy %150",             # Rapor 31
+                      "Seri: son 10 işlem < −%1 → ek %50, ≥ +%0.8 → ek %125"]      # Rapor 35
     plain_rows = fb.phase6_rows(fcfg, ev, sigs)                          # ⭐ Faz 6 setleri (2x / 3x) artık yok
     assert [r[0] for r in plain_rows] == ["Dalgada yeniden giriş (≥3 coin düşerken bekleme yok)"]
     p = fb.params_from_cfg(p6)

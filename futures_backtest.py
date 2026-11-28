@@ -21,6 +21,7 @@ TP / SL duyarlılığı. Grafik: sermaye eğrisi, düşüş, yıllık getiri ve 
 """
 from __future__ import annotations
 
+import bisect
 import csv
 from concurrent.futures import ThreadPoolExecutor
 import heapq
@@ -46,7 +47,7 @@ from futures_data import FuturesArchive, concat, resample, slice_range
 from futures_depth import DEPTH_CHECK_MIN_NOTIONAL, DepthBook, daily_volume_fn
 from strategy import (BEAR_SMA_CHOICES, BIG_EXTRA_SLOTS, FUT_BAR_MS, FUT_HOUR_MS, QUALITY_CUTS, basis_pct,
                       basis_size_factor, bear_size_factor, bounce_boost_factor, support_size_factor, fall7_size_factor,
-                      fall7_btc_skip, FALL7_BTC_REASON,
+                      fall7_btc_skip, FALL7_BTC_REASON, streak_avg, streak_factor, btc_first_skip, BTC_FIRST_REASON,
                       SUPPORT_DAY_CHOICES, ret7_pct,
                       big_extra_slots, big_funding_skip, big_rules_on, breadth_flags, btc_trend_1h, crash_state,
                       funding_per_bar, futures_candidates, futures_entries, futures_features, isolated_factor,
@@ -749,6 +750,17 @@ class SimParams:
     # Piyasa düşüşü (FUTURES_FALL7_BTC_PCT): BTC de son 7 günde %X'ten fazla düştüyse (metrics["btc7"]) bıçak coininin hafif
     # çöküşüne (oran < fall7_exempt_x) girilmez (0 = kapalı)
     fall7_btc_pct: float = 0.0
+    # BTC haftası genişletmesi (FUTURES_FALL7_BTC_FIRST_X): BTC haftası düşüşteyken (fall7_btc_pct) ilk pozisyonda düşüş /
+    # eşik < X olan çöküşe girilmez (her coinde; 0 = kapalı)
+    fall7_btc_first_x: float = 0.0
+    # Seri (FUTURES_STREAK_*; canlı: FuturesBot._streak_factor, strategy.streak_factor): son streak_trades kapanan işlemin
+    # işlem başı net ortalaması < streak_cold_pct → ek pozisyon × streak_cold_size_pct / 100; ≥ streak_hot_pct →
+    # × streak_hot_size_pct / 100 (boy 100 = o taraf kapalı; yalnız yuvalı motorda, başka pozisyon açıkken)
+    streak_trades: int = 10
+    streak_cold_pct: float = -1.0
+    streak_cold_size_pct: float = 100.0
+    streak_hot_pct: float = 0.8
+    streak_hot_size_pct: float = 100.0
     # Emir defteri derinliği (futures_depth; veri FutData.depth'te, yoksa ikisi de uygulanmaz): depth_cap_pct > 0 ise giriş
     # tutarı girişten önceki 2 dk'da ±%1 içindeki alış / satış emirlerinin küçüğünün bu yüzdesiyle sınırlı ve aynı mumdaki
     # sinyallerde sınıra takılınca kapasitesi büyük olan önce (FUTURES_DEPTH_CAP_PCT); depth_impact: piyasa emrinin defteri
@@ -824,6 +836,12 @@ def params_from_cfg(cfg, **over) -> SimParams:
                   fall7_size_pct=float(getattr(cfg, "futures_fall7_size_pct", 60.0)),
                   fall7_exempt_x=float(getattr(cfg, "futures_fall7_exempt_x", 0.0) or 0.0),
                   fall7_btc_pct=float(getattr(cfg, "futures_fall7_btc_pct", 0.0) or 0.0),
+                  fall7_btc_first_x=float(getattr(cfg, "futures_fall7_btc_first_x", 0.0) or 0.0),
+                  streak_trades=int(getattr(cfg, "futures_streak_trades", 10)),
+                  streak_cold_pct=float(getattr(cfg, "futures_streak_cold_pct", -1.0)),
+                  streak_cold_size_pct=float(getattr(cfg, "futures_streak_cold_size_pct", 100.0)),
+                  streak_hot_pct=float(getattr(cfg, "futures_streak_hot_pct", 0.8)),
+                  streak_hot_size_pct=float(getattr(cfg, "futures_streak_hot_size_pct", 100.0)),
                   depth_cap_pct=float(getattr(cfg, "futures_depth_cap_pct", 0.0) or 0.0),
                   depth_impact=bool(getattr(cfg, "futures_backtest_depth", False)),
                   entry_lag_pct=entry_lag_for(cfg)[0], stop_slip_pct=STOP_SLIP_PCT)
@@ -893,6 +911,7 @@ class FutTrade:
     small_tp: bool = False   # Küçük çöküşte Kâr Al (FUTURES_SMALL_TP_X) uygulandı: Kâr Al small_tp_pct
     deep_extra: bool = False  # Derin ek pozisyon (FUTURES_EXTRA_DEEP_X): büyük boyla açıldı
     fall7: bool = False      # Düşen bıçak (FUTURES_FALL7_PCT): coin son 7 günde sert düşmüştü, küçük boyla açıldı
+    streak: float = 1.0      # Seri (FUTURES_STREAK_*): ek pozisyonun son işlemlere göre boy çarpanı (1 = uygulanmadı)
     depth_capped: bool = False  # Derinliğe göre boy sınırına takıldı (FUTURES_DEPTH_CAP_PCT)
     impact_pct: float = 0.0  # Emir defteri kayması, giriş + çıkış (fiyat %; FUTURES_BACKTEST_DEPTH)
     drop15: float = float("nan")  # Girişten önceki 15 dk'daki düşüş (%; sinyal ölçüsü, FUTURES_RECENT_SIZE_PCT)
@@ -1235,6 +1254,43 @@ def fall7_factor(p: SimParams, s: FutSignal) -> float:
                              p.fall7_exempt_x)
 
 
+def btc_first_block(p: SimParams, s: FutSignal, n_open: int) -> bool:
+    """BTC haftası genişletmesi (FUTURES_FALL7_BTC_FIRST_X; canlı: FuturesBot._btc_first_block): ilk pozisyonda hafif
+    çöküşe girilmez mi (düşen bıçak kuralı açık olmalı; ek modül sinyalleri bu kurala girmez)."""
+    if p.fall7_btc_first_x <= 0 or p.fall7_pct <= 0 or s.metrics.get("tactic", 1.0) != 1.0:
+        return False
+    return btc_first_skip(p.fall7_btc_pct, p.fall7_btc_first_x, s.metrics.get("btc7"), crash_ratio(s.metrics), n_open)
+
+
+def streak_on(p: SimParams) -> bool:
+    """Seri kuralı (FUTURES_STREAK_*) açık mı (soğuk ya da sıcak taraftan biri) ve dalga modu mu."""
+    return p.max_positions > 1 and (p.streak_cold_size_pct < 100 or p.streak_hot_size_pct > 100)
+
+
+def streak_at(p: SimParams, closed: List[Tuple[int, float]], t_ms: int) -> float:
+    """Seri çarpanı t_ms anında: `closed` = (kapanış ms, işlem başı net %) çıkışa göre sıralı; yalnız o ana kadar kapanmış
+    son streak_trades işlem sayılır (canlı: durumdaki son kapanan işlemler)."""
+    hi = bisect.bisect_right(closed, (t_ms, math.inf))
+    nets = [x[1] for x in closed[max(0, hi - int(p.streak_trades)):hi]]
+    return streak_factor(streak_avg(nets, p.streak_trades), p.streak_cold_pct, p.streak_cold_size_pct,
+                         p.streak_hot_pct, p.streak_hot_size_pct)
+
+
+def streak_line(p: SimParams, res: "FutResult") -> str:
+    """Rapor başlığında seri satırı (kapalıysa ya da tek pozisyonda boş)."""
+    if not streak_on(p):
+        return ""
+    parts = []
+    if p.streak_cold_size_pct < 100:
+        parts.append(f"−%{abs(p.streak_cold_pct):g}'in altındaysa ek pozisyonlar %{p.streak_cold_size_pct:g} boy")
+    if p.streak_hot_size_pct > 100:
+        parts.append(f"+%{p.streak_hot_pct:g} ve üstündeyse %{p.streak_hot_size_pct:g} boy (boştaki teminatla sınırlı)")
+    cold = sum(1 for tr in res.trades if tr.streak < 1)
+    hot = sum(1 for tr in res.trades if tr.streak > 1)
+    return (f"🔥 Seri: son {p.streak_trades} kapanan işlemin işlem başı ortalaması " + "; ".join(parts)
+            + f". A'da {cold} ek pozisyon küçük, {hot} ek pozisyon büyük açıldı")
+
+
 def fall7_btc_block(p: SimParams, s: FutSignal) -> bool:
     """Düşen bıçak + piyasa düşüşü (FUTURES_FALL7_BTC_PCT; canlı: FuturesBot._fall7_btc_block): çöküş sinyali girilmez
     mi (ek modül sinyalleri bu kurala girmez)."""
@@ -1260,6 +1316,10 @@ def fall7_line(p: SimParams, res: "FutResult") -> str:
     if p.fall7_btc_pct > 0 and p.fall7_exempt_x > 0:
         exempt += f"; BTC de son 7 günde %{p.fall7_btc_pct:g}'ten fazla düştüyse hafif çöküşe girilmez"
         skipped = f", {res.skipped.get(FALL7_BTC_REASON, 0)} sinyal BTC düşüşü yüzünden atlandı"
+        if p.fall7_btc_first_x > 0:
+            exempt += (f"; o haftalarda her coinde ilk pozisyon için düşüş eşiğin en az {p.fall7_btc_first_x:g} katı "
+                       f"olmalı")
+            skipped += f", {res.skipped.get(BTC_FIRST_REASON, 0)} ilk pozisyon sinyali hafif çöküş yüzünden atlandı"
     return (f"🔪 Düşen bıçak: coin son 7 günde %{p.fall7_pct:g}'ten fazla düştüyse (dünkü kapanışa göre) yeni pozisyonlar "
             f"%{p.fall7_size_pct:g} boy{exempt} (A, B ve C'de). A'da {n7} / {len(res.trades)} işlem bu boyla açıldı"
             f"{skipped}")
@@ -1438,6 +1498,9 @@ def simulate(p: SimParams, data: FutData, signals: Sequence[FutSignal], windows:
         if fall7_btc_block(p, s):
             skipped[FALL7_BTC_REASON] += 1
             continue
+        if btc_first_block(p, s, 0):
+            skipped[BTC_FIRST_REASON] += 1
+            continue
         factor = size_factor(p, s)          # Yalnız çöküş / çöküş durulmuş: küçük
         ddf = 1.0 if fixed_notional else dd_scale_factor(p.dd_scale_pct, p.dd_scale_size_pct, equity, peak)
         bf = 1.0 if fixed_notional else brake_factor(p, curve, s.close_ms, equity)
@@ -1562,6 +1625,8 @@ def simulate_slots(p: SimParams, data: FutData, signals: Sequence[FutSignal], wi
     p_extra = (replace(p, be_trigger_pct=p.extra_be_trigger_pct) if phase8_active(p) else p)
     hold_cache: Dict[tuple, SimParams] = {}
     tp_cache: Dict[int, Tuple[SimParams, SimParams]] = {}
+    streak_live = streak_on(p)
+    closed: List[Tuple[int, float]] = []    # Seri: (kapanış ms, işlem başı net %), çıkışa göre sıralı
 
     def realize(until: int) -> None:
         nonlocal equity, used, freeze_until, sl_streak, day_key, day_pnl, kill_ms, ruined, stop, peak
@@ -1636,7 +1701,12 @@ def simulate_slots(p: SimParams, data: FutData, signals: Sequence[FutSignal], wi
         if fall7_btc_block(p, s):
             skipped[FALL7_BTC_REASON] += 1
             continue
+        if btc_first_block(p, s, len(heap)):
+            skipped[BTC_FIRST_REASON] += 1
+            continue
         factor = size_factor(p, s)
+        streak = streak_at(p, closed, s.close_ms) if streak_live and heap else 1.0
+        factor *= streak                    # Seri: son işlemlere göre ek pozisyon boyu (boştaki teminatla sınırlı)
         deep = extra_deep_factor(p.extra_deep_x, p.extra_deep_size_pct, len(heap), s.metrics)
         factor *= deep                      # Derin ek pozisyon (boştaki teminatla sınırlı)
         bf = 1.0 if fixed_notional else brake_factor(p, curve, s.close_ms, equity)
@@ -1685,6 +1755,9 @@ def simulate_slots(p: SimParams, data: FutData, signals: Sequence[FutSignal], wi
             skipped[f"limit emir {p.limit_ttl_min} dk içinde dolmadı"] += 1
             continue
         charge_impact(p, data, s, tr)
+        if streak_live and tr.notional:
+            bisect.insort(closed, (tr.exit_ms, tr.pnl / tr.notional * 100))
+        tr.streak = streak
         tr.depth_capped = capped
         tr.slot = len(heap) + 1
         tr.reentry = reentry
@@ -2044,7 +2117,7 @@ def phase6_rows(cfg, ev, signals=None) -> List[Tuple[str, "Evaluation"]]:
         rows.append(("Dalga eşikleri kapalı", ev(no_wave(signals))))
     if base.max_positions > 1 and base.extra_size_pct < 100:
         rows.append(("Ek pozisyonlar ilk pozisyonla eşit büyüklükte", ev(extra_size_pct=100.0)))
-    return rows + extra_min_rows(base, ev) + extra_deep_rows(base, ev)
+    return rows + extra_min_rows(base, ev) + extra_deep_rows(base, ev) + streak_rows(base, ev)
 
 
 EXTRA_MIN_X_TRIES = (1.2, 1.35, 1.5)      # Ek pozisyonda en küçük çöküş oranı (rapor 30 araştırması, 27 Kasım)
@@ -2079,6 +2152,34 @@ def extra_deep_rows(base: SimParams, ev) -> List[Tuple[str, "Evaluation"]]:
              for x in EXTRA_DEEP_X_TRIES if not _same(x, base.extra_deep_x)]
     rows += [(f"Derin ek pozisyonda boy %{z:g} (şimdi %{base.extra_deep_size_pct:g})", ev(extra_deep_size_pct=z))
              for z in EXTRA_DEEP_SIZE_TRIES if not _same(z, base.extra_deep_size_pct)]
+    return rows
+
+
+STREAK_COLD_TRIES = (-0.5, -1.5)          # Seri: soğuk eşik (son işlemlerin ortalama neti %; rapor 35 araştırması)
+STREAK_COLD_SIZE_TRIES = (35.0, 75.0)     # Soğuk seride ek pozisyon boyu (%)
+STREAK_HOT_SIZE_TRIES = (150.0,)          # Sıcak seride ek pozisyon boyu (%)
+
+
+def streak_rows(base: SimParams, ev) -> List[Tuple[str, "Evaluation"]]:
+    """Seri (FUTURES_STREAK_*; yalnız dalga modunda): açıksa her taraf kapalı + eşik / boy çevresi, kapalıysa araştırmanın
+    önerdiği soğuk %50 + sıcak %125."""
+    if base.max_positions <= 1:
+        return []
+    cold_on, hot_on = base.streak_cold_size_pct < 100, base.streak_hot_size_pct > 100
+    if not cold_on and not hot_on:
+        return [("Seri: son 10 işlem < −%1 → ek %50, ≥ +%0.8 → ek %125",
+                 ev(streak_cold_size_pct=50.0, streak_hot_size_pct=125.0))]
+    rows = []
+    if cold_on:
+        rows.append(("Seride soğuk taraf kapalı", ev(streak_cold_size_pct=100.0)))
+        rows += [(f"Soğuk seri: ortalama < −%{abs(c):g} (şimdi −%{abs(base.streak_cold_pct):g})", ev(streak_cold_pct=c))
+                 for c in STREAK_COLD_TRIES if not _same(c, base.streak_cold_pct)]
+        rows += [(f"Soğuk seride ek boy %{z:g} (şimdi %{base.streak_cold_size_pct:g})", ev(streak_cold_size_pct=z))
+                 for z in STREAK_COLD_SIZE_TRIES if not _same(z, base.streak_cold_size_pct)]
+    if hot_on:
+        rows.append(("Seride sıcak taraf kapalı", ev(streak_hot_size_pct=100.0)))
+        rows += [(f"Sıcak seride ek boy %{z:g} (şimdi %{base.streak_hot_size_pct:g})", ev(streak_hot_size_pct=z))
+                 for z in STREAK_HOT_SIZE_TRIES if not _same(z, base.streak_hot_size_pct)]
     return rows
 
 
@@ -2333,6 +2434,7 @@ FALL7_TRIES = (15.0, 20.0, 25.0)         # Düşen bıçak: son 7 günde düşü
 FALL7_SIZE_TRIES = (50.0, 60.0, 75.0)    # Düşen bıçakta boy (%)
 FALL7_EXEMPT_TRIES = (0.0, 2.0, 3.0)     # Bıçakta sert çöküş muafiyeti: düşüş / eşik (rapor 34 araştırması, 28 Kasım)
 FALL7_BTC_TRIES = (0.0, 5.0, 10.0, 15.0)  # Bıçakta piyasa düşüşü: BTC'nin son 7 günlük düşüşü (%)
+FALL7_BTC_FIRST_TRIES = (0.0, 1.25, 1.35, 1.5)   # BTC haftasında ilk pozisyon için en az düşüş / eşik (rapor 35)
 
 
 def fall7_variant_rows(base: SimParams, ev, has_data: bool) -> List[Tuple[str, "Evaluation"]]:
@@ -2360,6 +2462,11 @@ def fall7_variant_rows(base: SimParams, ev, has_data: bool) -> List[Tuple[str, "
         rows += [(f"Bıçakta BTC 7 günde %{b:g}+ düştüyse hafif çöküşe girme (şimdi {bnow})" if b > 0
                   else "Bıçakta piyasa düşüşü kuralı kapalı", ev(fall7_btc_pct=b))
                  for b in FALL7_BTC_TRIES if not _same(b, base.fall7_btc_pct)]
+    if base.fall7_btc_pct > 0:                  # BTC haftası genişletmesi aynı BTC eşiğini kullanır
+        fnow = f"×{base.fall7_btc_first_x:g}" if base.fall7_btc_first_x > 0 else "kapalı"
+        rows += [(f"BTC haftasında her coinde ilk pozisyon için düşüş ≥ eşik ×{x:g} (şimdi {fnow})" if x > 0
+                  else "BTC haftası ilk pozisyon şartı kapalı", ev(fall7_btc_first_x=x))
+                 for x in FALL7_BTC_FIRST_TRIES if not _same(x, base.fall7_btc_first_x)]
     return rows
 
 
@@ -4534,6 +4641,9 @@ def format_report(cfg, data: FutData, ev: Evaluation, funnel: Funnel, levs=None,
     deep_line = extra_deep_line(p, res)
     if deep_line:
         L.append(deep_line)
+    hot_line = streak_line(p, res)
+    if hot_line:
+        L.append(hot_line)
     if p.small_tp_x > 0:
         small = sum(1 for tr in res.trades if tr.small_tp)
         L.append(f"🎯 Küçük çöküşte Kâr Al: çöküş düşüşü eşiğinin {p.small_tp_x:g} katından azsa (eşik zar zor geçildi) "

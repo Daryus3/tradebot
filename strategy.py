@@ -2191,6 +2191,47 @@ def fall7_size_factor(fall_pct: float, size_pct: float, ret7: Optional[float], r
 FALL7_BTC_REASON = "düşen bıçak: BTC de düşüşte, hafif çöküş"     # Backtest atlama sayımı ve canlı tarama kaydı
 
 
+BTC_FIRST_REASON = "BTC haftası düşüşte: ilk pozisyonda hafif çöküş"   # Backtest atlama sayımı ve canlı tarama kaydı
+
+
+def btc_first_skip(btc_pct: float, first_x: float, btc7: Optional[float], ratio: Optional[float], n_open: int) -> bool:
+    """BTC haftası genişletmesi (FUTURES_FALL7_BTC_FIRST_X; rapor 35 araştırması): BTC son 7 günde btc_pct'den fazla
+    düştüyse (btc7 ≤ −btc_pct; FUTURES_FALL7_BTC_PCT) açık pozisyon yokken (ilk pozisyon) düşüşü eşiğin first_x katından
+    az olan çöküşe (her coinde) girilmez; oran bilinmiyorsa hafif sayılır. Kapalıysa (btc_pct ya da first_x 0), ek
+    pozisyonda ya da ölçü yoksa False. Piyasa haftası düşüşteyken eşiği zar zor geçen çöküşte açılan ilk pozisyonlar
+    zararlı (2021, 2022, 2024, 2026'da işlem başı eksi)."""
+    if btc_pct <= 0 or first_x <= 0 or n_open > 0:
+        return False
+    if btc7 is None or btc7 != btc7 or not btc7 <= -float(btc_pct):
+        return False
+    return not (ratio is not None and ratio == ratio and ratio >= float(first_x))
+
+
+def streak_avg(nets: Sequence[float], trades: int) -> Optional[float]:
+    """Seri (FUTURES_STREAK_*): son `trades` kapanan işlemin işlem başı net ortalaması (% ; nets kapanış sırasıyla, en
+    yenisi sonda). En az max(3, trades // 2) işlem yoksa None (kural uygulanmaz)."""
+    n = max(1, int(trades))
+    last = list(nets[-n:])
+    if len(last) < max(3, n // 2):
+        return None
+    return sum(last) / len(last)
+
+
+def streak_factor(avg: Optional[float], cold_pct: float, cold_size_pct: float, hot_pct: float,
+                  hot_size_pct: float) -> float:
+    """Seri çarpanı (FUTURES_STREAK_*; rapor 35 araştırması), yalnız ek pozisyonlarda: son işlemlerin ortalama neti
+    (streak_avg) < cold_pct ise cold_size_pct / 100 (dalgada zararlar sürüyor: ek pozisyonlar işlem başı ~%0), ≥ hot_pct
+    ise hot_size_pct / 100 (dalga dönüyor: ek pozisyonlar işlem başı ~+%1), değilse 1. Boy %100 olan taraf kapalıdır;
+    ölçü yoksa 1."""
+    if avg is None or avg != avg:
+        return 1.0
+    if cold_size_pct < 100 and avg < cold_pct:
+        return max(0.0, float(cold_size_pct)) / 100
+    if hot_size_pct > 100 and avg >= hot_pct:
+        return float(hot_size_pct) / 100
+    return 1.0
+
+
 def fall7_btc_skip(fall_pct: float, btc_pct: float, exempt_x: float, ret7: Optional[float], btc7: Optional[float],
                    ratio: Optional[float]) -> bool:
     """Düşen bıçak + piyasa düşüşü (FUTURES_FALL7_BTC_PCT; rapor 34 araştırması): coin son 7 günde fall_pct'den fazla
@@ -2901,6 +2942,10 @@ class FuturesSignal:
         elif m.get("fall7_exempt"):
             parts.append(f"Düşen bıçak: coin son 7 günde %{-m.get('ret7', 0.0):.1f} düştü ama çöküş sert (düşüş eşiğin "
                          f"{m['fall7_exempt']:g} katı), tam boy")
+        if m.get("streak_size_pct") and m["streak_size_pct"] != 100:
+            mood = "zararlar sürüyor" if m["streak_size_pct"] < 100 else "dalga dönüyor"
+            parts.append(f"Seri: son {int(m.get('streak_n', 10))} işlemin ortalaması %{m.get('streak_avg', 0.0):+.2f} "
+                         f"({mood}), ek pozisyon %{m['streak_size_pct']:g} boy")
         if m.get("deep_size_pct") and m["deep_size_pct"] > 100:
             parts.append(f"Derin ek pozisyon: düşüş çöküş eşiğinin {m.get('deep_ratio', 0):g} katı, pozisyon "
                          f"%{m['deep_size_pct']:g} boy")

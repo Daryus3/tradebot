@@ -1125,6 +1125,15 @@ class Config:
     futures_fall7_exempt_x: float = 0.0        # 0 = kapalı
     # Piyasa düşüşü (strategy.fall7_btc_skip): BTC de son 7 günde %X'ten fazla düştüyse bıçak coininde hafif çöküşe girme
     futures_fall7_btc_pct: float = 0.0         # 0 = kapalı
+    # BTC haftası genişletmesi (strategy.btc_first_skip): BTC haftası düşüşteyken ilk pozisyon için en az düşüş / eşik
+    futures_fall7_btc_first_x: float = 0.0     # 0 = kapalı
+    # Seri (strategy.streak_factor): son N kapanan işlemin ortalama neti < soğuk eşik → ek pozisyon boyu %Y; ≥ sıcak eşik →
+    # %Z (boy 100 = o taraf kapalı)
+    futures_streak_trades: int = 10
+    futures_streak_cold_pct: float = -1.0
+    futures_streak_cold_size_pct: float = 100.0
+    futures_streak_hot_pct: float = 0.8
+    futures_streak_hot_size_pct: float = 100.0
     # Sermaye koruması (bkz. futures_guard_factor): toplam zarar bota verilen sermayenin %X'i iken pozisyon boyu %Y
     futures_guard_pct: float = 0.0         # Başlangıç sermayesine göre zarar eşiği (%; 0 = kapalı)
     futures_guard_size_pct: float = 60.0   # Eşik aşılınca yeni pozisyonların büyüklüğü (%)
@@ -1544,6 +1553,21 @@ class Config:
             errors.append("FUTURES_FALL7_PCT 0 (kapalı) ya da 5-80 olmalı (coin son 7 günde % kaçtan fazla düştüyse)")
         if not 10 <= self.futures_fall7_size_pct <= 100:
             errors.append("FUTURES_FALL7_SIZE_PCT 10-100 arasında olmalı (düşen bıçakta pozisyon büyüklüğü %)")
+        if not (self.futures_fall7_btc_first_x == 0 or 1.05 <= self.futures_fall7_btc_first_x <= 5):
+            errors.append("FUTURES_FALL7_BTC_FIRST_X 0 (kapalı) ya da 1.05-5 olmalı (BTC haftası düşüşteyken ilk "
+                          "pozisyonda en az düşüş / eşik oranı)")
+        if not 3 <= self.futures_streak_trades <= 50:
+            errors.append("FUTURES_STREAK_TRADES 3-50 arasında olmalı (seri: son kaç işlemin ortalamasına bakılır)")
+        if not -10 <= self.futures_streak_cold_pct <= 0:
+            errors.append("FUTURES_STREAK_COLD_PCT -10 ile 0 arasında olmalı (son işlemlerin ortalama neti %, soğuk seri)")
+        if not 10 <= self.futures_streak_cold_size_pct <= 100:
+            errors.append("FUTURES_STREAK_COLD_SIZE_PCT 10-100 arasında olmalı (soğuk seride ek pozisyon büyüklüğü %; "
+                          "100 = kapalı)")
+        if not 0 <= self.futures_streak_hot_pct <= 10:
+            errors.append("FUTURES_STREAK_HOT_PCT 0-10 arasında olmalı (son işlemlerin ortalama neti %, sıcak seri)")
+        if not 100 <= self.futures_streak_hot_size_pct <= 200:
+            errors.append("FUTURES_STREAK_HOT_SIZE_PCT 100-200 arasında olmalı (sıcak seride ek pozisyon büyüklüğü %; "
+                          "100 = kapalı)")
         if not (self.futures_fall7_btc_pct == 0 or 2 <= self.futures_fall7_btc_pct <= 50):
             errors.append("FUTURES_FALL7_BTC_PCT 0 (kapalı) ya da 2-50 olmalı (BTC son 7 günde % kaçtan fazla düştüyse "
                           "düşen bıçak coininde hafif çöküşe girilmez)")
@@ -1875,6 +1899,12 @@ def load_config(env_file: Optional[str] = None, mode_override: Optional[str] = N
         futures_fall7_size_pct=_env_float("FUTURES_FALL7_SIZE_PCT", 60.0),
         futures_fall7_exempt_x=_env_float("FUTURES_FALL7_EXEMPT_X", 0.0),
         futures_fall7_btc_pct=_env_float("FUTURES_FALL7_BTC_PCT", 0.0),
+        futures_fall7_btc_first_x=_env_float("FUTURES_FALL7_BTC_FIRST_X", 0.0),
+        futures_streak_trades=_env_int("FUTURES_STREAK_TRADES", 10),
+        futures_streak_cold_pct=_env_float("FUTURES_STREAK_COLD_PCT", -1.0),
+        futures_streak_cold_size_pct=_env_float("FUTURES_STREAK_COLD_SIZE_PCT", 100.0),
+        futures_streak_hot_pct=_env_float("FUTURES_STREAK_HOT_PCT", 0.8),
+        futures_streak_hot_size_pct=_env_float("FUTURES_STREAK_HOT_SIZE_PCT", 100.0),
         futures_extra_deep_size_pct=_env_float("FUTURES_EXTRA_DEEP_SIZE_PCT", 150.0),
         futures_cushion_x=_env_float("FUTURES_CUSHION_X", 0.0),
         futures_cushion_size_pct=_env_float("FUTURES_CUSHION_SIZE_PCT", 112.5),
@@ -2091,6 +2121,13 @@ def _setting_notes(cfg: Config) -> List[str]:
         if cfg.futures_fall7_exempt_x > 0 and cfg.futures_fall7_pct <= 0:
             notes.append(f"FUTURES_FALL7_EXEMPT_X={cfg.futures_fall7_exempt_x:g} etkisiz: düşen bıçak kuralı kapalı "
                          f"(FUTURES_FALL7_PCT=0), küçültülen pozisyon yok.")
+        if cfg.futures_fall7_btc_first_x > 0 and (cfg.futures_fall7_btc_pct <= 0 or cfg.futures_fall7_pct <= 0):
+            notes.append(f"FUTURES_FALL7_BTC_FIRST_X={cfg.futures_fall7_btc_first_x:g} etkisiz: BTC haftası ölçüsü için "
+                         f"düşen bıçak (FUTURES_FALL7_PCT) ve BTC eşiği (FUTURES_FALL7_BTC_PCT) açık olmalı.")
+        streak_on = cfg.futures_streak_cold_size_pct < 100 or cfg.futures_streak_hot_size_pct > 100
+        if streak_on and cfg.futures_max_positions <= 1:
+            notes.append("FUTURES_STREAK_* (seri) etkisiz: yalnız ek pozisyonlara uygulanır, ek pozisyon dalga modunda "
+                         "(FUTURES_MAX_POSITIONS > 1) açılır.")
         if cfg.futures_fall7_btc_pct > 0 and (cfg.futures_fall7_pct <= 0 or cfg.futures_fall7_exempt_x <= 0):
             notes.append(f"FUTURES_FALL7_BTC_PCT={cfg.futures_fall7_btc_pct:g} etkisiz: düşen bıçak kuralı "
                          f"(FUTURES_FALL7_PCT) ve sert çöküş sınırı (FUTURES_FALL7_EXEMPT_X) açık olmalı.")

@@ -97,6 +97,8 @@ EXTRA_MIN_X_CHOICES = (0, 1.2, 1.35, 1.5)
 # Derin ek pozisyon (rapor 31 araştırması, 27 Kasım; varsayılan kapalı): düşüş / eşik en az ve o pozisyonun boyu (%)
 EXTRA_DEEP_X_CHOICES = (0, 2.5, 3, 4)
 EXTRA_DEEP_SIZE_CHOICES = (150, 200)
+STREAK_COLD_SIZE_CHOICES = (100, 75, 50, 35)   # Seri: soğuk seride ek pozisyon boyu % (100 = kapalı; rapor 35)
+STREAK_HOT_SIZE_CHOICES = (100, 125, 150)      # Seri: sıcak seride ek pozisyon boyu % (100 = kapalı)
 PAGE_TEXT_MAX = 3800        # Telegram mesajı 4096 karakter (gönderici 4000'de keser); açıklamalar sığdığı kadar eklenir
 BASIS_SIZE_CHOICES = (100, 130, 150)       # Vadeli-spot farkına göre boy (rapor 17 araştırması, 22 Kasım)
 BASIS_DEEP_CHOICES = (0.3, 0.5, 0.7)
@@ -136,6 +138,7 @@ FALL7_CHOICES = (0, 15, 20, 25)
 FALL7_SIZE_CHOICES = (50, 60, 75)
 FALL7_EXEMPT_CHOICES = (0, 2, 2.5, 3)      # Bıçakta sert çöküş muafiyeti: düşüş / eşik (rapor 34)
 FALL7_BTC_CHOICES = (0, 5, 10, 15)         # Bıçakta piyasa düşüşü: BTC'nin son 7 günlük düşüşü % (rapor 34)
+FALL7_BTC_FIRST_CHOICES = (0, 1.25, 1.35, 1.5)   # BTC haftasında ilk pozisyon için en az düşüş / eşik (rapor 35)
 # Sermaye koruması (rapor 26 araştırması, 26 Kasım; varsayılan kapalı): bota verilen sermayeye göre toplam zarar eşiği ve boy
 GUARD_CHOICES = (0, 20, 30, 40)
 GUARD_SIZE_CHOICES = (50, 60, 70)
@@ -479,6 +482,12 @@ PAGES: Dict[str, Page] = {
         Row("FUTURES_EXTRA_DEEP_SIZE_PCT", icon="📏", values=EXTRA_DEEP_SIZE_CHOICES,
             fmt=lambda v: f"derin ek boyu %{v:g}",
             show=lambda cfg: _crash(cfg) and cfg.futures_max_positions > 1 and cfg.futures_extra_deep_x > 0, per_row=2),
+        Row("FUTURES_STREAK_COLD_SIZE_PCT", icon="🧊", values=STREAK_COLD_SIZE_CHOICES,
+            fmt=lambda v: "soğuk seri: normal" if float(v) >= 100 else f"soğuk seri: ek %{float(v):g}",
+            show=lambda cfg: _crash(cfg) and cfg.futures_max_positions > 1, per_row=4),
+        Row("FUTURES_STREAK_HOT_SIZE_PCT", icon="🔥", values=STREAK_HOT_SIZE_CHOICES,
+            fmt=lambda v: "sıcak seri: normal" if float(v) <= 100 else f"sıcak seri: ek %{float(v):g}",
+            show=lambda cfg: _crash(cfg) and cfg.futures_max_positions > 1, per_row=3),
         Row("FUTURES_LEVERAGE", icon="⚡", values=(2, 3, 4), fmt=lambda v: f"{v}x",
             show=lambda cfg: _crash(cfg) and cfg.futures_max_positions > 1, per_row=3),
         Row("FUTURES_EXTRA_SIZE_PCT", icon="📏", values=(100, 50, 25, 16.7), fmt=lambda v: "ek: eşit" if float(v) >= 100
@@ -615,6 +624,9 @@ PAGES: Dict[str, Page] = {
         Row("FUTURES_FALL7_BTC_PCT", icon="🌧️", values=FALL7_BTC_CHOICES,
             fmt=_off("BTC'ye bakılmaz", lambda v: f"BTC 7 günde −%{v:g}+: hafife girme"),
             show=lambda cfg: is_futures(cfg.strategy) and cfg.futures_fall7_pct > 0 and cfg.futures_fall7_exempt_x > 0),
+        Row("FUTURES_FALL7_BTC_FIRST_X", icon="🥇", values=FALL7_BTC_FIRST_CHOICES,
+            fmt=_off("BTC haftası: ilk poz. serbest", lambda v: f"BTC haftası: ilk ≥ eşik ×{v:g}"),
+            show=lambda cfg: is_futures(cfg.strategy) and cfg.futures_fall7_pct > 0 and cfg.futures_fall7_btc_pct > 0),
         Row("FUTURES_GUARD_PCT", icon="🛡️", values=GUARD_CHOICES,
             fmt=_off("Sermaye koruması yok", lambda v: f"Zarar %{v:g}"), show=lambda cfg: is_futures(cfg.strategy)),
         Row("FUTURES_GUARD_SIZE_PCT", icon="📏", values=GUARD_SIZE_CHOICES, fmt=lambda v: f"Koruma boyu %{v:g}",
@@ -1145,6 +1157,15 @@ class SettingsMenu:
         if k > 1 and cfg.futures_extra_deep_x > 0:
             lines.append(f"🔱 Derin ek pozisyon: çöküş düşüşü eşiğin {cfg.futures_extra_deep_x:g} katı ya da fazlasıysa ek "
                          f"pozisyon <b>%{cfg.futures_extra_deep_size_pct:g}</b> büyüklükte (boştaki teminatla sınırlı).")
+        if k > 1 and (cfg.futures_streak_cold_size_pct < 100 or cfg.futures_streak_hot_size_pct > 100):
+            avg = bot.streak_recent_avg() if hasattr(bot, "streak_recent_avg") else None
+            parts = []
+            if cfg.futures_streak_cold_size_pct < 100:
+                parts.append(f"< %{cfg.futures_streak_cold_pct:g} → ek <b>%{cfg.futures_streak_cold_size_pct:g}</b>")
+            if cfg.futures_streak_hot_size_pct > 100:
+                parts.append(f"≥ +%{cfg.futures_streak_hot_pct:g} → ek <b>%{cfg.futures_streak_hot_size_pct:g}</b>")
+            now = f" | şu an %{avg:+.2f}" if avg is not None else " | şu an yeterli işlem yok"
+            lines.append(f"🔥 Seri: son {cfg.futures_streak_trades} işlemin ortalaması " + ", ".join(parts) + now)
         if cfg.futures_basis_size_pct != 100:
             lines.append(f"⚖️ Vadeli-spot farkı: girişte vadeli fiyat spotun %{tr_from_num(cfg.futures_basis_deep_pct)} fazla "
                          f"altındaysa (zorla satış izi) pozisyon <b>%{cfg.futures_basis_size_pct:g}</b> büyüklükte.")
@@ -1459,6 +1480,9 @@ class SettingsMenu:
             now = f", şu an BTC 7 günde %{b7:+.1f}" if b7 is not None else ""
             exempt += (f"; BTC de 7 günde %{cfg.futures_fall7_btc_pct:g}'ten fazla düştüyse hafif çöküşe girilmez"
                        f"{now}")
+        if cfg.futures_fall7_btc_first_x > 0 and cfg.futures_fall7_btc_pct > 0:
+            exempt += (f"; o haftalarda her coinde ilk pozisyon için düşüş eşiğin en az "
+                       f"{cfg.futures_fall7_btc_first_x:g} katı")
         return (f"🔪 Düşen bıçak: coin son 7 günde %{cfg.futures_fall7_pct:g}'ten fazla düştüyse pozisyon "
                 f"%{cfg.futures_fall7_size_pct:g} boy{exempt} | günlük kapanışları alınan coin: {got}\n")
 

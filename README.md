@@ -3265,6 +3265,80 @@ Okuma:
 - Açılışta Telegram'a ayar notu gönderilmez (eskiden kalan bilgilendirme notları silindi); etkisiz / çelişen ayar uyarıları
   yalnızca `logs/bot.log`'a yazılır.
 
+#### Rapor 35 araştırması: seri (son işlemlere göre ek pozisyon) + BTC haftasında ilk pozisyon şartı (Kasım 2026)
+Taban: H11 (rapor 34 ayarı: düşen bıçakta sert çöküş muafiyeti ×2 + BTC haftası kuralı %10), **4.000 USDT**, 10 çekiliş,
+her ayın 1'inde başlayan 71 hesap. Şimdiki: 12 ay ortanca +%4.346, %60'ı aşan düşüş 14, zararda 2, alt çeyrek +%1.416,
+kill-switch 0; canlıda ölçülen giriş dolumunda +%3.234 / 17 / 2 / +%1.211. "Eşleştirmeli": aynı çekilişteki tabanla
+karşılaştırma (ortancası iyi çekiliş, ortanca farkı, alt çeyreği iyi çekiliş, %60'ı aşan düşüş farkı).
+
+**Ön eleme (H11 işlemleri, 0. çekiliş, işlem başı net; 2020-23 / 2024-26; 1. çekiliş aynı yönde):**
+
+| Ölçü | Kova | İşlem başı net |
+|---|---|---|
+| Ek pozisyon: stratejinin son 10 kapanan işleminin ortalaması | < −%1 (567 işlem) | +%0.04 (+0.06 / −0.03) |
+| | −%1 … −%0.3 · −%0.3 … +%0.2 · +%0.2 … +%0.8 | +%0.32 · +%0.39 · +%0.49 |
+| | ≥ +%0.8 (960 işlem) | **+%1.00 (+0.99 / +1.04)** |
+| İlk pozisyon: aynı ölçü | sıralı değil | +%0.18 … +%0.31 (soğuk kovada 57 işlem +%1.06) |
+| BTC 7 günde %10+ düşmüş, bıçak olmayan coinde ilk pozisyon, düşüş / eşik < 1.35 | 153 işlem | −%0.14 (−0.23 / +0.13); 2021, 2022, 2024, 2026'da eksi |
+| Ayı piyasasında (BTC < 100 günlük ortalama) düşüş / eşik 2-3 · ≥3 | 392 · 343 işlem | +%0.62 · +%1.45 (ayı dışında +%0.34 · +%1.08) |
+| Destek bölgesinde düşüş / eşik < 1.35 | 120 işlem | −%0.40 |
+
+Ek pozisyonlar dalganın içinde açılıyor; dalgada önceki pozisyonlar kazandıysa piyasa dönüyor ve yeni ek pozisyonlar da
+dönüyor; zarar kesler sürüyorsa çöküş derinleşiyor ve ek pozisyon ~%0 kazandırıyor.
+
+| Fikir | 12 ay ortanca (eşleştirmeli) | Karar |
+|---|---|---|
+| Seri soğukken (son 10 < −%1) ek pozisyona hiç girmemek | +%3.866 (1/10, −%265); %60+ 14 → 6.5 | Kötü: kâr düşüyor |
+| Son 2 saatte kapananlara göre ek pozisyona girmemek | −%143 | Kötü |
+| Ayı küçültmesi düşüş ≥ eşik ×2 / ×3 olan çöküşte yok | +%126 (düşüş +5) · +%6 | Kaldıraç gibi / etkisiz |
+| Tüm küçültmelerden (ayı, destek, kalite, durulmuş, yalnız çöküş, bıçak) muaf: oran ≥3 | +%26 (alt çeyrek 7/10) | Etkisiz |
+| Destek bölgesinde hafif çöküşe girmemek · derin ek büyütmesi yalnız 1 saatlik pencerede | −%120 · ±0 | Kötü / etkisiz |
+| **Seri: son işlemlerin ortalamasına göre ek pozisyon boyu (soğukta ×0.5, sıcakta ×1.25-1.5)** | | **Eklendi (`FUTURES_STREAK_*`)** |
+| **BTC haftasında her coinde ilk pozisyon için düşüş ≥ eşik ×1.35** | +%4.630 (9/10, +%163), zararda 2 → 1.5 | **Eklendi (`FUTURES_FALL7_BTC_FIRST_X`)** |
+
+| Ayar | Normal maliyet: 12 ay ortanca / %60+ / alt çeyrek | Eşleştirmeli | Canlı dolum: 12 ay ortanca / %60+ / alt çeyrek | Eşleştirmeli |
+|---|---|---|---|---|
+| Şimdiki (H11) | +%4.346 / 14 / +%1.416 | – | +%3.234 / 17 / +%1.211 | – |
+| Seri son 10: soğuk ×0.5 · sıcak ×1.25 | +%4.674 / 9.5 / +%1.687 | 9/10, +%207, 8/10, −4.5 | +%3.490 / 12 / +%1.393 | 10/10, +%292, 10/10, −6.0 |
+| Seri son 10, soğuk eşik −%0.5 · soğuk ×0.35 · sıcak eşik +%0.5 · sıcak ×1.5 | +%4.648 … +%4.716 / 4.5-9 | 9-10/10, +%236 … +%422 | | |
+| Seri son 20 · son 7 · son 3 | +%4.621 · +%4.738 · +%4.915 / 4-6 | 8-10/10, +%251 … +%571 | | |
+| Seri son 5: soğuk ×0.5 · sıcak ×1.25 | +%4.894 / 5 / +%1.770 | 10/10, +%442, 9/10, −7.5 | +%3.821 / 10.5 / +%1.409 | 10/10, +%435, 9/10, −7.5 |
+| Seri son 5, soğuk eşik −%0.5 | +%5.021 / 3 / +%1.782 | 10/10, +%475, 9/10, −10.0 | | |
+| Seri son 5, sıcak ×1.5 | +%4.910 / 6 / +%1.745 | 10/10, +%556, 8/10, −6.5 | | |
+| Seri son 5 + BTC ilk ×1.35 | +%5.002 / 5 / +%1.763 | 10/10, +%492, 9/10, −8.0 | +%3.904 / 10 / +%1.476 | 10/10, +%554, 7/10, −7.5 |
+| Seri son 5 (×0.5 / ×1.5) + BTC ilk ×1.35 | +%5.061 / 5 / +%1.854 | 10/10, +%624, 10/10, −8.0 | +%4.040 / 8.5 / +%1.528 | 10/10, +%745, 7/10, −9.0 |
+| Resmi motor, aynı ayar (sıcak ×1.5) | +%5.034 / 4 / +%1.735 | 10/10, +%690, 9/10, −7.0 | +%4.093 / 8 / +%1.412 | 10/10, +%792, 6/10, −10.0 |
+| **Resmi motor: seri son 5 (×0.5 / ×1.25) + BTC ilk ×1.35** | **+%5.030 / 4 / +%1.815**, zararda 2 → 0 | **10/10, +%465, 10/10, −9.0** | **+%4.111 / 6.5 / +%1.496** | **10/10, +%747, 7/10, −11.5** |
+| (Bilgi) Seri son 10 + BTC ilk ×1.35 + 9x | +%5.204 / 14 / +%2.461 | 10/10, +%923, 10/10, 0.0 | +%4.095 / 17.5 / +%1.741, bir çekilişte kill-switch 3 | 10/10, +%824, 8/10, +1.5 |
+
+| Stres (0. çekiliş, 71 hesap; resmi motor) | Şimdiki (H11) | Seri son 5 (×0.5 / ×1.25) + BTC ilk ×1.35 | Aynısı, sıcak ×1.5 |
+|---|---|---|---|
+| 3 kat kayma | +%3.158, alt çeyrek +%1.483, zararda 2, %60+ 26, kill 0 | +%4.375, +%1.598, 2, 14, 0 | +%4.668, +%1.594, 2, 14, 0 |
+| Canlı dolum + 3 kat kayma | +%2.977, +%875, zararda 7, %60+ 32, kill 3 | +%4.280, +%1.266, 2, 23, 0 | +%4.241, +%1.319, 2, 22, 0 |
+| Kötümser stop dolumu (en kötü durum) | ortanca −%12, alt çeyrek −%61, zararda 37, kill 30 | +%194, −%6, 20, 15 | +%191, −%28, 20, 17 |
+
+Okuma:
+- Denenen her seri varyantı (son 3-20 işlem, eşik −%0.5 / −%1 / +%0.5 / +%0.8, boy ×0.35-0.5 / ×1.25-1.5) iki maliyette de
+  ortancayı 8-10 çekilişte, alt çeyreği 8-10 çekilişte iyileştiriyor ve %60'ı aşan düşüşü çekiliş başına 4-10 hesap
+  azaltıyor: kâr artarken risk düşüyor. Soğuk tarafın bedeli yok (o ek pozisyonlar zaten ~%0), sıcak taraf kârı artırıyor.
+- 2020, 2021, 2022 ve 2023-25 başlangıçlarının hepsinde daha iyi (resmi motor, ×1.25: 2020 +%88.234 → +%96.765, 2021
+  +%3.875 → +%6.095, 2022 +%170 → +%280, 2023-25 +%4.451 → +%4.973).
+- Stres testinin her senaryosunda da iyi: canlı dolum + 3 kat kaymada kill-switch 3 → 0, kötümser stop dolumunda (en kötü
+  durum) 30 → 15. Sıcak ×1.5 kârı neredeyse aynı tutup riski biraz artırıyor; bu yüzden ×1.25 önerildi.
+- Riski düşürdüğü için kaldıraç da artırılabilir görünüyor (9x: normal maliyette düşüş şimdikiyle aynı, ortanca +%923) ama
+  canlı dolumda bir çekilişte kill-switch 3 kez çalıştı; önerilmiyor, kaldıraç sizin kararınız.
+- Resmi motor kapanan işlemin netini emir defteri kayması dahil (canlıdaki gibi) sayar; araştırma kancası kaymadan önceki
+  neti kullanıyordu, bu yüzden rakamlar çok az farklı (son 5, ×0.5 / ×1.25: araştırma +%4.894, resmi +%4.921). BTC ilk
+  pozisyon kuralı resmi motorda araştırmayla birebir.
+- **Eklenen ayarlar:** `FUTURES_STREAK_TRADES` (10), `FUTURES_STREAK_COLD_PCT` (−1), `FUTURES_STREAK_COLD_SIZE_PCT` (100 =
+  kapalı), `FUTURES_STREAK_HOT_PCT` (0.8), `FUTURES_STREAK_HOT_SIZE_PCT` (100 = kapalı); `FUTURES_FALL7_BTC_FIRST_X` (0 =
+  kapalı). Telegram: 🌊 Dalga modu → 🧊 / 🔥 (sayfada "şu an" ortalaması da yazar), 🧯 Risk sigortaları → 🥇. Canlı bot
+  kapanan her vadeli işlemin netini durum dosyasına yazar; pozisyon mesajında "Seri: son 5 işlemin ortalaması …" satırı,
+  atlanan sinyal tarama kaydında "BTC haftası düşüşte: ilk pozisyonda hafif çöküş"; backtest başlığında 🔥 satırı, 🔪 satırında
+  atlanan ilk pozisyon sayısı, tek kural tablosunda çevre satırları.
+- **Öneri:** `FUTURES_STREAK_TRADES=5`, `FUTURES_STREAK_COLD_PCT=-1`, `FUTURES_STREAK_COLD_SIZE_PCT=50`,
+  `FUTURES_STREAK_HOT_PCT=0.8`, `FUTURES_STREAK_HOT_SIZE_PCT=125`, `FUTURES_FALL7_BTC_FIRST_X=1.35`.
+
 #### Kill-switch eşiği (rapor 23, Kasım 2026)
 **Nasıl çalışır:** botun toplam zararı (kapanan işlemler + açık pozisyonların anlık zararı) botun sermayesinin
 (başlangıç + /sermayeekle) `MAX_TOTAL_LOSS_PCT`'sine ulaşınca durum dosyasına "kill-switch" yazılır, yeni pozisyon
@@ -3423,7 +3497,12 @@ karar için ortancaya ve en kötüye bakın. Çıkış taraması her gün dengel
 - **🔪 Düşen bıçak satırı** (rapor başlığında, `FUTURES_FALL7_PCT` açıkken): son 7 günde eşikten fazla düşmüş
   coinlerde küçük boyla açılan işlem sayısını (A) gösterir. Sert çöküş muafiyeti (`FUTURES_FALL7_EXEMPT_X`) açıksa
   düşüşü eşiğin o katı ve üstündeki çöküşler tam boy açılır (sayıya girmez); piyasa düşüşü kuralı
-  (`FUTURES_FALL7_BTC_PCT`) açıksa BTC düşüşü yüzünden atlanan sinyal sayısı da yazılır. A, B ve C aynı kuralı kullanır.
+  (`FUTURES_FALL7_BTC_PCT`) açıksa BTC düşüşü yüzünden atlanan sinyal sayısı da yazılır; BTC haftasında ilk pozisyon
+  şartı (`FUTURES_FALL7_BTC_FIRST_X`) açıksa o yüzden atlanan ilk pozisyon sinyali sayısı da. A, B ve C aynı kuralı
+  kullanır.
+- **🔥 Seri satırı** (rapor başlığında, `FUTURES_STREAK_*` açıkken, dalga modunda): son kapanan işlemlerin ortalamasına göre
+  küçük (soğuk seri) ve büyük (sıcak seri) açılan ek pozisyon sayısını (A) gösterir. Kapanan işlemin neti emir defteri
+  kayması dahil sayılır (canlıdaki gibi). A, B ve C aynı kuralı kullanır.
 - **🔱 Derin ek pozisyon satırı** (rapor başlığında, `FUTURES_EXTRA_DEEP_X` açıkken, dalga modunda): başka pozisyon
   açıkken düşüşü çöküş eşiğinin X katı ya da fazlası olan çöküşte büyük boyla açılan işlem sayısını (A) gösterir. A, B ve
   C aynı kuralı kullanır.
