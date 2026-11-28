@@ -34,8 +34,7 @@ def test_settings_defaults_validation_env_notes_and_rule(fcfg, monkeypatch, tmp_
     assert (loaded.futures_guard_pct, loaded.futures_guard_size_pct) == (30.0, 70.0)
     assert EDITABLE["FUTURES_GUARD_PCT"].attr == "futures_guard_pct"
     assert EDITABLE["FUTURES_GUARD_SIZE_PCT"].attr == "futures_guard_size_pct"
-    notes = " ".join(_setting_notes(replace(fcfg, futures_guard_pct=30.0)))
-    assert "FUTURES_GUARD_PCT=30, FUTURES_GUARD_SIZE_PCT=60 (sermaye koruması)" in notes
+    assert not _setting_notes(replace(fcfg, futures_guard_pct=30.0))  # Açılış notu yok (rapor 34: bilgilendirme notları kaldırıldı)
     assert not any("FUTURES_GUARD_PCT" in n for n in _setting_notes(fcfg))
     on = replace(fcfg, futures_guard_pct=30.0, futures_guard_size_pct=60.0)
     assert futures_guard_factor(on, 70.0, 100.0) == pytest.approx(0.6)                # Tam %30 zararda
@@ -202,8 +201,7 @@ def test_cushion_settings_rule_and_engines(fcfg, monkeypatch, tmp_path):
     loaded = load_config(env_file=str(tmp_path / "x.env"), mode_override="paper")
     assert (loaded.futures_cushion_x, loaded.futures_cushion_size_pct) == (2.0, 125.0)
     assert EDITABLE["FUTURES_CUSHION_X"].attr == "futures_cushion_x"
-    notes = " ".join(_setting_notes(replace(fcfg, futures_cushion_x=2.0)))
-    assert "FUTURES_CUSHION_X=2, FUTURES_CUSHION_SIZE_PCT=112.5 (kâr yastığı)" in notes
+    assert not _setting_notes(replace(fcfg, futures_cushion_x=2.0))  # Açılış notu yok (rapor 34: bilgilendirme notları kaldırıldı)
     assert cushion_factor(2.0, 112.5, 200.0, 100.0) == pytest.approx(1.125)
     assert cushion_factor(2.0, 112.5, 199.9, 100.0) == 1.0 and cushion_factor(0.0, 112.5, 900.0, 100.0) == 1.0
     assert futures_cushion_factor(replace(fcfg, futures_cushion_x=1.5), 150.0, 100.0) == pytest.approx(1.125)

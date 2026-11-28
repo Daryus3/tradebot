@@ -14,8 +14,7 @@ def test_long_window_helper_and_note(fcfg):
     assert futures_long_windows(replace(c, futures_crash_extra="1:6,8:12")) == ((8, 12.0),)
     assert futures_long_windows(replace(c, futures_crash_extra="1:6,2:8")) == ()
     assert futures_long_windows(replace(c, futures_crash_extra="abc")) == ()       # Hatalı yazım: not yok, hata yok
-    notes = [n for n in _setting_notes(c) if "uzun pencere" in n]
-    assert len(notes) == 1 and "12 saatte %15" in notes[0] and "+ 1 sa %6" in notes[0]
+    assert not any("uzun pencere" in n for n in _setting_notes(c))  # Açılış notu yok (rapor 34: bilgilendirme notları kaldırıldı)
     assert not any("uzun pencere" in n for n in _setting_notes(replace(c, futures_crash_extra="1:6")))
     assert not any("uzun pencere" in n for n in _setting_notes(replace(c, futures_crash_z=3.0)))
     assert not any("uzun pencere" in n for n in _setting_notes(replace(c, futures_tactic="liq4")))

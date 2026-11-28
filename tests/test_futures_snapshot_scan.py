@@ -141,8 +141,7 @@ def test_setting_is_off_by_default_and_needs_fast_entry_and_close_only_rule(fcfg
     assert EDITABLE["FUTURES_SNAPSHOT_SCAN"].attr == "futures_snapshot_scan"
     on = snap_cfg(fcfg)
     assert futures_snapshot_on(on) and futures_snapshot_on(replace(on, futures_minute_scan=False))
-    note = [n for n in _setting_notes(on) if "FUTURES_SNAPSHOT_SCAN" in n]
-    assert len(note) == 1 and "~0.15 sn" in note[0] and "kendisi doğrular" in note[0] and "test modunda" in note[0]
+    assert not any("FUTURES_SNAPSHOT_SCAN" in n for n in _setting_notes(on))  # Açılış notu yok (rapor 34: bilgilendirme notları kaldırıldı)
     # Hızlı giriş kapalıyken, sinyal yalnızca kapanışlara bağlı değilken ya da limit girişte: çalışmaz ve söylenir
     for over in (dict(futures_fast_entry=False), dict(futures_crash_liq=True), dict(futures_crash_z=2.0),
                  dict(futures_pump_rules="1:8"), dict(futures_confirm="green"), dict(futures_entry_order="limit")):

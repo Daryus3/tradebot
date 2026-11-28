@@ -37,16 +37,12 @@ def test_phase6_settings_defaults_validation_env_notes(fcfg, monkeypatch, tmp_pa
     p6 = replace(fcfg, futures_max_positions=4, futures_leverage=3, futures_extra_size_pct=16.7,
                  futures_reentry_breadth=3, futures_wave_rules="1:5,4:8", futures_isolated_size_pct=50.0)
     p6.validate()
-    notes = " ".join(_setting_notes(p6))
-    assert "Faz 6 büyüklükleri" in notes and "1.90 katı" in notes and "dalgada yeniden giriş" in notes
-    assert "FUTURES_WAVE_RULES=1:5,4:8" in notes and "3 ve üstü" not in notes       # Eşit büyüklük uyarısı değil
-    assert "etkisiz" in " ".join(_setting_notes(replace(p6, loss_cooldown_minutes=0)))
-    assert "%75" in " ".join(_setting_notes(replace(p6, futures_max_positions=5, futures_extra_size_pct=50.0)))
-    assert "#2'den küçük" in " ".join(_setting_notes(replace(p6, futures_leverage=2)))
+    assert not any("Faz 6" in n or "FUTURES_WAVE_RULES" in n for n in _setting_notes(p6))   # Açılış notu yok
+    assert "etkisiz" in " ".join(_setting_notes(replace(p6, loss_cooldown_minutes=0)))      # Etkisiz ayar uyarısı kalır
     assert not any("Faz 6" in n for n in _setting_notes(fcfg))
     # Faz 5 seti (eşit büyüklük) notu aynen
     f5 = replace(fcfg, futures_max_positions=2, futures_leverage=3)
-    assert any("2 pozisyon, 3x" in n and "Düzeltilmiş testte" in n for n in _setting_notes(f5))
+    assert not any("Düzeltilmiş testte" in n for n in _setting_notes(f5))   # Açılış notu yok
 
 
 def test_slot_share_wave_cfg_and_kline_limit(fcfg):

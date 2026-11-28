@@ -224,8 +224,7 @@ def test_basis_settings_defaults_validation_env_runtime_and_notes(fcfg, monkeypa
     assert (loaded.futures_basis_size_pct, loaded.futures_basis_deep_pct) == (130.0, 0.4)
     assert EDITABLE["FUTURES_BASIS_SIZE_PCT"].attr == "futures_basis_size_pct"
     assert EDITABLE["FUTURES_BASIS_DEEP_PCT"].kind == "float"
-    notes = " ".join(_setting_notes(replace(fcfg, strategy="futures", futures_basis_size_pct=130.0)))
-    assert "FUTURES_BASIS_SIZE_PCT=130" in notes and "+%940 → +%1.034" in notes
+    assert not _setting_notes(replace(fcfg, strategy="futures", futures_basis_size_pct=130.0))  # Açılış notu yok (rapor 34: bilgilendirme notları kaldırıldı)
     assert not any("FUTURES_BASIS_SIZE_PCT" in n for n in _setting_notes(replace(fcfg, strategy="futures")))
     p = fb.params_from_cfg(replace(fcfg, futures_basis_size_pct=130.0, futures_basis_deep_pct=0.4))
     assert (p.basis_size_pct, p.basis_deep_pct) == (130.0, 0.4)

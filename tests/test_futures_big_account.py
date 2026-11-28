@@ -154,9 +154,7 @@ def test_big_account_settings_defaults_validation_env_runtime_and_notes(fcfg, mo
     loaded = load_config(env_file=str(tmp_path / "x.env"), mode_override="paper")
     assert loaded.futures_big_account_usdt == 5000.0
     assert EDITABLE["FUTURES_BIG_ACCOUNT_USDT"].attr == "futures_big_account_usdt"
-    notes = " ".join(_setting_notes(replace(fcfg, strategy="futures", futures_big_account_usdt=5000.0)))
-    assert "FUTURES_BIG_ACCOUNT_USDT=5.000" in notes and "+%1.097 → +%1.423" in notes
-    assert "açabilir, zayıf sinyale" in notes                                          # Metindeki virgül korunur
+    assert not _setting_notes(replace(fcfg, strategy="futures", futures_big_account_usdt=5000.0))  # Açılış notu yok (rapor 34: bilgilendirme notları kaldırıldı)
     assert not any("FUTURES_BIG_ACCOUNT_USDT" in n for n in _setting_notes(replace(fcfg, strategy="futures")))
     assert fb.params_from_cfg(replace(fcfg, futures_big_account_usdt=5000.0)).big_account_usdt == 5000.0
 

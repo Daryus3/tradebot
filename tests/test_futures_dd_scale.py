@@ -34,8 +34,7 @@ def test_settings_defaults_validation_env_notes_and_rule(fcfg, monkeypatch, tmp_
     assert (loaded.futures_dd_scale_pct, loaded.futures_dd_scale_size_pct) == (30.0, 50.0)
     assert EDITABLE["FUTURES_DD_SCALE_PCT"].attr == "futures_dd_scale_pct"
     assert EDITABLE["FUTURES_DD_SCALE_SIZE_PCT"].attr == "futures_dd_scale_size_pct"
-    notes = " ".join(_setting_notes(replace(fcfg, futures_dd_scale_pct=30.0)))
-    assert "FUTURES_DD_SCALE_PCT=30, FUTURES_DD_SCALE_SIZE_PCT=60 (düşüşte küçültme)" in notes
+    assert not _setting_notes(replace(fcfg, futures_dd_scale_pct=30.0))  # Açılış notu yok (rapor 34: bilgilendirme notları kaldırıldı)
     assert not any("FUTURES_DD_SCALE_PCT" in n for n in _setting_notes(fcfg))
     # Kural: zirvenin eşik kadar (ya da daha fazla) altındaysa boy küçülür; kapalıyken / zirve yokken hep tam boy
     assert dd_scale_factor(30, 60, 70.0, 100.0) == pytest.approx(0.6)                 # Tam %30 aşağıda

@@ -341,8 +341,7 @@ def test_settings_validation_env_notes(fcfg, monkeypatch, tmp_path):
     assert (loaded.futures_depth_cap_pct, loaded.futures_backtest_depth) == (12.5, False)
     assert EDITABLE["FUTURES_DEPTH_CAP_PCT"].attr == "futures_depth_cap_pct"
     assert EDITABLE["FUTURES_BACKTEST_DEPTH"].kind == "bool"
-    note = [n for n in _setting_notes(replace(fcfg, futures_depth_cap_pct=10.0)) if "FUTURES_DEPTH_CAP_PCT" in n]
-    assert len(note) == 1 and "%10'iyle sınırlanır" in note[0]
+    assert not _setting_notes(replace(fcfg, futures_depth_cap_pct=10.0))  # Açılış notu yok (rapor 34: bilgilendirme notları kaldırıldı)
     assert DEPTH_CHECK_MIN_NOTIONAL == 1_000.0
 
 

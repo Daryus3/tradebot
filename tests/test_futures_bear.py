@@ -42,9 +42,7 @@ def test_settings_defaults_validation_env_and_notes(fcfg, monkeypatch, tmp_path)
     assert (loaded.futures_bear_size_pct, loaded.futures_bear_sma_days) == (75.0, 50)
     assert EDITABLE["FUTURES_BEAR_SIZE_PCT"].attr == "futures_bear_size_pct"
     assert EDITABLE["FUTURES_BEAR_SMA_DAYS"].kind == "int"
-    notes = " ".join(_setting_notes(replace(fcfg, futures_bear_size_pct=75.0)))
-    assert "FUTURES_BEAR_SIZE_PCT=75, FUTURES_BEAR_SMA_DAYS=100 (ayı piyasası küçültmesi)" in notes
-    assert "+%1.841 → +%1.822" in notes
+    assert not _setting_notes(replace(fcfg, futures_bear_size_pct=75.0))  # Açılış notu yok (rapor 34: bilgilendirme notları kaldırıldı)
     assert not any("FUTURES_BEAR_SIZE_PCT" in n for n in _setting_notes(fcfg))
 
 

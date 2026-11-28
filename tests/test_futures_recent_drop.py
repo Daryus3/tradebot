@@ -135,8 +135,7 @@ def test_recent_settings_defaults_validation_env_and_runtime(fcfg, monkeypatch, 
     assert EDITABLE["FUTURES_RECENT_SIZE_PCT"].attr == "futures_recent_size_pct"
     assert EDITABLE["FUTURES_RECENT_DROP_PCT"].kind == "float"
     from config import _setting_notes
-    notes = " ".join(_setting_notes(replace(fcfg, strategy="futures", futures_recent_size_pct=50.0)))
-    assert "FUTURES_RECENT_SIZE_PCT=50" in notes
+    assert not _setting_notes(replace(fcfg, strategy="futures", futures_recent_size_pct=50.0))  # Açılış notu yok (rapor 34: bilgilendirme notları kaldırıldı)
     assert not any("FUTURES_RECENT_SIZE_PCT" in n for n in _setting_notes(replace(fcfg, strategy="futures")))
 
 

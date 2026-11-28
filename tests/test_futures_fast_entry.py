@@ -148,7 +148,7 @@ def test_fast_entry_is_off_by_default_and_editable(fcfg, tmp_path, monkeypatch):
     assert fcfg.futures_fast_entry is False
     assert not any("FUTURES_FAST_ENTRY" in n for n in _setting_notes(fcfg))
     new, _ = apply_settings(fcfg, {"FUTURES_FAST_ENTRY": "true"})
-    assert new.futures_fast_entry and any("FUTURES_FAST_ENTRY=true" in n for n in _setting_notes(new))
+    assert new.futures_fast_entry and not any("FUTURES_FAST_ENTRY" in n for n in _setting_notes(new))   # Açılış notu yok
     monkeypatch.setenv("FUTURES_FAST_ENTRY", "true")
     assert load_config(env_file=str(tmp_path / "x.env"), mode_override="paper").futures_fast_entry
     bot, _fake, notes, _clock = make_fbot(fcfg, tmp_path)

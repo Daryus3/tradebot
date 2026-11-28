@@ -60,8 +60,7 @@ def test_setting_is_off_by_default_and_supported_only_for_close_only_rules(fcfg,
     assert EDITABLE["FUTURES_MINUTE_SCAN"].attr == "futures_minute_scan"
     on = scan_cfg(fcfg)
     assert futures_close_only(on) and futures_scan_shifts(on) == (60_000, 120_000, 180_000, 240_000)
-    note = [n for n in _setting_notes(on) if "FUTURES_MINUTE_SCAN" in n]
-    assert len(note) == 1 and "1.662" in note[0] and "3 kat kaymada" in note[0] and "test modunda" in note[0]
+    assert not any("FUTURES_MINUTE_SCAN" in n for n in _setting_notes(on))  # Açılış notu yok (rapor 34: bilgilendirme notları kaldırıldı)
     # Sinyal yalnızca kapanışlara bağlı değilse, limit girişte ya da çok uzun pencerede: 5 dk taramaya düşer ve söylenir
     for over in (dict(futures_crash_liq=True), dict(futures_crash_z=2.0), dict(futures_pump_rules="1:8"),
                  dict(futures_confirm="green"), dict(futures_entry_order="limit")):
@@ -290,8 +289,7 @@ def test_trailing_stop_is_flagged_as_optimistic_in_report_and_notes(fcfg):
     assert "⚠️ İzleyen stop açık: backtest bu çıkışı iyimser hesaplar" in text
     assert "⚠️ İzleyen stop açık" not in fb.format_report(on, data, fb.evaluate(fb.params_from_cfg(on), data, sigs, windows),
                                                          funnel)
-    note = [n for n in _setting_notes(trail) if "FUTURES_TRAILING" in n]
-    assert len(note) == 1 and "1.935 işlemde" in note[0] and "Öneri: kapalı" in note[0]
+    assert not any("FUTURES_TRAILING" in n for n in _setting_notes(trail))  # Açılış notu yok (rapor 34: bilgilendirme notları kaldırıldı)
 
 
 def test_config_rejects_nothing_new_and_validates(fcfg):

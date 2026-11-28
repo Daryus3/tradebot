@@ -64,6 +64,7 @@ düzenlemeyin: güncelleme (`git pull`) sırasında çakışır.
 | `sudo systemctl stop tradebot` / `start tradebot` | Durdur / başlat |
 | `sudo journalctl -u tradebot -f` | Canlı log (Ctrl+C yalnızca izlemeyi bırakır) |
 | `tail -f /home/tradebot/tradebot/logs/bot.log` | Botun kendi log dosyası |
+| `grep '⚠️' /home/tradebot/tradebot/logs/bot.log \| tail -20` | Ayar notları (etkisiz / çelişen ayarlar): açılışta Telegram'a gönderilmez, yalnızca buraya yazılır |
 
 Normal durdurma, Telegram `/kapat`, ayar hatası ve kill-switch'te bot yeniden **başlatılmaz**.
 
@@ -720,7 +721,7 @@ giriş (yılda ~500 işlem, getiri üçte birin altına iner), 2 / 3 / 5 / 6 / 8
 ama 4x-5x'te düşüş %80+), yalnız çöküş %10-100 ve eşik 1-4 coin, yeniden giriş eşiği 0 / 2 / 5 / 8, zarar sonrası bekleme 0-720 dk, coin
 beklemesi 30-60 dk (kâr yarıya ya da daha aşağı iner), teminat %90, dalga eşiklerinin komşuları (≥8-20 coin; 1:4,4:7 doğrulamada
 yüksek ama 5x kötümser stopta eridi). Yüzlerce ayar denendiği için seçim yanlılığı olabilir; önce test modunda izleyin.
-Backtest raporu uzun pencere varsa "12 sa %15 penceresi kapalı" satırını, ayar notu da bu uyarıyı gösterir.
+Backtest raporu uzun pencere varsa "12 sa %15 penceresi kapalı" satırını gösterir.
 
 #### Faz 8: ek pozisyonlarda erken başabaş (Kasım 2026, rapor 14)
 > ⚠️ **Düzeltme (rapor 15):** bu bölümdeki kâr artışı backtest motorunun iyimserliğinden geliyordu. Saniyelik veriyle
@@ -1294,7 +1295,7 @@ işlemlerde izleyen stoplu − izleyen stopsuz çıkış getirisi (%; ortalama �
 pozisyonda %0.15-0.48, eklerde %0.55-0.83 daha iyi kapanacaktı (çöküş dönüşlerinde fiyat dakika içinde sık sık geri
 çekilip devam ediyor). Motorda en kötümser dakika içi sıra varsayımı (her mumda önce tepe, sonra dip) iyimserliği
 azaltıyor ama gidermiyor. İzleyen stop olmadan aynı oynatma motorla uyumlu (fark: ilk −0.038 ± 0.081, ek −0.003 ±
-0.087), yani motorun başabaş modeli dakikalık girişlerde de geçerli. **Sonuç: izleyen stop önerilmez**; ayar notu,
+0.087), yani motorun başabaş modeli dakikalık girişlerde de geçerli. **Sonuç: izleyen stop önerilmez**;
 Telegram ipucu ve rapor satırı artık bunu söylüyor, izleyen stop açıkken rapor başlığına uyarı düşüyor.
 
 **2) Giriş gecikmesinin maliyeti (aynı saniyelik veri, 2.001 giriş).** Sinyal dakikasının kapanışından sonra fiyat

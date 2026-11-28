@@ -65,8 +65,7 @@ def test_settings_defaults_validation_env_notes(fcfg, monkeypatch, tmp_path):
     assert (loaded.futures_support_size_pct, loaded.futures_support_days, loaded.futures_support_zone_pct) == (60.0, 14, 3.0)
     for key in ("FUTURES_SUPPORT_SIZE_PCT", "FUTURES_SUPPORT_DAYS", "FUTURES_SUPPORT_ZONE_PCT"):
         assert EDITABLE[key].attr == key.lower()
-    notes = " ".join(_setting_notes(replace(fcfg, futures_support_size_pct=60.0)))
-    assert "FUTURES_SUPPORT_SIZE_PCT=60, FUTURES_SUPPORT_DAYS=30, FUTURES_SUPPORT_ZONE_PCT=5 (destek bölgesi)" in notes
+    assert not _setting_notes(replace(fcfg, futures_support_size_pct=60.0))  # Açılış notu yok (rapor 34: bilgilendirme notları kaldırıldı)
     assert not any("FUTURES_SUPPORT_SIZE_PCT" in n for n in _setting_notes(fcfg))
 
 

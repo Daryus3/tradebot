@@ -157,8 +157,7 @@ def test_quality_settings_defaults_validation_env_runtime_and_notes(fcfg, monkey
     assert (loaded.futures_quality_size_pct, loaded.futures_quality_cut_pct) == (60.0, 40.0)
     assert EDITABLE["FUTURES_QUALITY_SIZE_PCT"].attr == "futures_quality_size_pct"
     assert EDITABLE["FUTURES_QUALITY_CUT_PCT"].kind == "float"
-    notes = " ".join(_setting_notes(replace(fcfg, strategy="futures", futures_quality_size_pct=60.0)))
-    assert "FUTURES_QUALITY_SIZE_PCT=60" in notes and "en zayıf %60'ında" in notes
+    assert not _setting_notes(replace(fcfg, strategy="futures", futures_quality_size_pct=60.0))  # Açılış notu yok (rapor 34: bilgilendirme notları kaldırıldı)
     assert not any("FUTURES_QUALITY_SIZE_PCT" in n for n in _setting_notes(replace(fcfg, strategy="futures")))
     p = fb.params_from_cfg(replace(fcfg, futures_quality_size_pct=60.0, futures_quality_cut_pct=40.0))
     assert (p.quality_size_pct, p.quality_cut_pct) == (60.0, 40.0)

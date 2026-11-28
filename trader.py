@@ -260,8 +260,7 @@ class TradingBot:
         cfg = self.cfg
         self.notifier.send(Messages.started(cfg, self.state.capital, self.state.realized_pnl, pairs, self.target_slots(),
                                             loss_limit=self.loss_limit, loss_pct=self.loss_pct))
-        for note in cfg.notes:
-            self.notifier.send(Messages.warning(note))
+        # Ayar notları (etkisiz / çelişen ayarlar) açılışta Telegram'a gönderilmez; main.py bot.log'a yazar
         if self.state.paused:
             self.notifier.send("⏸️ Yeni alımlar daha önce /durdur ile durdurulmuştu. Devam için /devam yazın.")
         if self.state.killed and self.state.positions:

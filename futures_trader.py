@@ -354,8 +354,7 @@ class FuturesBot(TradingBot):
             self.notifier.send(Messages.futures_started(
                 cfg, self.state.capital, self.state.realized_pnl, len(coins) - len(missing),
                 [c for c in coins if c not in missing], self.loss_limit, self.loss_pct, mode_note, free))
-            for note in cfg.notes:
-                self.notifier.send(Messages.warning(note))
+            # Ayar notları (etkisiz / çelişen ayarlar) açılışta Telegram'a gönderilmez; main.py bot.log'a yazar
             if not ex.is_paper:
                 try:
                     asset_note = ex.check_single_asset()

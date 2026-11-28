@@ -50,9 +50,10 @@ def test_cascade_settings_defaults_validation_env_notes(fcfg, monkeypatch, tmp_p
     assert (loaded.futures_max_positions, loaded.futures_extra_breadth) == (2, 5)
     assert (loaded.futures_isolated_size_pct, loaded.futures_isolated_breadth) == (50.0, 3)
     on = replace(fcfg, futures_max_positions=3, futures_isolated_size_pct=50.0, futures_universe=0)
-    notes = " ".join(_setting_notes(on))
-    assert "dalga modu" in notes and "3 ve üstü" in notes and "listesinde" in notes and "FUTURES_ISOLATED_SIZE_PCT" in notes
-    assert not any("dalga modu" in n for n in _setting_notes(fcfg))
+    notes = _setting_notes(on)
+    assert len(notes) == 1 and "FUTURES_COINS listesinde" in notes[0]     # Yalnız etkisiz / çelişen ayar uyarısı kalır
+    assert not _setting_notes(replace(on, futures_universe=20))
+    assert not any("Dalga modu" in n for n in _setting_notes(fcfg))
     preset = replace(fcfg, futures_max_positions=FUTURES_CASCADE_PRESET["FUTURES_MAX_POSITIONS"],
                      futures_leverage=FUTURES_CASCADE_PRESET["FUTURES_LEVERAGE"])
     preset.validate()

@@ -34,9 +34,7 @@ def test_settings_defaults_validation_env_notes_and_rule(fcfg, monkeypatch, tmp_
     assert (loaded.futures_day_brake_pct, loaded.futures_day_brake_size_pct) == (10.0, 60.0)
     assert EDITABLE["FUTURES_DAY_BRAKE_PCT"].attr == "futures_day_brake_pct"
     assert EDITABLE["FUTURES_DAY_BRAKE_SIZE_PCT"].attr == "futures_day_brake_size_pct"
-    notes = " ".join(_setting_notes(replace(fcfg, futures_day_brake_pct=10.0)))
-    assert "FUTURES_DAY_BRAKE_PCT=10, FUTURES_DAY_BRAKE_SIZE_PCT=50 (24 saat freni)" in notes
-    assert "+%1.426 → +%1.841" in notes
+    assert not _setting_notes(replace(fcfg, futures_day_brake_pct=10.0))  # Açılış notu yok (rapor 34: bilgilendirme notları kaldırıldı)
     assert not any("FUTURES_DAY_BRAKE_PCT" in n for n in _setting_notes(fcfg))
     on = replace(fcfg, futures_day_brake_pct=10.0, futures_day_brake_size_pct=70.0)
     assert futures_brake_factor(on, 90.0, 100.0) == pytest.approx(0.7)              # Tam %10 aşağıda

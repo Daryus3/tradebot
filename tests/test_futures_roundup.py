@@ -90,8 +90,7 @@ def test_roundup_setting_env_runtime_notes_and_menu(fcfg, monkeypatch, tmp_path)
     loaded = load_config(env_file=str(tmp_path / "x.env"), mode_override="paper")
     assert loaded.futures_quality_roundup is True
     assert EDITABLE["FUTURES_QUALITY_ROUNDUP"].kind == "bool"
-    notes = " ".join(_setting_notes(replace(fcfg, strategy="futures", futures_quality_roundup=True)))
-    assert "FUTURES_QUALITY_ROUNDUP=true" in notes and "+%1.554 → +%1.653" in notes
+    assert not _setting_notes(replace(fcfg, strategy="futures", futures_quality_roundup=True))  # Açılış notu yok (rapor 34: bilgilendirme notları kaldırıldı)
     import settings_menu as sm
     rows = {r.key: r for r in sm.PAGES["fw"].rows if isinstance(r, sm.Row)}
     assert rows["FUTURES_QUALITY_ROUNDUP"].show(replace(fcfg, strategy="futures", futures_tactic="crash"))

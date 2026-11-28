@@ -43,9 +43,7 @@ def test_phase9_settings_defaults_validation_env_helper_notes(fcfg, monkeypatch,
         == (35, 60, 10)
     new, _ = apply_settings(fcfg, {"FUTURES_WAVE_HOLD_MINUTES": "70"})
     assert new.futures_wave_hold_minutes == 70
-    notes = [n for n in _setting_notes(on) if "Faz 9" in n]
-    assert len(notes) == 1 and "ek pozisyonlar 35 dk'da" in notes[0] and "ilk pozisyon 60 dk'da" in notes[0]
-    assert "2025'te geride" in notes[0] and "hiçbir yılda geride değil" in notes[0]
+    assert not any("Faz 9" in n for n in _setting_notes(on))  # Açılış notu yok (rapor 34: bilgilendirme notları kaldırıldı)
     assert "etkisiz" in " ".join(n for n in _setting_notes(replace(fcfg, futures_extra_hold_minutes=35)) if "Faz 9" in n)
     assert not any("Faz 9" in n for n in _setting_notes(p6cfg(fcfg)))
     # Dalga kuralı tek pozisyonda da genişlik ölçümünü açar (canlıda sinyale genişlik eklenir)
