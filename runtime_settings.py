@@ -246,6 +246,12 @@ EDITABLE: Dict[str, Setting] = {
                                  "Düşen bıçak: coin son 7 günde bu kadar %'den fazla düştüyse küçük boy (0 = kapalı)"),
     "FUTURES_FALL7_SIZE_PCT": Setting("futures_fall7_size_pct", "float",
                                       "Düşen bıçakta pozisyon büyüklüğü (%; 10-100)"),
+    "FUTURES_FALL7_BTC_PCT": Setting("futures_fall7_btc_pct", "float",
+                                     "Düşen bıçak + piyasa düşüşü: BTC de son 7 günde bu kadar %'den fazla düştüyse bıçak "
+                                     "coininde hafif çöküşe girilmez (0 = kapalı; 2-50)"),
+    "FUTURES_FALL7_EXEMPT_X": Setting("futures_fall7_exempt_x", "float",
+                                      "Düşen bıçakta sert çöküş muafiyeti: düşüş eşiğin bu katı ve üstündeyse tam boy "
+                                      "(0 = kapalı; 1.2-10)"),
     "FUTURES_CUSHION_X": Setting("futures_cushion_x", "float",
                                  "Kâr yastığı: sermaye bota verilenin bu katına çıkınca pozisyonu büyüt (0 = kapalı)"),
     "FUTURES_CUSHION_SIZE_PCT": Setting("futures_cushion_size_pct", "float",

@@ -102,12 +102,27 @@ def test_engine_flags_and_header_line():
 
 def test_variant_rows(fcfg):
     rows = dict(fb.fall7_variant_rows(fb.params_from_cfg(fcfg), lambda **kw: kw, True))
-    assert rows == {"Coin son 7 günde %15+ düştüyse boy %60": {"fall7_pct": 15.0, "fall7_size_pct": 60.0}}
+    assert rows == {"Coin son 7 günde %15+ düştüyse boy %60": {"fall7_pct": 15.0, "fall7_size_pct": 60.0},
+                    "Düşen bıçak %15 / %60, düşüş ≥ eşik ×2 muaf": {"fall7_pct": 15.0, "fall7_size_pct": 60.0,
+                                                                    "fall7_exempt_x": 2.0},
+                    "Düşen bıçak %15 / %60, ×2 muaf, BTC 7 günde %10+ düştüyse hafife girme": {
+                        "fall7_pct": 15.0, "fall7_size_pct": 60.0, "fall7_exempt_x": 2.0, "fall7_btc_pct": 10.0}}
     on = fb.params_from_cfg(replace(fcfg, futures_fall7_pct=15.0, futures_fall7_size_pct=60.0))
     got = dict(fb.fall7_variant_rows(on, lambda **kw: kw, True))
     assert got["Düşen bıçak kuralı kapalı"] == {"fall7_pct": 0.0}
     assert got["Düşen bıçak: 7 günde %20+ (şimdi %15)"] == {"fall7_pct": 20.0}
-    assert got["Düşen bıçakta boy %50 (şimdi %60)"] == {"fall7_size_pct": 50.0} and len(got) == 5
+    assert got["Düşen bıçakta boy %50 (şimdi %60)"] == {"fall7_size_pct": 50.0}
+    assert got["Bıçakta sert çöküş muafiyeti: düşüş ≥ eşik ×2 (şimdi kapalı)"] == {"fall7_exempt_x": 2.0} and len(got) == 7
+    ex = fb.params_from_cfg(replace(fcfg, futures_fall7_pct=15.0, futures_fall7_exempt_x=2.0))
+    got = dict(fb.fall7_variant_rows(ex, lambda **kw: kw, True))
+    assert got["Bıçakta sert çöküş muafiyeti kapalı"] == {"fall7_exempt_x": 0.0}
+    assert got["Bıçakta sert çöküş muafiyeti: düşüş ≥ eşik ×3 (şimdi 2)"] == {"fall7_exempt_x": 3.0}
+    assert got["Bıçakta BTC 7 günde %10+ düştüyse hafif çöküşe girme (şimdi kapalı)"] == {"fall7_btc_pct": 10.0}
+    assert len(got) == 10                                                   # Piyasa düşüşü satırları muafiyetle
+    bt = fb.params_from_cfg(replace(fcfg, futures_fall7_pct=15.0, futures_fall7_exempt_x=2.0, futures_fall7_btc_pct=10.0))
+    got = dict(fb.fall7_variant_rows(bt, lambda **kw: kw, True))
+    assert got["Bıçakta piyasa düşüşü kuralı kapalı"] == {"fall7_btc_pct": 0.0}
+    assert got["Bıçakta BTC 7 günde %15+ düştüyse hafif çöküşe girme (şimdi %10)"] == {"fall7_btc_pct": 15.0}
     assert fb.fall7_variant_rows(on, lambda **kw: kw, False) == []
 
 

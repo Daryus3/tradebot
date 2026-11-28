@@ -58,7 +58,7 @@ from strategy import (FUT_BAR_MS, FUT_BREADTH_DROP_PCT, FUT_BREADTH_HOURS, FUT_B
                       recent_size_factor, basis_pct, basis_size_factor, quality_score, quality_size_factor,
                       spot_pairs, BIG_EXTRA_SLOTS, QUALITY_CUTS, big_extra_slots, big_funding_skip, big_rules_on,
                       quality_roundup_ok, bear_regime, bear_size_factor, bounce_boost_factor, support_dist_pct,
-                      support_low, fall7_size_factor, ret7_pct,
+                      support_low, fall7_size_factor, ret7_pct, fall7_btc_skip, FALL7_BTC_REASON,
                       support_size_factor)
 from telegram_bot import CRITICAL_EXITS, Messages, esc, fmt_duration, fmt_price, fmt_signed, fmt_usdt, futures_tag
 from trader import ALIVE_SAVE_SEC, POSITION_LOG_SEC, RULES_REFRESH_SEC, Mark, TradingBot
@@ -109,6 +109,7 @@ FAST_PREPARE_BATCH = 2             # Ön hazırlık: döngü adımı başına en
 FAST_PREPARE_GUARD_SEC = 20        # Taramaya bu kadar kala ön hazırlık / parite yenilemesi yapılmaz
 SUPPORT_REFRESH_BATCH = 4          # Destek bölgesi: döngü adımı başına en fazla bu kadar coinin 1 saatlik mumları
 SUPPORT_RETRY_SEC = 600            # 1 saatlik mumları alınamayan coin bu kadar sonra yeniden denenir
+BTC_SYMBOL = "BTCUSDT"            # Piyasa düşüşü kuralı (FUTURES_FALL7_BTC_PCT): BTC'nin günlük kapanışları
 FAST_PREPARE_RETRY_SEC = 3600      # Önceden ayarlanamayan coin bu kadar sonra yeniden denenir (girişte eski yol denenir)
 FAST_PREPARE_POLL_SEC = 1.0        # Hazırlanacak coin varken döngü bu aralıkla döner
 FAST_MIN_SLEEP_SEC = 0.02
@@ -807,6 +808,12 @@ class FuturesBot(TradingBot):
                 log.info("Ek pozisyon açılmadı: %s küçük çöküş (düşüş / eşik %.2f < %g)", sig.symbol,
                          crash_ratio(sig.metrics), self.cfg.futures_extra_min_x)
                 outcome[sig.symbol] = f"ek pozisyon: küçük çöküş (düşüş < eşik ×{self.cfg.futures_extra_min_x:g})"
+                continue
+            if self._fall7_btc_block(sig):                   # backtest: fall7_btc_block (iki motorda da)
+                log.info("Girilmedi: %s düşen bıçak (7 günde %%%.1f), BTC de düşüşte (7 günde %%%.1f), hafif çöküş "
+                         "(düşüş / eşik %.2f < %g)", sig.symbol, self.ret7_of(sig) or 0.0, self.btc7() or 0.0,
+                         crash_ratio(sig.metrics), self.cfg.futures_fall7_exempt_x)
+                outcome[sig.symbol] = FALL7_BTC_REASON
                 continue
             log.info("Vadeli sinyal: %s %s | %s", sig.symbol, sig.side, sig.note())
             try:
@@ -1944,7 +1951,10 @@ class FuturesBot(TradingBot):
             return
         day = int(now // 86400)
         ex = self.exchange
-        todo = [s for s in self._support_symbols() if ex.has_market(s)
+        symbols = list(self._support_symbols())
+        if self.cfg.futures_fall7_btc_pct > 0 and BTC_SYMBOL not in symbols:
+            symbols.insert(0, BTC_SYMBOL)                    # Piyasa düşüşü kuralı: BTC'nin 7 günlük getirisi
+        todo = [s for s in symbols if ex.has_market(s)
                 and self._day_closes.get(s, (-1, ()))[0] < day and now >= self._day_closes_retry.get(s, 0.0)]
         for symbol in todo[:SUPPORT_REFRESH_BATCH]:
             try:
@@ -1958,21 +1968,43 @@ class FuturesBot(TradingBot):
 
     def ret7_of(self, sig: FuturesSignal) -> Optional[float]:
         """Coinin son 7 günlük getirisi (%; strategy.ret7_pct, backtest: attach_fall7). Bugünün kaydı yoksa None."""
-        cached = self._day_closes.get(sig.symbol)
+        return self._ret7_symbol(sig.symbol)
+
+    def btc7(self) -> Optional[float]:
+        """BTC'nin son 7 günlük getirisi (%; piyasa düşüşü kuralı, backtest: attach_fall7 → metrics["btc7"])."""
+        return self._ret7_symbol(BTC_SYMBOL)
+
+    def _ret7_symbol(self, symbol: str) -> Optional[float]:
+        cached = self._day_closes.get(symbol)
         if cached is None or cached[0] != int(self.time_fn() // 86400):
             return None
         return ret7_pct(cached[1])
 
+    def _fall7_btc_block(self, sig: FuturesSignal) -> bool:
+        """Düşen bıçak + piyasa düşüşü (FUTURES_FALL7_BTC_PCT; backtest: futures_backtest.fall7_btc_block): coin ve BTC son
+        7 günde sert düştüyse ve çöküş hafifse (düşüş / eşik < FUTURES_FALL7_EXEMPT_X) girilmez. Ölçü yoksa girilir."""
+        cfg = self.cfg
+        if cfg.futures_fall7_btc_pct <= 0 or not self._fall7_on() or sig.metrics.get("tactic", 1.0) != 1.0:
+            return False
+        return fall7_btc_skip(cfg.futures_fall7_pct, cfg.futures_fall7_btc_pct, cfg.futures_fall7_exempt_x,
+                              self.ret7_of(sig), self.btc7(), crash_ratio(sig.metrics))
+
     def _fall7_factor(self, sig: FuturesSignal) -> float:
         """Düşen bıçak çarpanı (kapalıysa 1): coin son 7 günde FUTURES_FALL7_PCT'den fazla düştüyse FUTURES_FALL7_SIZE_PCT
-        / 100. Uygulanınca sinyale yazılır (pozisyon mesajı)."""
+        / 100; sert çöküş muafiyeti açıksa (FUTURES_FALL7_EXEMPT_X) düşüş / eşik oranı o kat ve üstündeyse 1 (backtest:
+        futures_backtest.fall7_factor). Uygulanınca ya da muaf tutulunca sinyale yazılır (pozisyon mesajı)."""
         cfg = self.cfg
         if not self._fall7_on() or sig.metrics.get("tactic", 1.0) != 1.0:
             return 1.0
         r7 = self.ret7_of(sig)
-        factor = fall7_size_factor(cfg.futures_fall7_pct, cfg.futures_fall7_size_pct, r7)
+        ratio = crash_ratio(sig.metrics)
+        factor = fall7_size_factor(cfg.futures_fall7_pct, cfg.futures_fall7_size_pct, r7, ratio,
+                                   cfg.futures_fall7_exempt_x)
         if factor < 1:
             sig.metrics["fall7_size_pct"] = round(factor * 100, 1)
+            sig.metrics["ret7"] = round(r7, 2)
+        elif fall7_size_factor(cfg.futures_fall7_pct, cfg.futures_fall7_size_pct, r7) < 1:
+            sig.metrics["fall7_exempt"] = round(ratio, 2)          # Bıçak ama sert çöküş: tam boy
             sig.metrics["ret7"] = round(r7, 2)
         return factor
 

@@ -2171,13 +2171,40 @@ def ret7_pct(closes: Sequence[float]) -> Optional[float]:
     return (float(closes[-1]) / float(closes[-8]) - 1) * 100
 
 
-def fall7_size_factor(fall_pct: float, size_pct: float, ret7: Optional[float]) -> float:
+def fall7_size_factor(fall_pct: float, size_pct: float, ret7: Optional[float], ratio: Optional[float] = None,
+                      exempt_x: float = 0.0) -> float:
     """Düşen bıçak (FUTURES_FALL7_PCT / FUTURES_FALL7_SIZE_PCT; rapor 33 araştırması): coin son 7 günde fall_pct'den
     fazla düştüyse (ret7 < −fall_pct) boy size_pct / 100, değilse 1 (kapalıysa ya da ölçü yoksa 1). Son haftada sert düşen
-    coinlerin çöküş dönüşü zayıf (işlem başı +%0.20, diğerleri +%0.28-0.61; iki dönemde de)."""
+    coinlerin çöküş dönüşü zayıf (işlem başı +%0.20, diğerleri +%0.28-0.61; iki dönemde de).
+    Sert çöküş muafiyeti (FUTURES_FALL7_EXEMPT_X; rapor 34): exempt_x > 0 ve çöküşün düşüş / eşik oranı (ratio,
+    config.crash_ratio) ≥ exempt_x ise küçültülmez: düşen bıçak coinlerinde sert çöküşün dönüşü güçlü (ek pozisyonda oran
+    ≥3 işlem başı +%1.1), zayıflık hafif çöküşlerde (oran <2: ~%0)."""
     if fall_pct <= 0 or ret7 is None or ret7 != ret7:
         return 1.0
-    return max(0.0, float(size_pct)) / 100 if ret7 < -float(fall_pct) else 1.0
+    if not ret7 < -float(fall_pct):
+        return 1.0
+    if exempt_x > 0 and ratio is not None and ratio == ratio and ratio >= float(exempt_x):
+        return 1.0
+    return max(0.0, float(size_pct)) / 100
+
+
+FALL7_BTC_REASON = "düşen bıçak: BTC de düşüşte, hafif çöküş"     # Backtest atlama sayımı ve canlı tarama kaydı
+
+
+def fall7_btc_skip(fall_pct: float, btc_pct: float, exempt_x: float, ret7: Optional[float], btc7: Optional[float],
+                   ratio: Optional[float]) -> bool:
+    """Düşen bıçak + piyasa düşüşü (FUTURES_FALL7_BTC_PCT; rapor 34 araştırması): coin son 7 günde fall_pct'den fazla
+    düştü, BTC de son 7 günde btc_pct'den fazla düştü (btc7 ≤ −btc_pct) ve çöküş hafif (düşüş / eşik < exempt_x; oran
+    bilinmiyorsa hafif sayılır) → girilmez. Sert çöküş (≥ exempt_x) düşen bıçak muafiyetiyle tam boy açılır. Kapalıysa
+    (fall_pct, btc_pct ya da exempt_x 0) ya da ölçü yoksa False. Piyasa geneli düşüş haftasında düşen bıçak coinlerinin hafif
+    çöküşleri zararlı (ilk pozisyon işlem başı −%0.22, ek ~%0)."""
+    if fall_pct <= 0 or btc_pct <= 0 or exempt_x <= 0:
+        return False
+    if ret7 is None or ret7 != ret7 or not ret7 < -float(fall_pct):
+        return False
+    if btc7 is None or btc7 != btc7 or not btc7 <= -float(btc_pct):
+        return False
+    return not (ratio is not None and ratio == ratio and ratio >= float(exempt_x))
 
 
 def window_sigma(c, bars: int, lookback: int = FUT_Z_LOOKBACK_BARS):
@@ -2871,6 +2898,9 @@ class FuturesSignal:
         if m.get("fall7_size_pct") and m["fall7_size_pct"] < 100:
             parts.append(f"Düşen bıçak: coin son 7 günde %{-m.get('ret7', 0.0):.1f} düştü, pozisyon "
                          f"%{m['fall7_size_pct']:g} boy")
+        elif m.get("fall7_exempt"):
+            parts.append(f"Düşen bıçak: coin son 7 günde %{-m.get('ret7', 0.0):.1f} düştü ama çöküş sert (düşüş eşiğin "
+                         f"{m['fall7_exempt']:g} katı), tam boy")
         if m.get("deep_size_pct") and m["deep_size_pct"] > 100:
             parts.append(f"Derin ek pozisyon: düşüş çöküş eşiğinin {m.get('deep_ratio', 0):g} katı, pozisyon "
                          f"%{m['deep_size_pct']:g} boy")

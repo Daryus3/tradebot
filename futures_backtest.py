@@ -39,12 +39,14 @@ import numpy as np
 from config import (DATA_DIR, DAY_BRAKE_HOURS, cushion_factor, dd_scale_factor, format_crash_rules, futures_coin_list,
                     futures_crash_rules, futures_funding_rules, futures_liq_distance_pct, futures_long_windows,
                     futures_modules, futures_scan_shifts, futures_snapshot_on, futures_wave_cfg, futures_wave_rules,
-                    parse_crash_rules, scan_log_path, small_crash_tp_pct, extra_depth_skip, extra_deep_factor, tr_from, tr_from_num,
+                    parse_crash_rules, scan_log_path, small_crash_tp_pct, extra_depth_skip, extra_deep_factor, crash_ratio,
+                    tr_from, tr_from_num,
                     window_peak)
 from futures_data import FuturesArchive, concat, resample, slice_range
 from futures_depth import DEPTH_CHECK_MIN_NOTIONAL, DepthBook, daily_volume_fn
 from strategy import (BEAR_SMA_CHOICES, BIG_EXTRA_SLOTS, FUT_BAR_MS, FUT_HOUR_MS, QUALITY_CUTS, basis_pct,
                       basis_size_factor, bear_size_factor, bounce_boost_factor, support_size_factor, fall7_size_factor,
+                      fall7_btc_skip, FALL7_BTC_REASON,
                       SUPPORT_DAY_CHOICES, ret7_pct,
                       big_extra_slots, big_funding_skip, big_rules_on, breadth_flags, btc_trend_1h, crash_state,
                       funding_per_bar, futures_candidates, futures_entries, futures_features, isolated_factor,
@@ -742,6 +744,11 @@ class SimParams:
     # fall7_pct'den fazla düştüyse (sinyal ölçüsü metrics["ret7"], attach_fall7) boy × fall7_size_pct / 100 (0 = kapalı)
     fall7_pct: float = 0.0
     fall7_size_pct: float = 60.0
+    # Sert çöküş muafiyeti (FUTURES_FALL7_EXEMPT_X): düşüş / eşik oranı ≥ X ise düşen bıçak küçültmesi yok (0 = kapalı)
+    fall7_exempt_x: float = 0.0
+    # Piyasa düşüşü (FUTURES_FALL7_BTC_PCT): BTC de son 7 günde %X'ten fazla düştüyse (metrics["btc7"]) bıçak coininin hafif
+    # çöküşüne (oran < fall7_exempt_x) girilmez (0 = kapalı)
+    fall7_btc_pct: float = 0.0
     # Emir defteri derinliği (futures_depth; veri FutData.depth'te, yoksa ikisi de uygulanmaz): depth_cap_pct > 0 ise giriş
     # tutarı girişten önceki 2 dk'da ±%1 içindeki alış / satış emirlerinin küçüğünün bu yüzdesiyle sınırlı ve aynı mumdaki
     # sinyallerde sınıra takılınca kapasitesi büyük olan önce (FUTURES_DEPTH_CAP_PCT); depth_impact: piyasa emrinin defteri
@@ -815,6 +822,8 @@ def params_from_cfg(cfg, **over) -> SimParams:
                   extra_deep_size_pct=float(getattr(cfg, "futures_extra_deep_size_pct", 150.0)),
                   fall7_pct=float(getattr(cfg, "futures_fall7_pct", 0.0) or 0.0),
                   fall7_size_pct=float(getattr(cfg, "futures_fall7_size_pct", 60.0)),
+                  fall7_exempt_x=float(getattr(cfg, "futures_fall7_exempt_x", 0.0) or 0.0),
+                  fall7_btc_pct=float(getattr(cfg, "futures_fall7_btc_pct", 0.0) or 0.0),
                   depth_cap_pct=float(getattr(cfg, "futures_depth_cap_pct", 0.0) or 0.0),
                   depth_impact=bool(getattr(cfg, "futures_backtest_depth", False)),
                   entry_lag_pct=entry_lag_for(cfg)[0], stop_slip_pct=STOP_SLIP_PCT)
@@ -1216,7 +1225,23 @@ def size_factor(p: SimParams, s: "FutSignal") -> float:
         out *= quality_size_factor(p.quality_size_pct, p.quality_cut_pct, quality_score(s.score, s.metrics))
     return (out * bear_size_factor(p.bear_size_pct, signal_bear(s, p.bear_sma_days))
             * support_size_factor(p.support_size_pct, p.support_zone_pct, s.metrics.get(f"low{int(p.support_days)}h"))
-            * fall7_size_factor(p.fall7_pct, p.fall7_size_pct, s.metrics.get("ret7")))
+            * fall7_factor(p, s))
+
+
+def fall7_factor(p: SimParams, s: FutSignal) -> float:
+    """Düşen bıçak boyu (FUTURES_FALL7_*; canlı: FuturesBot._fall7_factor): coin son 7 günde sert düştüyse küçük boy;
+    sert çöküş muafiyeti açıksa (FUTURES_FALL7_EXEMPT_X) düşüş / eşik oranı yüksek çöküşte tam boy."""
+    return fall7_size_factor(p.fall7_pct, p.fall7_size_pct, s.metrics.get("ret7"), crash_ratio(s.metrics),
+                             p.fall7_exempt_x)
+
+
+def fall7_btc_block(p: SimParams, s: FutSignal) -> bool:
+    """Düşen bıçak + piyasa düşüşü (FUTURES_FALL7_BTC_PCT; canlı: FuturesBot._fall7_btc_block): çöküş sinyali girilmez
+    mi (ek modül sinyalleri bu kurala girmez)."""
+    if p.fall7_btc_pct <= 0 or s.metrics.get("tactic", 1.0) != 1.0:
+        return False
+    return fall7_btc_skip(p.fall7_pct, p.fall7_btc_pct, p.fall7_exempt_x, s.metrics.get("ret7"), s.metrics.get("btc7"),
+                          crash_ratio(s.metrics))
 
 
 def extra_skip_reason(x: float) -> str:
@@ -1229,8 +1254,15 @@ def fall7_line(p: SimParams, res: "FutResult") -> str:
     if p.fall7_pct <= 0:
         return ""
     n7 = sum(1 for tr in res.trades if tr.fall7)
+    exempt = (f"; düşüşü eşiğin {p.fall7_exempt_x:g} katı ve üstündeki sert çöküşler tam boy" if p.fall7_exempt_x > 0
+              else "")
+    skipped = ""
+    if p.fall7_btc_pct > 0 and p.fall7_exempt_x > 0:
+        exempt += f"; BTC de son 7 günde %{p.fall7_btc_pct:g}'ten fazla düştüyse hafif çöküşe girilmez"
+        skipped = f", {res.skipped.get(FALL7_BTC_REASON, 0)} sinyal BTC düşüşü yüzünden atlandı"
     return (f"🔪 Düşen bıçak: coin son 7 günde %{p.fall7_pct:g}'ten fazla düştüyse (dünkü kapanışa göre) yeni pozisyonlar "
-            f"%{p.fall7_size_pct:g} boy (A, B ve C'de). A'da {n7} / {len(res.trades)} işlem bu boyla açıldı")
+            f"%{p.fall7_size_pct:g} boy{exempt} (A, B ve C'de). A'da {n7} / {len(res.trades)} işlem bu boyla açıldı"
+            f"{skipped}")
 
 
 def extra_deep_line(p: SimParams, res: "FutResult") -> str:
@@ -1403,6 +1435,9 @@ def simulate(p: SimParams, data: FutData, signals: Sequence[FutSignal], windows:
         if s.close_ms < freeze_until:
             skipped["risk sigortası (zarar serisi / günlük limit)"] += 1
             continue
+        if fall7_btc_block(p, s):
+            skipped[FALL7_BTC_REASON] += 1
+            continue
         factor = size_factor(p, s)          # Yalnız çöküş / çöküş durulmuş: küçük
         ddf = 1.0 if fixed_notional else dd_scale_factor(p.dd_scale_pct, p.dd_scale_size_pct, equity, peak)
         bf = 1.0 if fixed_notional else brake_factor(p, curve, s.close_ms, equity)
@@ -1454,7 +1489,7 @@ def simulate(p: SimParams, data: FutData, signals: Sequence[FutSignal], windows:
                                          s.metrics.get(f"low{int(p.support_days)}h")) < 1
         tr.bounced = bounce_flag(p, s)
         tr.small_tp = pt is not ph
-        tr.fall7 = fall7_size_factor(p.fall7_pct, p.fall7_size_pct, s.metrics.get("ret7")) < 1
+        tr.fall7 = fall7_factor(p, s) < 1
         peak = max(peak, equity)
         trades.append(tr)
         curve.append((tr.exit_ms, equity))
@@ -1598,6 +1633,9 @@ def simulate_slots(p: SimParams, data: FutData, signals: Sequence[FutSignal], wi
         if heap and extra_depth_skip(p.extra_min_x, len(heap), s.metrics):
             skipped[extra_skip_reason(p.extra_min_x)] += 1          # Yuva daha derin çöküşe kalır
             continue
+        if fall7_btc_block(p, s):
+            skipped[FALL7_BTC_REASON] += 1
+            continue
         factor = size_factor(p, s)
         deep = extra_deep_factor(p.extra_deep_x, p.extra_deep_size_pct, len(heap), s.metrics)
         factor *= deep                      # Derin ek pozisyon (boştaki teminatla sınırlı)
@@ -1664,7 +1702,7 @@ def simulate_slots(p: SimParams, data: FutData, signals: Sequence[FutSignal], wi
         tr.bounced = bounce_flag(p, s)
         tr.small_tp = pt is not pp
         tr.deep_extra = deep != 1
-        tr.fall7 = fall7_size_factor(p.fall7_pct, p.fall7_size_pct, s.metrics.get("ret7")) < 1
+        tr.fall7 = fall7_factor(p, s) < 1
         tr.rounded = not fixed_notional and rounded
         trades.append(tr)
         free_at = tr.exit_ms if tr.reason == "TIME" else tr.exit_ms + tr.bar_ms
@@ -2293,6 +2331,8 @@ def size_variant_rows(cfg, ev, depth: bool = False, has_basis: bool = False,
 
 FALL7_TRIES = (15.0, 20.0, 25.0)         # Düşen bıçak: son 7 günde düşüş eşiği (rapor 33 araştırması, 28 Kasım)
 FALL7_SIZE_TRIES = (50.0, 60.0, 75.0)    # Düşen bıçakta boy (%)
+FALL7_EXEMPT_TRIES = (0.0, 2.0, 3.0)     # Bıçakta sert çöküş muafiyeti: düşüş / eşik (rapor 34 araştırması, 28 Kasım)
+FALL7_BTC_TRIES = (0.0, 5.0, 10.0, 15.0)  # Bıçakta piyasa düşüşü: BTC'nin son 7 günlük düşüşü (%)
 
 
 def fall7_variant_rows(base: SimParams, ev, has_data: bool) -> List[Tuple[str, "Evaluation"]]:
@@ -2301,12 +2341,25 @@ def fall7_variant_rows(base: SimParams, ev, has_data: bool) -> List[Tuple[str, "
     if not has_data:
         return []
     if base.fall7_pct <= 0:
-        return [("Coin son 7 günde %15+ düştüyse boy %60", ev(fall7_pct=15.0, fall7_size_pct=60.0))]
+        return [("Coin son 7 günde %15+ düştüyse boy %60", ev(fall7_pct=15.0, fall7_size_pct=60.0)),
+                ("Düşen bıçak %15 / %60, düşüş ≥ eşik ×2 muaf",
+                 ev(fall7_pct=15.0, fall7_size_pct=60.0, fall7_exempt_x=2.0)),
+                ("Düşen bıçak %15 / %60, ×2 muaf, BTC 7 günde %10+ düştüyse hafife girme",
+                 ev(fall7_pct=15.0, fall7_size_pct=60.0, fall7_exempt_x=2.0, fall7_btc_pct=10.0))]
     rows = [("Düşen bıçak kuralı kapalı", ev(fall7_pct=0.0))]
     rows += [(f"Düşen bıçak: 7 günde %{t:g}+ (şimdi %{base.fall7_pct:g})", ev(fall7_pct=t))
              for t in FALL7_TRIES if not _same(t, base.fall7_pct)]
     rows += [(f"Düşen bıçakta boy %{z:g} (şimdi %{base.fall7_size_pct:g})", ev(fall7_size_pct=z))
              for z in FALL7_SIZE_TRIES if not _same(z, base.fall7_size_pct)]
+    now = f"{base.fall7_exempt_x:g}" if base.fall7_exempt_x > 0 else "kapalı"
+    rows += [(f"Bıçakta sert çöküş muafiyeti: düşüş ≥ eşik ×{x:g} (şimdi {now})" if x > 0
+              else "Bıçakta sert çöküş muafiyeti kapalı", ev(fall7_exempt_x=x))
+             for x in FALL7_EXEMPT_TRIES if not _same(x, base.fall7_exempt_x)]
+    if base.fall7_exempt_x > 0:                 # Piyasa düşüşü kuralı sert çöküş sınırıyla çalışır
+        bnow = f"%{base.fall7_btc_pct:g}" if base.fall7_btc_pct > 0 else "kapalı"
+        rows += [(f"Bıçakta BTC 7 günde %{b:g}+ düştüyse hafif çöküşe girme (şimdi {bnow})" if b > 0
+                  else "Bıçakta piyasa düşüşü kuralı kapalı", ev(fall7_btc_pct=b))
+                 for b in FALL7_BTC_TRIES if not _same(b, base.fall7_btc_pct)]
     return rows
 
 
@@ -5053,15 +5106,34 @@ def attach_regime(cfg, data: FutData, signals: Sequence[FutSignal],
     return done
 
 
+def _daily_closes(data: FutData, sym: str) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    """Coinin 5 dk geçmişinden günlük kapanışlar: (UTC gün numaraları, her günün son mumunun kapanışı); veri yoksa None."""
+    k = data.k5.get(sym) if data.loader is None else data.loader(sym)
+    if k is None or not len(k["t"]):
+        return None
+    day = np.asarray(k["t"], dtype=np.int64) // DAY_MS
+    last = np.r_[np.nonzero(np.diff(day))[0], len(day) - 1]
+    return day[last], np.asarray(k["c"], dtype=float)[last]
+
+
+def _ret7_at(daily: Tuple[np.ndarray, np.ndarray], close_ms: int) -> Optional[float]:
+    """Sinyal anında son 7 günlük getiri (%): dünkü kapanış / 7 gün önceki (bugün bilinmez); yeterli gün yoksa None."""
+    days, closes = daily
+    i = int(np.searchsorted(days, close_ms // DAY_MS, "left")) - 1
+    return ret7_pct(closes[i - 7:i + 1]) if i >= 7 else None
+
+
 def attach_fall7(cfg, data: FutData, signals: Sequence[FutSignal],
                  progress: Optional[Callable[[str], None]] = None) -> int:
     """Çöküş taktiğinde her sinyale coinin son 7 günlük getirisi (düşen bıçak, FUTURES_FALL7_*): metrics["ret7"] = dünkü
     günlük kapanış / 7 gün önceki kapanış − 1 (%; kapanışlar coinin 5 dk geçmişinden, günün son mumu; strategy.ret7_pct ile
-    aynı kural). Yeterli gün yoksa ölçü yazılmaz (boy değişmez). Ölçülen sinyal sayısı döner."""
+    aynı kural) ve aynı ölçü BTC için metrics["btc7"] (piyasa düşüşü, FUTURES_FALL7_BTC_PCT). Yeterli gün yoksa ölçü
+    yazılmaz (boy / giriş değişmez). Coin ölçüsü yazılan sinyal sayısı döner."""
     if getattr(cfg, "futures_tactic", "crash") != "crash" or not signals:
         return 0
     todo = [s for s in signals if "ret7" not in s.metrics]
-    if not todo:
+    btc_todo = [s for s in signals if "btc7" not in s.metrics]
+    if not todo and not btc_todo:
         return 0
     if progress:
         progress("🔪 Coinlerin son 7 günlük getirisi (günlük kapanışlar) hesaplanıyor...")
@@ -5070,19 +5142,20 @@ def attach_fall7(cfg, data: FutData, signals: Sequence[FutSignal],
         by_sym.setdefault(s.symbol, []).append(s)
     done = 0
     for sym, sigs in by_sym.items():
-        k = data.k5.get(sym) if data.loader is None else data.loader(sym)
-        if k is None or not len(k["t"]):
+        daily = _daily_closes(data, sym)
+        if daily is None:
             continue
-        day = np.asarray(k["t"], dtype=np.int64) // DAY_MS
-        last = np.r_[np.nonzero(np.diff(day))[0], len(day) - 1]
-        days, closes = day[last], np.asarray(k["c"], dtype=float)[last]
         for s in sigs:
-            i = int(np.searchsorted(days, s.close_ms // DAY_MS, "left")) - 1     # dünkü kapanış (bugün bilinmez)
-            if i >= 7:
-                r = ret7_pct(closes[i - 7:i + 1])
-                if r is not None:
-                    s.metrics["ret7"] = r
-                    done += 1
+            r = _ret7_at(daily, s.close_ms)
+            if r is not None:
+                s.metrics["ret7"] = r
+                done += 1
+    btc = _daily_closes(data, "BTCUSDT") if btc_todo else None
+    if btc is not None:
+        for s in btc_todo:
+            r = _ret7_at(btc, s.close_ms)
+            if r is not None:
+                s.metrics["btc7"] = r
     return done
 
 

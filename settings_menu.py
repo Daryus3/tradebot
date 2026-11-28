@@ -134,6 +134,8 @@ SUPPORT_HINT = ("Destek bölgesi (rapor 26 araştırması; aynı ölçü): fiyat
 # Düşen bıçak (rapor 33 araştırması, 28 Kasım; varsayılan kapalı): coin son 7 günde % kaçtan fazla düştüyse ve o boy (%)
 FALL7_CHOICES = (0, 15, 20, 25)
 FALL7_SIZE_CHOICES = (50, 60, 75)
+FALL7_EXEMPT_CHOICES = (0, 2, 2.5, 3)      # Bıçakta sert çöküş muafiyeti: düşüş / eşik (rapor 34)
+FALL7_BTC_CHOICES = (0, 5, 10, 15)         # Bıçakta piyasa düşüşü: BTC'nin son 7 günlük düşüşü % (rapor 34)
 # Sermaye koruması (rapor 26 araştırması, 26 Kasım; varsayılan kapalı): bota verilen sermayeye göre toplam zarar eşiği ve boy
 GUARD_CHOICES = (0, 20, 30, 40)
 GUARD_SIZE_CHOICES = (50, 60, 70)
@@ -607,6 +609,12 @@ PAGES: Dict[str, Page] = {
             fmt=_off("Düşen bıçak kuralı yok", lambda v: f"7 günde −%{v:g}+"), show=lambda cfg: is_futures(cfg.strategy)),
         Row("FUTURES_FALL7_SIZE_PCT", icon="📏", values=FALL7_SIZE_CHOICES, fmt=lambda v: f"Bıçakta %{v:g}",
             show=lambda cfg: is_futures(cfg.strategy) and cfg.futures_fall7_pct > 0),
+        Row("FUTURES_FALL7_EXEMPT_X", icon="💥", values=FALL7_EXEMPT_CHOICES,
+            fmt=_off("Sert çöküşte de küçük", lambda v: f"Düşüş ≥ eşik ×{v:g}: tam boy"),
+            show=lambda cfg: is_futures(cfg.strategy) and cfg.futures_fall7_pct > 0),
+        Row("FUTURES_FALL7_BTC_PCT", icon="🌧️", values=FALL7_BTC_CHOICES,
+            fmt=_off("BTC'ye bakılmaz", lambda v: f"BTC 7 günde −%{v:g}+: hafife girme"),
+            show=lambda cfg: is_futures(cfg.strategy) and cfg.futures_fall7_pct > 0 and cfg.futures_fall7_exempt_x > 0),
         Row("FUTURES_GUARD_PCT", icon="🛡️", values=GUARD_CHOICES,
             fmt=_off("Sermaye koruması yok", lambda v: f"Zarar %{v:g}"), show=lambda cfg: is_futures(cfg.strategy)),
         Row("FUTURES_GUARD_SIZE_PCT", icon="📏", values=GUARD_SIZE_CHOICES, fmt=lambda v: f"Koruma boyu %{v:g}",
@@ -1444,8 +1452,15 @@ class SettingsMenu:
         if cfg.futures_fall7_pct <= 0:
             return "🔪 Düşen bıçak: kapalı\n"
         got = len(getattr(bot, "_day_closes", {}) or {})
+        exempt = (f" (düşüşü eşiğin {cfg.futures_fall7_exempt_x:g} katı ve üstü sert çöküşte tam boy)"
+                  if cfg.futures_fall7_exempt_x > 0 else "")
+        if cfg.futures_fall7_btc_pct > 0 and cfg.futures_fall7_exempt_x > 0:
+            b7 = bot.btc7() if hasattr(bot, "btc7") else None
+            now = f", şu an BTC 7 günde %{b7:+.1f}" if b7 is not None else ""
+            exempt += (f"; BTC de 7 günde %{cfg.futures_fall7_btc_pct:g}'ten fazla düştüyse hafif çöküşe girilmez"
+                       f"{now}")
         return (f"🔪 Düşen bıçak: coin son 7 günde %{cfg.futures_fall7_pct:g}'ten fazla düştüyse pozisyon "
-                f"%{cfg.futures_fall7_size_pct:g} boy | günlük kapanışları alınan coin: {got}\n")
+                f"%{cfg.futures_fall7_size_pct:g} boy{exempt} | günlük kapanışları alınan coin: {got}\n")
 
     def guard_line(self) -> str:
         """Risk sayfasında sermaye koruması: bota verilen sermayeye göre şu anki toplam zarar ve sıradaki pozisyonun boyu."""

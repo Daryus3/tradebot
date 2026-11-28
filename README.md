@@ -3182,6 +3182,89 @@ Okuma:
 - **Öneri:** `FUTURES_FALL7_PCT=15`, `FUTURES_FALL7_SIZE_PCT=60` ve `FUTURES_EXTRA_DEEP_SIZE_PCT=200` (var olan ayar).
 - Risk sigortaları sayfası her şey açıkken Telegram sınırını aşıp kesiliyordu; açıklamalar artık sığdığı kadar ekleniyor.
 
+#### Rapor 34 araştırması: düşen bıçakta sert çöküş muafiyeti + BTC haftası kuralı (Kasım 2026)
+Taban: H10 (rapor 33 ayarı: düşen bıçak %15 / ×0.6 + derin ek pozisyon %200), **4.000 USDT**, 10 çekiliş, her ayın 1'inde
+başlayan 71 hesap. Şimdiki: 12 ay ortanca +%3.860, %60'ı aşan düşüş 12.5, zararda 2, alt çeyrek +%1.402, kill-switch 0;
+canlıda ölçülen giriş dolumunda +%2.982 / 17 / 2 / +%1.091. "Eşleştirmeli": aynı çekilişteki tabanla karşılaştırma
+(ortancası iyi çekiliş, ortanca farkı, alt çeyreği iyi çekiliş, %60'ı aşan düşüş farkı).
+
+**Ön eleme (H10 işlemleri, 0. çekiliş, işlem başı net; 2020-23 / 2024-26; 1. çekiliş aynı yönde).** Son 7 günde %15+
+düşmüş coinlerde zayıflık her çöküşte değil:
+
+| Düşen bıçak coininde | Kova | İşlem başı net |
+|---|---|---|
+| İlk pozisyon | düşüş / eşik < 1.35 (436 işlem) | −%0.11 (−0.14 / −0.05) |
+| Ek pozisyon | düşüş / eşik 1.35-2 (968) · 2-3 (500) · ≥3 (372) | −%0.03 · +%0.23 · **+%1.11** (iki dönemde de) |
+| İlk pozisyon, BTC de 7 günde %10+ düşmüş | 342 işlem | **−%0.15 (−0.10 / −0.42)**; 2021, 2022, 2024, 2026'da eksi |
+| İlk pozisyon, BTC düşmemiş | 208 işlem | +%0.08 … +%0.32 |
+| Ek pozisyon, düşüş / eşik ≥2, BTC 7 günde %10+ düşmüş | 608 işlem | +%0.73 |
+| (Karşılaştırma) bıçak olmayan coinde ilk pozisyon, BTC düşmüş | 151 işlem | +%0.49 |
+
+Yani son haftası kötü coinde hafif çöküş (eşiği az geçen) zararlı, özellikle piyasanın tamamı düşerken; sert çöküş ise en
+iyi işlemler arasında ve rapor 33'ün ×0.6 küçültmesi onları da küçültüyordu.
+
+| Fikir | 12 ay ortanca (eşleştirmeli) | Karar |
+|---|---|---|
+| Düşen bıçakta ilk pozisyona hiç girmemek | +%3.510 (0/10, −%392; düşüş +6.5) | Kötü: dalganın ilk (en derin) çöküşünü kaçırıyor |
+| Düşen bıçakta ilk pozisyon ×0.3 · oran kademeleri (<2 ×0.4 … ≥3 ×1) | −%36 · +%127 (alt çeyrek 4/10) | Kötü / zayıf |
+| Pompa sonrası çöküş (7 günde +%60) ×0.6 | −%85 | Kötü |
+| BTC haftası düşüşteyken bıçak coininde ilk pozisyona girmemek (her çöküş) | −%58 … −%172 | Kötü |
+| Muafiyetle birlikte bıçak eşiği %12 / %20 · derin ek %175 · bıçak boyu %50 / %70 | −%278 / −%73 · −%33 · +%41 / +%18 | Şimdiki (%15, %200, %60) doğru |
+| BTC şartı olmadan bıçak coininde hafif çöküşe girmemek | +%14 (5/10), alt çeyrek 4/10 | Etkisiz: BTC şartı gerekli |
+| BTC düşüşteyken bıçak olmayan ek pozisyon ×1.25 | kurala ek kazanç yok | Elendi |
+| **Sert çöküş muafiyeti: düşüş ≥ eşik ×2 ise bıçak küçültmesi yok** | **+%4.032 (8/10, +%78), alt çeyrek 7/10** | **Eklendi (`FUTURES_FALL7_EXEMPT_X`)** |
+| **+ BTC 7 günde %10+ düştüyse bıçak coininde hafif çöküşe (oran <2) girmemek** | **+%4.346 (10/10, +%673), alt çeyrek 8/10** | **Eklendi (`FUTURES_FALL7_BTC_PCT`), önerildi** |
+
+| Ayar | Normal maliyet: 12 ay ortanca / %60+ / alt çeyrek | Eşleştirmeli | Canlı dolum: 12 ay ortanca / %60+ / alt çeyrek | Eşleştirmeli |
+|---|---|---|---|---|
+| Şimdiki (H10) | +%3.860 / 12.5 / +%1.402 | – | +%2.982 / 17 / +%1.091 | – |
+| Muafiyet ×2 | +%4.032 / 12.5 / +%1.424 | 8/10, +%78, 7/10, 0.0 | +%3.042 / 15 / +%1.152 | 7/10, +%50, 3/10, 0.0 |
+| Muafiyet ×1.75 · ×2.25 · ×2.5 · ×3 | +%4.015 · +%4.067 · +%4.076 · +%4.113 | 7-9/10, +%51 … +%132 | | |
+| **Muafiyet ×2 + BTC %10** | **+%4.346 / 14 / +%1.416** | **10/10, +%673, 8/10, +1.5** | **+%3.234 / 17 / +%1.211** | **10/10, +%297, 8/10, 0.0** |
+| Muafiyet ×2 + BTC %10, yalnız ilk pozisyon | +%4.086 / 14 / +%1.480 | 10/10, +%221, 10/10, +1.0 | | |
+| Muafiyet ×2 + BTC %5 · %15 | +%4.341 · +%4.080 | 9/10, +%578 · 8/10, +%170 | | |
+| Muafiyet ×2 + BTC %10, hafif çöküşte girmek yerine ×0.5 | +%4.118 / 12 / +%1.444 | 10/10, +%325, 7/10, 0.0 | | |
+| Muafiyet ×3 + BTC %10 | +%4.218 / 13.5 / +%1.468 | 10/10, +%500, 5/10, +1.0 | | |
+| Muafiyet ×2 + BTC %10, hafif sınırı 1.5 | +%4.126 / 14 / +%1.346 | 9/10, +%406, 3/10, +2.0 | | |
+| Muafiyet ×2 + BTC %10 + bıçak boyu %50 | +%4.499 / 14.5 / +%1.428 | 9/10, +%716, 9/10, +2.0 | | |
+| Muafiyet ×2.5 + BTC %10 | +%4.126 / 14.5 / +%1.438 | 9/10, +%340, 6/10, +1.5 | | |
+| Muafiyet ×2 + BTC %10 + derin ek %175 | +%4.196 / 13 / +%1.407 | 10/10, +%440, 7/10, 0.0 | +%3.282 / 14 / +%1.127 | 8/10, +%185, 7/10, −1.0 |
+| Muafiyet ×2 + BTC %10 + derin ek %150 | +%4.130 / 12.5 / +%1.618 | 9/10, +%410, 8/10, 0.0 | +%3.050 / 14 / +%1.177 | 7/10, +%75, 7/10, −1.0 |
+
+Dönemlere göre (12 ay ortanca, başlangıç yılı) muafiyet + BTC %10: 2020 +%77.589 → +%88.234, 2021 +%3.227 → +%3.875,
+2022 +%131 → +%170, 2023-25 +%3.912 → +%4.451; A (tüm dönem) 5,86 → 6,45 M; seçim / doğrulama CAGR +%528 / +%555 → +%544 /
++%571.
+
+| Stres (0. çekiliş, 71 hesap) | Şimdiki (H10) | Muafiyet ×2 | Muafiyet ×2 + BTC %10 | + derin ek %175 | + derin ek %150 |
+|---|---|---|---|---|---|
+| 3 kat kayma | +%2.870, alt çeyrek +%1.179, zararda 3, %60+ 25, kill 0 | +%2.875, +%1.104, 3, 23, 0 | +%3.158, +%1.483, 2, 26, 0 | +%3.096, +%1.359, 2, 28, 0 | +%3.013, +%1.240, 3, 18, 0 |
+| Canlı dolum + 3 kat kayma | +%2.547, +%692, zararda 7, %60+ 28, kill 2 | +%2.603, +%658, 7, 31, 2 | +%2.977, +%875, 7, 32, 3 | +%2.915, +%799, 7, 28, 3 | +%2.809, +%850, 7, 27, 3 |
+| Kötümser stop dolumu (en kötü durum) | ortanca +%31, alt çeyrek −%60, zararda 33, kill 29 | −%4, −%61, 36, 30 | −%12, −%61, 37, 30 | −%4, −%61, 37, 30 | +%15, −%61, 34, 29 |
+
+Okuma:
+- Komşuların hepsi şimdikinden iyi (BTC %5-15, muafiyet ×2-3: ortanca 8-10/10). En iyisi seçildiği için kazanç biraz
+  iyimser olabilir; en zayıf komşu bile +%170.
+- BTC kuralı yalnız sert çöküş sınırıyla anlamlı: aynı ×2 sınırı hem muafiyet hem "hafif çöküş" için en iyisi (sınır 1.5
+  alt çeyreği bozuyor). Bu yüzden BTC kuralı `FUTURES_FALL7_EXEMPT_X`'i kullanır; muafiyet kapalıyken çalışmaz.
+- %60'ı aşan düşüş normal maliyette çekiliş başına +1.5, canlı dolumda değişmiyor (17 → 17). Stres testinde kâr ve alt
+  çeyrek gerçekçi maliyetlerde belirgin iyi (3 kat kayma +%288, canlı dolum + kayma +%430), ama kuyruk biraz kalınlaşıyor:
+  canlı dolum + kaymada %60+ 28 → 32, kill-switch 2 → 3; kötümser stop dolumunda ortanca +%31 → −%12, kill-switch 29 → 30
+  (sert çöküşte tam boy: en oynak anlarda daha büyük pozisyon). Derin ek pozisyonu %175'e indirmek kuyruğu toparlıyor:
+  normal +%440 (10/10), canlı dolum +%185 (8/10) ve %60+ 17 → 14; stres testinde canlı dolum + kaymada %60+ şimdikiyle aynı
+  (28). %150 en temkinlisi (alt çeyrek +%1.618) ama canlı dolumda kazancın çoğunu kaybediyor (+%75).
+- Resmi motor araştırma kancasıyla birebir aynı (muafiyet 10 çekilişin hepsinde, BTC kuralı 0. ve 3. çekilişte A kuruşu
+  kuruşuna aynı; botun `attach_fall7`'si BTC'nin 7 günlük getirisini araştırmayla aynı kuralla hesaplar).
+- **Eklenen ayarlar:** `FUTURES_FALL7_EXEMPT_X` (varsayılan 0 = kapalı; önerilen 2) ve `FUTURES_FALL7_BTC_PCT`
+  (varsayılan 0 = kapalı; önerilen 10). Telegram: 🧯 Risk sigortaları → 💥 / 🌧️ (düşen bıçak açıkken). Canlı bot BTC'nin
+  günlük mumlarını da diğer coinlerle birlikte günde bir alır; atlanan sinyal tarama kaydına "düşen bıçak: BTC de düşüşte,
+  hafif çöküş" diye yazılır; muaf pozisyonun mesajında "Düşen bıçak: … ama çöküş sert …, tam boy" satırı; backtest
+  başlığında 🔪 satırı muafiyeti ve atlanan sinyal sayısını gösterir, tek kural tablosunda çevre satırları var.
+- **Öneri:** `FUTURES_FALL7_EXEMPT_X=2` ve `FUTURES_FALL7_BTC_PCT=10` (rapor 33'ün `FUTURES_FALL7_PCT=15`,
+  `FUTURES_FALL7_SIZE_PCT=60`, `FUTURES_EXTRA_DEEP_SIZE_PCT=200` ayarlarıyla birlikte). Kuyruk riskini şimdiki düzeyde
+  tutmak isteyen ayrıca `FUTURES_EXTRA_DEEP_SIZE_PCT=175` yapabilir (kâr artışı yaklaşık üçte bir az).
+- Açılışta Telegram'a ayar notu gönderilmez (eskiden kalan bilgilendirme notları silindi); etkisiz / çelişen ayar uyarıları
+  yalnızca `logs/bot.log`'a yazılır.
+
 #### Kill-switch eşiği (rapor 23, Kasım 2026)
 **Nasıl çalışır:** botun toplam zararı (kapanan işlemler + açık pozisyonların anlık zararı) botun sermayesinin
 (başlangıç + /sermayeekle) `MAX_TOTAL_LOSS_PCT`'sine ulaşınca durum dosyasına "kill-switch" yazılır, yeni pozisyon
@@ -3338,7 +3421,9 @@ karar için ortancaya ve en kötüye bakın. Çıkış taraması her gün dengel
   dk'nın dibinden eşik kadar yukarıdayken durulmuş sayılmayan ve büyük boyla açılan işlemlerin A'daki sayısını gösterir.
   A ve B aynı kuralı kullanır; büyütme C'de de (sabit tutar × boy) uygulanır.
 - **🔪 Düşen bıçak satırı** (rapor başlığında, `FUTURES_FALL7_PCT` açıkken): son 7 günde eşikten fazla düşmüş
-  coinlerde küçük boyla açılan işlem sayısını (A) gösterir. A, B ve C aynı kuralı kullanır.
+  coinlerde küçük boyla açılan işlem sayısını (A) gösterir. Sert çöküş muafiyeti (`FUTURES_FALL7_EXEMPT_X`) açıksa
+  düşüşü eşiğin o katı ve üstündeki çöküşler tam boy açılır (sayıya girmez); piyasa düşüşü kuralı
+  (`FUTURES_FALL7_BTC_PCT`) açıksa BTC düşüşü yüzünden atlanan sinyal sayısı da yazılır. A, B ve C aynı kuralı kullanır.
 - **🔱 Derin ek pozisyon satırı** (rapor başlığında, `FUTURES_EXTRA_DEEP_X` açıkken, dalga modunda): başka pozisyon
   açıkken düşüşü çöküş eşiğinin X katı ya da fazlası olan çöküşte büyük boyla açılan işlem sayısını (A) gösterir. A, B ve
   C aynı kuralı kullanır.

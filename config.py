@@ -1121,6 +1121,10 @@ class Config:
     # Düşen bıçak (strategy.fall7_size_factor): coin son 7 günde %X'ten fazla düştüyse boy %Y
     futures_fall7_pct: float = 0.0             # 0 = kapalı
     futures_fall7_size_pct: float = 60.0
+    # Sert çöküş muafiyeti: düşüş / eşik oranı X ve üstündeyse düşen bıçak küçültmesi uygulanmaz
+    futures_fall7_exempt_x: float = 0.0        # 0 = kapalı
+    # Piyasa düşüşü (strategy.fall7_btc_skip): BTC de son 7 günde %X'ten fazla düştüyse bıçak coininde hafif çöküşe girme
+    futures_fall7_btc_pct: float = 0.0         # 0 = kapalı
     # Sermaye koruması (bkz. futures_guard_factor): toplam zarar bota verilen sermayenin %X'i iken pozisyon boyu %Y
     futures_guard_pct: float = 0.0         # Başlangıç sermayesine göre zarar eşiği (%; 0 = kapalı)
     futures_guard_size_pct: float = 60.0   # Eşik aşılınca yeni pozisyonların büyüklüğü (%)
@@ -1540,6 +1544,12 @@ class Config:
             errors.append("FUTURES_FALL7_PCT 0 (kapalı) ya da 5-80 olmalı (coin son 7 günde % kaçtan fazla düştüyse)")
         if not 10 <= self.futures_fall7_size_pct <= 100:
             errors.append("FUTURES_FALL7_SIZE_PCT 10-100 arasında olmalı (düşen bıçakta pozisyon büyüklüğü %)")
+        if not (self.futures_fall7_btc_pct == 0 or 2 <= self.futures_fall7_btc_pct <= 50):
+            errors.append("FUTURES_FALL7_BTC_PCT 0 (kapalı) ya da 2-50 olmalı (BTC son 7 günde % kaçtan fazla düştüyse "
+                          "düşen bıçak coininde hafif çöküşe girilmez)")
+        if not (self.futures_fall7_exempt_x == 0 or 1.2 <= self.futures_fall7_exempt_x <= 10):
+            errors.append("FUTURES_FALL7_EXEMPT_X 0 (kapalı) ya da 1.2-10 olmalı (düşüş / eşik oranı bu kat ve üstündeyse "
+                          "düşen bıçak küçültmesi yok)")
         if not (self.futures_extra_deep_x == 0 or 1.5 <= self.futures_extra_deep_x <= 10):
             errors.append("FUTURES_EXTRA_DEEP_X 0 (kapalı) ya da 1.5-10 olmalı (ek pozisyonda derin çöküş: düşüş eşiğin en "
                           "az kaç katı)")
@@ -1863,6 +1873,8 @@ def load_config(env_file: Optional[str] = None, mode_override: Optional[str] = N
         futures_extra_deep_x=_env_float("FUTURES_EXTRA_DEEP_X", 0.0),
         futures_fall7_pct=_env_float("FUTURES_FALL7_PCT", 0.0),
         futures_fall7_size_pct=_env_float("FUTURES_FALL7_SIZE_PCT", 60.0),
+        futures_fall7_exempt_x=_env_float("FUTURES_FALL7_EXEMPT_X", 0.0),
+        futures_fall7_btc_pct=_env_float("FUTURES_FALL7_BTC_PCT", 0.0),
         futures_extra_deep_size_pct=_env_float("FUTURES_EXTRA_DEEP_SIZE_PCT", 150.0),
         futures_cushion_x=_env_float("FUTURES_CUSHION_X", 0.0),
         futures_cushion_size_pct=_env_float("FUTURES_CUSHION_SIZE_PCT", 112.5),
@@ -2076,6 +2088,12 @@ def _setting_notes(cfg: Config) -> List[str]:
         if cfg.futures_extra_hold_minutes > 0 and cfg.futures_max_positions <= 1:
             notes.append(f"FUTURES_EXTRA_HOLD_MINUTES={cfg.futures_extra_hold_minutes} (Faz 9) etkisiz: ek pozisyon "
                          f"yalnızca dalga modunda (FUTURES_MAX_POSITIONS > 1) açılır.")
+        if cfg.futures_fall7_exempt_x > 0 and cfg.futures_fall7_pct <= 0:
+            notes.append(f"FUTURES_FALL7_EXEMPT_X={cfg.futures_fall7_exempt_x:g} etkisiz: düşen bıçak kuralı kapalı "
+                         f"(FUTURES_FALL7_PCT=0), küçültülen pozisyon yok.")
+        if cfg.futures_fall7_btc_pct > 0 and (cfg.futures_fall7_pct <= 0 or cfg.futures_fall7_exempt_x <= 0):
+            notes.append(f"FUTURES_FALL7_BTC_PCT={cfg.futures_fall7_btc_pct:g} etkisiz: düşen bıçak kuralı "
+                         f"(FUTURES_FALL7_PCT) ve sert çöküş sınırı (FUTURES_FALL7_EXEMPT_X) açık olmalı.")
         if getattr(cfg, "futures_minute_scan", False) and not futures_scan_shifts(cfg):
             notes.append("FUTURES_MINUTE_SCAN=true ama bu ayarlarla kullanılamıyor, 5 dk'da bir taranır: dakikalık "
                          "tarama yalnızca sade çöküş taktiğinde (ek modül, likidasyon şartı, oynaklık eşiği ve onay "
