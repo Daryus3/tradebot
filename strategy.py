@@ -2163,6 +2163,23 @@ def support_size_factor(size_pct: float, zone_pct: float, dist_pct: Optional[flo
     return max(0.0, float(size_pct)) / 100 if -float(zone_pct) <= dist_pct < 0 else 1.0
 
 
+def ret7_pct(closes: Sequence[float]) -> Optional[float]:
+    """Coinin son 7 günlük getirisi (%): kesinleşmiş günlük kapanışlardan (son eleman dünkü kapanış) dünkü kapanış / 7
+    gün önceki kapanış − 1. Yeterli gün yoksa None (düşen bıçak kuralı, FUTURES_FALL7_*)."""
+    if len(closes) < 8 or not float(closes[-8]) > 0:
+        return None
+    return (float(closes[-1]) / float(closes[-8]) - 1) * 100
+
+
+def fall7_size_factor(fall_pct: float, size_pct: float, ret7: Optional[float]) -> float:
+    """Düşen bıçak (FUTURES_FALL7_PCT / FUTURES_FALL7_SIZE_PCT; rapor 33 araştırması): coin son 7 günde fall_pct'den
+    fazla düştüyse (ret7 < −fall_pct) boy size_pct / 100, değilse 1 (kapalıysa ya da ölçü yoksa 1). Son haftada sert düşen
+    coinlerin çöküş dönüşü zayıf (işlem başı +%0.20, diğerleri +%0.28-0.61; iki dönemde de)."""
+    if fall_pct <= 0 or ret7 is None or ret7 != ret7:
+        return 1.0
+    return max(0.0, float(size_pct)) / 100 if ret7 < -float(fall_pct) else 1.0
+
+
 def window_sigma(c, bars: int, lookback: int = FUT_Z_LOOKBACK_BARS):
     """`bars` mumluk pencerenin olağan hareketi (log, 1 standart sapma): pencere başlangıcından önceki `lookback`
     mumun 5 dk log getirilerinin standart sapması × √bars. Çöküşün kendisi ölçüye karışmaz."""
@@ -2851,6 +2868,9 @@ class FuturesSignal:
         elif m.get("bounce_calm"):
             parts.append(f"V dönüşü: fiyat son 15 dk'nın dibinden %{m.get('bounce15', 0.0):.1f} yukarıda, durulmuş "
                          f"küçültmesi yok")
+        if m.get("fall7_size_pct") and m["fall7_size_pct"] < 100:
+            parts.append(f"Düşen bıçak: coin son 7 günde %{-m.get('ret7', 0.0):.1f} düştü, pozisyon "
+                         f"%{m['fall7_size_pct']:g} boy")
         if m.get("deep_size_pct") and m["deep_size_pct"] > 100:
             parts.append(f"Derin ek pozisyon: düşüş çöküş eşiğinin {m.get('deep_ratio', 0):g} katı, pozisyon "
                          f"%{m['deep_size_pct']:g} boy")

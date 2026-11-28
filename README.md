@@ -3118,6 +3118,69 @@ başı +%0.77) ama %60 boyla açılıyor; güçlü ama sığ çöküşler zayıf
 | Kalite muafiyeti + güçlü-sığ ×0.8 · + durulmuş muafiyeti | −%341 · −%30 | | Kötü / etkisiz |
 | Aynı dakikadaki sinyallerde derin çöküşe öncelik | | | Zaten öyle (sıralama puanı = düşüş / eşik × ana yüzde) |
 
+#### Rapor 33 araştırması: düşen bıçak + derin ek pozisyon hibriti, emir defteri ve piyasa geneli çıkış (Kasım 2026)
+Taban: H9 (rapor 32 ayarı), **4.000 USDT**, 10 çekiliş, her ayın 1'inde başlayan 71 hesap. Şimdiki: 12 ay ortanca +%3.578,
+%60'ı aşan düşüş 10, zararda 2, alt çeyrek +%1.331, kill-switch 0; canlıda ölçülen giriş dolumunda +%2.651 / 16 / 2 / +%1.039.
+"Eşleştirmeli": aynı çekilişteki tabanla karşılaştırma (ortancası iyi çekiliş, ortanca farkı, alt çeyreği iyi çekiliş,
+%60'ı aşan düşüş farkı).
+
+**Yeni ölçüler (işlem başı net, C; 2020-23 / 2024-26):**
+
+| Ölçü | Kova | İşlem başı net |
+|---|---|---|
+| Coinin dünkü kapanışı / 50 günlük ortalama | %30'dan fazla altında (958 işlem) | +%0.067 (+0.056 / +0.173) |
+| | %0-30 altında · üstünde | +%0.26-0.31 · +%0.43-0.57 |
+| Coinin son 7 günlük getirisi | %20'den fazla düşmüş (1.737 işlem) | +%0.198 (+0.198 / +0.200) |
+| | diğerleri | +%0.28 … +%0.61 |
+| Emir defteri (±%2 alış / satış, 2023+ ölçülen) | < 1 · ≥ 1 | ~+%0.16 · ~+%0.39 |
+
+| Fikir | Sonuç | Karar |
+|---|---|---|
+| Piyasa geneli sıçramada (≥3-8 coin dipten %3-5+ dönmüş) kârdaki pozisyonu kapatmak | Ön eleme: C toplamı +%2.672 → +%2.272 … +%2.612; Kâr Al'a gidecek işlemleri kesiyor | Kötü |
+| Başabaş tetiklenince Kâr Al'ı %3-4'e indirmek | Ön eleme: +%2.059 / +%2.426 | Kötü |
+| Düşen bıçağı (50 günlük ortalamanın %30+ altı) küçültmek ×0.5 / ×0.7 · hiç girmemek | −%124 / −%26 · −%252 | Kötü / etkisiz |
+| Yükselen coini (50 günlük ortalamanın %15+ üstü) ×1.2 | +%302 ama alt çeyrek 2/10, düşüş +5 | Kaldıraç gibi |
+| Emir defteri dengesizliğine göre boy (±%2: < 1 ×0.7, ≥ 1.33 ×1.2) | +%424 (8/10; 2022 ortası sonrası başlangıçlarda 10/10), canlı dolumda +%305 | **Uygulanamıyor** (aşağıda) |
+| **Düşen bıçak (son 7 günde %15+) ×0.6 + derin ek pozisyon %200 (hibrit)** | | **Eklendi (`FUTURES_FALL7_*`, varsayılan kapalı), önerildi** |
+
+**Emir defteri neden eklenmedi:** backtestteki ölçü Binance arşivindeki tam defterden hesaplanmış yüzde düzeyleri (±%1-5).
+Canlı bot defteri 500 seviye okuyor (Binance en fazla 1.000 veriyor); BTC, 1000PEPE gibi ince fiyat adımlı coinlerde bu
+seviyeler ±%2'yi, hatta ±%1'i kapsamıyor. Canlıda aynı ölçü üretilemiyor; canlıya yakın ±%1'lik ölçü de işe yaramadı
+(−%224). Bulgu not edildi (gelecekte tam defter akışıyla denenebilir).
+
+**Düşen bıçak + derin ek pozisyon (hibrit).** Son haftada sert düşmüş coinleri küçültmek tek başına riski azaltıyor ama
+kârı artırmıyor; derin ek pozisyonu %200'e büyütmek kârı artırıyor ama riski de. İkisi birlikte risk aynı kalırken kâr
+artıyor:
+
+| Ayar | Normal maliyet: 12 ay ortanca / %60+ / alt çeyrek | Eşleştirmeli | Canlı dolum: 12 ay ortanca / %60+ / alt çeyrek | Eşleştirmeli |
+|---|---|---|---|---|
+| Şimdiki (H9) | +%3.578 / 10 / +%1.331 | – | +%2.651 / 16 / +%1.039 | – |
+| Düşen bıçak (7 günde %15+) ×0.6 tek başına | +%3.735 / 8 / +%1.445 | 6/10, +%24, 9/10, −1.5 | | |
+| Düşen bıçak (7 günde %20+) ×0.5 tek başına | +%3.672 / 8 / +%1.363 | 5/10, −%11, 7/10, −3.0 | +%2.649 / 16 / +%1.118 | 5/10, +%26, 9/10, −0.5 |
+| Derin ek pozisyon %200 tek başına | +%3.833 / 14 / +%1.278 | 7/10, +%103, 4/10, +1.5 | +%2.780 / 18 / +%1.023 | 9/10, +%138, 6/10, +3.0 |
+| **7 günde %15+ ×0.6 + derin ek %200** | **+%3.860 / 12.5 / +%1.402** | **9/10, +%366, 8/10, 0.0** | **+%2.982 / 17 / +%1.091** | **10/10, +%379, 8/10, +0.5** |
+| 7 günde %20+ ×0.5 + derin ek %200 | +%3.782 / 11.5 / +%1.331 | 6/10, +%229, 6/10, +0.5 | +%2.709 / 18 / +%1.100 | 8/10, +%280, 8/10, +2.0 |
+| 7 günde %20+ ×0.6 + derin ek %200 | +%3.820 / 12.5 / +%1.320 | 8/10, +%86, 7/10, +0.5 | | |
+| 7 günde %20+ ×0.5 + derin ek %175 | +%3.815 / 10 / +%1.335 | 7/10, +%78, 7/10, −1.0 | +%2.723 / 15 / +%1.126 | 7/10, +%126, 8/10, −1.0 |
+| 7 günde %25+ ×0.5 + derin ek %200 | +%3.804 / 12.5 / +%1.334 | 8/10, +%92, 6/10, +1.0 | | |
+
+| Stres (0. çekiliş, 71 hesap) | Şimdiki | Hibrit (%15 / ×0.6 + %200) |
+|---|---|---|
+| 3 kat kayma | +%2.727, alt çeyrek +%885, zararda 6, kill 0 | +%2.870, +%1.179, zararda 3, kill 0 |
+| Canlı dolum + 3 kat kayma | +%2.455, +%637, %60+ 29, kill 3 | +%2.547, +%692, 28, kill 2 |
+| Kötümser stop dolumu (en kötü durum) | ortanca −%20, zararda 38, kill 31 | +%31, 33, kill 29 |
+
+Okuma:
+- Komşuların hepsi şimdikinden iyi (ortanca 6-10/10, alt çeyrek 6-8/10), düşüş çekiliş başına −1 … +1, kill-switch hiçbir
+  çekilişte yok. En iyisi seçildiği için kazanç biraz iyimser olabilir; en kötü komşu bile +%78 / +%126.
+- Resmi motor araştırma kancasıyla birebir aynı (botun `attach_fall7`'si araştırmadaki 7 günlük getiriyle 136.196 sinyalde
+  sıfır farkla, 0. ve 3. çekilişte A kuruşu kuruşuna aynı).
+- **Eklenen ayarlar:** `FUTURES_FALL7_PCT` (varsayılan 0 = kapalı; önerilen 15) ve `FUTURES_FALL7_SIZE_PCT` (60). Telegram:
+  🧯 Risk sigortaları → 🔪 / 📏. Canlı bot coinlerin günlük mumlarını taramalar arasında günde bir alır; pozisyon mesajında
+  "Düşen bıçak: …" satırı; backtest başlığında 🔪 satırı, tek kural tablosunda çevre satırları.
+- **Öneri:** `FUTURES_FALL7_PCT=15`, `FUTURES_FALL7_SIZE_PCT=60` ve `FUTURES_EXTRA_DEEP_SIZE_PCT=200` (var olan ayar).
+- Risk sigortaları sayfası her şey açıkken Telegram sınırını aşıp kesiliyordu; açıklamalar artık sığdığı kadar ekleniyor.
+
 #### Kill-switch eşiği (rapor 23, Kasım 2026)
 **Nasıl çalışır:** botun toplam zararı (kapanan işlemler + açık pozisyonların anlık zararı) botun sermayesinin
 (başlangıç + /sermayeekle) `MAX_TOTAL_LOSS_PCT`'sine ulaşınca durum dosyasına "kill-switch" yazılır, yeni pozisyon
@@ -3273,6 +3336,8 @@ karar için ortancaya ve en kötüye bakın. Çıkış taraması her gün dengel
 - **↩️ V dönüşü satırı** (rapor başlığında, `FUTURES_BOUNCE_CALM_PCT` / `FUTURES_BOUNCE_BOOST_PCT` açıkken): fiyat son 15
   dk'nın dibinden eşik kadar yukarıdayken durulmuş sayılmayan ve büyük boyla açılan işlemlerin A'daki sayısını gösterir.
   A ve B aynı kuralı kullanır; büyütme C'de de (sabit tutar × boy) uygulanır.
+- **🔪 Düşen bıçak satırı** (rapor başlığında, `FUTURES_FALL7_PCT` açıkken): son 7 günde eşikten fazla düşmüş
+  coinlerde küçük boyla açılan işlem sayısını (A) gösterir. A, B ve C aynı kuralı kullanır.
 - **🔱 Derin ek pozisyon satırı** (rapor başlığında, `FUTURES_EXTRA_DEEP_X` açıkken, dalga modunda): başka pozisyon
   açıkken düşüşü çöküş eşiğinin X katı ya da fazlası olan çöküşte büyük boyla açılan işlem sayısını (A) gösterir. A, B ve
   C aynı kuralı kullanır.

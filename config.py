@@ -1118,6 +1118,9 @@ class Config:
     # Derin ek pozisyon (bkz. extra_deep_factor): başka pozisyon açıkken düşüşü eşiğin X katı ve üstündeyse boy %Y
     futures_extra_deep_x: float = 0.0          # 0 = kapalı
     futures_extra_deep_size_pct: float = 150.0
+    # Düşen bıçak (strategy.fall7_size_factor): coin son 7 günde %X'ten fazla düştüyse boy %Y
+    futures_fall7_pct: float = 0.0             # 0 = kapalı
+    futures_fall7_size_pct: float = 60.0
     # Sermaye koruması (bkz. futures_guard_factor): toplam zarar bota verilen sermayenin %X'i iken pozisyon boyu %Y
     futures_guard_pct: float = 0.0         # Başlangıç sermayesine göre zarar eşiği (%; 0 = kapalı)
     futures_guard_size_pct: float = 60.0   # Eşik aşılınca yeni pozisyonların büyüklüğü (%)
@@ -1533,6 +1536,10 @@ class Config:
                           "küçük çöküş)")
         if not 0.5 <= self.futures_small_tp_pct <= 50:
             errors.append("FUTURES_SMALL_TP_PCT 0.5-50 arasında olmalı (küçük çöküşte Kâr Al, fiyat %)")
+        if not (self.futures_fall7_pct == 0 or 5 <= self.futures_fall7_pct <= 80):
+            errors.append("FUTURES_FALL7_PCT 0 (kapalı) ya da 5-80 olmalı (coin son 7 günde % kaçtan fazla düştüyse)")
+        if not 10 <= self.futures_fall7_size_pct <= 100:
+            errors.append("FUTURES_FALL7_SIZE_PCT 10-100 arasında olmalı (düşen bıçakta pozisyon büyüklüğü %)")
         if not (self.futures_extra_deep_x == 0 or 1.5 <= self.futures_extra_deep_x <= 10):
             errors.append("FUTURES_EXTRA_DEEP_X 0 (kapalı) ya da 1.5-10 olmalı (ek pozisyonda derin çöküş: düşüş eşiğin en "
                           "az kaç katı)")
@@ -1854,6 +1861,8 @@ def load_config(env_file: Optional[str] = None, mode_override: Optional[str] = N
         futures_small_tp_pct=_env_float("FUTURES_SMALL_TP_PCT", 5.0),
         futures_extra_min_x=_env_float("FUTURES_EXTRA_MIN_X", 0.0),
         futures_extra_deep_x=_env_float("FUTURES_EXTRA_DEEP_X", 0.0),
+        futures_fall7_pct=_env_float("FUTURES_FALL7_PCT", 0.0),
+        futures_fall7_size_pct=_env_float("FUTURES_FALL7_SIZE_PCT", 60.0),
         futures_extra_deep_size_pct=_env_float("FUTURES_EXTRA_DEEP_SIZE_PCT", 150.0),
         futures_cushion_x=_env_float("FUTURES_CUSHION_X", 0.0),
         futures_cushion_size_pct=_env_float("FUTURES_CUSHION_SIZE_PCT", 112.5),
@@ -2381,6 +2390,14 @@ def _setting_notes(cfg: Config) -> List[str]:
                          f"ayın 1'inde başlayan 71 hesap, 10 çekiliş) 1.35: 12 ay ortancası +%2.946 → +%3.255, alt "
                          f"çeyrek +%1.019 → +%1.219, %60'ı aşan düşüş 9.5 → 9.5, kill-switch 0; canlıda ölçülen giriş "
                          f"dolumunda +%2.247 → +%2.476, alt çeyrek +%546 → +%961.")
+        if cfg.futures_fall7_pct > 0:
+            notes.append(f"FUTURES_FALL7_PCT={cfg.futures_fall7_pct:g}, FUTURES_FALL7_SIZE_PCT={cfg.futures_fall7_size_pct:g} "
+                         f"(düşen bıçak): coin son 7 günde (dünkü günlük kapanışa göre) %{cfg.futures_fall7_pct:g}'ten "
+                         f"fazla düştüyse yeni pozisyonlar %{cfg.futures_fall7_size_pct:g} boy (günlük mumlar günde bir "
+                         f"alınır, alınamazsa boy değişmez). Testte (4.000 USDT, rapor 33 ayarı, 71 hesap, 10 çekiliş) "
+                         f"15 / 60 tek başına riski azaltıyor (12 ay ortancası aynı, %60'ı aşan düşüş çekiliş başına −1.5, "
+                         f"alt çeyrek 10 çekilişin 9'unda iyi); derin ek pozisyon boyu %200 ile birlikte 12 ay ortancası "
+                         f"+%3.578 → +%3.860 (canlıda ölçülen dolumda +%2.651 → +%2.982).")
         if cfg.futures_extra_deep_x > 0:
             notes.append(f"FUTURES_EXTRA_DEEP_X={cfg.futures_extra_deep_x:g}, FUTURES_EXTRA_DEEP_SIZE_PCT="
                          f"{cfg.futures_extra_deep_size_pct:g} (derin ek pozisyon): dalga modunda başka pozisyon açıkken "

@@ -58,7 +58,7 @@ from strategy import (FUT_BAR_MS, FUT_BREADTH_DROP_PCT, FUT_BREADTH_HOURS, FUT_B
                       recent_size_factor, basis_pct, basis_size_factor, quality_score, quality_size_factor,
                       spot_pairs, BIG_EXTRA_SLOTS, QUALITY_CUTS, big_extra_slots, big_funding_skip, big_rules_on,
                       quality_roundup_ok, bear_regime, bear_size_factor, bounce_boost_factor, support_dist_pct,
-                      support_low,
+                      support_low, fall7_size_factor, ret7_pct,
                       support_size_factor)
 from telegram_bot import CRITICAL_EXITS, Messages, esc, fmt_duration, fmt_price, fmt_signed, fmt_usdt, futures_tag
 from trader import ALIVE_SAVE_SEC, POSITION_LOG_SEC, RULES_REFRESH_SEC, Mark, TradingBot
@@ -187,6 +187,8 @@ class FuturesBot(TradingBot):
         # Destek bölgesi (FUTURES_SUPPORT_SIZE_PCT): sembol → (alındığı UTC saati, 1 saatlik mum açılışları, en düşükleri)
         self._hour_lows: Dict[str, Tuple[int, list, list]] = {}
         self._hour_lows_retry: Dict[str, float] = {}
+        self._day_closes: Dict[str, Tuple[int, list]] = {}     # Düşen bıçak: (UTC gün, dünkü dahil günlük kapanışlar)
+        self._day_closes_retry: Dict[str, float] = {}
         self._stop_passed: Set[str] = set()    # Stop taşınırken "emir hemen tetiklenir" reddi alan pariteler
         self._trail_at: Dict[str, float] = {}
         self.universe: List[str] = []          # FUTURES_UNIVERSE: en hacimli N köklü parite (sıralamanın ilk N'i)
@@ -494,6 +496,7 @@ class FuturesBot(TradingBot):
             self._timed_manage(self.time_fn())               # Ertelenen pozisyon kontrolü: taramadan hemen sonra
         if not scanned and not quiet:
             self._refresh_support(now)                       # Destek bölgesi: 1 saatlik mumlar (saatte bir)
+            self._refresh_fall7(now)                         # Düşen bıçak: günlük kapanışlar (günde bir)
         self._periodic(now)
 
     def _timed_manage(self, now: float) -> None:
@@ -1809,6 +1812,9 @@ class FuturesBot(TradingBot):
         support = self._support_factor(sig)
         if support != 1:
             factor *= support
+        fall7 = self._fall7_factor(sig)                      # Düşen bıçak (backtest: size_factor)
+        if fall7 != 1:
+            factor *= fall7
         dd = self._dd_factor(sig)
         brake = self._brake_factor(sig) * self._guard_factor(sig)   # 24 saat freni × sermaye koruması
         slots = self.slots()
@@ -1926,6 +1932,49 @@ class FuturesBot(TradingBot):
             sig.metrics["support_size_pct"] = round(factor * 100, 1)
             sig.metrics["support_dist"] = round(dist, 2)
             sig.metrics["support_days"] = int(cfg.futures_support_days)
+        return factor
+
+    def _fall7_on(self) -> bool:
+        return self.cfg.futures_fall7_pct > 0 and self.cfg.futures_tactic == "crash"
+
+    def _refresh_fall7(self, now: float) -> None:
+        """Düşen bıçak (FUTURES_FALL7_*): taramalar arasında coinlerin günlük kapanışları günde bir (UTC gün değişince)
+        alınır (döngü adımı başına en fazla SUPPORT_REFRESH_BATCH coin; girişte istek beklenmez). Alınamayan coin
+        SUPPORT_RETRY_SEC sonra yeniden denenir; o sürede ölçü yoksa boy değişmez."""
+        if not self._fall7_on():
+            return
+        day = int(now // 86400)
+        ex = self.exchange
+        todo = [s for s in self._support_symbols() if ex.has_market(s)
+                and self._day_closes.get(s, (-1, ()))[0] < day and now >= self._day_closes_retry.get(s, 0.0)]
+        for symbol in todo[:SUPPORT_REFRESH_BATCH]:
+            try:
+                kl = ex.klines(symbol, "1d", 10)
+            except Exception as exc:  # noqa: BLE001 - 7 günlük getiri ölçülemedi: boy değişmez
+                self._day_closes_retry[symbol] = now + SUPPORT_RETRY_SEC
+                log.warning("%s günlük mumları alınamadı (düşen bıçak): %s", symbol, exc)
+                continue
+            closes = [float(c) for t, c in zip(kl["t"], kl["c"]) if int(t) // 86_400_000 < day]   # yalnız kesinleşmiş
+            self._day_closes[symbol] = (day, closes)
+
+    def ret7_of(self, sig: FuturesSignal) -> Optional[float]:
+        """Coinin son 7 günlük getirisi (%; strategy.ret7_pct, backtest: attach_fall7). Bugünün kaydı yoksa None."""
+        cached = self._day_closes.get(sig.symbol)
+        if cached is None or cached[0] != int(self.time_fn() // 86400):
+            return None
+        return ret7_pct(cached[1])
+
+    def _fall7_factor(self, sig: FuturesSignal) -> float:
+        """Düşen bıçak çarpanı (kapalıysa 1): coin son 7 günde FUTURES_FALL7_PCT'den fazla düştüyse FUTURES_FALL7_SIZE_PCT
+        / 100. Uygulanınca sinyale yazılır (pozisyon mesajı)."""
+        cfg = self.cfg
+        if not self._fall7_on() or sig.metrics.get("tactic", 1.0) != 1.0:
+            return 1.0
+        r7 = self.ret7_of(sig)
+        factor = fall7_size_factor(cfg.futures_fall7_pct, cfg.futures_fall7_size_pct, r7)
+        if factor < 1:
+            sig.metrics["fall7_size_pct"] = round(factor * 100, 1)
+            sig.metrics["ret7"] = round(r7, 2)
         return factor
 
     def _guard_factor(self, sig: Optional[FuturesSignal] = None) -> float:

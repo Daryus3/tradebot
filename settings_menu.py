@@ -131,6 +131,9 @@ SUPPORT_HINT = ("Destek bölgesi (rapor 26 araştırması; aynı ölçü): fiyat
                 "altındayken (dip yeni kırılırken dönüşler zayıf) pozisyon %60 boy. 12 ay ortancası +%1.921 → "
                 "+%2.004, %60'ı aşan düşüş 7.5 → 4.5, zararla biten hesap 2 → 0.5. Sermaye korumasıyla birlikte "
                 "canlıda ölçülen pahalı dolumda kill-switch 9 → 0.")
+# Düşen bıçak (rapor 33 araştırması, 28 Kasım; varsayılan kapalı): coin son 7 günde % kaçtan fazla düştüyse ve o boy (%)
+FALL7_CHOICES = (0, 15, 20, 25)
+FALL7_SIZE_CHOICES = (50, 60, 75)
 # Sermaye koruması (rapor 26 araştırması, 26 Kasım; varsayılan kapalı): bota verilen sermayeye göre toplam zarar eşiği ve boy
 GUARD_CHOICES = (0, 20, 30, 40)
 GUARD_SIZE_CHOICES = (50, 60, 70)
@@ -600,6 +603,10 @@ PAGES: Dict[str, Page] = {
             show=lambda cfg: is_futures(cfg.strategy) and cfg.futures_support_size_pct < 100),
         Row("FUTURES_SUPPORT_DAYS", icon="📅", values=SUPPORT_DAYS_CHOICES, fmt=lambda v: f"{v:g} günlük dip",
             show=lambda cfg: is_futures(cfg.strategy) and cfg.futures_support_size_pct < 100),
+        Row("FUTURES_FALL7_PCT", icon="🔪", values=FALL7_CHOICES,
+            fmt=_off("Düşen bıçak kuralı yok", lambda v: f"7 günde −%{v:g}+"), show=lambda cfg: is_futures(cfg.strategy)),
+        Row("FUTURES_FALL7_SIZE_PCT", icon="📏", values=FALL7_SIZE_CHOICES, fmt=lambda v: f"Bıçakta %{v:g}",
+            show=lambda cfg: is_futures(cfg.strategy) and cfg.futures_fall7_pct > 0),
         Row("FUTURES_GUARD_PCT", icon="🛡️", values=GUARD_CHOICES,
             fmt=_off("Sermaye koruması yok", lambda v: f"Zarar %{v:g}"), show=lambda cfg: is_futures(cfg.strategy)),
         Row("FUTURES_GUARD_SIZE_PCT", icon="📏", values=GUARD_SIZE_CHOICES, fmt=lambda v: f"Koruma boyu %{v:g}",
@@ -1368,9 +1375,10 @@ class SettingsMenu:
                 if cfg.loss_cooldown_minutes > cfg.symbol_cooldown_minutes else "normal (her çıkıştaki bekleme)")
         frozen = bot.freeze_note()
         futures = is_futures(cfg.strategy)
-        return (f"🧯 <b>Risk Sigortaları</b>\n{LINE}\n"
+        head = (f"🧯 <b>Risk Sigortaları</b>\n{LINE}\n"
                 f"{self.kill_line()}\n" + (self.dd_line() + self.brake_line() + self.bear_line() + self.support_line()
-                                           + self.guard_line() + self.cushion_line() + self.depth_line()
+                                           + self.fall7_line() + self.guard_line() + self.cushion_line()
+                                           + self.depth_line()
                                            if futures else "") +
                 f"📉 Günlük zarar limiti: {daily} | bugün: {fmt_signed(day_pnl)} {q}\n"
                 f"🎯 Günlük kâr hedefi: {target}\n🔁 Zarar serisi sigortası: {streak}\n"
@@ -1380,9 +1388,22 @@ class SettingsMenu:
                 f"📒 Coin karnesi: {karne}\n" + ("" if futures else f"💧 Kayma alarmı: {slip}\n") +
                 f"{frozen or '▶️ Alımlar dondurulmamış'}\n{LINE}\n"
                 "<i>Sigortalar yalnızca YENİ alımları durdurur; açık pozisyonların takibi sürer. Kill-switch ise "
-                "her şeyi kapatıp botu kilitler. Diğerleri: /ayar ANAHTAR DEĞER"
-                + (f"\n{esc(DD_SCALE_HINT)}\n{esc(DAY_BRAKE_HINT)}\n{esc(BEAR_HINT)}\n{esc(SUPPORT_HINT)}"
-                   f"\n{esc(GUARD_HINT)}\n{esc(CUSHION_HINT)}\n{esc(DEPTH_HINT)}" if futures else "") + "</i>")
+                "her şeyi kapatıp botu kilitler. Diğerleri: /ayar ANAHTAR DEĞER")
+        hints = (DD_SCALE_HINT, DAY_BRAKE_HINT, BEAR_HINT, SUPPORT_HINT, GUARD_HINT, CUSHION_HINT,
+                 DEPTH_HINT) if futures else ()
+        return head + self._fit_hints(hints, len(head) + len("</i>")) + "</i>"
+
+    @staticmethod
+    def _fit_hints(hints, used: int) -> str:
+        """Açıklama paragrafları, sayfa metni Telegram sınırına (PAGE_TEXT_MAX) sığdığı kadar (kesilip HTML bozulmasın);
+        `used`: sayfanın açıklamalar dışındaki uzunluğu."""
+        out = ""
+        for h in hints:
+            extra = f"\n{esc(h)}"
+            if used + len(out) + len(extra) > PAGE_TEXT_MAX:
+                break
+            out += extra
+        return out
 
     def depth_line(self) -> str:
         """Risk sayfasında derinliğe göre boy ve backtestteki emir defteri kayması durumu."""
@@ -1415,6 +1436,16 @@ class SettingsMenu:
         return (f"📐 Destek bölgesi: fiyat coinin {cfg.futures_support_days} günlük dibinin en fazla "
                 f"%{cfg.futures_support_zone_pct:g} altındayken pozisyon %{cfg.futures_support_size_pct:g} boy | "
                 f"1 saatlik mumları alınan coin: {got}\n")
+
+    def fall7_line(self) -> str:
+        """Risk sayfasında düşen bıçak: ayar ve günlük kapanışları alınmış coin sayısı (sayfa açılırken Binance'e istek
+        atılmaz; bot taramalar arasında günde bir alır)."""
+        cfg, bot = self.cfg, self.bot
+        if cfg.futures_fall7_pct <= 0:
+            return "🔪 Düşen bıçak: kapalı\n"
+        got = len(getattr(bot, "_day_closes", {}) or {})
+        return (f"🔪 Düşen bıçak: coin son 7 günde %{cfg.futures_fall7_pct:g}'ten fazla düştüyse pozisyon "
+                f"%{cfg.futures_fall7_size_pct:g} boy | günlük kapanışları alınan coin: {got}\n")
 
     def guard_line(self) -> str:
         """Risk sayfasında sermaye koruması: bota verilen sermayeye göre şu anki toplam zarar ve sıradaki pozisyonun boyu."""
