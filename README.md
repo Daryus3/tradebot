@@ -3084,6 +3084,40 @@ Okuma:
 - **Öneri:** kâr için `FUTURES_EXTRA_DEEP_X=3`, `FUTURES_EXTRA_DEEP_SIZE_PCT=150` (ölçülü). Risk istemeyen kapalı
   bırakabilir.
 
+#### Rapor 32 araştırması: çöküş eşiği her dakika taramada, kalite × oran hibritleri (Kasım 2026)
+Taban: rapor 32'nin ayarı (H9 = rapor 31 ayarı + `FUTURES_EXTRA_DEEP_X=3`, `FUTURES_EXTRA_DEEP_SIZE_PCT=150`), **4.000
+USDT**, 10 çekiliş, her ayın 1'inde başlayan 71 hesap. Şimdiki: 12 ay ortanca +%3.578, %60'ı aşan düşüş 10, zararda 2,
+alt çeyrek +%1.331, kill-switch 0; canlıda ölçülen giriş dolumunda +%2.651 / 16 / 2 / +%1.039. **Yeni kural eklenmedi.**
+
+**Çöküş eşiği (raporun "Ek pencere 1 sa %7 · 5 dk taramayla" satırı üç rapor üst üste ▲ gösterdi).** O satır 5 dk
+taramayla hesaplanıyor. Burada sinyaller her dakika taramayla, yeni eşikle baştan üretildi (önbellekte olmayan sinyallerin
+vadeli-spot farkı ve destek dibi botun kendi fonksiyonlarıyla tamamlandı):
+
+| Çöküş kuralı | Sinyal | Normal maliyet: 12 ay ortanca / %60+ / alt çeyrek | Eşleştirmeli | Canlı dolum: 12 ay ortanca / %60+ / alt çeyrek | Eşleştirmeli |
+|---|---|---|---|---|---|
+| 1 sa %5.5 \| 4 sa %10 | 154.821 | +%2.239 / 22.5 / +%826 | 0/10, −%1.248 | +%1.871 / 27.5 / +%325 | 0/10, −%787 |
+| **1 sa %6 \| 4 sa %10 (şimdiki)** | 136.930 | **+%3.578 / 10 / +%1.331** | – | **+%2.651 / 16 / +%1.039** | – |
+| 1 sa %6.5 \| 4 sa %10 | 124.949 | +%2.514 / 8 / +%934 | 0/10, −%995 | +%1.970 / 10.5 / +%703 | 0/10, −%697 |
+| 1 sa %7 \| 4 sa %10 | 116.798 | +%1.312 / 13.5 / +%422 | 0/10, −%2.284 | +%1.025 / 15 / +%288 | 0/10, −%1.630 |
+| 1 sa %7.5 \| 4 sa %10 | 111.069 | +%1.206 / 17 / +%552 | 0/10, −%2.272 | +%1.021 / 22 / +%430 | 0/10, −%1.548 |
+| 1 sa %6 \| 4 sa %9 | 169.351 | +%3.214 / 9 / +%1.291 | 1/10, −%210 | +%2.292 / 17.5 / +%925 | 2/10, −%302 |
+
+Şimdiki kural her dakika taramada iki yönde de en iyisi. Eşiği yükseltmek en çok son yılları vuruyor (1 sa %7: 2023-25
+başlangıçlarında +%3.807 → +%1.143): sakin piyasada sinyal azalınca yuvalar boş kalıyor. Raporun "· 5 dk taramayla"
+satırları eşik değişikliği için yanıltıcı; rapordaki o tablonun notu artık bunu söylüyor.
+
+**Kalite puanı × çöküş oranı.** Zayıf kaliteli ama derin çöküşler güçlü kazandırıyor (en zayıf %60'ta oran ≥ 3: işlem
+başı +%0.77) ama %60 boyla açılıyor; güçlü ama sığ çöküşler zayıf (+%0.05-0.13) ama tam boy. İkisi de denendi:
+
+| Fikir | Normal maliyet (eşleştirmeli) | Canlı dolum | Karar |
+|---|---|---|---|
+| Kalite küçültmesi derin (≥ eşik ×1.25 / ×1.5 / ×1.75 / ×2) çöküşte yok | ortanca 2-5/10 (−%52 … +%28), alt çeyrek 9-10/10 (+%189 … +%208), düşüş aynı | ×1.5: +%11, alt çeyrek +%39, düşüş +2 · ×1.25: +%79, +%74, +1.5 | Elendi: canlıda kazanç küçük, düşüş artıyor |
+| Güçlü ama sığ çöküşü küçültmek (×0.8 · ×0.7) | −%446 · −%635 | | Kötü (pozitif beklentili işlemi küçültmek) |
+| Durulmuş küçültmesi derin çöküşte yok | −%46 | | Etkisiz |
+| V dönüşü büyütmesi yalnız ≥ eşik ×1.5'te | ±0 | | Etkisiz |
+| Kalite muafiyeti + güçlü-sığ ×0.8 · + durulmuş muafiyeti | −%341 · −%30 | | Kötü / etkisiz |
+| Aynı dakikadaki sinyallerde derin çöküşe öncelik | | | Zaten öyle (sıralama puanı = düşüş / eşik × ana yüzde) |
+
 #### Kill-switch eşiği (rapor 23, Kasım 2026)
 **Nasıl çalışır:** botun toplam zararı (kapanan işlemler + açık pozisyonların anlık zararı) botun sermayesinin
 (başlangıç + /sermayeekle) `MAX_TOTAL_LOSS_PCT`'sine ulaşınca durum dosyasına "kill-switch" yazılır, yeni pozisyon

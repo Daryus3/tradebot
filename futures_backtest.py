@@ -2521,7 +2521,9 @@ HARSH_STOP_ROW = "Kötümser stop dolumu (fitilin yarısı; en kötü durum)"
 # Tek kural tablosunda satırın altına yazılan açıklama (FEE2_ROW'unki yalnızca başabaş açıkken)
 ROW_NOTES = {
     SCAN5_REF: "alttaki \"· 5 dk taramayla\" satırları yeni sinyal gerektirdiği için 5 dk taramayla hesaplandı; "
-               "▲ / ▼ bu satıra göre",
+               "▲ / ▼ bu satıra göre. Her dakika taramada sonuç tersine dönebilir: rapor 32 araştırmasında (4.000 USDT, "
+               "71 hesap) 5 dk taramada ▲ görünen \"1 sa %7\" her dakika taramada 12 ay ortancasını +%3.578'den "
+               "+%1.312'ye düşürdü; eşiği değiştirmeden önce README \"Rapor 32\"ye bakın",
     FEE2_ROW: "kayma ve komisyon artınca başabaş çıkışları (net ~%0) küçük zarara döner; C'deki kazanma oranı bu yüzden "
               "düşer",
     HARSH_STOP_ROW: "saniyelik veride gerçek stop dolumu fitilin ~%3'ü; fitilin yarısı çok kötümser bir varsayımdır",
